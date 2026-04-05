@@ -878,10 +878,25 @@ def run_variant_checks(
 
             repo_id = Path(repo_dir).name
             if nc_count != rc_count:
+                # Compute specific FP/FN locations when available
+                nc_locs = set()
+                for o in nc_result.get("offenses", []):
+                    p = os.path.realpath(o.get("path", ""))
+                    nc_locs.add((p, o.get("line", 0)))
+                rc_locs = rc_result.get("locations", set())
+                fp_locs = sorted(nc_locs - rc_locs)[:3] if nc_locs and rc_locs else []
+                fn_locs = sorted(rc_locs - nc_locs)[:3] if nc_locs and rc_locs else []
+                # Format as relative paths
+                prefix = repo_dir.rstrip("/") + "/"
+                def fmt(loc: tuple) -> str:
+                    p = loc[0].replace(prefix, "") if loc[0].startswith(prefix) else loc[0]
+                    return f"{p}:{loc[1]}"
                 repo_counts.append({
                     "repo": repo_id,
                     "nc": max(0, nc_count),
                     "rc": max(0, rc_count),
+                    "fp_locs": [fmt(loc) for loc in fp_locs],
+                    "fn_locs": [fmt(loc) for loc in fn_locs],
                 })
 
         baseline = variant_baselines.get(label, {})
@@ -933,7 +948,7 @@ def _run_rubocop_for_variant(
             for o in f.get("offenses", []):
                 if o.get("cop_name") == cop:
                     seen.add((fpath, o["location"]["line"]))
-        return {"count": len(seen)}
+        return {"count": len(seen), "locations": seen}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return {"count": -1}
 
@@ -1588,7 +1603,12 @@ def main():
                             parts = []
                             for dr in diverging[:5]:
                                 kind = "FP" if dr["nc"] > dr["rc"] else "FN"
-                                parts.append(f"{dr['repo']}({kind})")
+                                locs = dr.get("fp_locs", []) if kind == "FP" else dr.get("fn_locs", [])
+                                if locs:
+                                    loc_str = ",".join(locs[:2])
+                                    parts.append(f"{dr['repo']}({kind}:{loc_str})")
+                                else:
+                                    parts.append(f"{dr['repo']}({kind})")
                             detail = " ".join(parts)
                         print(
                             f"SUMMARY|{args.cop} ({vr['style_label']})"
@@ -1602,6 +1622,10 @@ def main():
                             for dr in vr.get("diverging_repos", [])[:5]:
                                 fp_flag = " (FP)" if dr["nc"] > dr["rc"] else " (FN)" if dr["rc"] > dr["nc"] else ""
                                 print(f"    {dr['repo']}  NC:{dr['nc']} RC:{dr['rc']}{fp_flag}")
+                                for loc in dr.get("fp_locs", []):
+                                    print(f"      FP: {loc}")
+                                for loc in dr.get("fn_locs", []):
+                                    print(f"      FN: {loc}")
                     print()
                     if variant_failed:
                         print(f"FAIL: variant style regression detected for {args.cop}")
