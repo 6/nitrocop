@@ -202,6 +202,76 @@ def load_oracle_context(
     return by_cop, repo_breakdown
 
 
+def load_variant_examples(
+    cop: str, corpus_path: Path | None,
+) -> list[dict]:
+    """Load variant FP/FN examples from the oracle style-variant-results.json.
+
+    Returns a list of dicts with {style_label, fp_examples, fn_examples}
+    for each variant that has divergence for this cop.
+    """
+    if corpus_path is None:
+        return []
+    # The variant results are cached alongside the corpus results
+    variant_path = corpus_path.parent / corpus_path.name.replace(
+        "corpus", "style-variant-results"
+    )
+    if not variant_path.exists():
+        # Try the standard cache location
+        import tempfile
+        cache_dir = Path(tempfile.gettempdir()) / "nitrocop-corpus-cache"
+        candidates = sorted(cache_dir.glob("style-variant-results-*.json"))
+        if candidates:
+            variant_path = candidates[-1]
+        else:
+            return []
+    try:
+        data = json.loads(variant_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    results = []
+    for batch in data.get("batches", []):
+        for entry in batch.get("by_cop", []):
+            if entry.get("cop") != cop:
+                continue
+            fp_examples = entry.get("fp_examples", [])
+            fn_examples = entry.get("fn_examples", [])
+            if fp_examples or fn_examples:
+                results.append({
+                    "style_label": entry.get("style_label", batch.get("name", "")),
+                    "fp": entry.get("fp", 0),
+                    "fn": entry.get("fn", 0),
+                    "fp_examples": fp_examples[:5],
+                    "fn_examples": fn_examples[:5],
+                })
+    return results
+
+
+def render_variant_context(
+    cop: str,
+    *,
+    standard_corpus: Path | None,
+) -> list[str]:
+    """Render variant FP/FN examples for a cop into the diagnosis packet."""
+    variants = load_variant_examples(cop, standard_corpus)
+    if not variants:
+        return []
+    lines = [
+        "**Variant style examples** (from oracle):",
+        "",
+    ]
+    for v in variants:
+        lines.append(f"Style `{v['style_label']}` — {v['fp']} FP, {v['fn']} FN:")
+        for ex in v["fp_examples"]:
+            loc = ex.get("loc", str(ex)) if isinstance(ex, dict) else str(ex)
+            lines.append(f"  - FP: `{loc}`")
+        for ex in v["fn_examples"]:
+            loc = ex.get("loc", str(ex)) if isinstance(ex, dict) else str(ex)
+            lines.append(f"  - FN: `{loc}`")
+        lines.append("")
+    return lines
+
+
 def render_start_here(
     cop: str,
     top_repos: list[str],
@@ -286,6 +356,10 @@ def render_packet(
                     standard_corpus=standard_corpus,
                     oracle_by_cop=oracle_by_cop,
                     oracle_repo_breakdown=oracle_repo_breakdown,
+                ),
+                *render_variant_context(
+                    str(result["cop"]),
+                    standard_corpus=standard_corpus,
                 ),
                 "```bash",
                 result["command"],
