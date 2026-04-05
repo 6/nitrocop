@@ -9,6 +9,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Variant notes (EnforcedStyle: explicit)
+///
+/// For explicit style, trait-name calls inside nested `trait` blocks (e.g.
+/// `with_ipv6` inside `trait :dualstack`) must not be flagged when the method
+/// name matches a trait defined in the enclosing `factory`. Fixed by collecting
+/// trait names from the factory body and passing them through when recursing
+/// into nested trait blocks, rather than processing trait nodes independently.
 pub struct AssociationStyle;
 
 /// Ruby keywords that cannot be implicit associations.
@@ -160,14 +167,31 @@ impl Cop for AssociationStyle {
 
         let style = config.get_str("EnforcedStyle", "implicit");
 
-        let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
-            stmts.body().iter().collect()
-        } else {
-            vec![body]
-        };
+        if style == "explicit" {
+            // explicit style: only process factory nodes (not trait nodes separately)
+            if method_name != b"factory" {
+                return;
+            }
 
-        for child in &children {
-            if style == "implicit" {
+            // Collect all trait names defined in this factory (before moving body)
+            let trait_names = collect_trait_names(&body);
+
+            let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
+                stmts.body().iter().collect()
+            } else {
+                vec![body]
+            };
+
+            // Check direct children and recurse into nested trait blocks
+            check_implicit_in_children(self, source, &children, &trait_names, diagnostics);
+        } else {
+            let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
+                stmts.body().iter().collect()
+            } else {
+                vec![body]
+            };
+
+            for child in &children {
                 if is_explicit_association(child)
                     && !has_strategy_build(child)
                     && !has_keyword_arg(child)
@@ -181,15 +205,6 @@ impl Cop for AssociationStyle {
                         "Use implicit style to define associations.".to_string(),
                     ));
                 }
-            } else if is_implicit_association(child, node) {
-                let loc = child.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use explicit style to define associations.".to_string(),
-                ));
             }
         }
     }
@@ -294,63 +309,8 @@ fn has_keyword_arg(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Check if a node is an implicit association in explicit style.
-fn is_implicit_association(
-    node: &ruby_prism::Node<'_>,
-    factory_or_trait_node: &ruby_prism::Node<'_>,
-) -> bool {
-    let call = match node.as_call_node() {
-        Some(c) => c,
-        None => return false,
-    };
-
-    if call.receiver().is_some() {
-        return false;
-    }
-
-    let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
-
-    if is_reserved_method(method_name) {
-        return false;
-    }
-
-    if is_trait_within_factory(method_name, factory_or_trait_node) {
-        return false;
-    }
-
-    if call.block().is_some() {
-        return false;
-    }
-
-    true
-}
-
-/// Check if a method name matches a trait name defined in the enclosing factory node.
-fn is_trait_within_factory(method_name: &str, factory_node: &ruby_prism::Node<'_>) -> bool {
-    let call = match factory_node.as_call_node() {
-        Some(c) => c,
-        None => return false,
-    };
-
-    if call.name().as_slice() != b"factory" {
-        return false;
-    }
-
-    let block = match call.block() {
-        Some(b) => b,
-        None => return false,
-    };
-
-    let block_node = match block.as_block_node() {
-        Some(b) => b,
-        None => return false,
-    };
-
-    let body = match block_node.body() {
-        Some(b) => b,
-        None => return false,
-    };
-
+/// Collect all trait names defined within a factory body (recursively).
+fn collect_trait_names(body: &ruby_prism::Node<'_>) -> Vec<String> {
     struct TraitCollector {
         trait_names: Vec<String>,
     }
@@ -373,13 +333,125 @@ fn is_trait_within_factory(method_name: &str, factory_node: &ruby_prism::Node<'_
     let mut collector = TraitCollector {
         trait_names: Vec::new(),
     };
-    collector.visit(&body);
+    collector.visit(body);
+    collector.trait_names
+}
 
-    collector.trait_names.iter().any(|n| n == method_name)
+/// Check if a node is an implicit association in explicit style,
+/// using a pre-collected list of trait names from the enclosing factory.
+fn is_implicit_association_with_traits(
+    node: &ruby_prism::Node<'_>,
+    trait_names: &[String],
+) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if call.receiver().is_some() {
+        return false;
+    }
+
+    let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
+
+    if is_reserved_method(method_name) {
+        return false;
+    }
+
+    if trait_names.iter().any(|n| n == method_name) {
+        return false;
+    }
+
+    if call.block().is_some() {
+        return false;
+    }
+
+    true
+}
+
+/// Check children for implicit associations, recursing into nested trait blocks.
+fn check_implicit_in_children(
+    cop: &AssociationStyle,
+    source: &SourceFile,
+    children: &[ruby_prism::Node<'_>],
+    trait_names: &[String],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    for child in children {
+        // If this child is a `trait` call with a block, recurse into its body
+        if let Some(call) = child.as_call_node() {
+            if call.name().as_slice() == b"trait" && call.receiver().is_none() {
+                if let Some(block) = call.block() {
+                    if let Some(block_node) = block.as_block_node() {
+                        if let Some(body) = block_node.body() {
+                            let nested: Vec<_> = if let Some(stmts) = body.as_statements_node() {
+                                stmts.body().iter().collect()
+                            } else {
+                                vec![body]
+                            };
+                            check_implicit_in_children(
+                                cop,
+                                source,
+                                &nested,
+                                trait_names,
+                                diagnostics,
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+        }
+
+        if is_implicit_association_with_traits(child, trait_names) {
+            let loc = child.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            diagnostics.push(cop.diagnostic(
+                source,
+                line,
+                column,
+                "Use explicit style to define associations.".to_string(),
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AssociationStyle, "cops/factorybot/association_style");
+
+    fn explicit_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("explicit".to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_explicit() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &AssociationStyle,
+            include_bytes!(
+                "../../../tests/fixtures/cops/factorybot/association_style/offense.explicit.rb"
+            ),
+            explicit_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_explicit() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &AssociationStyle,
+            include_bytes!(
+                "../../../tests/fixtures/cops/factorybot/association_style/no_offense.explicit.rb"
+            ),
+            explicit_config(),
+        );
+    }
 }
