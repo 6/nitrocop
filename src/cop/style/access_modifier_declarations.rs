@@ -26,6 +26,19 @@ use ruby_prism::Visit;
 /// `Proc.new` / `lambda` remain a direct-parent exemption only: they suppress access
 /// modifiers in their own bodies, but nested DSL/class-like blocks underneath them
 /// still get checked once the proc-block override is consumed.
+///
+/// ## Inline style variant fix (2026-04-05)
+///
+/// The `EnforcedStyle: inline` variant had 1,238 FPs because the inline-style check
+/// in `visit_call_node` flagged every bare access modifier in macro scope. RuboCop only
+/// flags bare modifiers when there are grouped `def` nodes following them (up to the
+/// next bare modifier), via `select_grouped_def_nodes(node).any?`. A bare `private`
+/// followed only by `attr_reader` or other non-def calls is not an offense.
+///
+/// Fix: moved inline-style detection from `visit_call_node` to a new
+/// `check_inline_style_statements` method called from `visit_statements_node`, where
+/// we have access to sibling nodes. For each bare modifier, we look at right siblings
+/// (stopping at the next bare modifier) and only flag if any sibling is a `DefNode`.
 pub struct AccessModifierDeclarations;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -246,6 +259,54 @@ struct ModifierInfo<'a> {
 }
 
 impl AccessModifierVisitor<'_> {
+    fn check_inline_style_statements<'pr>(&mut self, stmts: &[ruby_prism::Node<'pr>]) {
+        if self.enforced_style != "inline" {
+            return;
+        }
+
+        if !access_modifier_predicates::in_macro_scope(&self.macro_scope_stack) {
+            return;
+        }
+
+        for (index, stmt) in stmts.iter().enumerate() {
+            let Some(call) = stmt.as_call_node() else {
+                continue;
+            };
+
+            if !access_modifier_predicates::is_bare_access_modifier(&call) {
+                continue;
+            }
+
+            // RuboCop inline style: only flag if there are grouped def nodes
+            // following this bare modifier (up to the next bare access modifier).
+            // This mirrors RuboCop's `select_grouped_def_nodes(node).any?`.
+            let has_grouped_defs = stmts[index + 1..]
+                .iter()
+                .take_while(|sibling| {
+                    !sibling
+                        .as_call_node()
+                        .is_some_and(|c| access_modifier_predicates::is_bare_access_modifier(&c))
+                })
+                .any(|sibling| sibling.as_def_node().is_some());
+
+            if !has_grouped_defs {
+                continue;
+            }
+
+            let loc = call.location();
+            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+            self.diagnostics.push(self.cop.diagnostic(
+                self.source,
+                line,
+                column,
+                format!(
+                    "`{}` should be inlined in method definitions.",
+                    std::str::from_utf8(call.name().as_slice()).unwrap_or("private")
+                ),
+            ));
+        }
+    }
+
     fn check_group_style_statements<'pr>(&mut self, stmts: &[ruby_prism::Node<'pr>]) {
         if self.enforced_style != "group" || !self.group_scope_active {
             return;
@@ -355,6 +416,7 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         let stmts: Vec<_> = node.body().iter().collect();
         self.check_group_style_statements(&stmts);
+        self.check_inline_style_statements(&stmts);
 
         let saved = self.statements_owner_kind;
         self.statements_owner_kind = StatementsOwnerKind::Other;
@@ -499,24 +561,9 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
             }
         }
 
-        // In group mode, direct modifiers are handled in visit_statements_node.
-        // Here we keep the existing inline-style handling.
-        if self.enforced_style == "inline"
-            && access_modifier_predicates::in_macro_scope(&self.macro_scope_stack)
-            && access_modifier_predicates::is_bare_access_modifier(node)
-        {
-            let loc = node.location();
-            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                format!(
-                    "`{}` should not be used in a group style.",
-                    std::str::from_utf8(node.name().as_slice()).unwrap_or("private")
-                ),
-            ));
-        }
+        // Inline-style checks are now handled in check_inline_style_statements
+        // (visit_statements_node) where we have access to sibling nodes to check
+        // for following def nodes.
         ruby_prism::visit_call_node(self, node);
         self.next_block_owner_kind = saved_next_block_owner_kind;
         self.next_block_group_scope = saved_next_block_group_scope;
@@ -565,8 +612,107 @@ impl Cop for AccessModifierDeclarations {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use crate::testutil::run_cop_full_with_config;
+
     crate::cop_fixture_tests!(
         AccessModifierDeclarations,
         "cops/style/access_modifier_declarations"
     );
+
+    fn inline_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("inline".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn inline_style_flags_bare_modifier_with_following_defs() {
+        // Bare `private` followed by def nodes → offense
+        let source = b"class Foo\n  private\n\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "inline style should flag bare modifier with following defs"
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_bare_modifier_without_defs() {
+        // Bare `private` followed by only attr_reader → no offense
+        let source = b"class Foo\n  private\n\n  attr_reader :bar\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier without following defs, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_bare_modifier_alone() {
+        // Bare `private` with nothing after it → no offense
+        let source = b"class Foo\n  private\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier with no following statements"
+        );
+    }
+
+    #[test]
+    fn inline_style_flags_bare_modifier_with_mixed_content() {
+        // Bare `private` followed by attr_reader AND def → offense (def is present)
+        let source = b"class Mixed\n  private\n\n  attr_reader :something\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "inline style should flag bare modifier when defs are among siblings"
+        );
+    }
+
+    #[test]
+    fn inline_style_flags_module_function() {
+        let source = b"class Foo\n  module_function\n\n  def helper; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "inline style should flag bare module_function with following defs"
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_for_inline_modifiers() {
+        // Inline `private def` → no offense in inline style
+        let source = b"class Foo\n  private def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag already-inlined modifiers"
+        );
+    }
+
+    #[test]
+    fn inline_style_stops_at_next_bare_modifier() {
+        // `private` followed by `protected` then def → private has no defs before protected
+        let source = b"class Foo\n  private\n\n  protected\n\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "should only flag the bare modifier that has following defs (protected), not private"
+        );
+        assert!(
+            diags[0].message.contains("protected"),
+            "offense should be on `protected`, not `private`"
+        );
+    }
 }
