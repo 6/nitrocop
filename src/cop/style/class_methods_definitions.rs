@@ -35,6 +35,14 @@ use crate::parse::source::SourceFile;
 /// registering autocorrections, so the corpus records no offense. Fix: skip
 /// that exact rewrite-crash shape while still flagging the nearby general case
 /// where the singleton class closes at the end of the line.
+///
+/// ## Fix (2026-04-05): FN for `EnforcedStyle: self_class`
+///
+/// Variant checks showed the cop only implemented the default `def_self`
+/// branch, so `def self.method_name` was never flagged when
+/// `EnforcedStyle: self_class` was configured. RuboCop's `on_defs` logic is
+/// simple here: any `def` whose receiver is exactly `self` is an offense,
+/// including inside `class << self`; receivers other than `self` are ignored.
 pub struct ClassMethodsDefinitions;
 
 impl Cop for ClassMethodsDefinitions {
@@ -61,26 +69,44 @@ impl Cop for ClassMethodsDefinitions {
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "def_self");
 
-        if enforced_style == "def_self" {
-            // Check for `class << self` with public methods
-            if let Some(sclass) = node.as_singleton_class_node() {
-                let expr = sclass.expression();
-                if expr.as_self_node().is_some() {
-                    // Check if body has defs and ALL are public
-                    if sclass.body().is_some() {
-                        let sclass_line = source
-                            .offset_to_line_col(sclass.location().start_offset())
-                            .0;
-                        if all_defs_public(source, &sclass, sclass_line) {
-                            let loc = sclass.location();
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                "Do not define public methods within class << self.".to_string(),
-                            ));
-                        }
+        if enforced_style == "self_class" {
+            if let Some(def_node) = node.as_def_node() {
+                if def_node
+                    .receiver()
+                    .is_some_and(|receiver| receiver.as_self_node().is_some())
+                {
+                    let loc = def_node.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `class << self` to define a class method.".to_string(),
+                    ));
+                }
+            }
+
+            return;
+        }
+
+        // Check for `class << self` with public methods
+        if let Some(sclass) = node.as_singleton_class_node() {
+            let expr = sclass.expression();
+            if expr.as_self_node().is_some() {
+                // Check if body has defs and ALL are public
+                if sclass.body().is_some() {
+                    let sclass_line = source
+                        .offset_to_line_col(sclass.location().start_offset())
+                        .0;
+                    if all_defs_public(source, &sclass, sclass_line) {
+                        let loc = sclass.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Do not define public methods within class << self.".to_string(),
+                        ));
                     }
                 }
             }
@@ -279,8 +305,37 @@ fn has_same_line_code_after_offset(source: &SourceFile, offset: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+
     crate::cop_fixture_tests!(
         ClassMethodsDefinitions,
         "cops/style/class_methods_definitions"
     );
+
+    fn self_class_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("self_class".into()),
+        );
+        config
+    }
+
+    #[test]
+    fn flags_def_self_when_self_class_style_is_enforced() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ClassMethodsDefinitions,
+            b"class A\n  def self.one\n  ^^^^^^^^^^^^ Style/ClassMethodsDefinitions: Use `class << self` to define a class method.\n  end\nend\n",
+            self_class_config(),
+        );
+    }
+
+    #[test]
+    fn ignores_singleton_methods_not_defined_on_self_for_self_class_style() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ClassMethodsDefinitions,
+            b"object = Object.new\ndef object.method\nend\n",
+            self_class_config(),
+        );
+    }
 }
