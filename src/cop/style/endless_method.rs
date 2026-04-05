@@ -38,42 +38,69 @@ pub struct EndlessMethod;
 
 impl EndlessMethod {
     /// Returns true if the def node's body is or contains a heredoc.
-    /// Mirrors RuboCop's `use_heredoc?` which checks for str-type heredoc nodes.
-    /// Uses a source-text scan of the first line after `=` for `<<` heredoc openers,
-    /// which is reliable because heredoc openers must appear on the `def` line.
-    fn body_uses_heredoc(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> bool {
-        // The heredoc opener (<<~FOO, <<-FOO, <<FOO) must appear on the same line
-        // as the `=` sign. Scan from equal_loc to end-of-line for `<<`.
-        let equal_loc = match def_node.equal_loc() {
-            Some(loc) => loc,
-            None => return false,
-        };
-        let src = source.as_bytes();
-        let start = equal_loc.end_offset();
-        // Scan forward on the same line for heredoc opener: `<<` followed by
-        // `~`, `-`, `'`, `"`, `` ` ``, or a word character (identifier start).
-        // This distinguishes heredocs from the `<<` shovel/bitshift operator.
-        let mut i = start;
-        while i + 1 < src.len() && src[i] != b'\n' {
-            if src[i] == b'<' && src[i + 1] == b'<' {
-                // Check what follows `<<`
-                if i + 2 < src.len() {
-                    let next = src[i + 2];
-                    if next == b'~'
-                        || next == b'-'
-                        || next == b'\''
-                        || next == b'"'
-                        || next == b'`'
-                        || next.is_ascii_alphabetic()
-                        || next == b'_'
-                    {
-                        return true;
-                    }
+    /// Mirrors RuboCop's `use_heredoc?` by walking string/xstring nodes under
+    /// the body and checking whether their opening delimiter starts with `<<`.
+    fn body_uses_heredoc(def_node: &ruby_prism::DefNode<'_>) -> bool {
+        use ruby_prism::Visit;
+
+        struct HeredocVisitor {
+            found: bool,
+        }
+
+        impl HeredocVisitor {
+            fn visit_heredoc<'pr>(&mut self, opening: Option<ruby_prism::Location<'pr>>) {
+                if self.found {
+                    return;
+                }
+                if opening.is_some_and(|loc| loc.as_slice().starts_with(b"<<")) {
+                    self.found = true;
                 }
             }
-            i += 1;
         }
-        false
+
+        impl<'pr> Visit<'pr> for HeredocVisitor {
+            fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+                self.visit_heredoc(node.opening_loc());
+                if !self.found {
+                    ruby_prism::visit_string_node(self, node);
+                }
+            }
+
+            fn visit_interpolated_string_node(
+                &mut self,
+                node: &ruby_prism::InterpolatedStringNode<'pr>,
+            ) {
+                self.visit_heredoc(node.opening_loc());
+                if !self.found {
+                    ruby_prism::visit_interpolated_string_node(self, node);
+                }
+            }
+
+            fn visit_x_string_node(&mut self, node: &ruby_prism::XStringNode<'pr>) {
+                self.visit_heredoc(Some(node.opening_loc()));
+                if !self.found {
+                    ruby_prism::visit_x_string_node(self, node);
+                }
+            }
+
+            fn visit_interpolated_x_string_node(
+                &mut self,
+                node: &ruby_prism::InterpolatedXStringNode<'pr>,
+            ) {
+                self.visit_heredoc(Some(node.opening_loc()));
+                if !self.found {
+                    ruby_prism::visit_interpolated_x_string_node(self, node);
+                }
+            }
+        }
+
+        let Some(body) = def_node.body() else {
+            return false;
+        };
+
+        let mut visitor = HeredocVisitor { found: false };
+        visitor.visit(&body);
+        visitor.found
     }
 
     fn is_single_line(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> bool {
@@ -223,7 +250,7 @@ impl Cop for EndlessMethod {
         // RuboCop: return if use_heredoc?(node)
         // Skip methods whose body is or contains a heredoc.
         // Heredocs in Prism are StringNode/InterpolatedStringNode with opening starting with "<<".
-        if Self::body_uses_heredoc(source, &def_node) {
+        if Self::body_uses_heredoc(&def_node) {
             return;
         }
 
@@ -452,6 +479,34 @@ mod tests {
         assert_eq!(
             diags[0].message,
             "Use endless method definitions for single line methods."
+        );
+    }
+
+    #[test]
+    fn require_single_line_skips_regular_heredoc_body() {
+        let source = b"def my_method\n  <<~HEREDOC\n    hello\n  HEREDOC\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_single_line"),
+        );
+        assert!(
+            diags.is_empty(),
+            "Heredoc bodies should be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_always_skips_regular_xstring_heredoc_body() {
+        let source = b"def my_method\n  <<~`HEREDOC`\n    echo hello\n  HEREDOC\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_always"),
+        );
+        assert!(
+            diags.is_empty(),
+            "XString heredoc bodies should be skipped, got: {diags:?}"
         );
     }
 }
