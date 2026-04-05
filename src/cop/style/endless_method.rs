@@ -165,24 +165,7 @@ impl EndlessMethod {
         let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
         let arguments = Self::arguments_source(source, def_node);
 
-        "def ".chars().count()
-            + method_name.chars().count()
-            + arguments.chars().count()
-            + " = ".chars().count()
-            + body_src.chars().count()
-    }
-
-    fn modifier_offset(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> usize {
-        let def_loc = def_node.def_keyword_loc();
-        let (line, _) = source.offset_to_line_col(def_loc.start_offset());
-        let line_start = source.line_start_offset(line);
-        let prefix = source.byte_slice(line_start, def_loc.start_offset(), "");
-        let trimmed = prefix.trim_start_matches(char::is_whitespace);
-        if trimmed.is_empty() {
-            0
-        } else {
-            trimmed.chars().count()
-        }
+        "def ".len() + method_name.len() + arguments.len() + " = ".len() + body_src.len()
     }
 
     fn too_long_when_made_endless(
@@ -195,8 +178,10 @@ impl EndlessMethod {
         }
 
         let max_line_length = config.get_usize("MaxLineLength", 120);
-        Self::endless_replacement_length(source, def_node) + Self::modifier_offset(source, def_node)
-            > max_line_length
+        // The def keyword column already accounts for both indentation and
+        // any access modifier prefix (e.g., `    private def` → column 12).
+        let (_, def_column) = source.offset_to_line_col(def_node.def_keyword_loc().start_offset());
+        def_column + Self::endless_replacement_length(source, def_node) > max_line_length
     }
 }
 
@@ -493,6 +478,24 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Heredoc bodies should be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_single_line_respects_indentation_in_line_length() {
+        // `def x\n  y\nend` is only 10 chars as endless (`def x = y`), but
+        // when indented 76 spaces the total line is 86 chars — over limit 80.
+        let mut source = Vec::new();
+        source.extend_from_slice(&[b' '; 76]);
+        source.extend_from_slice(b"def x\n  y\nend\n");
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            &source,
+            ruby30_style_with_line_length("require_single_line", 80, true),
+        );
+        assert!(
+            diags.is_empty(),
+            "Indentation should be counted in line length check, got: {diags:?}"
         );
     }
 
