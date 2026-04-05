@@ -30,3 +30,17 @@ ensure
     puts 'clean'
   end
 end
+
+def deprecated_task(name, new_name)
+  task name => new_name do
+    warn "deprecated #{name}"
+  end
+end
+
+if Rails.env.production? || Rails.env == 'fake_production'
+  task :eslint do
+    puts 'Skipping eslint checking in production.'
+  end
+end
+
+task :clobber => 'spec:clobber_rcov' if HAVE_RCOV

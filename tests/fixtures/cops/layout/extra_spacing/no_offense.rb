@@ -171,6 +171,11 @@ results  << set_to_array(statement.getResultSet) while statement.getMoreResults
 columns  = ((options && options[:columns]) || self.class.column_names_symbols.dup)
 columns << :id
 
+# Chained `.to` / `.not_to` with same dot column — alignment is intentional
+# RuboCop's tokenizer makes `.` a separate token, so `.` == `.` is a Mode 2 match.
+expect(clo)  .to be_within(0.1).of(1.0)
+expect(clo)  .not_to be_nil
+
 # Multiline block receivers can align a chained call operator on the closing line
 expect {
   Dry::Schema.Params do
