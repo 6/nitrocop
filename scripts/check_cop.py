@@ -773,6 +773,41 @@ def load_variant_baselines(
     return baselines
 
 
+def load_variant_example_repos(
+    cop_name: str, run_id: int | None,
+) -> list[str]:
+    """Extract repo IDs from oracle variant FP/FN examples.
+
+    Returns a list of repo IDs that the oracle identified as having variant
+    divergence for this cop. Used to prioritize variant sampling — these
+    repos are most likely to reproduce the regression.
+    """
+    if run_id is None:
+        return []
+    from shared.corpus_artifacts import get_variant_results_path
+    path = get_variant_results_path(run_id)
+    if not path:
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    repo_ids: list[str] = []
+    seen: set[str] = set()
+    for batch in data.get("batches", []):
+        for cop_entry in batch.get("by_cop", []):
+            if cop_entry.get("cop") != cop_name:
+                continue
+            for ex in cop_entry.get("fp_examples", []) + cop_entry.get("fn_examples", []):
+                loc = ex.get("loc", "") if isinstance(ex, dict) else str(ex)
+                if ": " in loc:
+                    repo_id = loc.split(": ", 1)[0]
+                    if repo_id not in seen:
+                        seen.add(repo_id)
+                        repo_ids.append(repo_id)
+    return repo_ids
+
+
 def run_variant_checks(
     *,
     cop_name: str,
@@ -813,6 +848,8 @@ def run_variant_checks(
         nc_total = 0
         rc_total = 0
         rc_errors = 0
+        # Per-repo counts for debugging which repos diverge
+        repo_counts: list[dict] = []
 
         for repo_dir in repo_dirs:
             if run_nitrocop_fn:
@@ -839,6 +876,14 @@ def run_variant_checks(
             else:
                 rc_errors += 1
 
+            repo_id = Path(repo_dir).name
+            if nc_count != rc_count:
+                repo_counts.append({
+                    "repo": repo_id,
+                    "nc": max(0, nc_count),
+                    "rc": max(0, rc_count),
+                })
+
         baseline = variant_baselines.get(label, {})
         results.append({
             "style_label": label,
@@ -850,6 +895,7 @@ def run_variant_checks(
             "rubocop_errors": rc_errors,
             "baseline_fp": baseline.get("fp", 0),
             "baseline_fn": baseline.get("fn", 0),
+            "diverging_repos": repo_counts,
         })
 
     return results
@@ -1479,9 +1525,25 @@ def main():
             # repo-specific edge cases, so a small sample catches them.
             VARIANT_SAMPLE = 20
             corpus_dir = _CLONE_DIR
-            repo_dirs = sorted(str(d) for d in corpus_dir.iterdir() if d.is_dir())
-            if len(repo_dirs) > VARIANT_SAMPLE:
-                repo_dirs = repo_dirs[:VARIANT_SAMPLE]
+            all_repo_dirs = sorted(str(d) for d in corpus_dir.iterdir() if d.is_dir())
+
+            # Mix oracle-priority repos (known variant divergence) with a
+            # spread from the rest.  Oracle repos catch known regressions;
+            # the spread catches NEW regressions the oracle hasn't seen.
+            oracle_repos = load_variant_example_repos(args.cop, corpus_run_id)
+            oracle_set = set(oracle_repos) if oracle_repos else set()
+            priority = [d for d in all_repo_dirs if Path(d).name in oracle_set]
+            rest = [d for d in all_repo_dirs if Path(d).name not in oracle_set]
+            # Take up to half the sample from oracle, fill the rest with spread
+            max_oracle = min(len(priority), VARIANT_SAMPLE // 2)
+            remaining_slots = VARIANT_SAMPLE - max_oracle
+            # Spread: evenly space through the rest list for diversity
+            if rest and remaining_slots > 0:
+                step = max(1, len(rest) // remaining_slots)
+                spread = rest[::step][:remaining_slots]
+            else:
+                spread = []
+            repo_dirs = priority[:max_oracle] + spread
 
             if repo_dirs:
                 print()
@@ -1526,6 +1588,10 @@ def main():
                         )
                         if v_result == "fail":
                             variant_failed = True
+                            # Show which repos diverge so agents can debug
+                            for dr in vr.get("diverging_repos", [])[:5]:
+                                fp_flag = " (FP)" if dr["nc"] > dr["rc"] else " (FN)" if dr["rc"] > dr["nc"] else ""
+                                print(f"    {dr['repo']}  NC:{dr['nc']} RC:{dr['rc']}{fp_flag}")
                     print()
                     if variant_failed:
                         print(f"FAIL: variant style regression detected for {args.cop}")

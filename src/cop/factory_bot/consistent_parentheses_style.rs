@@ -44,6 +44,29 @@ use crate::parse::source::SourceFile;
 /// FN fix: Added `visit_lambda_node` override to clear `parent_is_ambiguous`.
 /// Lambda bodies are independent contexts (like block bodies and parentheses),
 /// so factory calls inside them should not inherit ambiguity from outer context.
+///
+/// ## Variant fix: omit_parentheses (2026-04-05)
+///
+/// Variant oracle reported FP=3081, FN=145 for `EnforcedStyle: omit_parentheses`.
+/// Default style (require_parentheses) was unaffected.
+///
+/// **FP root cause (3081):** Factory calls used as receivers of method chains
+/// (e.g., `create(:user).save`) were not marked as ambiguous. In Parser AST,
+/// the receiver's parent is `send` (the outer `.save` call), which is in
+/// AMBIGUOUS_TYPES. Our code set `parent_is_ambiguous = false` for receivers.
+/// Fix: Changed receiver visit to `parent_is_ambiguous = true`.
+///
+/// **FN root cause (145):** Ambiguity propagated through the entire AST subtree
+/// of ambiguous parents instead of applying only to direct children. Example:
+/// `[x = create(:user)]` — `create`'s parent in Parser is `lvasgn` (not `array`),
+/// so it's not ambiguous. But our visitor set ambiguity for the array and it
+/// leaked through the `lvasgn` to the factory call.
+/// Fix: Added `visit_branch_node_enter/leave` hooks that implement "one-shot"
+/// ambiguity. `visit_branch_node_enter` captures `parent_is_ambiguous` into
+/// `immediate_parent_ambiguous` (read by `check_factory_call`) and then clears
+/// `parent_is_ambiguous`. `visit_branch_node_leave` restores it from a stack.
+/// This ensures only the direct parent's ambiguity affects the factory call check,
+/// matching RuboCop's `node.parent.type` behavior.
 pub struct ConsistentParenthesesStyle;
 
 impl Cop for ConsistentParenthesesStyle {
@@ -79,6 +102,8 @@ impl Cop for ConsistentParenthesesStyle {
             diagnostics: Vec::new(),
             parent_is_ambiguous: false,
             ambiguity_kind: None,
+            immediate_parent_ambiguous: false,
+            ambiguity_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -93,6 +118,14 @@ struct ParenStyleVisitor<'s> {
     diagnostics: Vec<Diagnostic>,
     parent_is_ambiguous: bool,
     ambiguity_kind: Option<AmbiguityKind>,
+    /// Captures whether the IMMEDIATE parent (the node that dispatched to us)
+    /// had set ambiguity. Unlike `parent_is_ambiguous`, this is only valid for
+    /// the directly-dispatched child and doesn't propagate through intermediate
+    /// non-ambiguous nodes (lvasgn, ivasgn, etc.).
+    immediate_parent_ambiguous: bool,
+    /// Stack to save/restore `parent_is_ambiguous` across visit() calls,
+    /// ensuring each node sees only its direct parent's ambiguity state.
+    ambiguity_stack: Vec<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -115,8 +148,11 @@ impl<'s> ParenStyleVisitor<'s> {
             return;
         }
 
-        // Skip if parent is an ambiguous context (send, pair, array, and, or, if)
-        if self.parent_is_ambiguous {
+        // Skip if immediate parent is an ambiguous context (send, pair, array, and, or, if).
+        // Uses immediate_parent_ambiguous (set by visit_branch_node_enter) rather than
+        // parent_is_ambiguous to match RuboCop's node.parent.type check, which only
+        // considers the DIRECT parent, not ancestors.
+        if self.immediate_parent_ambiguous {
             return;
         }
 
@@ -187,15 +223,35 @@ impl<'s> ParenStyleVisitor<'s> {
 }
 
 impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
+    fn visit_branch_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {
+        // Capture the parent's ambiguity state for this child node.
+        // This implements "one-shot" ambiguity: only the direct parent's
+        // setting matters. Non-ambiguous intermediate nodes (lvasgn, ivasgn,
+        // etc.) that don't override visit_*_node will have cleared
+        // parent_is_ambiguous from the previous leave, so their children
+        // correctly see immediate_parent_ambiguous = false.
+        self.ambiguity_stack.push(self.parent_is_ambiguous);
+        self.immediate_parent_ambiguous = self.parent_is_ambiguous;
+        self.parent_is_ambiguous = false;
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        if let Some(saved) = self.ambiguity_stack.pop() {
+            self.parent_is_ambiguous = saved;
+        }
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         self.check_factory_call(node);
 
-        // Visit receiver (not ambiguous)
+        // Visit receiver — ambiguous: in Parser AST, a receiver's parent is
+        // the outer `send` node, which is in AMBIGUOUS_TYPES. Example:
+        // `create(:user).save` — create's parent is `send` (the .save call).
         if let Some(recv) = node.receiver() {
             let saved = self.parent_is_ambiguous;
             let saved_kind = self.ambiguity_kind;
-            self.parent_is_ambiguous = false;
-            self.ambiguity_kind = None;
+            self.parent_is_ambiguous = true;
+            self.ambiguity_kind = Some(AmbiguityKind::Call);
             self.visit(&recv);
             self.parent_is_ambiguous = saved;
             self.ambiguity_kind = saved_kind;
@@ -385,4 +441,132 @@ mod tests {
         ConsistentParenthesesStyle,
         "cops/factorybot/consistent_parentheses_style"
     );
+
+    fn omit_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn omit_style_flags_parenthesized() {
+        let source = b"create(:user)\nbuild(:user)\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(diags.len(), 2);
+        assert!(diags[0].message.contains("without parentheses"));
+    }
+
+    #[test]
+    fn omit_style_accepts_no_parens() {
+        let source = b"create :user\nbuild :user\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn omit_style_skips_receiver_ambiguous() {
+        // Factory call as receiver: parent in Parser is `send` (ambiguous).
+        // RuboCop skips these — should not flag.
+        let source = b"create(:user).save\nbuild(:user).id\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offenses for factory call as receiver, got: {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn omit_style_skips_ambiguous_parent() {
+        // Direct argument of method call — parent is send (ambiguous)
+        let source = b"foo(create(:user))\n[create(:user)]\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn omit_style_flags_inside_assignment_in_array() {
+        // Assignment inside array: factory call's parent in Parser is lvasgn
+        // (NOT array), so it's not ambiguous and should be flagged.
+        let source = b"[x = create(:user)]\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for create(:user) inside lvasgn in array, got: {}",
+            diags.len()
+        );
+    }
+
+    #[test]
+    fn omit_style_flags_inside_assignment_in_args() {
+        // Assignment inside method args: factory call's parent is lvasgn (not ambiguous)
+        let source = b"foo(x = create(:user))\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn omit_style_flags_inside_ivar_assignment_in_args() {
+        // Instance variable write inside method args
+        let source = b"login_as(@user = create(:user))\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn omit_style_skips_multiline() {
+        // Multiline factory call: method and first arg on different lines
+        let source = b"create(\n  :user\n)\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn omit_style_skips_value_omission() {
+        let source = b"create(:user, name:)\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(diags.is_empty());
+    }
 }

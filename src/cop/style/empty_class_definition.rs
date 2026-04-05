@@ -14,6 +14,12 @@ use crate::parse::source::SourceFile;
 /// - `Class.new(Base, &BLOCK)` stores `&BLOCK` in `call.block()` as a
 ///   `BlockArgumentNode`, not a real class body `BlockNode`. RuboCop still
 ///   flags that form, so only actual block bodies should be skipped.
+/// - Under `EnforcedStyle: class_new`, Prism wraps class bodies with `rescue`
+///   in a `BeginNode`, so non-`StatementsNode` bodies must be treated as
+///   non-empty instead of being flagged as empty classes.
+/// - The same style should still flag single-statement bodies like `self`,
+///   `nil`, `true`, and `false`, because RuboCop treats those parser leaf
+///   bodies as empty class definitions.
 pub struct EmptyClassDefinition;
 
 impl Cop for EmptyClassDefinition {
@@ -142,16 +148,8 @@ fn check_class_new_style(
 ) -> Vec<Diagnostic> {
     // Check for empty class definitions
     if let Some(class_node) = node.as_class_node() {
-        // Must have no body
-        if class_node.body().is_some() {
-            // Check if body has actual statements
-            if let Some(body) = class_node.body() {
-                if let Some(stmts) = body.as_statements_node() {
-                    if stmts.body().iter().next().is_some() {
-                        return Vec::new();
-                    }
-                }
-            }
+        if !class_new_style_empty_body(class_node.body()) {
+            return Vec::new();
         }
 
         let loc = class_node.location();
@@ -165,6 +163,30 @@ fn check_class_new_style(
     }
 
     Vec::new()
+}
+
+fn class_new_style_empty_body(body: Option<ruby_prism::Node<'_>>) -> bool {
+    let Some(body) = body else {
+        return true;
+    };
+
+    let Some(statements) = body.as_statements_node() else {
+        return false;
+    };
+
+    let mut body = statements.body().iter();
+    let Some(statement) = body.next() else {
+        return true;
+    };
+
+    if body.next().is_some() {
+        return false;
+    }
+
+    statement.as_self_node().is_some()
+        || statement.as_nil_node().is_some()
+        || statement.as_true_node().is_some()
+        || statement.as_false_node().is_some()
 }
 
 fn is_class_const(node: &ruby_prism::Node<'_>) -> bool {
@@ -181,5 +203,43 @@ fn is_class_const(node: &ruby_prism::Node<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+    };
+
+    fn class_new_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("class_new".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
     crate::cop_fixture_tests!(EmptyClassDefinition, "cops/style/empty_class_definition");
+
+    #[test]
+    fn offense_class_new_fixture() {
+        assert_cop_offenses_full_with_config(
+            &EmptyClassDefinition,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/empty_class_definition/offense.class_new.rb"
+            ),
+            class_new_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_class_new_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &EmptyClassDefinition,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/empty_class_definition/no_offense.class_new.rb"
+            ),
+            class_new_config(),
+        );
+    }
 }
