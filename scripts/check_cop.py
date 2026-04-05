@@ -879,11 +879,15 @@ def _run_rubocop_for_variant(
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env)
         data = json.loads(result.stdout)
-        count = sum(
-            len(f.get("offenses", []))
-            for f in data.get("files", [])
-        )
-        return {"count": count}
+        # Filter to only the requested cop and deduplicate by (path, line),
+        # matching the deduplication that run_nitrocop applies on the NC side.
+        seen: set[tuple[str, int]] = set()
+        for f in data.get("files", []):
+            fpath = os.path.realpath(f.get("path", ""))
+            for o in f.get("offenses", []):
+                if o.get("cop_name") == cop:
+                    seen.add((fpath, o["location"]["line"]))
+        return {"count": len(seen)}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return {"count": -1}
 
@@ -1455,6 +1459,7 @@ def main():
         print("PASS: no per-repo regressions vs baseline (default config)")
 
         # ── Variant style checks ──
+        variant_failed = False
         if args.check_variants and _CLONE_DIR is not None:
             # Generate variant batch configs if not provided
             variant_batches = args.variant_batches_dir

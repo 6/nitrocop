@@ -17,6 +17,17 @@ use crate::parse::source::SourceFile;
 /// `Rakefile` tasks and created corpus-only false positives, so this cop
 /// skips files whose basename is exactly `Rakefile`.
 ///
+/// RuboCop only checks task siblings where a `desc` could actually be inserted.
+/// Single-statement bodies under `def`, `class`, `module`, and `if`/`unless`
+/// parents stay attached to those parent nodes, so tasks there are exempt. Once
+/// those bodies contain multiple statements, Parser wraps them in `begin`, and
+/// RuboCop starts checking sibling `desc` calls again. Prism visits every
+/// `StatementsNode` directly, so nitrocop previously over-flagged single-task
+/// bodies and then, after a first narrowing attempt, under-flagged valid
+/// offenses inside multi-statement bodies. We now mirror RuboCop by checking
+/// top-level/block/begin bodies unconditionally and other statement bodies only
+/// when they contain multiple statements.
+///
 /// RuboCop's `can_insert_desc_to?` only allows `:begin`, `:block`, `:kwbegin`
 /// as parent types. In RuboCop AST, a single-statement rescue/ensure body has
 /// parent `:resbody`/`:ensure` (not allowed), so tasks there are exempt. With
@@ -59,6 +70,8 @@ impl Cop for Desc {
             cop: self,
             source,
             diagnostics: Vec::new(),
+            ancestor_kinds: Vec::new(),
+            statements_parent_overrides: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -69,6 +82,23 @@ struct DescVisitor<'a> {
     cop: &'a Desc,
     source: &'a SourceFile,
     diagnostics: Vec<Diagnostic>,
+    ancestor_kinds: Vec<AncestorKind>,
+    statements_parent_overrides: Vec<AncestorKind>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AncestorKind {
+    Program,
+    Block,
+    Begin,
+    Transparent,
+    Other,
+}
+
+impl AncestorKind {
+    fn allows_desc_insertion(self) -> bool {
+        matches!(self, Self::Program | Self::Block | Self::Begin)
+    }
 }
 
 impl DescVisitor<'_> {
@@ -155,11 +185,41 @@ impl DescVisitor<'_> {
             }
         }
     }
+
+    fn current_statements_parent_kind(&self) -> AncestorKind {
+        self.ancestor_kinds
+            .iter()
+            .rev()
+            .copied()
+            .find(|kind| *kind != AncestorKind::Transparent)
+            .unwrap_or(AncestorKind::Other)
+    }
 }
 
 impl<'pr> Visit<'pr> for DescVisitor<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let kind = match node {
+            ruby_prism::Node::ProgramNode { .. } => AncestorKind::Program,
+            ruby_prism::Node::BlockNode { .. } => AncestorKind::Block,
+            ruby_prism::Node::BeginNode { .. } => AncestorKind::Begin,
+            ruby_prism::Node::StatementsNode { .. } => AncestorKind::Transparent,
+            _ => AncestorKind::Other,
+        };
+        self.ancestor_kinds.push(kind);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestor_kinds.pop();
+    }
+
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
-        self.check_statements(node);
+        let parent_kind = self
+            .statements_parent_overrides
+            .pop()
+            .unwrap_or_else(|| self.current_statements_parent_kind());
+        if parent_kind.allows_desc_insertion() || node.body().len() > 1 {
+            self.check_statements(node);
+        }
         ruby_prism::visit_statements_node(self, node);
     }
 
@@ -174,6 +234,7 @@ impl<'pr> Visit<'pr> for DescVisitor<'_> {
                     self.visit(&child);
                 }
             } else {
+                self.statements_parent_overrides.push(AncestorKind::Begin);
                 self.visit_statements_node(&stmts);
             }
         }
@@ -190,6 +251,7 @@ impl<'pr> Visit<'pr> for DescVisitor<'_> {
                     self.visit(&child);
                 }
             } else {
+                self.statements_parent_overrides.push(AncestorKind::Begin);
                 self.visit_statements_node(&stmts);
             }
         }
