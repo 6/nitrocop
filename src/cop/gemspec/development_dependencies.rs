@@ -334,7 +334,9 @@ fn check_gem_calls(
 }
 
 /// Find a `gem` method call in a line. Returns (position_of_gem, text_after_gem).
-/// Ensures `gem` is a whole word (not part of `gemspec`, `gems`, etc.).
+/// Ensures `gem` is a whole word (not part of `gemspec`, `gems`, etc.) and
+/// appears in method-call position — not inside a string, regex, or other literal.
+/// RuboCop uses AST matching (`(send _ :gem ...)`), so only real send nodes count.
 fn find_gem_call(line: &str) -> Option<(usize, &str)> {
     let bytes = line.as_bytes();
     let mut search_from = 0;
@@ -346,6 +348,14 @@ fn find_gem_call(line: &str) -> Option<(usize, &str)> {
         if pos > 0 {
             let prev = bytes[pos - 1];
             if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = pos + 3;
+                continue;
+            }
+            // Skip `gem` inside literals: if preceded by a non-whitespace,
+            // non-statement character like /, ', ", it's inside a regex or string,
+            // not a real method call. Real gem calls are at line start (after
+            // whitespace) or after statement separators like ; or keywords.
+            if !prev.is_ascii_whitespace() && prev != b';' {
                 search_from = pos + 3;
                 continue;
             }
@@ -490,6 +500,16 @@ gem('bar')
 gem 'example'
 ^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
 "#,
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_gem_in_string_or_regex() {
+        // `gem` inside gsub_file regex/string args is not a real gem call
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: Gemfile\ngsub_file 'Gemfile', /gem 'sdoc',\\s+'~> 0.4.0'/, ''\n",
             gemspec_style_config(),
         );
     }
