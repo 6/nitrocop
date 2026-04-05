@@ -120,33 +120,38 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
         md.append(f"| RuboCop files dropped (parser crash) | {total_files_dropped:,} |")
     md.append("")
 
-    # Department breakdown
+    # Department breakdown (default config)
     if by_department:
         md.append("## Department Breakdown")
         md.append("")
-        if variant_by_cop:
-            md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Default variant % | All variants % |")
-            md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|---------:|---------------:|")
-        else:
-            md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
-            md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
+        md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
+        md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
         for d in by_department:
             total = d["matches"] + d["fp"] + d["fn"]
             pct = fmt_pct(d['match_rate']) if total > 0 else "N/A"
-            row = (
+            md.append(
                 f"| {d['department']} | {d['cops']:,} | "
                 f"{d['perfect_cops']:,} | {d['diverging_cops']:,} | {d['inactive_cops']:,} | "
-                f"{d['matches']:,} | {d['fp']:,} | {d['fn']:,} | {pct}"
+                f"{d['matches']:,} | {d['fp']:,} | {d['fn']:,} | {pct} |"
             )
-            if variant_by_cop:
-                vd = variant_dept_stats.get(d["department"], {"matches": 0, "fp": 0, "fn": 0})
-                v_total = total + vd["matches"] + vd["fp"] + vd["fn"]
-                v_matches = d["matches"] + vd["matches"]
-                v_pct = fmt_pct(v_matches / v_total) if v_total > 0 else "N/A"
-                row += f" | {v_pct} |"
-            else:
-                row += " |"
-            md.append(row)
+        md.append("")
+
+    # Department breakdown (all variants)
+    if by_department and variant_by_cop:
+        md.append("### All Variants")
+        md.append("")
+        md.append("| Department | Default matches | Variant matches | Variant FP | Variant FN | All variants % |")
+        md.append("|------------|----------------:|----------------:|-----------:|-----------:|---------------:|")
+        for d in by_department:
+            total = d["matches"] + d["fp"] + d["fn"]
+            vd = variant_dept_stats.get(d["department"], {"matches": 0, "fp": 0, "fn": 0})
+            v_total = total + vd["matches"] + vd["fp"] + vd["fn"]
+            v_matches = d["matches"] + vd["matches"]
+            v_pct = fmt_pct(v_matches / v_total) if v_total > 0 else "N/A"
+            md.append(
+                f"| {d['department']} | {d['matches']:,} | "
+                f"{vd['matches']:,} | {vd['fp']:,} | {vd['fn']:,} | {v_pct} |"
+            )
         md.append("")
 
     # Diverging cops
