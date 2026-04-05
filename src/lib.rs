@@ -211,16 +211,6 @@ pub fn run(args: Args) -> Result<i32> {
         }
     }
 
-    // Detect bare command names passed as positional paths (e.g. `nitrocop migrate`
-    // instead of `nitrocop --migrate`) and bail with a helpful hint.
-    if let Some(first) = args.paths.first() {
-        let bare = first.to_string_lossy();
-        let known_flags = ["migrate", "init", "doctor", "rules", "verify"];
-        if known_flags.contains(&bare.as_ref()) {
-            anyhow::bail!("Unknown path '{bare}'. Did you mean `nitrocop --{bare}`?");
-        }
-    }
-
     let target_dir = args.paths.first().map(|p| {
         if p.is_file() {
             p.parent().unwrap_or(p)
