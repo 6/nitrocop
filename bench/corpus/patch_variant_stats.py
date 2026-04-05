@@ -6,10 +6,17 @@ are computed from the final (merged) default FP/FN numbers. Without this
 ordering, variant rates can appear higher than default rates for
 departments where the IG merge improved the default numbers.
 
+When --synthetic is provided, cops with no corpus data but a passing
+synthetic result are treated as default-perfect (matching update_readme.py
+logic). Synthetic variant data (from run_synthetic.py) is also merged
+into variant results so that synth-only cops with EnforcedStyle options
+get proper variant coverage.
+
 Usage:
     python3 bench/corpus/patch_variant_stats.py \
         --corpus corpus-results.json \
-        --variants style-variant-results.json
+        --variants style-variant-results.json \
+        --synthetic bench/synthetic/synthetic-results.json
 """
 from __future__ import annotations
 
@@ -24,7 +31,28 @@ def trunc4(rate: float) -> float:
     return math.floor(rate * 10000) / 10000
 
 
-def patch(corpus: dict, variant_path: Path) -> bool:
+def load_synthetic(path: Path | None) -> tuple[dict[str, dict], dict[str, list[dict]]]:
+    """Load synthetic results.
+
+    Returns (synth_by_cop, synth_variant_by_cop) where synth_by_cop maps
+    cop name to its default-config entry and synth_variant_by_cop maps
+    cop name to its variant entries (from run_synthetic.py variant runs).
+    """
+    if not path or not path.exists():
+        return {}, {}
+    data = json.loads(path.read_text())
+    by_cop = {e["cop"]: e for e in data.get("by_cop", [])}
+    variant_by_cop: dict[str, list[dict]] = {}
+    for batch in data.get("variants", {}).get("batches", []):
+        for cop_entry in batch.get("by_cop", []):
+            cop_name = cop_entry.get("cop", "")
+            if cop_name:
+                variant_by_cop.setdefault(cop_name, []).append(cop_entry)
+    return by_cop, variant_by_cop
+
+
+def patch(corpus: dict, variant_path: Path,
+          synthetic_path: Path | None = None) -> bool:
     """Patch variant stats into corpus dict. Returns True if patched."""
     data = json.loads(variant_path.read_text())
     variant_by_cop: dict[str, list[dict]] = {}
@@ -33,6 +61,12 @@ def patch(corpus: dict, variant_path: Path) -> bool:
             cop_name = cop_entry.get("cop", "")
             if cop_name:
                 variant_by_cop.setdefault(cop_name, []).append(cop_entry)
+
+    # Merge synthetic variant data into variant_by_cop so that synth-only
+    # cops with EnforcedStyle options get variant coverage.
+    synth_by_cop, synth_variant_by_cop = load_synthetic(synthetic_path)
+    for cop_name, entries in synth_variant_by_cop.items():
+        variant_by_cop.setdefault(cop_name, []).extend(entries)
 
     if not variant_by_cop:
         return False
@@ -80,8 +114,13 @@ def patch(corpus: dict, variant_path: Path) -> bool:
         dept = cop_name.split("/")[0]
         dept_variant_perfect.setdefault(dept, 0)
         dept_variant_diverging.setdefault(dept, 0)
-        # A cop is variant-perfect if it's default-perfect AND not variant-diverging
+        # A cop is variant-perfect if it's default-perfect AND not variant-diverging.
+        # Fall back to synthetic results for cops with no corpus data.
         default_perfect = cop_entry.get("perfect_match", False)
+        if not default_perfect and not cop_entry.get("exercised", True):
+            syn = synth_by_cop.get(cop_name)
+            if syn and syn.get("perfect_match"):
+                default_perfect = True
         if cop_name in variant_diverging_cops:
             dept_variant_diverging[dept] += 1
         elif default_perfect:
@@ -110,6 +149,8 @@ def main():
         description="Patch variant stats into corpus-results.json")
     parser.add_argument("--corpus", required=True, type=Path)
     parser.add_argument("--variants", required=True, type=Path)
+    parser.add_argument("--synthetic", type=Path, default=None,
+                        help="Path to synthetic-results.json (fills in cops with no corpus data)")
     args = parser.parse_args()
 
     if not args.variants.exists():
@@ -117,7 +158,7 @@ def main():
         return
 
     corpus = json.loads(args.corpus.read_text())
-    if patch(corpus, args.variants):
+    if patch(corpus, args.variants, args.synthetic):
         args.corpus.write_text(json.dumps(corpus, indent=2) + "\n")
         rate = corpus["summary"].get("variant_overall_match_rate", 0)
         print(f"Patched variant stats: {math.floor(rate * 1000) / 10:.1f}%", file=sys.stderr)
