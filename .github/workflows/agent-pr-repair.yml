@@ -79,6 +79,8 @@ jobs:
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
+      # Inline because checkout is conditional (can't use .github/actions/free-disk-space).
+      # Keep targets in sync with .github/actions/free-disk-space/action.yml.
       - name: Free disk space
         run: |
           echo "=== Before cleanup ==="
