@@ -208,3 +208,9 @@ projects  = 3.times.map { |i| i }
 # Plain = followed by non-assignment line with = only inside a string
 rel  = '/test'
 expect(foo).to eq("test?name2=val2")
+
+# Setter calls with aligned trailing space after = (RHS values align)
+# RuboCop does not flag these because aligned_with_something? returns true
+cors_rule.allowed_origins =  foo
+cors_rule.allowed_methods =  bar
+cors_rule.max_age_in_seconds = baz
