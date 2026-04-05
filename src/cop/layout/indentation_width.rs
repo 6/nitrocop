@@ -1,8 +1,8 @@
 use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{
     BEGIN_NODE, BLOCK_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, FOR_NODE,
-    IF_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE, UNLESS_NODE, UNTIL_NODE,
-    WHEN_NODE, WHILE_NODE,
+    IF_NODE, LAMBDA_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE, SUPER_NODE,
+    UNLESS_NODE, UNTIL_NODE, WHEN_NODE, WHILE_NODE,
 };
 use crate::cop::shared::util::{assignment_context_base_col, expected_indent_for_body};
 use crate::cop::{Cop, CopConfig};
@@ -61,6 +61,22 @@ use crate::parse::source::SourceFile;
 ///   walk. RuboCop's `check_members_for_normal_style` skips ALL access modifier
 ///   calls (via `member.access_modifier?`), not just bare ones. Changed to use
 ///   `is_any_access_modifier_call` which matches all forms. Resolved ~83 FP.
+///
+/// 2026-04-05:
+/// - Added lambda block handling (`-> do ... end`). LambdaNode was not in
+///   `interested_node_types`, so lambda bodies were never checked.
+/// - Added super block handling (`super(args) do ... end`). SuperNode blocks
+///   were not checked since only CallNode blocks were handled.
+/// - Fixed case/else body base: was using the `else` keyword column, but
+///   RuboCop uses the LAST `when` keyword column as base for else body
+///   indentation (matching `on_case` which calls
+///   `check_indentation(when_branches.last.loc.keyword, else_branch)`).
+///   Same fix applied to case/in pattern matching (uses last `in` keyword).
+/// - Fixed first member access modifier with args: `select_check_member`
+///   checks the first member even when it's `private :method` (access modifier
+///   with args). Changed the first-member check from `is_access_modifier_call`
+///   (bare only) to `is_any_access_modifier_call` (all forms).
+///   Resolved 25+ FN, 0 regressions.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -320,7 +336,11 @@ impl IndentationWidth {
             return diagnostics;
         }
 
-        if is_access_modifier_call(first) && styles.access_modifier != "outdent" {
+        // RuboCop's `select_check_member` checks the first member specially.
+        // If the first member is ANY access modifier (bare or with args), it is
+        // checked here (unless `outdent` style) and skipped in the loop below.
+        // Non-access-modifier first members are handled by the loop.
+        if is_any_access_modifier_call(first) && styles.access_modifier != "outdent" {
             if let Some(diagnostic) =
                 self.check_member_indentation(source, base_offset, base_col, first, options, None)
             {
@@ -328,11 +348,10 @@ impl IndentationWidth {
             }
         }
 
+        // RuboCop's `check_members_for_normal_style` iterates all children and
+        // skips access modifiers (bare, with symbol args, or with def).
+        // Access modifier indentation is handled by Layout/AccessModifierIndentation.
         for member in &members {
-            // Skip ALL access modifier calls (bare, with symbol args, or with def).
-            // RuboCop's `check_members_for_normal_style` does:
-            //   `next if member.send_type? && member.access_modifier?`
-            // Access modifier indentation is handled by Layout/AccessModifierIndentation.
             if is_any_access_modifier_call(member) {
                 continue;
             }
@@ -640,9 +659,11 @@ impl Cop for IndentationWidth {
             DEF_NODE,
             FOR_NODE,
             IF_NODE,
+            LAMBDA_NODE,
             MODULE_NODE,
             SINGLETON_CLASS_NODE,
             STATEMENTS_NODE,
+            SUPER_NODE,
             UNLESS_NODE,
             UNTIL_NODE,
             WHEN_NODE,
@@ -976,6 +997,71 @@ impl Cop for IndentationWidth {
             }
         }
 
+        // Lambda blocks (-> do ... end / -> { ... }). Treated like blocks
+        // by RuboCop's on_block handler. No dot/receiver, so base is always
+        // the closing location (end/}).
+        if let Some(lambda_node) = node.as_lambda_node() {
+            let opening_offset = lambda_node.opening_loc().start_offset();
+            let closing_offset = lambda_node.closing_loc().start_offset();
+            let (_, closing_col) = source.offset_to_line_col(closing_offset);
+
+            // Skip if closing brace/end is not on its own line
+            let bytes = source.as_bytes();
+            let mut line_start = closing_offset;
+            while line_start > 0 && bytes[line_start - 1] != b'\n' {
+                line_start -= 1;
+            }
+            if !bytes[line_start..closing_offset]
+                .iter()
+                .all(|&b| b == b' ' || b == b'\t')
+            {
+                return;
+            }
+
+            diagnostics.extend(self.check_body_indentation(
+                source,
+                opening_offset,
+                closing_col,
+                lambda_node.body(),
+                options,
+            ));
+            return;
+        }
+
+        // Super with block (super(args) do ... end). Extract the block and
+        // check indentation like a non-chained block.
+        if let Some(super_node) = node.as_super_node() {
+            if let Some(block_ref) = super_node.block() {
+                if let Some(block) = block_ref.as_block_node() {
+                    let opening_offset = block.opening_loc().start_offset();
+                    let closing_offset = block.closing_loc().start_offset();
+                    let (_, closing_col) = source.offset_to_line_col(closing_offset);
+
+                    // Skip if closing brace/end is not on its own line
+                    let bytes = source.as_bytes();
+                    let mut line_start = closing_offset;
+                    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+                        line_start -= 1;
+                    }
+                    if !bytes[line_start..closing_offset]
+                        .iter()
+                        .all(|&b| b == b' ' || b == b'\t')
+                    {
+                        return;
+                    }
+
+                    diagnostics.extend(self.check_body_indentation(
+                        source,
+                        opening_offset,
+                        closing_col,
+                        block.body(),
+                        options,
+                    ));
+                }
+            }
+            return;
+        }
+
         // Check body indentation inside when clauses (when keyword
         // positioning is handled by Layout/CaseIndentation, not here).
         if let Some(when_node) = node.as_when_node() {
@@ -1008,18 +1094,46 @@ impl Cop for IndentationWidth {
             return;
         }
 
-        // Check else clause on case/when (ElseNode bypasses the walker)
+        // Check else clause on case/when. RuboCop uses the LAST when keyword
+        // as the base for else body indentation, not the else keyword itself.
         if let Some(case_node) = node.as_case_node() {
             if let Some(else_clause) = case_node.else_clause() {
-                self.check_else_clause(source, &else_clause, options, diagnostics);
+                if let Some(last_when) = case_node.conditions().iter().last() {
+                    if let Some(when_node) = last_when.as_when_node() {
+                        let kw_offset = when_node.keyword_loc().start_offset();
+                        let (_, kw_col) = source.offset_to_line_col(kw_offset);
+                        diagnostics.extend(self.check_statements_indentation(
+                            source,
+                            kw_offset,
+                            kw_col,
+                            None,
+                            else_clause.statements(),
+                            options,
+                        ));
+                    }
+                }
             }
             return;
         }
 
-        // Check else clause on case/in pattern matching
+        // Check else clause on case/in pattern matching. Uses last `in` keyword
+        // as base, matching RuboCop's on_case_match behavior.
         if let Some(case_match_node) = node.as_case_match_node() {
             if let Some(else_clause) = case_match_node.else_clause() {
-                self.check_else_clause(source, &else_clause, options, diagnostics);
+                if let Some(last_in) = case_match_node.conditions().iter().last() {
+                    if let Some(in_node) = last_in.as_in_node() {
+                        let kw_offset = in_node.in_loc().start_offset();
+                        let (_, kw_col) = source.offset_to_line_col(kw_offset);
+                        diagnostics.extend(self.check_statements_indentation(
+                            source,
+                            kw_offset,
+                            kw_col,
+                            None,
+                            else_clause.statements(),
+                            options,
+                        ));
+                    }
+                }
             }
             return;
         }

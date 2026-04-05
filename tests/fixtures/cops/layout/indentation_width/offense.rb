@@ -215,3 +215,35 @@ end
       body_here
       ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
 end
+
+# Lambda block body with wrong indentation
+scope :verified, -> do
+    where('stuff')
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+end
+
+# Super with block — body wrong indentation
+def each_mutation(payload, options = {}, &block)
+  super(payload, options) do |element|
+      yield element
+      ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+  end
+end
+
+# Case else body checked from last when keyword, not else keyword
+result = case resource_name
+         when :a
+           do_a
+         when :b
+           do_b
+     else
+       default_name
+       ^^^ Layout/IndentationWidth: Use 2 (not -2) spaces for indentation.
+     end
+
+# Class with first member being access modifier with args at wrong indentation
+class Manager
+    private :load, :available
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+    public :load, :available
+end
