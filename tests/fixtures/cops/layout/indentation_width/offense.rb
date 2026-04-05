@@ -247,3 +247,45 @@ class Manager
     ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
     public :load, :available
 end
+
+# Block with rescue — body has wrong indentation
+items.each do |item|
+    process(item)
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+rescue StandardError
+  handle
+end
+
+# Block with rescue — rescue body has wrong indentation
+items.each do |item|
+  process(item)
+rescue StandardError
+    handle_error
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+end
+
+# Block with ensure — body has wrong indentation
+items.each do |item|
+    process(item)
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+ensure
+  cleanup
+end
+
+# Block with ensure — ensure body has wrong indentation
+items.each do |item|
+  process(item)
+ensure
+    cleanup
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+end
+
+# Block with rescue — else body has wrong indentation
+items.each do |item|
+  process(item)
+rescue StandardError
+  handle
+else
+    success
+    ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+end
