@@ -986,6 +986,8 @@ def test_run_variant_checks_includes_diverging_repos():
 
     assert len(results) == 1
     assert results[0]["fp"] == 1  # NC=5, RC=4
-    assert results[0]["diverging_repos"] == [
-        {"repo": "repo_a", "nc": 3, "rc": 2},
-    ]
+    assert len(results[0]["diverging_repos"]) == 1
+    dr = results[0]["diverging_repos"][0]
+    assert dr["repo"] == "repo_a"
+    assert dr["nc"] == 3
+    assert dr["rc"] == 2
