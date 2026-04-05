@@ -141,3 +141,14 @@ XML
 # Spaces before a chained `.` are still offenses for single-line receivers
 data = { a: 1 }  .transform_values
                ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+
+# Extra spaces before ** (double splat) — not aligned with adjacent **
+foo 1,  **x
+      ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+foo 1, **x
+
+# Multiline receiver: extra spaces before chained `.` are still offenses
+expect {
+  something
+}          .to raise_error
+ ^^^^^^^^^ Layout/ExtraSpacing: Unnecessary spacing detected.

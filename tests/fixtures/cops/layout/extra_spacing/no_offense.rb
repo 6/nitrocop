@@ -176,18 +176,6 @@ columns << :id
 expect(clo)  .to be_within(0.1).of(1.0)
 expect(clo)  .not_to be_nil
 
-# Multiline block receivers can align a chained call operator on the closing line
-expect {
-  Dry::Schema.Params do
-    required(:foo).maybe(:empty?)
-  end
-}          .to raise_error Dry::Schema::InvalidSchemaError
-
-# Multiline literal receivers can also align a chained call operator
-data = {
-  a: 1
-}  .transform_values
-
 # Heredoc openers can be followed by a same-line block close
 let(:hiera_config) { <<~CONF  }
 ---
