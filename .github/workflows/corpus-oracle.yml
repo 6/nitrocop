@@ -71,17 +71,11 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJson(needs.compute-matrix.outputs.matrix) }}
     steps:
-      - name: Free disk space
-        run: |
-          echo "=== Before cleanup ==="
-          df -h / | tail -1
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          echo "=== After cleanup ==="
-          df -h / | tail -1
-
       - uses: actions/checkout@v6
         with:
           submodules: true
+
+      - uses: ./.github/actions/free-disk-space
 
       - name: Download nitrocop binary
         uses: actions/download-artifact@v8
@@ -461,19 +455,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - name: Free disk space
-        run: |
-          # Remove pre-installed tools we don't need (~8GB).
-          echo "=== Before cleanup ==="
-          df -h / | tail -1
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          echo "=== After cleanup ==="
-          df -h / | tail -1
-
       - uses: actions/checkout@v6
         with:
           submodules: true
           persist-credentials: false
+
+      - uses: ./.github/actions/free-disk-space
 
       - name: Download all results
         uses: actions/download-artifact@v8
@@ -826,15 +813,9 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     steps:
-      - name: Free disk space
-        run: |
-          echo "=== Before cleanup ==="
-          df -h / | tail -1
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
-          echo "=== After cleanup ==="
-          df -h / | tail -1
-
       - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk-space
 
       - name: Download corpus results
         uses: actions/download-artifact@v8
