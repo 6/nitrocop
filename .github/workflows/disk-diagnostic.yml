@@ -1,0 +1,27 @@
+# Temporary workflow to check what's eating disk on ubuntu-24.04 runners.
+# Delete this after confirming the cleanup targets are valid.
+name: Disk Diagnostic
+on: workflow_dispatch
+
+jobs:
+  check-disk:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Disk usage overview
+        run: |
+          echo "=== Filesystem ==="
+          df -h /
+          echo ""
+          echo "=== Top-level directories by size ==="
+          sudo du -sh /* 2>/dev/null | sort -rh | head -20
+          echo ""
+          echo "=== Cleanup targets ==="
+          du -sh /usr/local/lib/android /usr/share/dotnet /opt/ghc 2>/dev/null || true
+          echo ""
+          echo "=== Other large directories under /usr ==="
+          sudo du -sh /usr/local/lib/* 2>/dev/null | sort -rh | head -10
+          sudo du -sh /usr/share/* 2>/dev/null | sort -rh | head -10
+          echo ""
+          echo "=== After cleanup ==="
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
