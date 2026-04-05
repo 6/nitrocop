@@ -16,6 +16,7 @@ bench/autocorrect_validate.json
 # Corpus oracle
 bench/corpus/.bundle/
 bench/corpus/vendor/
+bench/corpus/variant_batches/
 bench/synthetic/.bundle/
 bench/synthetic/vendor/
 bench/corpus/repos/
