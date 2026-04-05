@@ -70,6 +70,10 @@ impl Cop for RakeEnvironment {
         Severity::Convention
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/lib/capistrano/tasks/**/*.rake"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }

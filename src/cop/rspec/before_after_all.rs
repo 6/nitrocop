@@ -43,6 +43,14 @@ impl Cop for BeforeAfterAll {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &[
+            "**/spec/spec_helper.rb",
+            "**/spec/rails_helper.rb",
+            "**/spec/support/**/*.rb",
+        ]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, SYMBOL_NODE]
     }

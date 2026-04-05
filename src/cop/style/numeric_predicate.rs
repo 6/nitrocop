@@ -127,6 +127,10 @@ impl Cop for NumericPredicate {
         "Style/NumericPredicate"
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["spec/**/*"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, GLOBAL_VARIABLE_READ_NODE, INTEGER_NODE]
     }
