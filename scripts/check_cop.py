@@ -879,20 +879,11 @@ def _run_rubocop_for_variant(
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env)
         data = json.loads(result.stdout)
-        # Filter to the requested cop — RuboCop always reports Lint/Syntax
-        # regardless of --only, and run_nitrocop does the same filtering.
-        # Then deduplicate by (path, line, cop_name) to match the dedup
-        # applied by run_nitrocop.normalize_offenses on the nitrocop side.
-        seen: set[tuple[str, int, str]] = set()
-        for f in data.get("files", []):
-            fpath = f.get("path", "")
-            for o in f.get("offenses", []):
-                if o.get("cop_name") != cop:
-                    continue
-                key = (fpath, o.get("location", {}).get("start_line", 0),
-                       o.get("cop_name", ""))
-                seen.add(key)
-        return {"count": len(seen)}
+        count = sum(
+            len(f.get("offenses", []))
+            for f in data.get("files", [])
+        )
+        return {"count": count}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return {"count": -1}
 
@@ -1464,7 +1455,6 @@ def main():
         print("PASS: no per-repo regressions vs baseline (default config)")
 
         # ── Variant style checks ──
-        variant_failed = False
         if args.check_variants and _CLONE_DIR is not None:
             # Generate variant batch configs if not provided
             variant_batches = args.variant_batches_dir
