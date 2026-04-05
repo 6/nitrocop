@@ -32,5 +32,26 @@ TEXT
 x = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 # rubocop:enable Layout:LineLength
 
+# AllowURI: URL followed by \n escape — the URL extends to end of line via word boundary extension
+puts "\nFor all saved admins, copy and paste into the wiki at https://wiki.transformativeworks.org/mediawiki/AO3_Admins:\n"
+
+# AllowURI: URL followed by :\n\n" — the URL extends to end of line via word boundary extension
+  say_status "", "The easiest way of launching Elasticsearch is by running it with Docker (https://www.docker.com/get-docker):\n\n"
+
+# AllowURI: URL in backticks followed by :\n — brace extension reaches end of line
+        let(:message)         { "You have exceeded the rate limit. `https://www.hipchat.com/docs/apiv2/rate_limiting`:\nResponse: #{body.to_json}" }
+
+# AllowURI: URLs with HTML entity &#46; inside array access — # in &#46; is not a real fragment
+            expect(click_event.click_url).to eq(["https://www&#46;gumroad&#46;com/checkout", "https://seller&#46;gumroad&#46;com/l/abc"][i])
+
+# AllowURI: URLs with real # fragments separated by single-quote separators — Ruby regex merges them
+      vocab.sample_controlled_vocab_terms << FactoryBot.build(:sample_controlled_vocab_term, label: 'Mother',iri:'http://ontology.org/#mother',parent_iri:'http://ontology.org/#parent')
+
+# AllowURI: URLs with IPv6 brackets and comma separator — Ruby regex merges them into one long match
+      assert_equal 2, instance.get_connection_options("https://john:password@[2404:7a80:d440:3000:192a:a292:bd7f:ca19]:443/elastic/,http://host2")[:hosts].length
+
+# AllowURI: URLs with &#8203; (zero-width space entity) — # in &#8203; is not a real fragment
+      markdown.should include "* PUT [https:&#8203;/&#8203;/api.sample.com&#8203;/members&#8203;/add](members_api/add-PUT.md)"
+
 __END__
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
