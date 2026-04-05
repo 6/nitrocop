@@ -52,14 +52,9 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 ## Cops
 
 <!-- corpus-cops:start -->
-nitrocop supports 915 cops from 7 RuboCop gems.
+Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
 
-Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files).
-
-862 of 915 cops produce identical results to RuboCop (default config).
-When tested with all style variants (e.g. `EnforcedStyle: comma`), 728 of 915 match exactly.
-
-**Default** = tested with default RuboCop config. **All variants** = tested with every supported `EnforcedStyle` value.
+**Default** = default RuboCop config. **All variants** = every supported `EnforcedStyle` (e.g. `EnforcedStyle: comma`).
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 

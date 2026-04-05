@@ -101,6 +101,22 @@ use crate::parse::source::SourceFile;
 ///    right at the match boundary. Our regex excludes quotes, leaving
 ///    `'` then `]` in the extension. Strip leading quotes before the
 ///    `]` fragment check to match Ruby's behavior.
+///
+/// ## Corpus investigation (2026-04-05)
+///
+/// FPs (14 of 24 resolved) from three AllowURI edge cases:
+/// 1. Colon+backslash filter too broad — URLs ending in `:` followed by
+///    `\n` escape were skipped by the escaped-scheme filter even when
+///    they contained `://` (i.e. were real URLs). Added `!contains("://")`
+///    guard so only non-URL scheme-like prefixes are filtered.
+/// 2. HTML entity `#` misidentified as URI fragment — `&#46;` and
+///    `&#8203;` contain `#` that isn't a real fragment marker. Added
+///    `has_real_uri_fragment()` helper that skips `#` preceded by `&`.
+/// 3. URI merge logic too restrictive — Ruby's `URI::DEFAULT_PARSER`
+///    includes RFC 2396 mark characters (`'`, `)`, `]`) in URI matches,
+///    creating longer matches than our regex. Added general merge path
+///    that merges adjacent URI matches through these chars, with `](`
+///    (markdown link syntax) and `\` (escape sequences) as boundaries.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -476,7 +492,7 @@ fn uri_range_if_applicable(
     let ext_past_quotes = extension_text.trim_start_matches(['\'', '"']);
     if ext_past_quotes.starts_with(']') {
         let uri_text = &line[last_match.start..last_match.end];
-        if uri_text.contains('#') {
+        if has_real_uri_fragment(uri_text) {
             return None;
         }
     }
@@ -521,20 +537,31 @@ fn merge_query_linked_uri_matches(line: &str, uri_regex: &regex::Regex) -> Vec<U
         {
             continue;
         }
-        if text.ends_with(':') && line[current.end()..].starts_with('\\') {
+        if text.ends_with(':') && !text.contains("://") && line[current.end()..].starts_with('\\') {
             continue;
         }
         if let Some(previous) = matches.last_mut() {
             let previous_text = &line[previous.start..previous.end];
             let separator = &line[previous.end..current.start()];
-            // Only merge when the separator contains no boundary characters.
-            // Characters like ", ', <, >, {, } indicate context boundaries
-            // (HTML tags, string delimiters, interpolation) that separate
-            // unrelated URI occurrences.
+            // Merge adjacent URI matches when the separator contains no
+            // boundary characters. Ruby's URI regex includes characters
+            // like ', ), ] that our regex excludes, creating longer matches
+            // that span through these chars. Merging here approximates
+            // Ruby's behavior.
+            // Boundaries: whitespace, |, ", <, >, {, }, \
+            // (' is a valid RFC 2396 mark character, not a boundary)
             let has_boundary = separator.chars().any(|c| {
-                c.is_whitespace() || matches!(c, '|' | '"' | '\'' | '<' | '>' | '{' | '}')
+                c.is_whitespace() || matches!(c, '|' | '"' | '<' | '>' | '{' | '}' | '\\')
             });
+            // Query-param merge: when previous URL has ?, the next URL is
+            // likely a query parameter value — merge even through ](
             if previous_text.contains('?') && !has_boundary {
+                previous.end = current.end();
+                continue;
+            }
+            // General merge: merge through RFC 2396 chars like ', ), ]
+            // but NOT through ]( (markdown link syntax)
+            if !has_boundary && !separator.contains("](") {
                 previous.end = current.end();
                 continue;
             }
@@ -546,6 +573,22 @@ fn merge_query_linked_uri_matches(line: &str, uri_regex: &regex::Regex) -> Vec<U
     }
 
     matches
+}
+
+/// Check if a URI text contains a real fragment marker (`#`), excluding
+/// `#` that is part of an HTML character entity like `&#46;` or `&#8203;`.
+fn has_real_uri_fragment(uri: &str) -> bool {
+    let bytes = uri.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#' {
+            // Skip # preceded by & (HTML entity like &#46;)
+            if i > 0 && bytes[i - 1] == b'&' {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn line_overlaps_heredoc(
