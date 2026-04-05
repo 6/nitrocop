@@ -10,3 +10,8 @@
   data.push(:x) if keynav?
   data.join
 }>)
+
+%(<span #{
+        ^^ Style/EmptyStringInsideInterpolation: Do not use trailing conditionals in string interpolation.
+  %( aria-label="#{aria_label}") if aria_label
+}>)
