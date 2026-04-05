@@ -6431,6 +6431,77 @@ fn migrate_clean_config_no_skips() {
     fs::remove_dir_all(&dir).ok();
 }
 
+// ---------- bare command name detection ----------
+
+#[test]
+fn bare_migrate_suggests_flag() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args(["migrate"])
+        .output()
+        .expect("Failed to execute nitrocop");
+
+    assert!(
+        !output.status.success(),
+        "bare 'migrate' should fail, but got exit 0"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Did you mean `nitrocop --migrate`?"),
+        "Should suggest --migrate flag, got: {stderr}"
+    );
+}
+
+#[test]
+fn bare_init_suggests_flag() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args(["init"])
+        .output()
+        .expect("Failed to execute nitrocop");
+
+    assert!(
+        !output.status.success(),
+        "bare 'init' should fail, but got exit 0"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Did you mean `nitrocop --init`?"),
+        "Should suggest --init flag, got: {stderr}"
+    );
+}
+
+#[test]
+fn bare_doctor_suggests_flag() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args(["doctor"])
+        .output()
+        .expect("Failed to execute nitrocop");
+
+    assert!(
+        !output.status.success(),
+        "bare 'doctor' should fail, but got exit 0"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Did you mean `nitrocop --doctor`?"),
+        "Should suggest --doctor flag, got: {stderr}"
+    );
+}
+
+#[test]
+fn normal_path_not_rejected_as_flag_name() {
+    // Paths like "src" or "." must not be confused with flag-like names.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args(["--list-cops", "."])
+        .output()
+        .expect("Failed to execute nitrocop");
+
+    assert!(
+        output.status.success(),
+        "normal path '.' should not be rejected, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ---------- --doctor CLI tests ----------
 
 #[test]

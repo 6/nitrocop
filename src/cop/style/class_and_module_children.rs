@@ -24,6 +24,20 @@ use crate::parse::source::SourceFile;
 /// (`x = module Foo::Bar`, `@var = class Foo::Bar < Base`), producing
 /// 0 offenses. Skip class/module nodes that are direct values of variable
 /// assignments to match the observable behavior.
+///
+/// Variant fix #1 (superclass check): RuboCop's `on_class` early-returns
+/// `if node.parent_class && style != :nested` where `style` is the global
+/// `EnforcedStyle` (from `ConfigurableEnforcedStyle`), NOT `style_for_classes`.
+/// Our code was using the effective per-class style, which differs when
+/// `EnforcedStyleForClasses` overrides `EnforcedStyle`. Fixed to use
+/// `enforced_style` for the superclass check.
+///
+/// Variant fix #2 (string/symbol mismatch): In RuboCop, `style_for_classes`
+/// and `style_for_modules` return a Ruby String when `EnforcedStyleForClasses`
+/// / `EnforcedStyleForModules` is explicitly set, but `check_style` compares
+/// with a Symbol (`:nested`). In Ruby, `"nested" != :nested`, so the
+/// comparison always fails and falls through to `check_compact_style`.
+/// We replicate this: when the override is set, always use compact checking.
 pub struct ClassAndModuleChildren;
 
 impl Cop for ClassAndModuleChildren {
@@ -94,22 +108,6 @@ struct ChildrenVisitor<'a> {
 }
 
 impl<'a> ChildrenVisitor<'a> {
-    fn style_for_class(&self) -> &str {
-        if !self.enforced_for_classes.is_empty() {
-            &self.enforced_for_classes
-        } else {
-            &self.enforced_style
-        }
-    }
-
-    fn style_for_module(&self) -> &str {
-        if !self.enforced_for_modules.is_empty() {
-            &self.enforced_for_modules
-        } else {
-            &self.enforced_style
-        }
-    }
-
     fn add_diagnostic(&mut self, offset: usize, message: String) {
         let (line, column) = self.source.offset_to_line_col(offset);
         self.diagnostics.push(Diagnostic {
@@ -287,7 +285,6 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
             return;
         }
 
-        let style = self.style_for_class().to_string();
         let constant_path = node.constant_path();
         let is_compact = constant_path.as_constant_path_node().is_some();
         let name_offset = constant_path.location().start_offset();
@@ -303,9 +300,10 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         }
 
         // RuboCop: return if node.parent_class && style != :nested
-        // Skip classes with superclass unless checking nested style
+        // `style` in RuboCop is the global EnforcedStyle (from ConfigurableEnforcedStyle),
+        // NOT style_for_classes. Must use enforced_style here.
         let has_superclass = node.superclass().is_some();
-        if has_superclass && style != "nested" {
+        if has_superclass && self.enforced_style != "nested" {
             // Still visit children
             let prev = self.parent_is_class_or_module;
             self.parent_is_class_or_module = body_statement_count(&node.body()) == 1;
@@ -314,9 +312,17 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
             return;
         }
 
-        if style == "nested" {
+        // RuboCop bug: style_for_classes returns a Ruby String when
+        // EnforcedStyleForClasses is explicitly set, but check_style compares
+        // with a Symbol (:nested). In Ruby, "nested" != :nested, so the
+        // comparison always fails and falls through to check_compact_style.
+        // We replicate this: when the override is set, always use compact.
+        if !self.enforced_for_classes.is_empty() {
+            let body = node.body();
+            self.check_compact_style(&body, name_offset);
+        } else if self.enforced_style == "nested" {
             self.check_nested_style(is_compact, name_offset);
-        } else if style == "compact" {
+        } else if self.enforced_style == "compact" {
             let body = node.body();
             self.check_compact_style(&body, name_offset);
         }
@@ -340,7 +346,6 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
             return;
         }
 
-        let style = self.style_for_module().to_string();
         let constant_path = node.constant_path();
         let is_compact = constant_path.as_constant_path_node().is_some();
         let name_offset = constant_path.location().start_offset();
@@ -354,9 +359,15 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
             return;
         }
 
-        if style == "nested" {
+        // Same RuboCop string/symbol mismatch: when EnforcedStyleForModules
+        // is explicitly set, it returns a String that never matches :nested,
+        // so check_compact_style is always used.
+        if !self.enforced_for_modules.is_empty() {
+            let body = node.body();
+            self.check_compact_style(&body, name_offset);
+        } else if self.enforced_style == "nested" {
             self.check_nested_style(is_compact, name_offset);
-        } else if style == "compact" {
+        } else if self.enforced_style == "compact" {
             let body = node.body();
             self.check_compact_style(&body, name_offset);
         }
@@ -544,6 +555,113 @@ mod tests {
             "Module should be flagged with nested style"
         );
         assert!(diags2[0].message.contains("nested"));
+    }
+
+    /// Variant batch 1: EnforcedStyle=compact, ForClasses=nested, ForModules=nested.
+    /// In RuboCop, style_for_classes returns the STRING "nested" which fails
+    /// the symbol comparison `style == :nested`, so check_compact_style is used.
+    /// Also, superclass check uses the global EnforcedStyle (compact), so classes
+    /// with superclass are skipped.
+    #[test]
+    fn variant_compact_for_classes_nested_for_modules_nested() {
+        use crate::testutil::{assert_cop_no_offenses_full_with_config, run_cop_full_with_config};
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+                (
+                    "EnforcedStyleForClasses".into(),
+                    serde_yml::Value::String("nested".into()),
+                ),
+                (
+                    "EnforcedStyleForModules".into(),
+                    serde_yml::Value::String("nested".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        // Compact-style class should NOT be flagged (check_compact_style only looks
+        // at nestable bodies, not compact names)
+        let source = b"class Foo::Bar\nend\n";
+        assert_cop_no_offenses_full_with_config(&ClassAndModuleChildren, source, config.clone());
+
+        // Compact-style module should NOT be flagged
+        let source2 = b"module Baz::Qux\nend\n";
+        assert_cop_no_offenses_full_with_config(&ClassAndModuleChildren, source2, config.clone());
+
+        // Nested class wrapping single child — SHOULD be flagged (compact check)
+        let source3 = b"class A\n  class B\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ClassAndModuleChildren, source3, config.clone());
+        assert_eq!(
+            diags.len(),
+            1,
+            "Class wrapping single class should be flagged"
+        );
+        assert!(diags[0].message.contains("compact"));
+
+        // Nested module wrapping single child — SHOULD be flagged (compact check)
+        let source4 = b"module C\n  module D\n  end\nend\n";
+        let diags2 = run_cop_full_with_config(&ClassAndModuleChildren, source4, config.clone());
+        assert_eq!(
+            diags2.len(),
+            1,
+            "Module wrapping single module should be flagged"
+        );
+        assert!(diags2[0].message.contains("compact"));
+
+        // Class with superclass wrapping child — NOT flagged (EnforcedStyle=compact,
+        // so on_class returns early when superclass present)
+        let source5 = b"class E < Base\n  class F\n  end\nend\n";
+        assert_cop_no_offenses_full_with_config(&ClassAndModuleChildren, source5, config);
+    }
+
+    /// Variant batch 2: EnforcedStyle=nested(default), ForClasses=compact, ForModules=compact.
+    /// The superclass check uses EnforcedStyle (nested), so classes with superclass
+    /// are NOT skipped. The style override makes both use check_compact_style.
+    #[test]
+    fn variant_nested_for_classes_compact_for_modules_compact() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyleForClasses".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+                (
+                    "EnforcedStyleForModules".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        // Class with superclass wrapping child — SHOULD be flagged
+        // (EnforcedStyle=nested, so superclass does NOT trigger early return)
+        let source = b"class E < Base\n  class F\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ClassAndModuleChildren, source, config.clone());
+        assert_eq!(
+            diags.len(),
+            1,
+            "Class with superclass wrapping single child should be flagged"
+        );
+        assert!(diags[0].message.contains("compact"));
+
+        // Nested class wrapping single child — SHOULD be flagged
+        let source2 = b"class A\n  class B\n  end\nend\n";
+        let diags2 = run_cop_full_with_config(&ClassAndModuleChildren, source2, config);
+        assert_eq!(
+            diags2.len(),
+            1,
+            "Class wrapping single class should be flagged"
+        );
+        assert!(diags2[0].message.contains("compact"));
     }
 
     #[test]

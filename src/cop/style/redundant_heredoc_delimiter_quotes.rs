@@ -66,7 +66,7 @@ impl Cop for RedundantHeredocDelimiterQuotes {
             rest
         };
 
-        if rest.is_empty() {
+        if rest.len() < 2 {
             return;
         }
 
@@ -75,8 +75,13 @@ impl Cop for RedundantHeredocDelimiterQuotes {
             return;
         }
 
-        // Extract the delimiter name (between quotes)
-        let delim = &rest[1..rest.len() - 1]; // strip quotes
+        // Extract the delimiter name (between quotes).
+        // Malformed heredocs (e.g. unterminated `<<"\rA`) may lack a closing quote,
+        // so bail if the closing byte doesn't match the opening quote.
+        if rest[rest.len() - 1] != quote_char {
+            return;
+        }
+        let delim = &rest[1..rest.len() - 1];
 
         // If the delimiter contains any non-word character, quotes are required.
         // Unquoted heredoc identifiers must be valid Ruby identifiers (alphanumeric + underscore).

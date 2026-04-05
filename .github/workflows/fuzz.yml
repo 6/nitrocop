@@ -113,16 +113,38 @@ jobs:
             --branch "$BRANCH" \
             --message "$COMMIT_MSG"
 
-          CRASH_LIST=$(ls fuzz/artifacts/${{ matrix.target }}/ 2>/dev/null | head -20)
+          CRASH_DIR="fuzz/artifacts/${{ matrix.target }}"
+          CRASH_LIST=$(ls "$CRASH_DIR" 2>/dev/null | head -20)
+
+          # Build per-crash reproduction details: hex dump + repro command
+          CRASH_DETAILS=""
+          for f in "$CRASH_DIR"/*; do
+            [ -f "$f" ] || continue
+            NAME=$(basename "$f")
+            HEX=$(xxd -l 256 "$f" | head -8)
+            CRASH_DETAILS="${CRASH_DETAILS}
+          <details>
+          <summary><code>${NAME}</code> ($(wc -c < "$f") bytes)</summary>
+
+          \`\`\`
+          ${HEX}
+          \`\`\`
+
+          **Reproduce:**
+          \`\`\`bash
+          cargo +nightly fuzz run ${{ matrix.target }} fuzz/seeds/${{ matrix.target }}/ -- -runs=1
+          \`\`\`
+          </details>
+          "
+          done
+
           PR_BODY=$(cat <<EOF
           ## Fuzz crashes found
 
           The nightly fuzz run found crashing inputs for \`${{ matrix.target }}\`.
 
-          **Crash artifacts:**
-          \`\`\`
-          ${CRASH_LIST}
-          \`\`\`
+          ### Crash artifacts
+          ${CRASH_DETAILS}
 
           These inputs have been added to \`fuzz/seeds/${{ matrix.target }}/\` so they serve as regression tests once the underlying bugs are fixed.
 

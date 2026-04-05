@@ -2,6 +2,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Gemspec/DevelopmentDependencies cop.
+///
+/// ## Variant: `EnforcedStyle: gemspec`
+/// When style is `gemspec`, flags bare `gem 'name'` calls (single string-literal
+/// argument, no version constraints) in `Gemfile` / `gems.rb` files. This matches
+/// RuboCop's `(send _ :gem (str #forbidden_gem? ...))` NodePattern which only
+/// captures sends with exactly one `(str)` argument — multi-arg calls like
+/// `gem 'foo', '~> 1.0'` are not flagged.
 pub struct DevelopmentDependencies;
 
 impl Cop for DevelopmentDependencies {
@@ -10,7 +18,7 @@ impl Cop for DevelopmentDependencies {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        &["**/*.gemspec"]
+        &["**/*.gemspec", "**/Gemfile", "**/gems.rb"]
     }
 
     fn check_lines(
@@ -23,8 +31,17 @@ impl Cop for DevelopmentDependencies {
         let style = config.get_str("EnforcedStyle", "Gemfile");
         let allowed_gems = config.get_string_array("AllowedGems").unwrap_or_default();
 
-        // When style is "gemspec", development dependencies belong in gemspec, so no offense
+        // When style is "gemspec", flag `gem` calls in Gemfile/gems.rb
         if style == "gemspec" {
+            let path = source.path_str();
+            let filename = std::path::Path::new(path)
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("");
+            if filename != "Gemfile" && filename != "gems.rb" {
+                return;
+            }
+            check_gem_calls(self, source, &allowed_gems, diagnostics);
             return;
         }
 
@@ -276,6 +293,88 @@ fn extract_percent_string_content(s: &str) -> Option<&str> {
         .map(|end| &content[..end])
 }
 
+/// Check `gem` calls in Gemfile/gems.rb for the `gemspec` enforced style.
+/// RuboCop's pattern `(send _ :gem (str #forbidden_gem? ...))` only matches
+/// calls with exactly one string-literal argument (no version constraints).
+fn check_gem_calls(
+    cop: &DevelopmentDependencies,
+    source: &SourceFile,
+    allowed_gems: &[String],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    for (line_idx, line) in lines.iter().enumerate() {
+        let line_str = match std::str::from_utf8(line) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let trimmed = line_str.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((gem_pos, after)) = find_gem_call(line_str) {
+            if !has_string_literal_arg(after) {
+                continue;
+            }
+            // RuboCop's NodePattern only matches single-arg gem calls (no version constraints)
+            if count_top_level_args(after) > 1 {
+                continue;
+            }
+            if is_gem_allowed(after, allowed_gems) {
+                continue;
+            }
+            diagnostics.push(cop.diagnostic(
+                source,
+                line_idx + 1,
+                gem_pos,
+                "Specify development dependencies in `gemspec`.".to_string(),
+            ));
+        }
+    }
+}
+
+/// Find a `gem` method call in a line. Returns (position_of_gem, text_after_gem).
+/// Ensures `gem` is a whole word (not part of `gemspec`, `gems`, etc.) and
+/// appears in method-call position — not inside a string, regex, or other literal.
+/// RuboCop uses AST matching (`(send _ :gem ...)`), so only real send nodes count.
+fn find_gem_call(line: &str) -> Option<(usize, &str)> {
+    let bytes = line.as_bytes();
+    let mut search_from = 0;
+    loop {
+        let idx = line[search_from..].find("gem")?;
+        let pos = search_from + idx;
+
+        // Word boundary check before
+        if pos > 0 {
+            let prev = bytes[pos - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = pos + 3;
+                continue;
+            }
+            // Skip `gem` inside literals: if preceded by a non-whitespace,
+            // non-statement character like /, ', ", it's inside a regex or string,
+            // not a real method call. Real gem calls are at line start (after
+            // whitespace) or after statement separators like ; or keywords.
+            if !prev.is_ascii_whitespace() && prev != b';' {
+                search_from = pos + 3;
+                continue;
+            }
+        }
+        // Word boundary check after
+        let end = pos + 3;
+        if end < bytes.len() {
+            let next_byte = bytes[end];
+            if next_byte.is_ascii_alphanumeric() || next_byte == b'_' {
+                search_from = end;
+                continue;
+            }
+        }
+
+        let after = if end <= line.len() { &line[end..] } else { "" };
+        return Some((pos, after));
+    }
+}
+
 /// Check if the gem name following the method call is in the allowed list.
 fn is_gem_allowed(after_method: &str, allowed_gems: &[String]) -> bool {
     if allowed_gems.is_empty() {
@@ -313,4 +412,105 @@ mod tests {
         DevelopmentDependencies,
         "cops/gemspec/development_dependencies"
     );
+
+    fn gemspec_style_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("gemspec".to_string()),
+        );
+        options.insert(
+            "AllowedGems".to_string(),
+            serde_yml::Value::Sequence(vec![serde_yml::Value::String("allowed".to_string())]),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn gemspec_style_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &DevelopmentDependencies,
+            br#"# nitrocop-filename: Gemfile
+gem 'example'
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+gem 'foo'
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+gem('bar')
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+"#,
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_gemspec_file() {
+        // In gemspec style, add_development_dependency in gemspec files is OK
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: example.gemspec\nGem::Specification.new do |s|\n  s.add_development_dependency 'foo'\nend\n",
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_version_args() {
+        // gem calls with version constraints are not flagged (RuboCop single-arg pattern)
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: Gemfile\ngem 'rails', '~> 7.0'\ngem 'puma', '>= 5.0'\n",
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_allowed_gem() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: Gemfile\ngem 'allowed'\n",
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_freeze() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: Gemfile\ngem 'rails'.freeze\n",
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_dynamic_arg() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: Gemfile\ngem foo\n",
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_gems_rb() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &DevelopmentDependencies,
+            br#"# nitrocop-filename: gems.rb
+gem 'example'
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+"#,
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_gem_in_string_or_regex() {
+        // `gem` inside gsub_file regex/string args is not a real gem call
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            b"# nitrocop-filename: Gemfile\ngsub_file 'Gemfile', /gem 'sdoc',\\s+'~> 0.4.0'/, ''\n",
+            gemspec_style_config(),
+        );
+    }
 }

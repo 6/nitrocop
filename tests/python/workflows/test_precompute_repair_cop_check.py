@@ -125,6 +125,74 @@ def test_load_oracle_context_reconstructs_by_cop_and_repo_breakdown():
         assert repo_breakdown["Style/MixinUsage"]["repo-a"] == {"fp": 1, "fn": 2}
 
 
+def test_load_variant_examples_extracts_fp_fn():
+    """Variant examples from oracle are extracted for the correct cop."""
+    import json
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="style-variant-results-", delete=False,
+    ) as f:
+        json.dump({
+            "batches": [{
+                "name": "variant_batch_1",
+                "by_cop": [
+                    {
+                        "cop": "Style/Foo",
+                        "style_label": "bar",
+                        "fp": 2, "fn": 1,
+                        "fp_examples": [
+                            {"loc": "repo_a__abc: app.rb:10", "msg": "FP msg"},
+                            {"loc": "repo_b__def: lib.rb:5", "msg": "FP msg 2"},
+                        ],
+                        "fn_examples": [
+                            {"loc": "repo_c__ghi: test.rb:1", "msg": "FN msg"},
+                        ],
+                    },
+                    {
+                        "cop": "Style/Other",
+                        "style_label": "baz",
+                        "fp": 5, "fn": 0,
+                        "fp_examples": [{"loc": "r: f:1", "msg": "x"}],
+                        "fn_examples": [],
+                    },
+                ],
+            }],
+        }, f)
+        f.flush()
+        result = precompute_repair_cop_check.load_variant_examples(
+            "Style/Foo", Path(f.name))
+    assert len(result) == 1
+    assert result[0]["style_label"] == "bar"
+    assert len(result[0]["fp_examples"]) == 2
+    assert len(result[0]["fn_examples"]) == 1
+
+
+def test_render_variant_context_includes_examples():
+    """render_variant_context includes FP/FN locations."""
+    import json
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", prefix="style-variant-results-", delete=False,
+    ) as f:
+        json.dump({
+            "batches": [{
+                "name": "variant_batch_1",
+                "by_cop": [{
+                    "cop": "Style/Foo",
+                    "style_label": "bar",
+                    "fp": 1, "fn": 0,
+                    "fp_examples": [{"loc": "repo_a: app.rb:10", "msg": "FP"}],
+                    "fn_examples": [],
+                }],
+            }],
+        }, f)
+        f.flush()
+        lines = precompute_repair_cop_check.render_variant_context(
+            "Style/Foo", standard_corpus=Path(f.name))
+    text = "\n".join(lines)
+    assert "bar" in text
+    assert "repo_a: app.rb:10" in text
+    assert "FP" in text
+
+
 if __name__ == "__main__":
     test_render_packet_includes_changed_cop_results()
     test_render_packet_handles_no_changed_cops()
@@ -132,4 +200,6 @@ if __name__ == "__main__":
     test_extract_top_repo_ids_reads_repo_block()
     test_used_batch_mode_detects_batch_marker()
     test_load_oracle_context_reconstructs_by_cop_and_repo_breakdown()
+    test_load_variant_examples_extracts_fp_fn()
+    test_render_variant_context_includes_examples()
     print("All tests passed.")

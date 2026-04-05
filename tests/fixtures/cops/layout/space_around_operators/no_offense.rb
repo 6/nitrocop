@@ -134,6 +134,8 @@ x.y = 2
 
 # Ternary operator with proper spacing
 x == 0 ? 1 : 2
+result = condition ? true_val : false_val
+nested = a ? (b ? c : d) : e
 
 # Rational literal (no_space style default for /)
 x = 2/3r

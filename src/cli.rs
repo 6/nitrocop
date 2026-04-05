@@ -2,6 +2,20 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
+/// Known flag names that users commonly pass as bare positional arguments
+/// (e.g. `nitrocop migrate` instead of `nitrocop --migrate`).
+const FLAG_LIKE_NAMES: &[&str] = &["migrate", "init", "doctor", "rules", "verify"];
+
+/// Clap value parser that rejects bare command names with a helpful hint.
+fn parse_path(s: &str) -> Result<PathBuf, String> {
+    if FLAG_LIKE_NAMES.contains(&s) {
+        return Err(format!(
+            "unknown path '{s}'. Did you mean `nitrocop --{s}`?"
+        ));
+    }
+    Ok(PathBuf::from(s))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutocorrectMode {
     Off,
@@ -25,7 +39,7 @@ pub enum StrictScope {
 #[command(name = "nitrocop", version, about = "A fast Ruby linter")]
 pub struct Args {
     /// Files or directories to lint
-    #[arg(default_value = ".")]
+    #[arg(default_value = ".", value_parser = parse_path)]
     pub paths: Vec<PathBuf>,
 
     /// Path to configuration file
@@ -260,5 +274,50 @@ mod tests {
     fn strict_scope_invalid() {
         assert_eq!(args_with_strict(Some("bogus")).strict_scope(), None);
         assert_eq!(args_with_strict(Some("")).strict_scope(), None);
+    }
+
+    #[test]
+    fn parse_path_rejects_flag_names() {
+        for name in FLAG_LIKE_NAMES {
+            let result = parse_path(name);
+            assert!(result.is_err(), "'{name}' should be rejected");
+            let err = result.unwrap_err();
+            assert!(
+                err.contains(&format!("--{name}")),
+                "error for '{name}' should suggest --{name}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_path_accepts_normal_paths() {
+        assert_eq!(parse_path(".").unwrap(), PathBuf::from("."));
+        assert_eq!(parse_path("src").unwrap(), PathBuf::from("src"));
+        assert_eq!(
+            parse_path("lib/foo.rb").unwrap(),
+            PathBuf::from("lib/foo.rb")
+        );
+    }
+
+    #[test]
+    fn clap_rejects_bare_migrate() {
+        let result = Args::try_parse_from(["nitrocop", "migrate"]);
+        assert!(result.is_err(), "bare 'migrate' should fail clap parsing");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("--migrate"),
+            "clap error should suggest --migrate, got: {err}"
+        );
+    }
+
+    #[test]
+    fn clap_accepts_flag_migrate() {
+        let result = Args::try_parse_from(["nitrocop", "--migrate", "."]);
+        assert!(
+            result.is_ok(),
+            "--migrate should parse: {}",
+            result.unwrap_err()
+        );
+        assert!(result.unwrap().migrate);
     }
 }
