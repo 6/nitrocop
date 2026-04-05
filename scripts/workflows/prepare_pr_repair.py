@@ -673,6 +673,19 @@ def main() -> None:
         "headRefName": args.head_branch,
     }
 
+    # When the repair was triggered by a variant style regression, the verify
+    # script must also check variant styles.  Without this, a repair agent can
+    # pass local verification by only fixing the default style while the broken
+    # variant remains unverified — then the full CI cop-check-gate fails again.
+    if vc:
+        classification["verification_commands"] = [
+            cmd.replace(
+                'scripts/check_cop.py "$cop" --verbose --rerun --clone',
+                'scripts/check_cop.py "$cop" --verbose --rerun --clone --check-variants',
+            )
+            for cmd in classification["verification_commands"]
+        ]
+
     prompt = build_prompt(
         run=run,
         classification=classification,
