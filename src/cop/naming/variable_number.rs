@@ -98,6 +98,17 @@ use crate::parse::source::SourceFile;
 /// Fix: moved symbol checking from `check_node` to the `check_source` visitor, which
 /// overrides `visit_hash_pattern_node` to skip SymbolNode keys while still visiting
 /// assoc values.
+///
+/// ## Variant style fix (2026-04-05) — snake_case and non_integer
+///
+/// Variant styles had divergence: snake_case had 45 FN, non_integer had 61 FP + 60 FN.
+/// Root cause: RuboCop's `\A\d+\z` regex alternative (for all-digit names like `:"42"`)
+/// checks the FULL name including sigils. Nitrocop strips sigils before checking, so
+/// `$0` became bare `"0"` which incorrectly matched the all-digits pattern as valid.
+/// In RuboCop, `$0` starts with `$` so `\A\d+\z` doesn't match → offense.
+/// Fix: `is_valid_snake_case` and `is_valid_non_integer` now accept `is_bare_name`
+/// and only apply the all-digits exemption for truly bare names (locals, symbols,
+/// methods), not for sigil-stripped variables.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -574,8 +585,8 @@ fn check_number_style(
     // non_integer: /(\D|\A\d+)\z/              — no trailing digits allowed
     let valid = match enforced_style {
         "normalcase" => is_valid_normalcase(name),
-        "snake_case" => is_valid_snake_case(name),
-        "non_integer" => is_valid_non_integer(name),
+        "snake_case" => is_valid_snake_case(name, is_bare_name),
+        "non_integer" => is_valid_non_integer(name, is_bare_name),
         _ => true,
     };
 
@@ -621,7 +632,12 @@ fn is_valid_normalcase(name: &str) -> bool {
 /// snake_case: /(?:\D|_\d+|\A\d+)\z/
 /// Valid if: ends with non-digit, OR ends with digits preceded by _, OR is all digits.
 /// Empty names are invalid (regex doesn't match empty string).
-fn is_valid_snake_case(name: &str) -> bool {
+///
+/// `is_bare_name` is false for sigiled variables (@, @@, $). RuboCop checks the
+/// FULL name including sigils, so `\A\d+\z` never matches sigiled names like `$0`.
+/// We check the bare name after stripping sigils, so we need `is_bare_name` to
+/// avoid incorrectly treating all-digit bare names (e.g., `$0` → `"0"`) as valid.
+fn is_valid_snake_case(name: &str, is_bare_name: bool) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
         return false;
@@ -635,7 +651,11 @@ fn is_valid_snake_case(name: &str) -> bool {
         i -= 1;
     }
     if i == 0 {
-        return true;
+        // All digits in bare name. For bare names (locals, symbols, methods),
+        // this is truly all-digit (e.g., :"42") → valid. For sigiled names,
+        // RuboCop checks the full name (e.g., "$0") where \A\d+\z doesn't
+        // match because of the sigil prefix → invalid.
+        return is_bare_name;
     }
     // The character before the trailing digits MUST be underscore
     bytes[i - 1] == b'_'
@@ -644,7 +664,10 @@ fn is_valid_snake_case(name: &str) -> bool {
 /// non_integer: /(\D|\A\d+)\z/
 /// Valid if: ends with non-digit, OR is all digits.
 /// Empty names are invalid (regex doesn't match empty string).
-fn is_valid_non_integer(name: &str) -> bool {
+///
+/// `is_bare_name` is false for sigiled variables (@, @@, $). See
+/// `is_valid_snake_case` for the rationale on the all-digits check.
+fn is_valid_non_integer(name: &str, is_bare_name: bool) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() {
         return false;
@@ -653,8 +676,8 @@ fn is_valid_non_integer(name: &str) -> bool {
     if !last.is_ascii_digit() {
         return true;
     }
-    // Only valid if ALL digits
-    bytes.iter().all(|b| b.is_ascii_digit())
+    // Only valid if ALL digits AND bare name (no sigil prefix in original)
+    is_bare_name && bytes.iter().all(|b| b.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -723,5 +746,128 @@ mod tests {
         assert_eq!(diags.len(), 0, "standalone :\"\" should NOT be flagged");
         let diags = crate::testutil::run_cop_full(&VariableNumber, b":''\n");
         assert_eq!(diags.len(), 0, "standalone :'' should NOT be flagged");
+    }
+
+    fn snake_case_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("snake_case".to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    fn non_integer_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("non_integer".to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn dollar_zero_is_offense_under_snake_case() {
+        // $0 under snake_case: RuboCop checks "$0" against /(?:\D|_\d+|\A\d+)\z/.
+        // "$0" doesn't match \A\d+\z (starts with $), _\d+\z ($ is not _),
+        // or \D\z (0 is digit) → invalid → offense.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"$0 = 'myapp'\n",
+            snake_case_config(),
+        );
+        assert_eq!(diags.len(), 1, "expected $0 to be flagged under snake_case");
+    }
+
+    #[test]
+    fn dollar_zero_is_offense_under_non_integer() {
+        // $0 under non_integer: same reasoning — sigil prevents \A\d+\z match.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"$0 = 'myapp'\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected $0 to be flagged under non_integer"
+        );
+    }
+
+    #[test]
+    fn dollar_zero_is_no_offense_under_normalcase() {
+        // $0 under normalcase: [^_\d]\d+\z matches "$0" because $ is [^_\d].
+        // After sigil stripping, bare "0" is all digits → also valid.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"$0 = 'myapp'\n",
+            crate::cop::CopConfig::default(),
+        );
+        assert_eq!(
+            diags.len(),
+            0,
+            "expected $0 to NOT be flagged under normalcase"
+        );
+    }
+
+    #[test]
+    fn integer_symbol_valid_under_all_styles() {
+        // :"42" and %i[1 2 3] should be valid under all styles.
+        // The bare name is all-digits (truly, no sigil) → \A\d+\z matches.
+        for config in [
+            crate::cop::CopConfig::default(),
+            snake_case_config(),
+            non_integer_config(),
+        ] {
+            let diags = crate::testutil::run_cop_full_with_config(
+                &VariableNumber,
+                b":\"42\"\n",
+                config.clone(),
+            );
+            assert_eq!(diags.len(), 0, "integer symbol :\"42\" should be valid");
+        }
+    }
+
+    #[test]
+    fn snake_case_flags_normalcase_names() {
+        // Under snake_case, foo1 is an offense (digits not preceded by _)
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"foo1 = 1\n",
+            snake_case_config(),
+        );
+        assert_eq!(diags.len(), 1, "expected foo1 flagged under snake_case");
+
+        // Under snake_case, foo_1 is valid
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"foo_1 = 1\n",
+            snake_case_config(),
+        );
+        assert_eq!(diags.len(), 0, "expected foo_1 valid under snake_case");
+    }
+
+    #[test]
+    fn non_integer_flags_all_trailing_digits() {
+        // Under non_integer, both foo1 and foo_1 are offenses
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"foo1 = 1\n",
+            non_integer_config(),
+        );
+        assert_eq!(diags.len(), 1, "expected foo1 flagged under non_integer");
+
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"foo_1 = 1\n",
+            non_integer_config(),
+        );
+        assert_eq!(diags.len(), 1, "expected foo_1 flagged under non_integer");
     }
 }
