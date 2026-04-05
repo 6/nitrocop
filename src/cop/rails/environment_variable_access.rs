@@ -83,7 +83,11 @@ impl Cop for EnvironmentVariableAccess {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        &["**/app/**/*.rb", "**/config/initializers/**/*.rb", "**/lib/**/*.rb"]
+        &[
+            "**/app/**/*.rb",
+            "**/config/initializers/**/*.rb",
+            "**/lib/**/*.rb",
+        ]
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
