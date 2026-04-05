@@ -29,5 +29,6 @@ jobs:
           sudo du -sh /home/* 2>/dev/null | sort -rh | head -10
           echo ""
           echo "=== After cleanup ==="
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
+            /usr/share/miniconda /usr/share/az_*
           df -h /
