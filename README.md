@@ -15,7 +15,7 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 **Features**
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
-- **99.9% conformance** against RuboCop across [**5,590 open-source repos**](docs/corpus.md)
+- Tested on [**5,590 open-source repos**](docs/corpus.md): **835 of 915 cops match RuboCop exactly** (default config), **728** across all style variants
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -52,14 +52,9 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 ## Cops
 
 <!-- corpus-cops:start -->
-nitrocop supports 915 cops from 7 RuboCop gems.
+Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
 
-Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files).
-
-862 of 915 cops produce identical results to RuboCop (default config).
-When tested with all style variants (e.g. `EnforcedStyle: comma`), 728 of 915 match exactly.
-
-**Default** = tested with default RuboCop config. **All variants** = tested with every supported `EnforcedStyle` value.
+**Default** = default RuboCop config. **All variants** = every supported `EnforcedStyle` (e.g. `EnforcedStyle: comma`).
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 
