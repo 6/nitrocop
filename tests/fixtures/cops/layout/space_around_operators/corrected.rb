@@ -73,7 +73,7 @@ t.warning = false
 { :reset => "\e[0m" }
 
 # Setter call with extra trailing space (not aligned with neighbor)
-adapter.properties = @props
+obj.prop = @v
 
 # Ternary operator: missing space before :
 incoming_page = resource.is_a?( Page ) ? resource : resource.to_page

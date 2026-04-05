@@ -108,8 +108,8 @@ t.warning = false
            ^^ Layout/SpaceAroundOperators: Operator `=>` should be surrounded by a single space.
 
 # Setter call with extra trailing space (not aligned with neighbor)
-adapter.properties =  @props
-                   ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+obj.prop =  @v
+         ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
 
 # Ternary operator: missing space before :
 incoming_page = resource.is_a?( Page ) ? resource: resource.to_page
