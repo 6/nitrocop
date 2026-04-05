@@ -177,6 +177,7 @@ def test_write():
 
         updated = readme_path.read_text()
         assert "**6 of 14** cops match RuboCop exactly" in updated
+        assert "Across **5.10M** offenses compared, **4.90M** (96.0%) match exactly" in updated
         assert "500 open-source repos" in updated
         assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md)" in updated
         assert "5.1M offenses compared" in updated
