@@ -122,3 +122,27 @@ def test_parse_summary_lines(tmp_path):
     assert rows[0]["cop"] == "Style/Foo"
     assert rows[1]["cop"] == "Style/Foo (bar)"
     assert rows[1]["local_fp"] == 100
+
+
+def test_variant_regression_shows_diverging_repos(tmp_path):
+    """When a variant regresses, the comment should show which repos diverged."""
+    f = tmp_path / "shard-0.txt"
+    f.write_text("Style/Foo (bar)|0|5|1|0|fail|0|0|repo_a__abc(FP)\n")
+    rows = mod.parse_summary_lines(tmp_path)
+    assert rows[0]["detail"] == "repo_a__abc(FP)"
+    agg = mod.aggregate_rows(rows)
+    comment = mod.render_comment(agg, "fail")
+    assert "repo_a__abc(FP)" in comment
+
+
+def test_variant_detail_aggregates_across_shards(tmp_path):
+    """Diverging repos from multiple shards are combined."""
+    f0 = tmp_path / "shard-0.txt"
+    f0.write_text("Style/Foo (bar)|0|5|1|0|fail|0|0|repo_a(FP)\n")
+    f1 = tmp_path / "shard-1.txt"
+    f1.write_text("Style/Foo (bar)|0|5|0|1|fail|0|0|repo_b(FN)\n")
+    rows = mod.parse_summary_lines(tmp_path)
+    agg = mod.aggregate_rows(rows)
+    variant_row = [r for r in agg if mod.is_variant_row(r["cop"])][0]
+    assert "repo_a(FP)" in " ".join(variant_row["details"])
+    assert "repo_b(FN)" in " ".join(variant_row["details"])

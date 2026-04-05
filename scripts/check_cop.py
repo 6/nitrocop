@@ -1581,10 +1581,20 @@ def main():
                             f"{vr['baseline_fp']:>6,} "
                             f"{vr['baseline_fn']:>6,}{marker}"
                         )
+                        # Build diverging repo detail for the SUMMARY line
+                        diverging = vr.get("diverging_repos", [])
+                        detail = ""
+                        if diverging:
+                            parts = []
+                            for dr in diverging[:5]:
+                                kind = "FP" if dr["nc"] > dr["rc"] else "FN"
+                                parts.append(f"{dr['repo']}({kind})")
+                            detail = " ".join(parts)
                         print(
                             f"SUMMARY|{args.cop} ({vr['style_label']})"
                             f"|{vr['baseline_fp']}|{vr['baseline_fn']}"
                             f"|{vr['fp']}|{vr['fn']}|{v_result}|0|0"
+                            f"|{detail}"
                         )
                         if v_result == "fail":
                             variant_failed = True
