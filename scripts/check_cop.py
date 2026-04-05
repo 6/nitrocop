@@ -1527,16 +1527,23 @@ def main():
             corpus_dir = _CLONE_DIR
             all_repo_dirs = sorted(str(d) for d in corpus_dir.iterdir() if d.is_dir())
 
-            # Prefer repos the oracle identified as having variant divergence —
-            # these are most likely to reproduce regressions.
+            # Mix oracle-priority repos (known variant divergence) with a
+            # spread from the rest.  Oracle repos catch known regressions;
+            # the spread catches NEW regressions the oracle hasn't seen.
             oracle_repos = load_variant_example_repos(args.cop, corpus_run_id)
-            if oracle_repos:
-                oracle_set = set(oracle_repos)
-                priority = [d for d in all_repo_dirs if Path(d).name in oracle_set]
-                rest = [d for d in all_repo_dirs if Path(d).name not in oracle_set]
-                repo_dirs = (priority + rest)[:VARIANT_SAMPLE]
+            oracle_set = set(oracle_repos) if oracle_repos else set()
+            priority = [d for d in all_repo_dirs if Path(d).name in oracle_set]
+            rest = [d for d in all_repo_dirs if Path(d).name not in oracle_set]
+            # Take up to half the sample from oracle, fill the rest with spread
+            max_oracle = min(len(priority), VARIANT_SAMPLE // 2)
+            remaining_slots = VARIANT_SAMPLE - max_oracle
+            # Spread: evenly space through the rest list for diversity
+            if rest and remaining_slots > 0:
+                step = max(1, len(rest) // remaining_slots)
+                spread = rest[::step][:remaining_slots]
             else:
-                repo_dirs = all_repo_dirs[:VARIANT_SAMPLE]
+                spread = []
+            repo_dirs = priority[:max_oracle] + spread
 
             if repo_dirs:
                 print()
