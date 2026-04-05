@@ -15,10 +15,6 @@ impl Cop for I18nLocaleAssignment {
         Severity::Convention
     }
 
-    fn default_include(&self) -> &'static [&'static str] {
-        &["spec/**/*.rb", "test/**/*.rb"]
-    }
-
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }
