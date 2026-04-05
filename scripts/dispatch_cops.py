@@ -1561,9 +1561,11 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 2. **Verify with RuboCop first** (for FP fixes): before writing any code, confirm RuboCop's
    behavior on BOTH the specific FP case AND the general pattern:
    ```bash
-   echo '<specific FP case>' > /tmp/test.rb && rubocop --only {cop} /tmp/test.rb
-   echo '<general pattern>' > /tmp/test.rb && rubocop --only {cop} /tmp/test.rb
+   echo '<specific FP case>' > /tmp/test.rb
+   BUNDLE_GEMFILE=bench/corpus/Gemfile BUNDLE_PATH=bench/corpus/vendor/bundle \\
+     bundle exec rubocop --only {cop} /tmp/test.rb
    ```
+   **Important:** Always use `BUNDLE_GEMFILE=bench/corpus/Gemfile BUNDLE_PATH=bench/corpus/vendor/bundle bundle exec rubocop` — bare `rubocop` won't find the correct version.
    If RuboCop flags the general pattern, your fix must be narrow enough to not suppress it.
 3. Add a test case FIRST:
    - FN fix: add the missed pattern to `tests/fixtures/cops/{dept_snake}/{snake}/offense.rb` with `^` annotation
@@ -1795,7 +1797,15 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
             "The ground truth is in the vendored Ruby cop file.\n"
         )
         lines.append(
-            "3. **Add fixture tests** for each broken variant. Use the `# nitrocop-config:` "
+            "3. **Spot-check with RuboCop** to understand the expected behavior:\n"
+            "```bash\n"
+            "echo '<test code>' > /tmp/test.rb\n"
+            "BUNDLE_GEMFILE=bench/corpus/Gemfile BUNDLE_PATH=bench/corpus/vendor/bundle \\\n"
+            f"  bundle exec rubocop --only {cop} /tmp/test.rb\n"
+            "```\n"
+        )
+        lines.append(
+            "4. **Add fixture tests** for each broken variant. Use the `# nitrocop-config:` "
             "directive at the top of fixture files:\n"
             "```ruby\n"
             "# nitrocop-config: EnforcedStyle: comma\n"
@@ -1804,14 +1814,14 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
             "```\n"
         )
         lines.append(
-            "4. **Validate locally** with `check_cop.py --style`:\n"
+            "5. **Validate locally** with `check_cop.py --style`:\n"
             f"```bash\n"
             f"python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
             f"--style EnforcedStyle=<value>\n"
             f"```\n"
         )
         lines.append(
-            "5. **All variants must pass.** The CI gate (`--check-variants`) runs ALL "
+            "6. **All variants must pass.** The CI gate (`--check-variants`) runs ALL "
             "variant styles automatically. Fixing one variant must not break another.\n"
         )
         return lines

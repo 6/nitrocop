@@ -899,3 +899,59 @@ def test_spot_check_mixed_cloned_and_missing_repos():
     finally:
         check_cop._CLONE_DIR = original_clone_dir
         check_cop.NITROCOP_BIN = original_nitrocop_bin
+
+
+# ── _run_rubocop_for_variant filtering/dedup tests ──
+
+
+def test_run_rubocop_for_variant_filters_to_requested_cop(monkeypatch):
+    """_run_rubocop_for_variant must only count offenses for the requested cop,
+    not Lint/Syntax or other cops that RuboCop emits alongside --only."""
+    rubocop_json = json.dumps({
+        "files": [{
+            "path": "/tmp/repo/app.rb",
+            "offenses": [
+                {"cop_name": "Style/Foo", "location": {"line": 1}},
+                {"cop_name": "Lint/Syntax", "location": {"line": 2}},
+                {"cop_name": "Lint/Syntax", "location": {"line": 3}},
+                {"cop_name": "Style/Foo", "location": {"line": 5}},
+            ],
+        }],
+    })
+
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = rubocop_json
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = check_cop._run_rubocop_for_variant(
+        "/tmp/repo", cop="Style/Foo", config="/tmp/config.yml")
+    assert result["count"] == 2, (
+        "Should count only Style/Foo offenses, not Lint/Syntax")
+
+
+def test_run_rubocop_for_variant_deduplicates_by_path_line(monkeypatch):
+    """_run_rubocop_for_variant must deduplicate by (path, line) to match
+    the dedup that run_nitrocop applies on the nitrocop side."""
+    rubocop_json = json.dumps({
+        "files": [{
+            "path": "/tmp/repo/app.rb",
+            "offenses": [
+                {"cop_name": "Style/Foo", "location": {"line": 1}},
+                {"cop_name": "Style/Foo", "location": {"line": 1}},
+                {"cop_name": "Style/Foo", "location": {"line": 5}},
+            ],
+        }],
+    })
+
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = rubocop_json
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = check_cop._run_rubocop_for_variant(
+        "/tmp/repo", cop="Style/Foo", config="/tmp/config.yml")
+    assert result["count"] == 2, (
+        "Should deduplicate: two offenses at line 1 count as one")

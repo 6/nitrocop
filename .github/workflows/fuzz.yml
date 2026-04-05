@@ -45,13 +45,16 @@ jobs:
         id: fuzz
         run: |
           cd fuzz
+          CORPUS_DIR="corpus/${{ matrix.target }}"
           SEEDS_DIR="seeds/${{ matrix.target }}"
+          mkdir -p "$CORPUS_DIR"
           SEEDS_ARG=""
           if [ -d "$SEEDS_DIR" ]; then
             SEEDS_ARG="$SEEDS_DIR"
           fi
           # Nightly run: 30 minutes per target
-          if cargo +nightly fuzz run ${{ matrix.target }} $SEEDS_ARG -- \
+          # Corpus dir is listed first (read-write), seeds dir second (read-only)
+          if cargo +nightly fuzz run ${{ matrix.target }} $CORPUS_DIR $SEEDS_ARG -- \
             -max_total_time=1800 \
             -max_len=4096; then
             echo "found_crash=false" >> "$GITHUB_OUTPUT"
@@ -68,7 +71,11 @@ jobs:
           mkdir -p "$SEEDS_DIR"
 
           if [ -d "$CRASH_DIR" ] && [ "$(ls -A "$CRASH_DIR" 2>/dev/null)" ]; then
-            cp "$CRASH_DIR"/* "$SEEDS_DIR"/
+            # Copy only crash-triggering inputs, not the evolved corpus
+            for f in "$CRASH_DIR"/*; do
+              cp "$f" "$SEEDS_DIR"/
+              echo "  $(basename "$f")"
+            done
             echo "has_new_seeds=true" >> "$GITHUB_OUTPUT"
             echo "Collected $(ls "$CRASH_DIR" | wc -l) crash inputs"
           else
@@ -97,7 +104,7 @@ jobs:
             --unset-extraheader
 
           git checkout -B "$BRANCH"
-          git add fuzz/seeds/
+          git add fuzz/seeds/${{ matrix.target }}/
           git commit -m "$COMMIT_MSG"
           git push origin "$BRANCH" --force
 
@@ -106,16 +113,38 @@ jobs:
             --branch "$BRANCH" \
             --message "$COMMIT_MSG"
 
-          CRASH_LIST=$(ls fuzz/artifacts/${{ matrix.target }}/ 2>/dev/null | head -20)
+          CRASH_DIR="fuzz/artifacts/${{ matrix.target }}"
+          CRASH_LIST=$(ls "$CRASH_DIR" 2>/dev/null | head -20)
+
+          # Build per-crash reproduction details: hex dump + repro command
+          CRASH_DETAILS=""
+          for f in "$CRASH_DIR"/*; do
+            [ -f "$f" ] || continue
+            NAME=$(basename "$f")
+            HEX=$(xxd -l 256 "$f" | head -8)
+            CRASH_DETAILS="${CRASH_DETAILS}
+          <details>
+          <summary><code>${NAME}</code> ($(wc -c < "$f") bytes)</summary>
+
+          \`\`\`
+          ${HEX}
+          \`\`\`
+
+          **Reproduce:**
+          \`\`\`bash
+          cargo +nightly fuzz run ${{ matrix.target }} fuzz/seeds/${{ matrix.target }}/ -- -runs=1
+          \`\`\`
+          </details>
+          "
+          done
+
           PR_BODY=$(cat <<EOF
           ## Fuzz crashes found
 
           The nightly fuzz run found crashing inputs for \`${{ matrix.target }}\`.
 
-          **Crash artifacts:**
-          \`\`\`
-          ${CRASH_LIST}
-          \`\`\`
+          ### Crash artifacts
+          ${CRASH_DETAILS}
 
           These inputs have been added to \`fuzz/seeds/${{ matrix.target }}/\` so they serve as regression tests once the underlying bugs are fixed.
 

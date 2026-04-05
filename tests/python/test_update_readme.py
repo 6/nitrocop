@@ -176,12 +176,10 @@ def test_write():
         assert result.returncode == 0, f"Script failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         updated = readme_path.read_text()
-        assert "96.0% conformance" in updated
-        assert "167k Ruby files" in updated
-        assert "nitrocop supports 14 cops from 7 RuboCop gems." in updated
-        assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md) (167k Ruby files)." in updated
-        assert "6 of 14 cops produce identical results to RuboCop (default config)." in updated
-        assert "4 cops had no corpus data." in updated
+        assert "6 of 14 cops match RuboCop exactly" in updated
+        assert "500 open-source repos" in updated
+        assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md)" in updated
+        assert "5.1M offenses compared" in updated
         assert "See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown." in updated
         assert "| Department | Cops | Exact match (default) |" in updated
         assert "**[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (9 cops)" in updated
@@ -215,11 +213,8 @@ def test_conformance_includes_fp():
         assert result.returncode == 0, f"Script failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         updated = readme_path.read_text()
-        assert "94.1% conformance" in updated, (
-            "Expected 94.1% (includes FP in denominator, floored), got: "
-            + next(line for line in updated.splitlines() if "conformance" in line)
-        )
-        assert "95.2% conformance" not in updated
+        # Headline should show cop exact-match count, not percentage
+        assert "6 of 14 cops match RuboCop exactly" in updated
 
 
 def test_comma_repo_count():
