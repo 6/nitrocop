@@ -955,3 +955,37 @@ def test_run_rubocop_for_variant_deduplicates_by_path_line(monkeypatch):
         "/tmp/repo", cop="Style/Foo", config="/tmp/config.yml")
     assert result["count"] == 2, (
         "Should deduplicate: two offenses at line 1 count as one")
+
+
+def test_run_variant_checks_includes_diverging_repos():
+    """run_variant_checks should include per-repo divergence info."""
+    batches = "/tmp/batches"
+    calls = {"nc": 0, "rc": 0}
+
+    def fake_nc(*a, **kw):
+        calls["nc"] += 1
+        # First repo: NC=3, Second repo: NC=2
+        return {"count": 3 if calls["nc"] == 1 else 2}
+
+    def fake_rc(*a, **kw):
+        calls["rc"] += 1
+        # First repo: RC=2 (diverges), Second repo: RC=2 (matches)
+        return {"count": 2}
+
+    import unittest.mock as mock
+    with mock.patch.object(check_cop, "variant_styles_for_cop", return_value=[
+        {"batch_config": "/tmp/batch.yml", "style_label": "test_style"},
+    ]):
+        results = check_cop.run_variant_checks(
+            cop_name="Style/Foo",
+            repo_dirs=["/tmp/repo_a", "/tmp/repo_b"],
+            batches_dir=batches,
+            run_nitrocop_fn=fake_nc,
+            run_rubocop_fn=fake_rc,
+        )
+
+    assert len(results) == 1
+    assert results[0]["fp"] == 1  # NC=5, RC=4
+    assert results[0]["diverging_repos"] == [
+        {"repo": "repo_a", "nc": 3, "rc": 2},
+    ]
