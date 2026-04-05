@@ -81,6 +81,15 @@ use ruby_prism::Visit;
 /// `c.loc.name.is?(name.to_s)` compares the full constant path text
 /// ("HighLine::String" != "String"), so it correctly flags the offense.
 /// Fixed by using the full constant path text in `collect_emitter_name`.
+///
+/// ## Variant divergence fix (2026-04-05)
+/// camelCase variant: FP=10, FN=0.
+/// All 10 FPs were methods named `_` (bare underscore), common in gettext
+/// stubs. RuboCop's camelCase regex `/^@{0,2}(?:_|...)[!?=]?$/` explicitly
+/// allows a bare `_` via the first alternative. Our `is_lower_camel_case`
+/// returned false for `_` because after consuming the leading underscore it
+/// required a second character. Fixed by returning true when the name is
+/// exactly `_` (with optional method suffix stripped).
 pub struct MethodName;
 
 /// Bundles config values needed for method name checking.
@@ -607,7 +616,9 @@ fn is_lower_camel_case(name: &str) -> bool {
     let lead = if first == '_' {
         match chars.next() {
             Some(ch) => ch,
-            None => return false,
+            // RuboCop's camelCase regex: /^@{0,2}(?:_|...)[!?=]?$/
+            // A bare underscore is valid camelCase.
+            None => return true,
         }
     } else {
         first
@@ -779,6 +790,46 @@ mod tests {
         assert!(
             !diags2.is_empty(),
             "Non-matching camelCase should still be flagged"
+        );
+    }
+
+    #[test]
+    fn camel_case_allows_bare_underscore_method() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("camelCase".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // bare `_` is valid camelCase per RuboCop regex: /^@{0,2}(?:_|_?...)[!?=]?$/
+        let source = b"def _(msg)\n  msg\nend\n";
+        let diags = run_cop_full_with_config(&MethodName, source, config.clone());
+        assert!(
+            diags.is_empty(),
+            "bare underscore method should be valid camelCase, got: {:?}",
+            diags
+        );
+
+        // also check define_singleton_method :_
+        let source2 = b"define_singleton_method :_ do\nend\n";
+        let diags2 = run_cop_full_with_config(&MethodName, source2, config.clone());
+        assert!(
+            diags2.is_empty(),
+            "define_singleton_method :_ should be valid camelCase, got: {:?}",
+            diags2
+        );
+
+        // also check alias _ foo
+        let source3 = b"alias _ foo\n";
+        let diags3 = run_cop_full_with_config(&MethodName, source3, config);
+        assert!(
+            diags3.is_empty(),
+            "alias _ should be valid camelCase, got: {:?}",
+            diags3
         );
     }
 

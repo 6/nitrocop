@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Variant fix: `percent_q` style uses RuboCop regex `/^%[^\w]/` where `\w`
+/// includes `[a-zA-Z0-9_]`. The original Rust code only checked
+/// `is_ascii_alphabetic()`, missing digits and underscores. The corpus FP
+/// was `%_..._` (underscore delimiter) in `natalie-lang/natalie` —
+/// RuboCop's `\w` matches `_`, so `%_` is not flagged. Fixed by adding
+/// `is_ascii_alphanumeric()` and `!= b'_'` checks.
 pub struct BarePercentLiterals;
 
 impl Cop for BarePercentLiterals {
@@ -60,7 +66,8 @@ impl Cop for BarePercentLiterals {
                     && !opening_bytes.starts_with(b"%Q")
                     && !opening_bytes.starts_with(b"%q")
                     && opening_bytes.len() >= 2
-                    && !opening_bytes[1].is_ascii_alphabetic()
+                    && !opening_bytes[1].is_ascii_alphanumeric()
+                    && opening_bytes[1] != b'_'
                 {
                     let (line, column) = source.offset_to_line_col(node_loc.start_offset());
                     diagnostics.push(self.diagnostic(
@@ -80,4 +87,52 @@ impl Cop for BarePercentLiterals {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BarePercentLiterals, "cops/style/bare_percent_literals");
+
+    #[test]
+    fn percent_q_style_skips_underscore_delimiter() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("percent_q".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // %_ uses underscore as delimiter — RuboCop treats _ as \w, so
+        // /^%[^\w]/ does NOT match. We must not flag it.
+        let source = b"x = %_hello world_\n";
+        let diags = run_cop_full_with_config(&BarePercentLiterals, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should not flag %_ with percent_q style: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn percent_q_style_flags_bare_percent_parens() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("percent_q".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // %(hello) should still be flagged with percent_q style
+        let source = b"x = %(hello world)\n";
+        let diags = run_cop_full_with_config(&BarePercentLiterals, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag %() with percent_q style: {:?}",
+            diags
+        );
+    }
 }
