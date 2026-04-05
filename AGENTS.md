@@ -2,6 +2,10 @@
 
 Fast Ruby linter in Rust targeting RuboCop compatibility. Uses Prism for parsing and rayon for parallelism.
 
+## Core Principle: 1:1 RuboCop Compatibility
+
+nitrocop is a **drop-in replacement** for RuboCop. Match RuboCop's exact output on every file — including edge-case quirks. The corpus oracle treats any deviation as a regression. When you must replicate a RuboCop quirk, document it in a `///` doc comment on the cop struct.
+
 ## Mental Model
 
 - A **cop** is one RuboCop-compatible rule implemented in Rust under `src/cop/`.

@@ -77,6 +77,17 @@ use crate::parse::source::SourceFile;
 ///   with args). Changed the first-member check from `is_access_modifier_call`
 ///   (bare only) to `is_any_access_modifier_call` (all forms).
 ///   Resolved 25+ FN, 0 regressions.
+///
+/// 2026-04-05 (block rescue/ensure):
+/// - Fixed block body indentation when blocks have rescue/ensure/else clauses
+///   (e.g., `items.each do ... rescue ... end`). In Prism, such blocks have a
+///   BeginNode body instead of StatementsNode. `check_body_indentation` only
+///   handled StatementsNode and returned empty for BeginNode, silently skipping
+///   all indentation checks for these blocks. Applied same pattern as the
+///   existing def handler: check `begin_node.statements()` for the main body
+///   and `check_begin_clauses` for rescue/ensure/else bodies. Applied to
+///   CallNode block, LambdaNode, and SuperNode block handlers.
+///   Resolved 62+ FN, 0 regressions.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -973,13 +984,30 @@ impl Cop for IndentationWidth {
                     } else {
                         closing_col
                     };
-                    diagnostics.extend(self.check_body_indentation(
-                        source,
-                        opening_offset,
-                        base_col,
-                        block.body(),
-                        options,
-                    ));
+                    if let Some(body) = block.body() {
+                        if let Some(begin_node) = body.as_begin_node() {
+                            // Block with rescue/ensure — body is implicit BeginNode.
+                            // Check main body statements.
+                            diagnostics.extend(self.check_statements_indentation(
+                                source,
+                                opening_offset,
+                                base_col,
+                                None,
+                                begin_node.statements(),
+                                options,
+                            ));
+                            // Check rescue/ensure/else clauses.
+                            self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        } else {
+                            diagnostics.extend(self.check_body_indentation(
+                                source,
+                                opening_offset,
+                                base_col,
+                                Some(body),
+                                options,
+                            ));
+                        }
+                    }
                     if consistency_style == "indented_internal_methods"
                         && body_contains_access_modifier(block.body())
                     {
@@ -1018,13 +1046,27 @@ impl Cop for IndentationWidth {
                 return;
             }
 
-            diagnostics.extend(self.check_body_indentation(
-                source,
-                opening_offset,
-                closing_col,
-                lambda_node.body(),
-                options,
-            ));
+            if let Some(body) = lambda_node.body() {
+                if let Some(begin_node) = body.as_begin_node() {
+                    diagnostics.extend(self.check_statements_indentation(
+                        source,
+                        opening_offset,
+                        closing_col,
+                        None,
+                        begin_node.statements(),
+                        options,
+                    ));
+                    self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                } else {
+                    diagnostics.extend(self.check_body_indentation(
+                        source,
+                        opening_offset,
+                        closing_col,
+                        Some(body),
+                        options,
+                    ));
+                }
+            }
             return;
         }
 
@@ -1050,13 +1092,27 @@ impl Cop for IndentationWidth {
                         return;
                     }
 
-                    diagnostics.extend(self.check_body_indentation(
-                        source,
-                        opening_offset,
-                        closing_col,
-                        block.body(),
-                        options,
-                    ));
+                    if let Some(body) = block.body() {
+                        if let Some(begin_node) = body.as_begin_node() {
+                            diagnostics.extend(self.check_statements_indentation(
+                                source,
+                                opening_offset,
+                                closing_col,
+                                None,
+                                begin_node.statements(),
+                                options,
+                            ));
+                            self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        } else {
+                            diagnostics.extend(self.check_body_indentation(
+                                source,
+                                opening_offset,
+                                closing_col,
+                                Some(body),
+                                options,
+                            ));
+                        }
+                    }
                 }
             }
             return;

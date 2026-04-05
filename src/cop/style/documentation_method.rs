@@ -641,6 +641,10 @@ impl Cop for DocumentationMethod {
         false
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["spec/**/*", "test/**/*"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,

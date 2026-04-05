@@ -67,6 +67,27 @@ use crate::parse::source::SourceFile;
 /// `parent_is_ambiguous`. `visit_branch_node_leave` restores it from a stack.
 /// This ensures only the direct parent's ambiguity affects the factory call check,
 /// matching RuboCop's `node.parent.type` behavior.
+///
+/// ## Variant fix: omit_parentheses block bypass + unless handling (2026-04-05)
+///
+/// Variant oracle reported FP=5, FN=11 for `omit_parentheses`.
+///
+/// **FN root cause:** Factory calls with blocks (e.g., `build("Plugins") do...end`
+/// or `build(:user) { }`) inside ambiguous contexts (method args, arrays, `||`,
+/// `&&`, `if`) were incorrectly skipped. In Parser AST, a call with a block is
+/// wrapped in a `block` node, making the call's parent `block` (not the enclosing
+/// context). Since `block` is NOT in AMBIGUOUS_TYPES, these calls are never
+/// ambiguous. In Prism, the block is a child of the CallNode, so the enclosing
+/// context's ambiguity leaked through.
+/// Fix: Added `call.block().is_none()` guard to the ambiguity check so that
+/// factory calls with blocks bypass the ambiguity skip.
+///
+/// **FP root cause:** Prism has a separate `UnlessNode` (distinct from `IfNode`).
+/// The visitor only overrode `visit_if_node`, so `unless` contexts never set
+/// ambiguity. Factory calls inside modifier `unless` (e.g.,
+/// `create(:foo) unless cond`) have parent `if` in Parser AST (ambiguous), but
+/// our visitor saw no ambiguity and incorrectly flagged them.
+/// Fix: Added `visit_unless_node` with the same ambiguity logic as `visit_if_node`.
 pub struct ConsistentParenthesesStyle;
 
 impl Cop for ConsistentParenthesesStyle {
@@ -152,7 +173,12 @@ impl<'s> ParenStyleVisitor<'s> {
         // Uses immediate_parent_ambiguous (set by visit_branch_node_enter) rather than
         // parent_is_ambiguous to match RuboCop's node.parent.type check, which only
         // considers the DIRECT parent, not ancestors.
-        if self.immediate_parent_ambiguous {
+        //
+        // Exception: when the factory call has a block (e.g., `build(:user) { }` or
+        // `build("Plugins") do...end`), its parent in Parser AST is `block` (not the
+        // enclosing context), and `block` is NOT in AMBIGUOUS_TYPES. So calls with
+        // blocks are never ambiguous, regardless of the enclosing context.
+        if self.immediate_parent_ambiguous && call.block().is_none() {
             return;
         }
 
@@ -382,6 +408,51 @@ impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
         self.ambiguity_kind = saved_kind;
     }
 
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        let saved = self.parent_is_ambiguous;
+        let saved_kind = self.ambiguity_kind;
+
+        // Predicate: ambiguous (factory call in unless condition has parent `if` in Parser)
+        self.parent_is_ambiguous = true;
+        self.ambiguity_kind = Some(AmbiguityKind::If);
+        self.visit(&node.predicate());
+
+        // Body: same as if — single-statement body with CallNode is ambiguous
+        if let Some(stmts) = node.statements() {
+            let body: Vec<_> = stmts.body().iter().collect();
+            if body.len() == 1 && body[0].as_call_node().is_some() {
+                self.parent_is_ambiguous = true;
+                self.ambiguity_kind = Some(AmbiguityKind::If);
+            } else {
+                self.parent_is_ambiguous = false;
+                self.ambiguity_kind = None;
+            }
+            for stmt in &body {
+                self.visit(stmt);
+            }
+        }
+
+        // Else clause: same treatment as if's else
+        if let Some(else_clause) = node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                let body: Vec<_> = stmts.body().iter().collect();
+                if body.len() == 1 && body[0].as_call_node().is_some() {
+                    self.parent_is_ambiguous = true;
+                    self.ambiguity_kind = Some(AmbiguityKind::If);
+                } else {
+                    self.parent_is_ambiguous = false;
+                    self.ambiguity_kind = None;
+                }
+                for stmt in &body {
+                    self.visit(stmt);
+                }
+            }
+        }
+
+        self.parent_is_ambiguous = saved;
+        self.ambiguity_kind = saved_kind;
+    }
+
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         let saved = self.parent_is_ambiguous;
         let saved_kind = self.ambiguity_kind;
@@ -568,5 +639,115 @@ mod tests {
             omit_config(),
         );
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn omit_style_skips_unless_modifier() {
+        // Modifier `unless`: factory call's parent in Parser is `if` (ambiguous).
+        // Prism uses UnlessNode (separate from IfNode) — must handle both.
+        let source = b"create(:foo) unless some_condition\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offenses for create(:foo) unless cond, got: {}",
+            diags.len()
+        );
+
+        // Multi-line unless...end with single CallNode statement
+        let source = b"unless cond\n  create(:foo)\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offenses for unless...create(:foo)...end, got: {}",
+            diags.len()
+        );
+
+        // Assignment inside unless body: factory call's parent is lvasgn (not ambiguous)
+        let source = b"unless cond\n  x = create(:foo)\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for x = create(:foo) inside unless body"
+        );
+    }
+
+    #[test]
+    fn omit_style_flags_call_with_block_in_ambiguous_context() {
+        // In Parser AST, a call with a block is wrapped in a `block` node.
+        // `block` is NOT in AMBIGUOUS_TYPES, so the call is not ambiguous.
+        // These should all be flagged even though they're inside ambiguous parents.
+        let source = b"menu.should == build(\"Plugins\") do\n  item \"Foo\", 1\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(\"Plugins\") do...end as argument to ==, got: {}",
+            diags.len()
+        );
+
+        let source = b"foo(build(:user) { })\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} inside method args"
+        );
+
+        let source = b"[build(:user) { }]\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} inside array"
+        );
+
+        let source = b"build(:user) { } || other\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} || other"
+        );
+
+        let source = b"build(:user) { } && other\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} && other"
+        );
     }
 }

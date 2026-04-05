@@ -27,6 +27,7 @@ These rules apply when `GITHUB_ACTIONS` is set and the workflow is driving the a
 - Read the task prompt first, then inspect the existing PR diff if this is a repair.
 - Prefer the provided helper scripts over ad hoc corpus debugging when they directly answer the question.
 - Use local corpus artifacts and cached repos when they are already present in the prompt or runtime files.
+- **Match RuboCop exactly.** nitrocop is a drop-in replacement. Replicate RuboCop's behavior even when it seems wrong — a "more correct" result that diverges from RuboCop is a corpus regression. Document replicated quirks in `///` doc comments.
 - Keep fixes narrow. The workflow prefers a small correct fix over a broad cleanup.
 - Add or update tests with every real behavior fix.
 

@@ -4,6 +4,9 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RuboCop's `not_to?` node matcher pattern only matches `:not_to`, not `:to_not`.
+/// In `be_invalid` style, `expect(foo).to_not be_valid` must NOT be flagged —
+/// only `expect(foo).not_to be_valid` is an offense. This matches RuboCop's behavior.
 pub struct NegationBeValid;
 
 impl Cop for NegationBeValid {
@@ -108,7 +111,8 @@ impl Cop for NegationBeValid {
             }
             "be_invalid" => {
                 // Flag: expect(x).not_to be_valid -> suggest expect(x).to be_invalid
-                if is_not_to && matcher_name == b"be_valid" {
+                // RuboCop's not_to? pattern only matches :not_to, not :to_not
+                if runner_name == b"not_to" && matcher_name == b"be_valid" {
                     let runner_loc = runner_call.message_loc().unwrap_or(runner_call.location());
                     let (line, column) = source.offset_to_line_col(runner_loc.start_offset());
                     diagnostics.push(self.diagnostic(
@@ -146,6 +150,24 @@ mod tests {
         let diags = run_cop_full_with_config(&NegationBeValid, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("be_invalid"));
+    }
+
+    #[test]
+    fn be_invalid_style_allows_to_not_be_valid() {
+        // RuboCop's not_to? pattern only matches :not_to, not :to_not
+        use crate::cop::CopConfig;
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("be_invalid".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect(foo).to_not be_valid\n";
+        assert_cop_no_offenses_full_with_config(&NegationBeValid, source, config);
     }
 
     #[test]

@@ -99,15 +99,12 @@ use ruby_prism::Visit;
 ///
 /// ## Remaining gaps
 ///
-/// - **CRLF line endings**: Files with `\r\n` line endings have ~80+ FNs because
-///   `trim_end` does not strip `\r`, so `\` followed by `\r\n` is not detected.
-///   Adding `\r` to `trim_end` correctly detects these, but introduces ~30 FPs
-///   because RuboCop itself has a CRLF bug: its `LINE_CONTINUATION_PATTERN`
-///   regex `/(\\\n)/` fails to match `\<CR><LF>` patterns, and its reparse
-///   position offsets become misaligned between normalized and raw source.
-///   Confirmed by running RuboCop on LF-converted files, where it finds the
-///   same offenses our cop does. A fix requires the oracle to normalize CRLF
-///   before comparison.
+/// - **CRLF reparse compat**: `trim_end` strips `\r` so CRLF files are
+///   detected. The Parser gem normalizes `\r\n` → `\n` in its buffer, so
+///   RuboCop's `range.begin_pos` is a normalized offset into shorter source.
+///   But `redundant_line_continuation?` does its reparse on `raw_source`
+///   (CRLF) using that normalized offset, replacing wrong bytes. We replicate
+///   this exact mismatch in `is_redundant_continuation` to match RuboCop 1:1.
 ///
 /// - **Multiline expression FPs**: ~9 remaining FPs where `\` precedes a
 ///   multiline expression (e.g., method chains or block calls spanning multiple
@@ -241,7 +238,8 @@ impl Cop for RedundantLineContinuation {
 
 fn trim_end(bytes: &[u8]) -> &[u8] {
     let mut end = bytes.len();
-    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t' || bytes[end - 1] == b'\r')
+    {
         end -= 1;
     }
     &bytes[..end]
@@ -332,8 +330,30 @@ fn is_redundant_continuation(
     backslash_offset: usize,
     original_error_count: usize,
 ) -> bool {
+    // RuboCop's reparse check has a CRLF offset mismatch: the Parser gem
+    // normalizes \r\n → \n in its buffer, so `range.begin_pos` is an offset
+    // into the shorter (LF) source. But `processed_source.raw_source` is the
+    // original CRLF content. RuboCop's reparse does:
+    //   source[range.begin_pos, 2] = "\n"
+    // replacing 2 bytes at the normalized offset with "\n". On CRLF files this
+    // replaces the wrong bytes, causing some continuations to appear required.
+    // We replicate this exactly to match RuboCop's behavior.
+    let cr_count = source[..backslash_offset]
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'\r' && source.get(i + 1) == Some(&b'\n'))
+        .count();
+    let normalized_offset = backslash_offset - cr_count;
+
     let mut modified = source.to_vec();
-    modified.remove(backslash_offset);
+    // Replicate RuboCop's `source[pos, 2] = "\n"`: replace byte at pos with \n,
+    // remove byte at pos+1.
+    if normalized_offset + 1 < modified.len() {
+        modified[normalized_offset] = b'\n';
+        modified.remove(normalized_offset + 1);
+    } else if normalized_offset < modified.len() {
+        modified[normalized_offset] = b'\n';
+    }
     ruby_prism::parse(&modified).errors().count() <= original_error_count
 }
 
@@ -794,4 +814,29 @@ mod tests {
         RedundantLineContinuation,
         "cops/style/redundant_line_continuation"
     );
+
+    #[test]
+    fn crlf_line_endings() {
+        // CRLF file: `foo(1, \<CR><LF>  2)<CR><LF>` should detect the redundant continuation
+        let source = b"foo(1, \\\r\n  2)\r\n";
+        let diags = crate::testutil::run_cop_full(&RedundantLineContinuation, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected 1 offense on CRLF file, got {diags:?}"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+    }
+
+    #[test]
+    fn crlf_no_offense_string_concat() {
+        // String concatenation with CRLF is still required
+        let source = b"x = \"hello\" \\\r\n  \"world\"\r\n";
+        let diags = crate::testutil::run_cop_full(&RedundantLineContinuation, source);
+        assert!(
+            diags.is_empty(),
+            "string concat should not be flagged: {diags:?}"
+        );
+    }
 }

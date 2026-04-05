@@ -89,6 +89,13 @@ impl Cop for CreateTableWithTimestamps {
         &["db/migrate/**/*.rb"]
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &[
+            "db/**/*_create_active_storage_tables.active_storage.rb",
+            "db/**/*_create_active_storage_variant_records.active_storage.rb",
+        ]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ASSOC_NODE,

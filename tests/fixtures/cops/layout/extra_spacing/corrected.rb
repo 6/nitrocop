@@ -108,3 +108,12 @@ XML
 
 # Spaces before a chained `.` are still offenses for single-line receivers
 data = { a: 1 } .transform_values
+
+# Extra spaces before ** (double splat) — not aligned with adjacent **
+foo 1, **x
+foo 1, **x
+
+# Multiline receiver: extra spaces before chained `.` are still offenses
+expect {
+  something
+} .to raise_error
