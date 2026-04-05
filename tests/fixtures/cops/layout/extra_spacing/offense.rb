@@ -131,9 +131,12 @@ let(:hiera_config) {      <<~CONF }
 version: 5
 CONF
 
-# Spaces before a non-heredoc same-line block closer are still offenses
-let(:output_missing) { ""  }
-                         ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+# Extra space in hash argument trailing a heredoc opener
+self.post("/path", <<-XML, {"Content-Type" =>  "application/atom+xml"})
+                                             ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+<?xml version='1.0' encoding='UTF-8'?>
+<entry/>
+XML
 
 # Spaces before a chained `.` are still offenses for single-line receivers
 data = { a: 1 }  .transform_values
