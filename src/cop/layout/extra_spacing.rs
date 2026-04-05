@@ -632,14 +632,27 @@ impl HeredocTrailingCollector<'_> {
             return;
         }
         let opener_end = opening.end_offset();
-        // Find end of the line (next newline or end of source)
+        // In RuboCop's token stream, the heredoc opener causes the tokenizer to
+        // jump to the heredoc body. The gap between the opener and the NEXT token
+        // on the same line is never checked by RuboCop's token-pair iteration.
+        // But any subsequent token pairs on the same line (e.g., `, {key => val}`)
+        // ARE checked because they are consecutive same-line tokens in the stream.
+        //
+        // So we only ignore from the opener end to the first non-whitespace
+        // character on the same line, NOT the entire rest of the line.
         let line_end = self.src_bytes[opener_end..]
             .iter()
             .position(|&b| b == b'\n')
             .map(|p| opener_end + p)
             .unwrap_or(self.src_bytes.len());
-        if line_end > opener_end {
-            self.ranges.push(opener_end..line_end);
+        // Find the first non-whitespace character after the opener on the same line
+        let next_token_start = self.src_bytes[opener_end..line_end]
+            .iter()
+            .position(|&b| b != b' ' && b != b'\t')
+            .map(|p| opener_end + p)
+            .unwrap_or(line_end);
+        if next_token_start > opener_end {
+            self.ranges.push(opener_end..next_token_start);
         }
     }
 }
@@ -1011,13 +1024,12 @@ fn extract_token_at(line: &[u8], col: usize) -> &[u8] {
         };
         let end = identifier_like_end(line, ident_start);
         &line[col..end]
-    } else if ch == b'.'
-        && col + 1 < line.len()
-        && (line[col + 1].is_ascii_alphabetic() || line[col + 1] == b'_')
-    {
-        // Dot followed by identifier: extract `.method_name`
-        let end = identifier_like_end(line, col + 1);
-        &line[col..end]
+    } else if ch == b'.' {
+        // Dot (call operator): return just `.`, matching RuboCop's tokenization
+        // where `.` is a separate token from the method name that follows.
+        // Previously extracted `.method_name` which caused FPs when different
+        // method names at the same column failed to match (e.g., `.to` vs `.not_to`).
+        &line[col..col + 1]
     } else if ch == b'"' || ch == b'\'' {
         // String delimiter: extract the full quoted string to avoid coincidental
         // single-character alignment. This matches RuboCop's behavior where
@@ -1237,6 +1249,10 @@ fn check_equals_alignment(
         // Cross-alignment: current has `=` (or ends with `=`), adjacent has `<<`
         // whose last `<` is at the same column. RuboCop's aligned_with_append_operator?
         // checks: range.source[-1] == '=' && token.type == tLSHFT && last_column matches.
+        //
+        // RuboCop uses `detect` to find the FIRST assignment/comparison token on the
+        // adjacent line. If there's an earlier `=`/`||=`/etc. before the `<<`, the `<<`
+        // is not the first operator and should not be used for cross-alignment.
         if adj_eq_col < adj_line.len()
             && adj_line[adj_eq_col] == b'<'
             && adj_eq_col > 0
@@ -1250,7 +1266,9 @@ fn check_equals_alignment(
                 || adj_line[lshift_start - 1] == b'\t'
             {
                 let adj_lshift_offset = adj_line_start_offset + lshift_start;
-                if !heredoc_opener_starts.contains(&adj_lshift_offset) {
+                if !heredoc_opener_starts.contains(&adj_lshift_offset)
+                    && !has_earlier_assignment_op(adj_line, lshift_start)
+                {
                     return true;
                 }
             }
@@ -1274,9 +1292,12 @@ fn check_equals_alignment(
             None => return false,
         };
         // Check if adjacent line has `=` at the same column as last `<`
+        // Only consider the `=` if it would be the first assignment/comparison
+        // operator on the adjacent line (matching RuboCop's `detect` behavior).
         if adj_last_col < adj_line.len()
             && adj_line[adj_last_col] == b'='
             && is_assignment_equals(adj_line, adj_last_col)
+            && !has_earlier_assignment_op(adj_line, adj_last_col)
         {
             return true;
         }
@@ -1305,6 +1326,33 @@ fn is_assignment_equals(line: &[u8], eq_col: usize) -> bool {
         || prev == b'>'
         || prev == b'!'
         || prev == b'='
+}
+
+/// Check if there's an assignment/comparison operator (=, +=, ||=, ==, <<, etc.)
+/// on the line at a column strictly before `before_col`.
+///
+/// RuboCop uses `detect` to find the FIRST assignment/comparison token on a line
+/// for alignment. If this function returns true, it means the operator at
+/// `before_col` is NOT the first such operator and should not be used for
+/// cross-alignment.
+fn has_earlier_assignment_op(line: &[u8], before_col: usize) -> bool {
+    let mut i = 0;
+    while i < before_col && i < line.len() {
+        if line[i] == b'=' && is_assignment_equals(line, i) {
+            return true;
+        }
+        // Check for `<<` in operator position (preceded by space or at start)
+        if i + 1 < before_col
+            && i + 1 < line.len()
+            && line[i] == b'<'
+            && line[i + 1] == b'<'
+            && (i == 0 || line[i - 1] == b' ' || line[i - 1] == b'\t')
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Find the column of the LAST '=' in an assignment/comparison operator starting at col.
@@ -1848,6 +1896,52 @@ mod tests {
             diags.len(),
             1,
             "Unaligned ||= with extra spaces should be flagged, got: {:?}",
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn heredoc_trailing_hash_arg_extra_space_flagged() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // FN #8: Extra space in hash argument after heredoc opener should be flagged.
+        // RuboCop flags the extra space between `=>` and `"application/atom+xml"`.
+        let src = b"self.post(\"/path\", <<-XML, {\"Content-Type\" =>  \"application/atom+xml\"})\n<?xml version='1.0' encoding='UTF-8'?>\n<entry/>\nXML\n";
+        let diags = run_cop_full(&cop, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Extra space in hash arg after heredoc opener should be flagged, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!(
+                    "L{}:C{} '{}'",
+                    d.location.line, d.location.column, d.message
+                ))
+                .collect::<Vec<_>>()
+        );
+        // Verify the offense is at the right position (col 48 in the `=>  "` gap)
+        assert_eq!(diags[0].location.line, 1);
+    }
+
+    #[test]
+    fn block_trailing_space_before_close() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // Extra space before `}` closing a block should be flagged
+        let src = b"let(:output_missing) { \"\"  }\n";
+        let diags = run_cop_full(&cop, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Extra space before block closer should be flagged, got {}: {:?}",
+            diags.len(),
             diags
                 .iter()
                 .map(|d| format!("L{}:C{}", d.location.line, d.location.column))

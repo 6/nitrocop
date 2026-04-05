@@ -178,10 +178,8 @@ def test_write():
         updated = readme_path.read_text()
         assert "6 of 14 cops match RuboCop exactly" in updated
         assert "500 open-source repos" in updated
-        assert "nitrocop supports 14 cops from 7 RuboCop gems." in updated
-        assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md) (167k Ruby files)." in updated
-        assert "6 of 14 cops produce identical results to RuboCop (default config)." in updated
-        assert "4 cops had no corpus data." in updated
+        assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md)" in updated
+        assert "5.1M offenses compared" in updated
         assert "See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown." in updated
         assert "| Department | Cops | Exact match (default) |" in updated
         assert "**[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (9 cops)" in updated

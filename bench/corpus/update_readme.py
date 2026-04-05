@@ -220,45 +220,32 @@ def build_cops_section(data: dict, synthetic: dict[str, dict] | None = None) -> 
     baseline = data.get("baseline", {})
     by_department = build_department_stats(data, synthetic)
 
-    total_cops = summary.get("registered_cops", sum(d["cops"] for d in by_department.values()))
-    perfect_cops = sum(d["perfect_cops"] for d in by_department.values())
-    no_data_cops = sum(d["no_data_cops"] for d in by_department.values())
     total_repos = summary.get("total_repos", 0)
     total_files = summary.get("total_files_inspected", 0)
     files_str = format_files(total_files) if total_files > 0 else None
 
     lines = []
-    lines.append(f"nitrocop supports {total_cops:,} cops from {len(GEMS)} RuboCop gems.")
-    lines.append("")
+
+    total_compared = summary.get("total_offenses_compared", 0)
     if total_repos > 0:
         corpus_line = "Compared with RuboCop on "
         corpus_line += f"[**{total_repos:,} open-source repos**](docs/corpus.md)"
+        detail_parts = []
         if files_str:
-            corpus_line += f" ({files_str} Ruby files)"
+            detail_parts.append(f"{files_str} Ruby files")
+        if total_compared > 0:
+            detail_parts.append(f"{format_count_summary(total_compared)} offenses compared")
+        if detail_parts:
+            corpus_line += f" ({', '.join(detail_parts)})"
         corpus_line += "."
         lines.append(corpus_line)
         lines.append("")
-    # Summary: cop-level exact match counts
-    variant_perfect_total = sum(d.get("variant_perfect_cops") or 0 for d in by_department.values())
-    has_variant = any(d.get("variant_perfect_cops") is not None for d in by_department.values())
-
-    lines.append(f"{perfect_cops:,} of {total_cops:,} cops produce identical results to RuboCop (default config).")
-    if has_variant and variant_perfect_total < perfect_cops:
-        lines.append(
-            f"When tested with all style variants (e.g. `EnforcedStyle: comma`), "
-            f"{variant_perfect_total:,} of {total_cops:,} match exactly."
-        )
-    if no_data_cops > 0:
-        lines.append(f"{no_data_cops:,} cops had no corpus data.")
+    lines.append(
+        "**Default** = default RuboCop config. "
+        "**All variants** = every supported `EnforcedStyle` "
+        "(e.g. `EnforcedStyle: comma`)."
+    )
     lines.append("")
-
-    # Explanation before tables
-    if has_variant:
-        lines.append(
-            "**Default** = tested with default RuboCop config. "
-            "**All variants** = tested with every supported `EnforcedStyle` value."
-        )
-        lines.append("")
 
     for gem in GEMS:
         rows = [by_department[dept] for dept in gem["departments"]]
