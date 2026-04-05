@@ -879,16 +879,15 @@ def _run_rubocop_for_variant(
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env)
         data = json.loads(result.stdout)
-        # Filter to only the requested cop — RuboCop's --only flag still
-        # allows Lint/Syntax (parser errors) to appear in the output, which
-        # inflates the count and causes false variant regressions.
-        count = sum(
-            1
-            for f in data.get("files", [])
-            for o in f.get("offenses", [])
-            if o.get("cop_name") == cop
-        )
-        return {"count": count}
+        # Filter to only the requested cop and deduplicate by (path, line),
+        # matching the deduplication that run_nitrocop applies on the NC side.
+        seen: set[tuple[str, int]] = set()
+        for f in data.get("files", []):
+            fpath = os.path.realpath(f.get("path", ""))
+            for o in f.get("offenses", []):
+                if o.get("cop_name") == cop:
+                    seen.add((fpath, o["location"]["line"]))
+        return {"count": len(seen)}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return {"count": -1}
 

@@ -75,3 +75,6 @@ code = <<-"CODE"
 
 x = 1
 y = 2
+
+# Fuzz crash regression: malformed heredoc with unterminated quote (crash-be7c898f)
+!<<"A

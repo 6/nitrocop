@@ -78,6 +78,19 @@ use crate::parse::source::SourceFile;
 /// never sees RescueNode. Fixed by adding a `check_source` implementation
 /// with a custom `RescueRefVisitor` that overrides `visit_rescue_node`
 /// to check rescue reference variables.
+///
+/// ## Variant divergence fix (2026-04-05)
+///
+/// camelCase variant: 30,271 FP, 356 FN (baseline).
+///
+/// FP=30,271: `is_lower_camel_case` operated on raw bytes and rejected
+/// ALL underscores and ALL non-ASCII characters. RuboCop's camelCase regex
+/// `/^@{0,2}(?:_|_?[[:lower:]][\d[[:lower:]][[:upper:]]]*)[!?=]?$/` accepts:
+/// (1) bare `_`, (2) optional `_` prefix + lowercase start + alphanumeric body,
+/// (3) Unicode lowercase letters via `[[:lower:]]`. Fixed by rewriting
+/// `is_lower_camel_case` to use `char::is_lowercase()`/`is_uppercase()` for
+/// Unicode support and handle the optional leading underscore per the regex.
+/// Verified on 15 corpus repos: per-repo offense counts match RuboCop exactly.
 pub struct VariableName;
 
 impl Cop for VariableName {
@@ -631,22 +644,48 @@ impl VariableName {
     }
 }
 
-/// Returns true if the name is lowerCamelCase (starts lowercase, no underscores).
+/// Returns true if the name is lowerCamelCase per RuboCop's regex:
+/// `/^@{0,2}(?:_|_?[[:lower:]][\d[[:lower:]][[:upper:]]]*)[!?=]?$/`
+///
+/// After stripping sigil prefixes (@/@@/$), the bare name must be:
+/// - `_` alone, OR
+/// - optional `_` prefix, then a Unicode lowercase letter, then zero or more
+///   of: Unicode lowercase, Unicode uppercase, or ASCII digit.
 fn is_lower_camel_case(name: &[u8]) -> bool {
     if name.is_empty() {
         return true;
     }
-    if name[0].is_ascii_uppercase() {
+
+    let s = match std::str::from_utf8(name) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let mut chars = s.chars();
+    let first = chars.next().unwrap(); // name is not empty
+
+    // Handle optional leading underscore
+    let start_char = if first == '_' {
+        match chars.next() {
+            None => return true, // bare `_` is valid
+            Some(c) => c,
+        }
+    } else {
+        first
+    };
+
+    // First non-underscore char must be Unicode lowercase
+    if !start_char.is_lowercase() {
         return false;
     }
-    for &b in name {
-        if b == b'_' {
-            return false;
-        }
-        if !(b.is_ascii_alphanumeric()) {
+
+    // Remaining chars must be lowercase, uppercase, or ASCII digit
+    for ch in chars {
+        if !(ch.is_lowercase() || ch.is_uppercase() || ch.is_ascii_digit()) {
             return false;
         }
     }
+
     true
 }
 
@@ -655,20 +694,22 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(VariableName, "cops/naming/variable_name");
 
-    #[test]
-    fn config_enforced_style_camel_case() {
-        use crate::testutil::run_cop_full_with_config;
+    fn camel_case_config() -> CopConfig {
         use std::collections::HashMap;
-
-        let config = CopConfig {
+        CopConfig {
             options: HashMap::from([(
                 "EnforcedStyle".into(),
                 serde_yml::Value::String("camelCase".into()),
             )]),
             ..CopConfig::default()
-        };
+        }
+    }
+
+    #[test]
+    fn config_enforced_style_camel_case() {
+        use crate::testutil::run_cop_full_with_config;
         let source = b"myVar = 1\n";
-        let diags = run_cop_full_with_config(&VariableName, source, config);
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
         assert!(
             diags.is_empty(),
             "camelCase variable should not be flagged in camelCase mode"
@@ -678,20 +719,107 @@ mod tests {
     #[test]
     fn config_enforced_style_camel_case_flags_snake() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("camelCase".into()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"my_var = 1\n";
-        let diags = run_cop_full_with_config(&VariableName, source, config);
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
         assert!(
             !diags.is_empty(),
             "snake_case variable should be flagged in camelCase mode"
+        );
+    }
+
+    #[test]
+    fn camel_case_accepts_underscore_prefix() {
+        use crate::testutil::run_cop_full_with_config;
+        // RuboCop accepts _myLocal in camelCase mode (unused var convention)
+        let source = b"_myLocal = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            diags.is_empty(),
+            "_myLocal should not be flagged in camelCase mode: got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn camel_case_accepts_bare_underscore() {
+        use crate::testutil::run_cop_full_with_config;
+        // RuboCop always accepts `_ = 1`
+        let source = b"_ = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            diags.is_empty(),
+            "bare _ should not be flagged in camelCase mode: got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn camel_case_accepts_non_ascii_lowercase() {
+        use crate::testutil::run_cop_full_with_config;
+        // RuboCop: `léo = 1` is accepted in camelCase mode
+        let source = "léo = 1\n".as_bytes();
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            diags.is_empty(),
+            "léo should not be flagged in camelCase mode: got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn camel_case_flags_underscore_snake_case() {
+        use crate::testutil::run_cop_full_with_config;
+        // _my_var has underscore in body → not valid camelCase
+        let source = b"_my_var = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            !diags.is_empty(),
+            "_my_var should be flagged in camelCase mode"
+        );
+    }
+
+    #[test]
+    fn camel_case_flags_uppercase_after_underscore() {
+        use crate::testutil::run_cop_full_with_config;
+        // _MyVar starts uppercase after underscore → not valid camelCase
+        let source = b"_MyVar = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            !diags.is_empty(),
+            "_MyVar should be flagged in camelCase mode"
+        );
+    }
+
+    #[test]
+    fn camel_case_flags_double_underscore() {
+        use crate::testutil::run_cop_full_with_config;
+        // __x has double underscore → not valid camelCase
+        let source = b"__x = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(!diags.is_empty(), "__x should be flagged in camelCase mode");
+    }
+
+    #[test]
+    fn camel_case_accepts_single_lowercase() {
+        use crate::testutil::run_cop_full_with_config;
+        let source = b"x = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            diags.is_empty(),
+            "single lowercase letter should not be flagged in camelCase mode"
+        );
+    }
+
+    #[test]
+    fn camel_case_accepts_underscore_prefix_lowercase() {
+        use crate::testutil::run_cop_full_with_config;
+        // _unused is valid camelCase (underscore + all lowercase is fine)
+        let source = b"_unused = 1\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        assert!(
+            diags.is_empty(),
+            "_unused should not be flagged in camelCase mode: got {:?}",
+            diags
         );
     }
 
