@@ -35,6 +35,7 @@ def parse_summary_lines(summaries_dir: Path) -> list[dict]:
                 "result": parts[5].strip() if len(parts) > 5 else "pass",
                 "count_bl_fp": int(parts[6].strip()) if len(parts) > 6 and parts[6].strip() else None,
                 "count_bl_fn": int(parts[7].strip()) if len(parts) > 7 and parts[7].strip() else None,
+                "detail": parts[8].strip() if len(parts) > 8 and parts[8].strip() else "",
             }
             rows.append(row)
     return rows
@@ -70,10 +71,13 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
                     "result": "pass",
                     "count_bl_fp": None,
                     "count_bl_fn": None,
+                    "details": [],
                 }
             agg = variant_agg[key]
             agg["local_fp"] += row["local_fp"]
             agg["local_fn"] += row["local_fn"]
+            if row.get("detail"):
+                agg["details"].append(row["detail"])
             # If any shard errored, mark as error
             if row["result"] == "error":
                 agg["result"] = "error"
@@ -125,6 +129,14 @@ def render_comment(rows: list[dict], overall_result: str) -> str:
             f"| {row['local_fp']} | {row['local_fn']} "
             f"| {fp_str} | {fn_str} | {status}{note} |"
         )
+
+        # Show diverging repos for variant regressions so agents know
+        # exactly where to look instead of re-running the entire corpus.
+        details = row.get("details", [])
+        if details and row["result"] in ("fail", "regression"):
+            combined = " ".join(details)
+            if combined:
+                lines.append(f"| | | | | | | | Repos: `{combined}` |")
 
     lines.append("")
     if overall_result == "pass":
