@@ -67,6 +67,20 @@ use crate::parse::source::SourceFile;
 /// `parent_is_ambiguous`. `visit_branch_node_leave` restores it from a stack.
 /// This ensures only the direct parent's ambiguity affects the factory call check,
 /// matching RuboCop's `node.parent.type` behavior.
+///
+/// ## Variant fix: omit_parentheses block bypass (2026-04-05)
+///
+/// Variant oracle reported FP=5, FN=11 for `omit_parentheses`.
+///
+/// **FN root cause:** Factory calls with blocks (e.g., `build("Plugins") do...end`
+/// or `build(:user) { }`) inside ambiguous contexts (method args, arrays, `||`,
+/// `&&`, `if`) were incorrectly skipped. In Parser AST, a call with a block is
+/// wrapped in a `block` node, making the call's parent `block` (not the enclosing
+/// context). Since `block` is NOT in AMBIGUOUS_TYPES, these calls are never
+/// ambiguous. In Prism, the block is a child of the CallNode, so the enclosing
+/// context's ambiguity leaked through.
+/// Fix: Added `call.block().is_none()` guard to the ambiguity check so that
+/// factory calls with blocks bypass the ambiguity skip.
 pub struct ConsistentParenthesesStyle;
 
 impl Cop for ConsistentParenthesesStyle {
@@ -152,7 +166,12 @@ impl<'s> ParenStyleVisitor<'s> {
         // Uses immediate_parent_ambiguous (set by visit_branch_node_enter) rather than
         // parent_is_ambiguous to match RuboCop's node.parent.type check, which only
         // considers the DIRECT parent, not ancestors.
-        if self.immediate_parent_ambiguous {
+        //
+        // Exception: when the factory call has a block (e.g., `build(:user) { }` or
+        // `build("Plugins") do...end`), its parent in Parser AST is `block` (not the
+        // enclosing context), and `block` is NOT in AMBIGUOUS_TYPES. So calls with
+        // blocks are never ambiguous, regardless of the enclosing context.
+        if self.immediate_parent_ambiguous && call.block().is_none() {
             return;
         }
 
@@ -568,5 +587,72 @@ mod tests {
             omit_config(),
         );
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn omit_style_flags_call_with_block_in_ambiguous_context() {
+        // In Parser AST, a call with a block is wrapped in a `block` node.
+        // `block` is NOT in AMBIGUOUS_TYPES, so the call is not ambiguous.
+        // These should all be flagged even though they're inside ambiguous parents.
+        let source = b"menu.should == build(\"Plugins\") do\n  item \"Foo\", 1\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(\"Plugins\") do...end as argument to ==, got: {}",
+            diags.len()
+        );
+
+        let source = b"foo(build(:user) { })\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} inside method args"
+        );
+
+        let source = b"[build(:user) { }]\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} inside array"
+        );
+
+        let source = b"build(:user) { } || other\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} || other"
+        );
+
+        let source = b"build(:user) { } && other\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for build(:user) {{}} && other"
+        );
     }
 }
