@@ -71,11 +71,35 @@ def changed_files(repo_root: Path, base_ref: str) -> list[str]:
     return sorted(names)
 
 
+def find_gitlinks(repo_root: Path, base_ref: str) -> list[str]:
+    """Find any new or modified submodule gitlink (mode 160000) entries in the diff.
+
+    Agents sometimes clone repos into the working tree and accidentally stage
+    them as submodule gitlinks.  These break ``git submodule update --init``
+    in CI because the path has no entry in ``.gitmodules``.
+    """
+    raw = run_git(repo_root, "diff", "--raw", base_ref)
+    gitlinks: list[str] = []
+    for line in raw.splitlines():
+        # Format: :old_mode new_mode old_sha new_sha status\tpath
+        if not line.startswith(":"):
+            continue
+        parts = line.split("\t", 1)
+        if len(parts) < 2:
+            continue
+        meta = parts[0]
+        path = parts[1]
+        # 160000 is the git mode for submodule gitlinks
+        if "160000" in meta:
+            gitlinks.append(path)
+    return gitlinks
+
+
 def is_allowed(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
-def validate(profile: str, files: list[str]) -> tuple[list[str], list[str]]:
+def validate(profile: str, files: list[str], *, gitlinks: list[str] | None = None) -> tuple[list[str], list[str]]:
     try:
         patterns = ALLOWLISTS[profile]
     except KeyError as exc:
@@ -83,15 +107,20 @@ def validate(profile: str, files: list[str]) -> tuple[list[str], list[str]]:
 
     allowed: list[str] = []
     disallowed: list[str] = []
+    gitlink_set = set(gitlinks or [])
     for path in files:
-        if is_allowed(path, patterns):
+        if path in gitlink_set:
+            # Submodule gitlinks are never allowed — agents should not
+            # commit cloned repos as submodules.
+            disallowed.append(path)
+        elif is_allowed(path, patterns):
             allowed.append(path)
         else:
             disallowed.append(path)
     return allowed, disallowed
 
 
-def render_report(profile: str, allowed: list[str], disallowed: list[str]) -> str:
+def render_report(profile: str, allowed: list[str], disallowed: list[str], *, gitlinks: list[str] | None = None) -> str:
     patterns = ALLOWLISTS[profile]
     lines = [
         "## Agent File Scope",
@@ -106,6 +135,11 @@ def render_report(profile: str, allowed: list[str], disallowed: list[str]) -> st
     if allowed:
         lines.append("Changed files within scope:")
         lines.extend(f"- `{path}`" for path in allowed)
+        lines.append("")
+
+    if gitlinks:
+        lines.append("Accidental submodule gitlinks (always disallowed):")
+        lines.extend(f"- `{path}`" for path in gitlinks)
         lines.append("")
 
     if disallowed:
@@ -129,8 +163,9 @@ def main() -> int:
 
     repo_root = args.repo_root.resolve()
     files = changed_files(repo_root, args.base_ref)
-    allowed, disallowed = validate(args.profile, files)
-    report = render_report(args.profile, allowed, disallowed)
+    gitlinks = find_gitlinks(repo_root, args.base_ref)
+    allowed, disallowed = validate(args.profile, files, gitlinks=gitlinks)
+    report = render_report(args.profile, allowed, disallowed, gitlinks=gitlinks)
 
     if args.report_out:
         args.report_out.parent.mkdir(parents=True, exist_ok=True)
