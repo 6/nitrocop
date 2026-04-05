@@ -23,3 +23,20 @@ rescue LoadError
     abort 'not available'
   end
 end
+
+if HAVE_RCOV
+  RCov::VerifyTask.new(:verify) do |t|
+    t.threshold = 1
+  end
+  task :verify => :rcov
+  ^^^^ Rake/Desc: Describe the task with `desc` method.
+  remove_desc_for_task %w(spec:clobber_rcov)
+end
+
+def deprecated_task(name, new_name)
+  warn name
+  task name => new_name do
+  ^^^^ Rake/Desc: Describe the task with `desc` method.
+    warn "deprecated #{name}"
+  end
+end

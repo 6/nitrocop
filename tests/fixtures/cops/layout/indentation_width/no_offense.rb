@@ -251,14 +251,34 @@ end
 if cond then result = value
 end
 
-# Access modifier with symbol arg — RuboCop skips ALL access modifiers
-# in class member walk, even at wrong indentation (handled by
-# Layout/AccessModifierIndentation instead)
+# Access modifier with symbol arg — RuboCop skips SUBSEQUENT access modifiers
+# in class member walk (handled by Layout/AccessModifierIndentation).
+# The FIRST member is always checked regardless.
 class AccessModWithArgs
-    private :some_method
+  private :some_method
     public :other_method
     protected :another_method
 end
+
+# Lambda block body correctly indented
+scope :verified, -> do
+  where('stuff')
+end
+
+# Super with block — body correctly indented
+def each_mutation(payload, options = {}, &block)
+  super(payload, options) do |element|
+    yield element
+  end
+end
+
+# Case else body correctly indented relative to last when keyword
+result = case x
+         when 1
+           do_a
+     else
+           do_else
+         end
 
 # def body with rescue — correctly indented
 def method_with_rescue
