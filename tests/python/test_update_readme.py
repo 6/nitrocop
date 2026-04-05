@@ -176,7 +176,7 @@ def test_write():
         assert result.returncode == 0, f"Script failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         updated = readme_path.read_text()
-        assert "6 of 14 cops match RuboCop exactly" in updated
+        assert "**6 of 14** cops match RuboCop exactly" in updated
         assert "500 open-source repos" in updated
         assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md)" in updated
         assert "5.1M offenses compared" in updated
@@ -214,7 +214,7 @@ def test_conformance_includes_fp():
 
         updated = readme_path.read_text()
         # Headline should show cop exact-match count, not percentage
-        assert "6 of 14 cops match RuboCop exactly" in updated
+        assert "**6 of 14** cops match RuboCop exactly" in updated
 
 
 def test_comma_repo_count():

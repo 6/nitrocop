@@ -349,15 +349,17 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
         d.get("variant_perfect_cops") or 0
         for d in data.get("by_department", [])
     )
-    new_corpus_bullet = (
-        f"Tested on [**{total_repos:,} open-source repos**](docs/corpus.md): "
-        f"**{perfect_cops:,} of {total_cops:,} cops match RuboCop exactly** (default config)"
+    new_corpus_lines = (
+        f"- Tested on [**{total_repos:,} open-source repos**](docs/corpus.md):\n"
+        f"  - **{perfect_cops:,} of {total_cops:,}** cops match RuboCop exactly (default config)"
     )
     if variant_perfect > 0 and variant_perfect < perfect_cops:
-        new_corpus_bullet += f", **{variant_perfect:,}** across all `EnforcedStyle` variants"
+        new_corpus_lines += (
+            f"\n  - **{variant_perfect:,} of {total_cops:,}** match across all `EnforcedStyle` variants"
+        )
     readme_text = re.sub(
-        r"- .+open-source repos.+\n",
-        f"- {new_corpus_bullet}\n",
+        r"- Tested .+?open-source repos.+?\n(?:  - .+\n)*",
+        f"{new_corpus_lines}\n",
         readme_text,
         count=1,
     )
