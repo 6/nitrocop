@@ -1,7 +1,7 @@
 use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{
     BEGIN_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, ELSE_NODE, FOR_NODE,
-    IF_NODE, IN_NODE, LAMBDA_NODE, MODULE_NODE, PRE_EXECUTION_NODE, PROGRAM_NODE,
+    IF_NODE, IN_NODE, LAMBDA_NODE, MODULE_NODE, PARENTHESES_NODE, PRE_EXECUTION_NODE, PROGRAM_NODE,
     SINGLETON_CLASS_NODE, STATEMENTS_NODE, UNLESS_NODE, UNTIL_NODE, WHEN_NODE, WHILE_NODE,
 };
 use crate::cop::shared::util::begins_its_line;
@@ -78,10 +78,14 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 ///     inconsistent, but RuboCop ignores it. Fixed by adding the same
 ///     access modifier filtering to `check_statements_consistency`.
 ///
-/// Remaining 2 FN (poolparty chef_client.rb lines 16-17): Prism treats
-/// `return expr||= (multi\nline\nexpression)` as a single statement due
-/// to the unmatched `(`, while the parser gem (used by RuboCop) sees
-/// separate statements. This is a parser difference, not a detection bug.
+/// ## Corpus investigation (2026-04-05)
+///
+/// Fixed 2 FN (poolparty chef_client.rb lines 16-17):
+/// 13. Parenthesized expressions spanning multiple lines `(expr\nexpr\nexpr)`
+///     are `begin` nodes in the parser gem, checked by RuboCop's `on_begin`.
+///     In Prism they are `ParenthesesNode`, which was not handled. Added a
+///     handler to check consistency of statements inside parenthesized
+///     expressions.
 pub struct IndentationConsistency;
 
 /// Check if a node is a bare access modifier call
@@ -377,6 +381,7 @@ impl Cop for IndentationConsistency {
             IN_NODE,
             LAMBDA_NODE,
             MODULE_NODE,
+            PARENTHESES_NODE,
             PRE_EXECUTION_NODE,
             PROGRAM_NODE,
             SINGLETON_CLASS_NODE,
@@ -486,6 +491,20 @@ impl Cop for IndentationConsistency {
                 pre_exec_node.opening_loc().start_offset(),
                 pre_exec_node.statements(),
             ));
+            return;
+        }
+
+        // Parenthesized expressions: (expr\nexpr\nexpr)
+        // In the parser gem these are `begin` nodes and RuboCop's on_begin
+        // checks their children for consistency. Prism uses ParenthesesNode.
+        if let Some(parens_node) = node.as_parentheses_node() {
+            if let Some(stmts) = parens_node.body().and_then(|b| b.as_statements_node()) {
+                diagnostics.extend(self.check_statements_consistency(
+                    source,
+                    parens_node.opening_loc().start_offset(),
+                    Some(stmts),
+                ));
+            }
             return;
         }
 
