@@ -129,6 +129,10 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     if by_department:
         md.append("## Department Breakdown")
         md.append("")
+        md.append("### Default Config")
+        md.append("")
+        md.append("Results using each cop's default RuboCop configuration.")
+        md.append("")
         md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
         md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
         for d in by_department:
@@ -143,7 +147,9 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
 
     # Department breakdown (all variants)
     if by_department and variant_by_cop:
-        md.append("### All Variants")
+        md.append("### All `EnforcedStyle` Variants")
+        md.append("")
+        md.append("Results across every supported `EnforcedStyle` option (e.g. `EnforcedStyle: comma`).")
         md.append("")
         md.append("| Department | Default matches | Variant matches | Variant FP | Variant FN | All variants % |")
         md.append("|------------|----------------:|----------------:|-----------:|-----------:|---------------:|")
