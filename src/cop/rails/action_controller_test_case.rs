@@ -15,6 +15,10 @@ impl Cop for ActionControllerTestCase {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/test/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CLASS_NODE]
     }

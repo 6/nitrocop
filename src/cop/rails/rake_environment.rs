@@ -70,6 +70,10 @@ impl Cop for RakeEnvironment {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/Rakefile", "**/*.rake"]
+    }
+
     fn default_exclude(&self) -> &'static [&'static str] {
         &["**/lib/capistrano/tasks/**/*.rake"]
     }

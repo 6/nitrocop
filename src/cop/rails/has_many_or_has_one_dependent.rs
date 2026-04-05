@@ -87,6 +87,10 @@ impl Cop for HasManyOrHasOneDependent {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*.rb"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
