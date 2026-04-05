@@ -84,7 +84,8 @@ jobs:
       - name: Free disk space
         run: |
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
-            /usr/share/miniconda /usr/share/az_*
+            /usr/share/miniconda /usr/share/az_* /usr/share/gradle-* \
+            /usr/share/kotlinc /opt/az
 
       - name: Generate app token
         id: app-token
