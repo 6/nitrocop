@@ -354,7 +354,7 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
         f"**{perfect_cops:,} of {total_cops:,} cops match RuboCop exactly** (default config)"
     )
     if variant_perfect > 0 and variant_perfect < perfect_cops:
-        new_corpus_bullet += f", **{variant_perfect:,}** across all style variants"
+        new_corpus_bullet += f", **{variant_perfect:,}** across all `EnforcedStyle` variants"
     readme_text = re.sub(
         r"- .+open-source repos.+\n",
         f"- {new_corpus_bullet}\n",
