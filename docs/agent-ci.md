@@ -52,6 +52,17 @@ Agent runs have a hard timeout. Plan your work to finish well within it — a pa
   - `python3 scripts/investigate_cop.py Department/CopName --context`
   - `python3 scripts/dispatch_cops.py changed --base origin/main --head HEAD`
 
+## Variant Style Testing
+
+Many cops have configurable `EnforcedStyle` parameters. The CI gate tests all supported style values against the corpus, not just the default. A fix that works for the default style but breaks a variant will fail CI.
+
+- The task prompt's **Style Variant Divergence** section lists which variants diverge and by how much.
+- Add fixture tests for non-default styles using the `# nitrocop-config: EnforcedStyle: value` directive.
+- Spot-check a specific variant locally: `python3 scripts/check_cop.py Cop --rerun --clone --sample 5 --style EnforcedStyle=value`
+- The full CI gate runs `--check-variants` automatically, which tests all variant styles.
+- When the variant check fails, it now shows which repos diverge (e.g., `repo_a NC:3 RC:2 (FP)`). Use these to inspect the exact file.
+- **Do not assume a default-config fix works for all variants.** Always check the variant section in the task prompt and test each diverging style.
+
 ## Failure Handling
 
 - If the only plausible resolution is a full revert of the PR, stop and say so clearly instead of doing the revert.

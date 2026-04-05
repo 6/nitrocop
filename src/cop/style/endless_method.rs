@@ -19,46 +19,169 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: return early for receiver-bearing `DefNode`s before applying the endless-method
 /// style checks.
+///
+/// ## Variant-style divergence (2026-04-05)
+///
+/// Default `allow_single_line` behavior matched the corpus, but the non-default
+/// `require_single_line` / `require_always` styles had large FN counts because
+/// nitrocop only re-checked existing endless methods and never flagged regular
+/// `def .. end` bodies that RuboCop converts to endless form.
+///
+/// RuboCop's `can_be_made_endless?` works on parser AST bodies, while Prism
+/// wraps method bodies in a `StatementsNode`. The equivalent Prism condition is:
+/// exactly one body statement, and that single statement is not an explicit
+/// `begin .. end` body. The fix implements that mapping, preserves the existing
+/// multiline endless-method checks, and honors `MaxLineLength` /
+/// `LineLengthEnabled` when the endless replacement would be too long (including
+/// `private def ...` / `protected def ...` prefixes on the same line).
 pub struct EndlessMethod;
 
 impl EndlessMethod {
     /// Returns true if the def node's body is or contains a heredoc.
-    /// Mirrors RuboCop's `use_heredoc?` which checks for str-type heredoc nodes.
-    /// Uses a source-text scan of the first line after `=` for `<<` heredoc openers,
-    /// which is reliable because heredoc openers must appear on the `def` line.
-    fn body_uses_heredoc(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> bool {
-        // The heredoc opener (<<~FOO, <<-FOO, <<FOO) must appear on the same line
-        // as the `=` sign. Scan from equal_loc to end-of-line for `<<`.
-        let equal_loc = match def_node.equal_loc() {
-            Some(loc) => loc,
-            None => return false,
-        };
-        let src = source.as_bytes();
-        let start = equal_loc.end_offset();
-        // Scan forward on the same line for heredoc opener: `<<` followed by
-        // `~`, `-`, `'`, `"`, `` ` ``, or a word character (identifier start).
-        // This distinguishes heredocs from the `<<` shovel/bitshift operator.
-        let mut i = start;
-        while i + 1 < src.len() && src[i] != b'\n' {
-            if src[i] == b'<' && src[i + 1] == b'<' {
-                // Check what follows `<<`
-                if i + 2 < src.len() {
-                    let next = src[i + 2];
-                    if next == b'~'
-                        || next == b'-'
-                        || next == b'\''
-                        || next == b'"'
-                        || next == b'`'
-                        || next.is_ascii_alphabetic()
-                        || next == b'_'
-                    {
-                        return true;
-                    }
+    /// Mirrors RuboCop's `use_heredoc?` by walking string/xstring nodes under
+    /// the body and checking whether their opening delimiter starts with `<<`.
+    fn body_uses_heredoc(def_node: &ruby_prism::DefNode<'_>) -> bool {
+        use ruby_prism::Visit;
+
+        struct HeredocVisitor {
+            found: bool,
+        }
+
+        impl HeredocVisitor {
+            fn visit_heredoc<'pr>(&mut self, opening: Option<ruby_prism::Location<'pr>>) {
+                if self.found {
+                    return;
+                }
+                if opening.is_some_and(|loc| loc.as_slice().starts_with(b"<<")) {
+                    self.found = true;
                 }
             }
-            i += 1;
         }
-        false
+
+        impl<'pr> Visit<'pr> for HeredocVisitor {
+            fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+                self.visit_heredoc(node.opening_loc());
+                if !self.found {
+                    ruby_prism::visit_string_node(self, node);
+                }
+            }
+
+            fn visit_interpolated_string_node(
+                &mut self,
+                node: &ruby_prism::InterpolatedStringNode<'pr>,
+            ) {
+                self.visit_heredoc(node.opening_loc());
+                if !self.found {
+                    ruby_prism::visit_interpolated_string_node(self, node);
+                }
+            }
+
+            fn visit_x_string_node(&mut self, node: &ruby_prism::XStringNode<'pr>) {
+                self.visit_heredoc(Some(node.opening_loc()));
+                if !self.found {
+                    ruby_prism::visit_x_string_node(self, node);
+                }
+            }
+
+            fn visit_interpolated_x_string_node(
+                &mut self,
+                node: &ruby_prism::InterpolatedXStringNode<'pr>,
+            ) {
+                self.visit_heredoc(Some(node.opening_loc()));
+                if !self.found {
+                    ruby_prism::visit_interpolated_x_string_node(self, node);
+                }
+            }
+        }
+
+        let Some(body) = def_node.body() else {
+            return false;
+        };
+
+        let mut visitor = HeredocVisitor { found: false };
+        visitor.visit(&body);
+        visitor.found
+    }
+
+    fn is_single_line(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> bool {
+        let (start_line, _) = source.offset_to_line_col(loc.start_offset());
+        let (end_line, _) = source.offset_to_line_col(loc.end_offset());
+        start_line == end_line
+    }
+
+    fn single_body_statement(body: ruby_prism::Node<'_>) -> Option<ruby_prism::Node<'_>> {
+        if let Some(stmts) = body.as_statements_node() {
+            let body_nodes: Vec<_> = stmts.body().iter().collect();
+            if body_nodes.len() == 1 {
+                body_nodes.into_iter().next()
+            } else {
+                None
+            }
+        } else {
+            Some(body)
+        }
+    }
+
+    fn can_be_made_endless(def_node: &ruby_prism::DefNode<'_>) -> bool {
+        let Some(body) = def_node.body() else {
+            return false;
+        };
+        let Some(stmt) = Self::single_body_statement(body) else {
+            return false;
+        };
+        stmt.as_begin_node().is_none()
+    }
+
+    fn arguments_source(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> String {
+        let Some(params) = def_node.parameters() else {
+            return String::new();
+        };
+
+        if let (Some(lparen), Some(rparen)) = (def_node.lparen_loc(), def_node.rparen_loc()) {
+            return source
+                .byte_slice(lparen.start_offset(), rparen.end_offset(), "")
+                .to_string();
+        }
+
+        let params_loc = params.location();
+        let params_src = source.byte_slice(params_loc.start_offset(), params_loc.end_offset(), "");
+        if params_src.is_empty() {
+            String::new()
+        } else {
+            format!(" {params_src}")
+        }
+    }
+
+    fn endless_replacement_length(
+        source: &SourceFile,
+        def_node: &ruby_prism::DefNode<'_>,
+    ) -> usize {
+        let body = match def_node.body() {
+            Some(body) => body,
+            None => return 0,
+        };
+        let body_loc = body.location();
+        let body_src = source.byte_slice(body_loc.start_offset(), body_loc.end_offset(), "");
+        let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
+        let arguments = Self::arguments_source(source, def_node);
+
+        "def ".len() + method_name.len() + arguments.len() + " = ".len() + body_src.len()
+    }
+
+    fn too_long_when_made_endless(
+        source: &SourceFile,
+        def_node: &ruby_prism::DefNode<'_>,
+        config: &CopConfig,
+    ) -> bool {
+        if !config.get_bool("LineLengthEnabled", true) {
+            return false;
+        }
+
+        let max_line_length = config.get_usize("MaxLineLength", 120);
+        // The def keyword column already accounts for both indentation and
+        // any access modifier prefix (e.g., `    private def` → column 12).
+        let (_, def_column) = source.offset_to_line_col(def_node.def_keyword_loc().start_offset());
+        def_column + Self::endless_replacement_length(source, def_node) > max_line_length
     }
 }
 
@@ -112,13 +235,11 @@ impl Cop for EndlessMethod {
         // RuboCop: return if use_heredoc?(node)
         // Skip methods whose body is or contains a heredoc.
         // Heredocs in Prism are StringNode/InterpolatedStringNode with opening starting with "<<".
-        if Self::body_uses_heredoc(source, &def_node) {
+        if Self::body_uses_heredoc(&def_node) {
             return;
         }
 
         let style = config.get_str("EnforcedStyle", "allow_single_line");
-
-        // Check if this is an endless method (has = sign, no end keyword)
         let is_endless = def_node.end_keyword_loc().is_none() && def_node.equal_loc().is_some();
 
         match style {
@@ -137,9 +258,7 @@ impl Cop for EndlessMethod {
             "allow_single_line" => {
                 if is_endless {
                     let loc = def_node.location();
-                    let (start_line, _) = source.offset_to_line_col(loc.start_offset());
-                    let (end_line, _) = source.offset_to_line_col(loc.end_offset());
-                    if end_line > start_line {
+                    if !Self::is_single_line(source, &loc) {
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
                         diagnostics.push(self.diagnostic(
                             source,
@@ -153,15 +272,10 @@ impl Cop for EndlessMethod {
             "allow_always" => {
                 // No offenses for endless methods
             }
-            "require_single_line" | "require_always" => {
-                // These styles want endless methods to be used
-                // We skip enforcement of "use endless" to keep this simple
-                // and focus on the "avoid" cases
+            "require_single_line" => {
                 if is_endless {
                     let loc = def_node.location();
-                    let (start_line, _) = source.offset_to_line_col(loc.start_offset());
-                    let (end_line, _) = source.offset_to_line_col(loc.end_offset());
-                    if end_line > start_line && style == "require_single_line" {
+                    if !Self::is_single_line(source, &loc) {
                         let (line, column) = source.offset_to_line_col(loc.start_offset());
                         diagnostics.push(self.diagnostic(
                             source,
@@ -170,6 +284,35 @@ impl Cop for EndlessMethod {
                             "Avoid endless method definitions with multiple lines.".to_string(),
                         ));
                     }
+                } else if Self::can_be_made_endless(&def_node)
+                    && def_node
+                        .body()
+                        .is_some_and(|body| Self::is_single_line(source, &body.location()))
+                    && !Self::too_long_when_made_endless(source, &def_node, config)
+                {
+                    let loc = def_node.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use endless method definitions for single line methods.".to_string(),
+                    ));
+                }
+            }
+            "require_always" => {
+                if !is_endless
+                    && Self::can_be_made_endless(&def_node)
+                    && !Self::too_long_when_made_endless(source, &def_node, config)
+                {
+                    let loc = def_node.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use endless method definitions.".to_string(),
+                    ));
                 }
             }
             _ => {}
@@ -181,12 +324,35 @@ impl Cop for EndlessMethod {
 mod tests {
     use super::*;
     use crate::cop::CopConfig;
+    use crate::testutil::run_cop_full_with_config;
 
     fn ruby30_config() -> CopConfig {
         let mut config = CopConfig::default();
         config.options.insert(
             "TargetRubyVersion".to_string(),
             serde_yml::Value::Number(serde_yml::Number::from(3.0)),
+        );
+        config
+    }
+
+    fn ruby30_style_config(style: &str) -> CopConfig {
+        let mut config = ruby30_config();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        config
+    }
+
+    fn ruby30_style_with_line_length(style: &str, max: u64, enabled: bool) -> CopConfig {
+        let mut config = ruby30_style_config(style);
+        config.options.insert(
+            "MaxLineLength".to_string(),
+            serde_yml::Value::Number(serde_yml::Number::from(max)),
+        );
+        config.options.insert(
+            "LineLengthEnabled".to_string(),
+            serde_yml::Value::Bool(enabled),
         );
         config
     }
@@ -206,6 +372,144 @@ mod tests {
             &EndlessMethod,
             include_bytes!("../../../tests/fixtures/cops/style/endless_method/no_offense.rb"),
             ruby30_config(),
+        );
+    }
+
+    #[test]
+    fn require_single_line_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &EndlessMethod,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/endless_method/require_single_line_offense.rb"
+            ),
+            ruby30_style_config("require_single_line"),
+        );
+    }
+
+    #[test]
+    fn require_single_line_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EndlessMethod,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/endless_method/require_single_line_no_offense.rb"
+            ),
+            ruby30_style_config("require_single_line"),
+        );
+    }
+
+    #[test]
+    fn require_always_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &EndlessMethod,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/endless_method/require_always_offense.rb"
+            ),
+            ruby30_style_config("require_always"),
+        );
+    }
+
+    #[test]
+    fn require_always_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EndlessMethod,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/endless_method/require_always_no_offense.rb"
+            ),
+            ruby30_style_config("require_always"),
+        );
+    }
+
+    #[test]
+    fn require_single_line_respects_line_length() {
+        let source =
+            b"def my_method\n  'this_string_ends_at_column_75_________________________________________'\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_with_line_length("require_single_line", 80, true),
+        );
+        assert!(
+            diags.is_empty(),
+            "Endless replacement exceeding MaxLineLength should be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_single_line_ignores_line_length_when_disabled() {
+        let source =
+            b"def my_method\n  'this_string_ends_at_column_75_________________________________________'\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_with_line_length("require_single_line", 80, false),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "Use endless method definitions for single line methods."
+        );
+    }
+
+    #[test]
+    fn require_single_line_flags_access_modifier_def() {
+        let source = b"private def my_method\n  x\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_single_line"),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 8);
+        assert_eq!(
+            diags[0].message,
+            "Use endless method definitions for single line methods."
+        );
+    }
+
+    #[test]
+    fn require_single_line_skips_regular_heredoc_body() {
+        let source = b"def my_method\n  <<~HEREDOC\n    hello\n  HEREDOC\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_single_line"),
+        );
+        assert!(
+            diags.is_empty(),
+            "Heredoc bodies should be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_single_line_respects_indentation_in_line_length() {
+        // `def x\n  y\nend` is only 10 chars as endless (`def x = y`), but
+        // when indented 76 spaces the total line is 86 chars — over limit 80.
+        let mut source = Vec::new();
+        source.extend_from_slice(&[b' '; 76]);
+        source.extend_from_slice(b"def x\n  y\nend\n");
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            &source,
+            ruby30_style_with_line_length("require_single_line", 80, true),
+        );
+        assert!(
+            diags.is_empty(),
+            "Indentation should be counted in line length check, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_always_skips_regular_xstring_heredoc_body() {
+        let source = b"def my_method\n  <<~`HEREDOC`\n    echo hello\n  HEREDOC\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_always"),
+        );
+        assert!(
+            diags.is_empty(),
+            "XString heredoc bodies should be skipped, got: {diags:?}"
         );
     }
 }

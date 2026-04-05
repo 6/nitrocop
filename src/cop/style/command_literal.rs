@@ -3,15 +3,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Corpus FN investigation (0 FP / 11 FN): RuboCop treats any backtick byte inside
-/// a backtick command body's source as a reason to prefer `%x`, including nested
-/// command literals inside interpolation such as ``#{`status`}`` and multiline
-/// callbacks that call ``block.call(`realpath`)``. The previous implementation only
-/// looked for the escaped `\\`` sequence in backtick literals and, under
-/// `EnforcedStyle: backticks`, never emitted the `%x` offense for backtick literals
-/// whose bodies already contained backticks. Match RuboCop by scanning the literal
-/// body between the opening and closing delimiters for any backtick byte and by
-/// flagging those backtick literals as `%x`.
+/// Corpus investigations found two RuboCop-matching edge cases for command
+/// literals:
+/// - inner backtick bytes anywhere in the literal body force `%x` unless
+///   `AllowInnerBackticks` is enabled, including nested command literals inside
+///   interpolation;
+/// - under `EnforcedStyle: mixed`, any command literal whose source contains a
+///   newline byte is multiline, even when it spans exactly two lines like
+///   `%x(ls\n)` or ``ls\n``.
+///
+/// The previous implementation already missed the inner-backtick case, and it
+/// also required more than one newline byte before treating a node as
+/// multiline. Match RuboCop by scanning the full literal body for backticks and
+/// by treating any newline in the node source as multiline.
 pub struct CommandLiteral;
 
 impl Cop for CommandLiteral {
@@ -60,7 +64,7 @@ impl Cop for CommandLiteral {
             .get(opening.end_offset()..closing.start_offset())
             .unwrap_or(&[]);
         let is_backtick = opening_bytes == b"`";
-        let is_multiline = node_source.iter().filter(|&&b| b == b'\n').count() > 1;
+        let is_multiline = node_source.contains(&b'\n');
         let content_has_backticks = body.contains(&b'`');
 
         let disallowed_backtick = !allow_inner_backticks && content_has_backticks;
@@ -125,5 +129,47 @@ impl Cop for CommandLiteral {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+    };
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(CommandLiteral, "cops/style/command_literal");
+
+    fn mixed_config() -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("mixed".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn mixed_style_two_line_backtick_literal_is_an_offense() {
+        let fixture =
+            b"foo = `ls\n      ^ Style/CommandLiteral: Use `%x` around command string.\n`\n";
+        assert_cop_offenses_full_with_config(&CommandLiteral, fixture, mixed_config());
+    }
+
+    #[test]
+    fn mixed_style_two_line_percent_x_literal_is_allowed() {
+        let fixture = b"foo = %x(ls\n)\n";
+        assert_cop_no_offenses_full_with_config(&CommandLiteral, fixture, mixed_config());
+    }
+
+    #[test]
+    fn mixed_style_backslash_continued_backtick_literal_is_an_offense() {
+        let fixture = b"foo = `grep -sqxF #{needle} \"#{path}\" \\\n      ^ Style/CommandLiteral: Use `%x` around command string.\n  || echo #{needle} >> \"#{path}\"`\n";
+        assert_cop_offenses_full_with_config(&CommandLiteral, fixture, mixed_config());
+    }
+
+    #[test]
+    fn mixed_style_backslash_continued_percent_x_literal_is_allowed() {
+        let fixture = b"foo = %x(ruby #{script} \\\n  | #{command} > out.svg)\n";
+        assert_cop_no_offenses_full_with_config(&CommandLiteral, fixture, mixed_config());
+    }
 }

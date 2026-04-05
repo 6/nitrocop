@@ -750,6 +750,38 @@ def test_load_variant_baselines_no_run_id():
     assert check_cop.load_variant_baselines("Style/Foo", None) == {}
 
 
+def test_variant_batch_configs_have_resolvable_inherit_from(tmp_path):
+    """Variant batch configs must use inherit_from paths that resolve from the config's directory.
+
+    Regression test: when configs were generated in a temp dir, inherit_from: ../baseline_rubocop.yml
+    pointed to nothing, causing rubocop to silently return 0 offenses and making all nitrocop
+    offenses look like FP.
+    """
+    import yaml
+
+    # Generate batches in the standard location
+    batches_dir = Path(__file__).parents[2] / "bench" / "corpus" / "variant_batches"
+    if not batches_dir.exists():
+        import sys
+        sys.path.insert(0, str(Path(__file__).parents[2] / "bench" / "corpus"))
+        from gen_variant_batches import generate_batches
+        generate_batches(batches_dir)
+
+    class _Loader(yaml.SafeLoader):
+        pass
+    _Loader.add_multi_constructor("!", lambda loader, suffix, node: loader.construct_scalar(node))
+
+    for batch_file in sorted(batches_dir.glob("variant_batch_*.yml")):
+        data = yaml.load(batch_file.read_text(), Loader=_Loader)
+        inherit = data.get("inherit_from", "")
+        if inherit:
+            resolved = (batch_file.parent / inherit).resolve()
+            assert resolved.exists(), (
+                f"{batch_file.name}: inherit_from '{inherit}' resolves to "
+                f"{resolved} which does not exist"
+            )
+
+
 def test_run_variant_checks_handles_rubocop_errors(tmp_path):
     """When rubocop returns negative count (error), still produces results."""
     batches = tmp_path / "batches"
@@ -867,3 +899,95 @@ def test_spot_check_mixed_cloned_and_missing_repos():
     finally:
         check_cop._CLONE_DIR = original_clone_dir
         check_cop.NITROCOP_BIN = original_nitrocop_bin
+
+
+# ── _run_rubocop_for_variant filtering/dedup tests ──
+
+
+def test_run_rubocop_for_variant_filters_to_requested_cop(monkeypatch):
+    """_run_rubocop_for_variant must only count offenses for the requested cop,
+    not Lint/Syntax or other cops that RuboCop emits alongside --only."""
+    rubocop_json = json.dumps({
+        "files": [{
+            "path": "/tmp/repo/app.rb",
+            "offenses": [
+                {"cop_name": "Style/Foo", "location": {"line": 1}},
+                {"cop_name": "Lint/Syntax", "location": {"line": 2}},
+                {"cop_name": "Lint/Syntax", "location": {"line": 3}},
+                {"cop_name": "Style/Foo", "location": {"line": 5}},
+            ],
+        }],
+    })
+
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = rubocop_json
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = check_cop._run_rubocop_for_variant(
+        "/tmp/repo", cop="Style/Foo", config="/tmp/config.yml")
+    assert result["count"] == 2, (
+        "Should count only Style/Foo offenses, not Lint/Syntax")
+
+
+def test_run_rubocop_for_variant_deduplicates_by_path_line(monkeypatch):
+    """_run_rubocop_for_variant must deduplicate by (path, line) to match
+    the dedup that run_nitrocop applies on the nitrocop side."""
+    rubocop_json = json.dumps({
+        "files": [{
+            "path": "/tmp/repo/app.rb",
+            "offenses": [
+                {"cop_name": "Style/Foo", "location": {"line": 1}},
+                {"cop_name": "Style/Foo", "location": {"line": 1}},
+                {"cop_name": "Style/Foo", "location": {"line": 5}},
+            ],
+        }],
+    })
+
+    def fake_run(cmd, **kwargs):
+        class Result:
+            stdout = rubocop_json
+        return Result()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = check_cop._run_rubocop_for_variant(
+        "/tmp/repo", cop="Style/Foo", config="/tmp/config.yml")
+    assert result["count"] == 2, (
+        "Should deduplicate: two offenses at line 1 count as one")
+
+
+def test_run_variant_checks_includes_diverging_repos():
+    """run_variant_checks should include per-repo divergence info."""
+    batches = "/tmp/batches"
+    calls = {"nc": 0, "rc": 0}
+
+    def fake_nc(*a, **kw):
+        calls["nc"] += 1
+        # First repo: NC=3, Second repo: NC=2
+        return {"count": 3 if calls["nc"] == 1 else 2}
+
+    def fake_rc(*a, **kw):
+        calls["rc"] += 1
+        # First repo: RC=2 (diverges), Second repo: RC=2 (matches)
+        return {"count": 2}
+
+    import unittest.mock as mock
+    with mock.patch.object(check_cop, "variant_styles_for_cop", return_value=[
+        {"batch_config": "/tmp/batch.yml", "style_label": "test_style"},
+    ]):
+        results = check_cop.run_variant_checks(
+            cop_name="Style/Foo",
+            repo_dirs=["/tmp/repo_a", "/tmp/repo_b"],
+            batches_dir=batches,
+            run_nitrocop_fn=fake_nc,
+            run_rubocop_fn=fake_rc,
+        )
+
+    assert len(results) == 1
+    assert results[0]["fp"] == 1  # NC=5, RC=4
+    assert len(results[0]["diverging_repos"]) == 1
+    dr = results[0]["diverging_repos"][0]
+    assert dr["repo"] == "repo_a"
+    assert dr["nc"] == 3
+    assert dr["rc"] == 2

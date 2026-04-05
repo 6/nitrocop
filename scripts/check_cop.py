@@ -773,6 +773,41 @@ def load_variant_baselines(
     return baselines
 
 
+def load_variant_example_repos(
+    cop_name: str, run_id: int | None,
+) -> list[str]:
+    """Extract repo IDs from oracle variant FP/FN examples.
+
+    Returns a list of repo IDs that the oracle identified as having variant
+    divergence for this cop. Used to prioritize variant sampling — these
+    repos are most likely to reproduce the regression.
+    """
+    if run_id is None:
+        return []
+    from shared.corpus_artifacts import get_variant_results_path
+    path = get_variant_results_path(run_id)
+    if not path:
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    repo_ids: list[str] = []
+    seen: set[str] = set()
+    for batch in data.get("batches", []):
+        for cop_entry in batch.get("by_cop", []):
+            if cop_entry.get("cop") != cop_name:
+                continue
+            for ex in cop_entry.get("fp_examples", []) + cop_entry.get("fn_examples", []):
+                loc = ex.get("loc", "") if isinstance(ex, dict) else str(ex)
+                if ": " in loc:
+                    repo_id = loc.split(": ", 1)[0]
+                    if repo_id not in seen:
+                        seen.add(repo_id)
+                        repo_ids.append(repo_id)
+    return repo_ids
+
+
 def run_variant_checks(
     *,
     cop_name: str,
@@ -813,6 +848,8 @@ def run_variant_checks(
         nc_total = 0
         rc_total = 0
         rc_errors = 0
+        # Per-repo counts for debugging which repos diverge
+        repo_counts: list[dict] = []
 
         for repo_dir in repo_dirs:
             if run_nitrocop_fn:
@@ -839,6 +876,29 @@ def run_variant_checks(
             else:
                 rc_errors += 1
 
+            repo_id = Path(repo_dir).name
+            if nc_count != rc_count:
+                # Compute specific FP/FN locations when available
+                nc_locs = set()
+                for o in nc_result.get("offenses", []):
+                    p = os.path.realpath(o.get("path", ""))
+                    nc_locs.add((p, o.get("line", 0)))
+                rc_locs = rc_result.get("locations", set())
+                fp_locs = sorted(nc_locs - rc_locs)[:3] if nc_locs and rc_locs else []
+                fn_locs = sorted(rc_locs - nc_locs)[:3] if nc_locs and rc_locs else []
+                # Format as relative paths
+                prefix = repo_dir.rstrip("/") + "/"
+                def fmt(loc: tuple) -> str:
+                    p = loc[0].replace(prefix, "") if loc[0].startswith(prefix) else loc[0]
+                    return f"{p}:{loc[1]}"
+                repo_counts.append({
+                    "repo": repo_id,
+                    "nc": max(0, nc_count),
+                    "rc": max(0, rc_count),
+                    "fp_locs": [fmt(loc) for loc in fp_locs],
+                    "fn_locs": [fmt(loc) for loc in fn_locs],
+                })
+
         baseline = variant_baselines.get(label, {})
         results.append({
             "style_label": label,
@@ -850,6 +910,7 @@ def run_variant_checks(
             "rubocop_errors": rc_errors,
             "baseline_fp": baseline.get("fp", 0),
             "baseline_fn": baseline.get("fn", 0),
+            "diverging_repos": repo_counts,
         })
 
     return results
@@ -879,11 +940,15 @@ def _run_rubocop_for_variant(
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, env=env)
         data = json.loads(result.stdout)
-        count = sum(
-            len(f.get("offenses", []))
-            for f in data.get("files", [])
-        )
-        return {"count": count}
+        # Filter to only the requested cop and deduplicate by (path, line),
+        # matching the deduplication that run_nitrocop applies on the NC side.
+        seen: set[tuple[str, int]] = set()
+        for f in data.get("files", []):
+            fpath = os.path.realpath(f.get("path", ""))
+            for o in f.get("offenses", []):
+                if o.get("cop_name") == cop:
+                    seen.add((fpath, o["location"]["line"]))
+        return {"count": len(seen), "locations": seen}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return {"count": -1}
 
@@ -1455,12 +1520,14 @@ def main():
         print("PASS: no per-repo regressions vs baseline (default config)")
 
         # ── Variant style checks ──
+        variant_failed = False
         if args.check_variants and _CLONE_DIR is not None:
             # Generate variant batch configs if not provided
             variant_batches = args.variant_batches_dir
             if not variant_batches:
-                import tempfile
-                variant_batches = tempfile.mkdtemp(prefix="variant_batches_")
+                # Generate into the repo's variant_batches dir so that
+                # inherit_from: ../baseline_rubocop.yml resolves correctly.
+                variant_batches = str(PROJECT_ROOT / "bench" / "corpus" / "variant_batches")
                 sys.path.insert(0, str(PROJECT_ROOT / "bench" / "corpus"))
                 from gen_variant_batches import generate_batches
                 generate_batches(Path(variant_batches))
@@ -1468,9 +1535,30 @@ def main():
             # Load variant baselines from the oracle for delta computation
             vb = load_variant_baselines(args.cop, corpus_run_id)
 
-            # Collect all cloned repo directories
+            # Collect cloned repo directories, capped for variant checks.
+            # Variant bugs are systematic (wrong code path for a style), not
+            # repo-specific edge cases, so a small sample catches them.
+            VARIANT_SAMPLE = 20
             corpus_dir = _CLONE_DIR
-            repo_dirs = sorted(str(d) for d in corpus_dir.iterdir() if d.is_dir())
+            all_repo_dirs = sorted(str(d) for d in corpus_dir.iterdir() if d.is_dir())
+
+            # Mix oracle-priority repos (known variant divergence) with a
+            # spread from the rest.  Oracle repos catch known regressions;
+            # the spread catches NEW regressions the oracle hasn't seen.
+            oracle_repos = load_variant_example_repos(args.cop, corpus_run_id)
+            oracle_set = set(oracle_repos) if oracle_repos else set()
+            priority = [d for d in all_repo_dirs if Path(d).name in oracle_set]
+            rest = [d for d in all_repo_dirs if Path(d).name not in oracle_set]
+            # Take up to half the sample from oracle, fill the rest with spread
+            max_oracle = min(len(priority), VARIANT_SAMPLE // 2)
+            remaining_slots = VARIANT_SAMPLE - max_oracle
+            # Spread: evenly space through the rest list for diversity
+            if rest and remaining_slots > 0:
+                step = max(1, len(rest) // remaining_slots)
+                spread = rest[::step][:remaining_slots]
+            else:
+                spread = []
+            repo_dirs = priority[:max_oracle] + spread
 
             if repo_dirs:
                 print()
@@ -1483,12 +1571,22 @@ def main():
                     variant_baselines=vb,
                 )
 
+                variant_failed = False
                 if variant_results:
                     print()
                     print("  Variant results:")
                     print(f"  {'Style':<30} {'NC':>8} {'RC':>8} {'FP':>6} {'FN':>6}  {'BL FP':>6} {'BL FN':>6}")
                     print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*6} {'-'*6}  {'-'*6} {'-'*6}")
                     for vr in variant_results:
+                        # Regression: local FP/FN on this shard's repos exceeds
+                        # what's expected. Since baseline is global (all repos) and
+                        # the shard is a subset, we can't compare directly. Instead,
+                        # flag when baseline was 0 but local has FP/FN (new regression),
+                        # or when local FP/FN exceeds the global baseline (definitely worse).
+                        fp_regressed = (vr['fp'] > 0 and vr['baseline_fp'] == 0) or vr['fp'] > vr['baseline_fp']
+                        fn_regressed = (vr['fn'] > 0 and vr['baseline_fn'] == 0) or vr['fn'] > vr['baseline_fn']
+                        v_result = "fail" if fp_regressed or fn_regressed else "pass"
+                        marker = " ← REGRESSION" if v_result == "fail" else ""
                         print(
                             f"  {vr['style_label']:<30} "
                             f"{vr['nitrocop_total']:>8,} "
@@ -1496,20 +1594,47 @@ def main():
                             f"{vr['fp']:>6,} "
                             f"{vr['fn']:>6,}  "
                             f"{vr['baseline_fp']:>6,} "
-                            f"{vr['baseline_fn']:>6,}"
+                            f"{vr['baseline_fn']:>6,}{marker}"
                         )
-                        # Emit SUMMARY lines for CI PR comment (variant rows)
-                        v_result = "pass"
+                        # Build diverging repo detail for the SUMMARY line
+                        diverging = vr.get("diverging_repos", [])
+                        detail = ""
+                        if diverging:
+                            parts = []
+                            for dr in diverging[:5]:
+                                kind = "FP" if dr["nc"] > dr["rc"] else "FN"
+                                locs = dr.get("fp_locs", []) if kind == "FP" else dr.get("fn_locs", [])
+                                if locs:
+                                    loc_str = ",".join(locs[:2])
+                                    parts.append(f"{dr['repo']}({kind}:{loc_str})")
+                                else:
+                                    parts.append(f"{dr['repo']}({kind})")
+                            detail = " ".join(parts)
                         print(
                             f"SUMMARY|{args.cop} ({vr['style_label']})"
                             f"|{vr['baseline_fp']}|{vr['baseline_fn']}"
                             f"|{vr['fp']}|{vr['fn']}|{v_result}|0|0"
+                            f"|{detail}"
                         )
+                        if v_result == "fail":
+                            variant_failed = True
+                            # Show which repos diverge so agents can debug
+                            for dr in vr.get("diverging_repos", [])[:5]:
+                                fp_flag = " (FP)" if dr["nc"] > dr["rc"] else " (FN)" if dr["rc"] > dr["nc"] else ""
+                                print(f"    {dr['repo']}  NC:{dr['nc']} RC:{dr['rc']}{fp_flag}")
+                                for loc in dr.get("fp_locs", []):
+                                    print(f"      FP: {loc}")
+                                for loc in dr.get("fn_locs", []):
+                                    print(f"      FN: {loc}")
                     print()
+                    if variant_failed:
+                        print(f"FAIL: variant style regression detected for {args.cop}")
                 else:
                     print(f"  No variant overrides for {args.cop}")
                     print()
 
+        if variant_failed:
+            sys.exit(1)
         sys.exit(0)
 
     # Per-repo gate should have handled this — if we reach here, something is wrong

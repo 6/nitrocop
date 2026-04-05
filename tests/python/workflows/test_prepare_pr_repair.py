@@ -304,6 +304,59 @@ def test_build_prompt_no_variant_context_when_empty():
     assert "Variant Style Regression" not in prompt
 
 
+def test_variant_regression_adds_check_variants_to_verify_commands():
+    """When variant context exists, --check-variants is appended to check_cop.py
+    in verification commands so the repair agent can't bypass variant checks."""
+    cop_check_cmd = (
+        'python3 scripts/dispatch_cops.py changed --base origin/main --head HEAD > "$REPAIR_CHANGED_COPS_FILE"\n'
+        'failed=0\n'
+        'while IFS= read -r cop; do\n'
+        '  [ -z "$cop" ] && continue\n'
+        '  if ! python3 scripts/check_cop.py "$cop" --verbose --rerun --clone; then\n'
+        '    failed=$((failed + 1))\n'
+        '  fi\n'
+        'done < "$REPAIR_CHANGED_COPS_FILE"\n'
+        'test "$failed" -eq 0'
+    )
+    classification = {
+        "route": "hard",
+        "backend": "codex-hard",
+        "guard_profile": "repair-cop-check",
+        "cop_check_failure": True,
+        "jobs": [],
+        "hard_jobs": [],
+        "easy_jobs": [],
+        "skip_jobs": [],
+        "verification_commands": [cop_check_cmd],
+        "reason": "cop-check: variant regression",
+    }
+    # Simulate what main() does: when variant context is non-empty,
+    # modify verification_commands before building verify script
+    vc = "## Variant Style Regression\n\nBroken."
+    if vc:
+        classification["verification_commands"] = [
+            cmd.replace(
+                'scripts/check_cop.py "$cop" --verbose --rerun --clone',
+                'scripts/check_cop.py "$cop" --verbose --rerun --clone --check-variants',
+            )
+            for cmd in classification["verification_commands"]
+        ]
+    verify = prepare_pr_repair.build_verification_script(classification["verification_commands"])
+    assert "--check-variants" in verify, (
+        "Variant regression repairs must include --check-variants in verify script"
+    )
+    # Prompt should also show the updated commands
+    run = {"number": 1, "workflowName": "Checks"}
+    pr_meta = {"number": "1553", "title": "[bot] Fix Style/Foo", "headRefName": "fix/foo"}
+    prompt = prepare_pr_repair.build_prompt(
+        run=run, classification=classification, pr_meta=pr_meta,
+        diff_stat="", diff_text="", extra_context="", variant_context=vc,
+    )
+    assert "--check-variants" in prompt, (
+        "Prompt must show --check-variants so agent knows variants are verified"
+    )
+
+
 if __name__ == "__main__":
     test_easy_linux_failure_routes_to_codex()
     test_hard_cop_check_routes_to_codex()
@@ -323,4 +376,5 @@ if __name__ == "__main__":
     test_build_variant_context_empty_without_data()
     test_build_prompt_includes_variant_context()
     test_build_prompt_no_variant_context_when_empty()
+    test_variant_regression_adds_check_variants_to_verify_commands()
     print("All tests passed.")

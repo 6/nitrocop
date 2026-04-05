@@ -15,7 +15,7 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 **Features**
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
-- **99.9% conformance** against RuboCop across [**5,590 open-source repos**](docs/corpus.md)
+- Tested on [**5,590 open-source repos**](docs/corpus.md): **845 of 915 cops match RuboCop exactly** (default config), **742** across all style variants
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -52,29 +52,24 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 ## Cops
 
 <!-- corpus-cops:start -->
-nitrocop supports 915 cops from 7 RuboCop gems.
+Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
 
-Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files).
-
-862 of 915 cops produce identical results to RuboCop (default config).
-When tested with all style variants (e.g. `EnforcedStyle: comma`), 728 of 915 match exactly.
-
-**Default** = tested with default RuboCop config. **All variants** = tested with every supported `EnforcedStyle` value.
+**Default** = default RuboCop config. **All variants** = every supported `EnforcedStyle` (e.g. `EnforcedStyle: comma`).
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Layout | 100 | 89 | 59 |
+| Layout | 100 | 90 | 59 |
 | Lint | 148 | 145 | 141 |
-| Style | 287 | 268 | 221 |
+| Style | 287 | 276 | 233 |
 | Metrics | 10 | **10 ✓** | **10 ✓** |
-| Naming | 19 | **19 ✓** | 13 |
+| Naming | 19 | **19 ✓** | 14 |
 | Security | 6 | **6 ✓** | **6 ✓** |
 | Bundler | 7 | **7 ✓** | **7 ✓** |
 | Gemspec | 10 | **10 ✓** | 9 |
 | Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **555 (94.3%)** | **467 (79.4%)** |
+| **Total** | **588** | **564 (95.9%)** | **480 (81.6%)** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
@@ -110,7 +105,7 @@ When tested with all style variants (e.g. `EnforcedStyle: comma`), 728 of 915 ma
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Rake | 5 | 3 | 3 |
+| Rake | 5 | 4 | 4 |
 
 See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.
 <!-- corpus-cops:end -->

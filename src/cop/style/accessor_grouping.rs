@@ -77,6 +77,20 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: added `call.arguments().is_some()` check when identifying accessor calls and when
 /// checking if the previous sibling is an accessor in `is_groupable_accessor`.
+///
+/// ## Investigation findings (2026-04-05, EnforcedStyle: separated)
+///
+/// 8,358 FNs from the `separated` style variant — the implementation only handled
+/// `EnforcedStyle: grouped` (the default) and had no code path for `separated`.
+///
+/// RuboCop's `separated` style flags any accessor call (`attr_reader`, `attr_writer`,
+/// `attr_accessor`, `attr`) that has more than one argument. The same `previous_line_comment?`
+/// and `groupable_accessor?` filters apply: accessors preceded by a comment or a non-accessor
+/// send without a blank line gap are excluded.
+///
+/// Fix: added `check_separated()` that iterates accessor calls in the class/module body and
+/// reports an offense when `arguments.len() > 1`, applying the same comment/groupability
+/// filters. Message: "Use one attribute per `<accessor>`."
 pub struct AccessorGrouping;
 
 const ACCESSOR_METHODS: &[&str] = &["attr_reader", "attr_writer", "attr_accessor", "attr"];
@@ -130,6 +144,8 @@ impl Cop for AccessorGrouping {
 
         if enforced_style == "grouped" {
             check_grouped(self, source, &stmts, diagnostics);
+        } else if enforced_style == "separated" {
+            check_separated(self, source, &stmts, diagnostics);
         }
     }
 }
@@ -148,6 +164,49 @@ struct StmtInfo {
     groupable: bool,
     /// Whether the line before this accessor is a comment
     has_previous_line_comment: bool,
+}
+
+fn check_separated(
+    cop: &AccessorGrouping,
+    source: &SourceFile,
+    stmts: &ruby_prism::StatementsNode<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let stmt_list: Vec<_> = stmts.body().iter().collect();
+
+    for (idx, stmt) in stmt_list.iter().enumerate() {
+        let call = match stmt.as_call_node() {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
+        if !ACCESSOR_METHODS.contains(&name) || call.receiver().is_some() {
+            continue;
+        }
+
+        let arg_count = call.arguments().map_or(0, |args| args.arguments().len());
+        if arg_count <= 1 {
+            continue;
+        }
+
+        // Same filters as grouped style: skip if previous line is a comment or not groupable
+        if previous_line_is_comment(source, stmt.location().start_offset()) {
+            continue;
+        }
+        if !is_groupable_accessor(source, &stmt_list, idx) {
+            continue;
+        }
+
+        let loc = stmt.location();
+        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        diagnostics.push(cop.diagnostic(
+            source,
+            line,
+            column,
+            format!("Use one attribute per `{}`.", name),
+        ));
+    }
 }
 
 fn check_grouped(
@@ -393,4 +452,38 @@ fn has_inline_rbs_comment(source: &SourceFile, start_offset: usize) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AccessorGrouping, "cops/style/accessor_grouping");
+
+    fn separated_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("separated".to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_separated() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &AccessorGrouping,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/accessor_grouping/offense.separated.rb"
+            ),
+            separated_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_separated() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &AccessorGrouping,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/accessor_grouping/no_offense.separated.rb"
+            ),
+            separated_config(),
+        );
+    }
 }
