@@ -115,6 +115,11 @@ def format_match_rate(rate: float) -> str:
     return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
+def format_match_rate_precise(rate: float) -> str:
+    """Format match rate floored to 0.01%: 0.99829 -> '99.82%', never rounds up to 100%."""
+    return f"{math.floor(rate * 10000) / 100:.2f}%"
+
+
 def format_exact_match_pct(exact: int, total: int) -> str:
     """Format cop exact-match coverage across total cops."""
     if total <= 0:
@@ -369,7 +374,7 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
             f"\n  - **{variant_perfect:,} of {total_cops:,}** match across all `EnforcedStyle` variants"
         )
     if total_compared > 0 and total_matches > 0:
-        match_pct = format_match_rate(total_matches / total_compared)
+        match_pct = format_match_rate_precise(total_matches / total_compared)
         new_corpus_lines += (
             f"\n  - Across **{format_count_precise(total_compared)}** offenses compared, "
             f"**{format_count_precise(total_matches)}** ({match_pct}) match exactly with default config"

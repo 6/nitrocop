@@ -26,6 +26,11 @@ def fmt_pct(rate: float) -> str:
     return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
+def fmt_pct_precise(rate: float) -> str:
+    """Two-decimal match rate, floored: 0.99829 -> '99.82%'."""
+    return f"{math.floor(rate * 10000) / 100:.2f}%"
+
+
 def _sanitize_for_md(s: str) -> str:
     return "".join(
         repr(c)[1:-1] if ord(c) < 0x20 and c not in '\n\t' else c
@@ -110,9 +115,9 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     md.append(f"| Cops with exact match | {perfect_cops:,} |")
     md.append(f"| Cops with divergence | {diverging_cops_count:,} |")
     md.append(f"| Cops with no corpus data | {inactive_cops:,} |")
-    md.append(f"| **Match rate (default config)** | **{fmt_pct(overall_rate)}** |")
+    md.append(f"| **Match rate (default config)** | **{fmt_pct_precise(overall_rate)}** |")
     if variant_by_cop:
-        md.append(f"| **Match rate (all variants)** | **{fmt_pct(variant_overall_rate)}** |")
+        md.append(f"| **Match rate (all variants)** | **{fmt_pct_precise(variant_overall_rate)}** |")
     if repos_error > 0 or warning_repos:
         md.append(f"| Repos with errors | {repos_error} |")
     if warning_repos:
