@@ -102,7 +102,7 @@ def ensure_dirs(paths: dict[str, str]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Emit canonical runtime paths for agent workflows")
-    parser.add_argument("workflow", choices=["agent-cop-fix", "agent-pr-repair"])
+    parser.add_argument("workflow", choices=["agent-cop-fix", "agent-pr-repair", "agent-cop-audit"])
     parser.add_argument("--runner-temp", type=Path, required=True)
     args = parser.parse_args()
 

@@ -1456,6 +1456,108 @@ def detect_prism_pitfalls(rust_source: str) -> list[str]:
     return notes
 
 
+def _extract_default_config_entry(cop: str) -> str | None:
+    """Extract the YAML config block for a cop from the vendored default config."""
+    dept = cop.split("/")[0]
+    vendor_gem = DEPT_TO_VENDOR.get(dept)
+    if not vendor_gem:
+        return None
+    config_path = PROJECT_ROOT / vendor_gem / "config" / "default.yml"
+    if not config_path.exists():
+        return None
+    lines = config_path.read_text(errors="replace").splitlines()
+    result = []
+    capturing = False
+    for line in lines:
+        if line.startswith(f"{cop}:"):
+            capturing = True
+            result.append(line)
+        elif capturing:
+            if line and not line[0].isspace() and not line.startswith("#"):
+                break
+            result.append(line)
+    return "\n".join(result) if result else None
+
+
+def generate_audit_task(cops: list[str], mode: str = "fix") -> str:
+    """Generate a ground-truth audit prompt comparing Ruby and Rust implementations."""
+    sections = []
+    sections.append("# Cop Ground-Truth Audit")
+    sections.append("")
+    if mode == "fix":
+        sections.append(
+            "Compare each cop's Ruby source (ground truth) against our Rust implementation. "
+            "Fix any divergences you find. Validate each fix with `cargo test --lib`."
+        )
+    else:
+        sections.append(
+            "Compare each cop's Ruby source (ground truth) against our Rust implementation. "
+            "Report all divergences but do NOT modify code."
+        )
+    sections.append("")
+    sections.append("## Checklist (check ALL of these for each cop)")
+    sections.append("")
+    sections.append("1. **Config attributes**: Compare the `config/default.yml` entry against the Rust `impl Cop` trait:")
+    sections.append("   - `Enabled: false` → `default_enabled() -> false`")
+    sections.append("   - `Exclude: [...]` → `default_exclude() -> &[...]`")
+    sections.append("   - `Include: [...]` → `default_include() -> &[...]`")
+    sections.append("   - `Severity: warning` → `default_severity() -> Severity::Warning`")
+    sections.append("   - Cop-specific options (`AllowedMethods`, `EnforcedStyle`, etc.) → check they're read from `CopConfig`")
+    sections.append("2. **Node types**: Compare Ruby's `on_def`, `on_send`, `on_class` etc. callbacks against our `interested_node_types()`")
+    sections.append("3. **Detection logic**: Walk through the Ruby cop's main methods and compare conditional logic against Rust")
+    sections.append("4. **Autocorrect**: If Ruby has `extend AutoCorrector`, verify we implement `supports_autocorrect() -> true`")
+    sections.append("5. **Shared mixins**: If the Ruby cop includes shared modules, check we use equivalent shared code")
+    sections.append("6. **Edge cases**: Look for Ruby comments/TODOs mentioning special handling — verify we match")
+    sections.append("")
+
+    if mode == "fix":
+        sections.append("## Workflow")
+        sections.append("")
+        sections.append("For each divergence found:")
+        sections.append("1. Add or update test fixtures if the fix changes behavior")
+        sections.append("2. Make the fix in the Rust source")
+        sections.append("3. Run `cargo test --lib -- cop::dept::cop_name` to verify")
+        sections.append("4. Document any replicated RuboCop quirks in `///` doc comments")
+        sections.append("")
+
+    for cop in cops:
+        dept, name, snake = parse_cop_name(cop)
+        sections.append(f"---\n\n## {cop}\n")
+
+        # Corpus stats
+        try:
+            corpus = get_corpus_data(cop, None, require_examples=False)
+            sections.append(
+                f"**Corpus**: {corpus['matches']} matches, "
+                f"{corpus['fp']} FP, {corpus['fn']} FN\n"
+            )
+        except Exception:
+            sections.append("**Corpus**: (no data available)\n")
+
+        # Default config entry
+        config_entry = _extract_default_config_entry(cop)
+        if config_entry:
+            sections.append(f"### Default config (`config/default.yml`)\n\n```yaml\n{config_entry}\n```\n")
+
+        # Ruby source
+        ruby_path = find_vendor_ruby_source(dept, snake)
+        ruby_source = read_file_safe(ruby_path) if ruby_path else None
+        if ruby_source:
+            sections.append(f"### Ruby implementation (`{ruby_path.relative_to(PROJECT_ROOT)}`)\n\n```ruby\n{ruby_source}\n```\n")
+        else:
+            sections.append("### Ruby implementation\n\n(not found in vendored gems)\n")
+
+        # Rust source
+        rust_path = find_rust_source(dept, snake)
+        rust_source = read_file_safe(rust_path)
+        if rust_source:
+            sections.append(f"### Rust implementation (`{rust_path.relative_to(PROJECT_ROOT)}`)\n\n```rust\n{rust_source}\n```\n")
+        else:
+            sections.append(f"### Rust implementation\n\n(not found at {rust_path})\n")
+
+    return "\n".join(sections)
+
+
 def generate_task(
     cop: str,
     input_path: Path | None = None,
@@ -3014,7 +3116,23 @@ def main():
         help="GitHub repo (owner/name)",
     )
 
+    audit_parser = subparsers.add_parser("audit-task", help="Generate a ground-truth audit prompt for one or more cops")
+    audit_parser.add_argument("cops", help="Comma-separated cop names (e.g., Style/DocumentationMethod,Rails/Exit)")
+    audit_parser.add_argument("--output", "-o", type=Path, help="Output file path (default: stdout)")
+    audit_parser.add_argument("--mode", choices=["fix", "audit"], default="fix", help="fix: attempt fixes; audit: report only")
+
     args = parser.parse_args()
+
+    if args.command == "audit-task":
+        cops = [c.strip() for c in args.cops.split(",") if c.strip()]
+        task = generate_audit_task(cops, args.mode)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(task)
+            print(f"Audit task written to {args.output}", file=sys.stderr)
+        else:
+            print(task)
+        return
 
     if args.command == "task":
         binary = args.binary.resolve() if args.binary else None
