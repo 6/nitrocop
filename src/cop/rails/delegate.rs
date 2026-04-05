@@ -282,6 +282,10 @@ impl Cop for Delegate {
         Severity::Convention
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/app/controllers/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,

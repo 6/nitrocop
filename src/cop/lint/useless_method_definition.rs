@@ -42,6 +42,10 @@ impl Cop for UselessMethodDefinition {
         Severity::Warning
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/app/controllers/**/*.rb", "**/app/mailers/**/*.rb"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
