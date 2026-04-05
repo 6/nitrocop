@@ -54,6 +54,10 @@ impl Cop for ExpectActual {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/spec/routing/**/*"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ARRAY_NODE,

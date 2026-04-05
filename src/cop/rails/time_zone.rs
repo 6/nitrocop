@@ -246,6 +246,10 @@ impl Cop for TimeZone {
         Severity::Convention
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/*.gemspec"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, CALL_OPERATOR_WRITE_NODE]
     }

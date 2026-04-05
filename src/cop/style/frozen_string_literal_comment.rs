@@ -16,6 +16,10 @@ impl Cop for FrozenStringLiteralComment {
         "Style/FrozenStringLiteralComment"
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/*.arb"]
+    }
+
     fn supports_autocorrect(&self) -> bool {
         true
     }

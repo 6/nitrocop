@@ -128,6 +128,96 @@ def test_patch_computes_variant_perfect_cops(tmp_path):
     assert dept["variant_diverging_cops"] == 2
 
 
+def test_patch_synthetic_fallback_for_variant_perfect(tmp_path):
+    """Cops unexercised in corpus but synth-perfect count as variant-perfect."""
+    corpus = {
+        "summary": {"matches": 100, "fp": 0, "fn": 0},
+        "by_department": [
+            {"department": "RSpecRails", "matches": 100, "fp": 0, "fn": 0},
+        ],
+        "by_cop": [
+            # Corpus-perfect → variant-perfect
+            {"cop": "RSpecRails/A", "matches": 50, "fp": 0, "fn": 0,
+             "perfect_match": True, "diverging": False, "exercised": True},
+            # NOT exercised in corpus, but synth-perfect → should be variant-perfect
+            {"cop": "RSpecRails/B", "matches": 0, "fp": 0, "fn": 0,
+             "perfect_match": False, "diverging": False, "exercised": False},
+            # NOT exercised in corpus, NOT in synthetic → no data, not counted
+            {"cop": "RSpecRails/C", "matches": 0, "fp": 0, "fn": 0,
+             "perfect_match": False, "diverging": False, "exercised": False},
+        ],
+    }
+    variants = tmp_path / "variants.json"
+    variants.write_text(json.dumps({
+        "batches": [{
+            "name": "batch_1",
+            "by_cop": [
+                {"cop": "RSpecRails/A", "style_label": "x", "matches": 40, "fp": 0, "fn": 0},
+            ],
+        }]
+    }))
+    synthetic = tmp_path / "synthetic.json"
+    synthetic.write_text(json.dumps({
+        "by_cop": [
+            {"cop": "RSpecRails/B", "matches": 5, "fp": 0, "fn": 0,
+             "perfect_match": True, "exercised": True, "diverging": False},
+        ],
+    }))
+
+    patch_variant_stats.patch(corpus, variants, synthetic)
+
+    dept = corpus["by_department"][0]
+    # A (corpus-perfect) + B (synth-perfect) = 2 variant-perfect
+    assert dept["variant_perfect_cops"] == 2
+    assert dept["variant_diverging_cops"] == 0
+
+
+def test_patch_synthetic_variant_data_merged(tmp_path):
+    """Synthetic variant data is merged into variant results."""
+    corpus = {
+        "summary": {"matches": 0, "fp": 0, "fn": 0},
+        "by_department": [
+            {"department": "Rails", "matches": 0, "fp": 0, "fn": 0},
+        ],
+        "by_cop": [
+            # Synth-perfect for default, but synth variant diverges
+            {"cop": "Rails/X", "matches": 0, "fp": 0, "fn": 0,
+             "perfect_match": False, "diverging": False, "exercised": False},
+        ],
+    }
+    # Empty corpus variants
+    variants = tmp_path / "variants.json"
+    variants.write_text(json.dumps({
+        "batches": [{
+            "name": "batch_1",
+            "by_cop": [],
+        }]
+    }))
+    # Synthetic: default perfect, but variant has FP
+    synthetic = tmp_path / "synthetic.json"
+    synthetic.write_text(json.dumps({
+        "by_cop": [
+            {"cop": "Rails/X", "matches": 3, "fp": 0, "fn": 0,
+             "perfect_match": True, "exercised": True, "diverging": False},
+        ],
+        "variants": {
+            "batches": [{
+                "style_label": "variant_batch_1",
+                "by_cop": [
+                    {"cop": "Rails/X", "matches": 2, "fp": 1, "fn": 0},
+                ],
+            }]
+        },
+    }))
+
+    patch_variant_stats.patch(corpus, variants, synthetic)
+
+    dept = corpus["by_department"][0]
+    # Rails/X is synth-default-perfect but synth-variant-diverging
+    assert dept["variant_perfect_cops"] == 0
+    assert dept["variant_diverging_cops"] == 1
+
+
 def test_patch_empty_variants(tmp_path):
     corpus = {"summary": {"matches": 100, "fp": 0, "fn": 0}, "by_department": []}
     variants = tmp_path / "variants.json"

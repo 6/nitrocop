@@ -71,6 +71,16 @@ impl Cop for DescribeClass {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &[
+            "**/spec/features/**/*",
+            "**/spec/requests/**/*",
+            "**/spec/routing/**/*",
+            "**/spec/system/**/*",
+            "**/spec/views/**/*",
+        ]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ASSOC_NODE,

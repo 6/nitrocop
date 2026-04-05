@@ -117,6 +117,10 @@ impl Cop for SpecFilePathFormat {
         RSPEC_DEFAULT_INCLUDE
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/spec/routing/**/*"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
