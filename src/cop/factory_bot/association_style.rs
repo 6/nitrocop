@@ -380,7 +380,7 @@ fn check_implicit_in_children(
     for child in children {
         // If this child is a `trait` call with a block, recurse into its body
         if let Some(call) = child.as_call_node() {
-            if call.name().as_slice() == b"trait" && call.receiver().is_none() {
+            if method_dispatch_predicates::is_command(&call, b"trait") {
                 if let Some(block) = call.block() {
                     if let Some(block_node) = block.as_block_node() {
                         if let Some(body) = block_node.body() {
