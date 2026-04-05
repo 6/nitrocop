@@ -18,6 +18,10 @@ impl Cop for Exit {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/**/*.rb", "**/config/**/*.rb", "**/lib/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE]
     }

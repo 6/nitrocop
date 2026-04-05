@@ -116,6 +116,10 @@ impl Cop for EnumUniqueness {
         Severity::Warning
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[ASSOC_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }

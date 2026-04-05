@@ -18,6 +18,10 @@ impl Cop for HttpPositionalArguments {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["spec/**/*", "test/**/*"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,
