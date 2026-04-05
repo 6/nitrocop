@@ -63,7 +63,7 @@ pub fn read_lock(dir: &Path) -> Result<NitroCopLock> {
     let cache_path = lockfile_path(dir);
     if !cache_path.exists() {
         anyhow::bail!(
-            "No lockfile found for {}. Run 'nitrocop --init' first.",
+            "No lockfile found for {}. Run 'nitrocop --init' first, or use --no-cache to skip.",
             dir.display()
         );
     }

@@ -500,7 +500,7 @@ pub fn run(args: Args) -> Result<i32> {
             parts.push(format!("{} outside baseline", s.outside_baseline.len()));
         }
         eprintln!(
-            "Skipped {} cops ({}). Run `nitrocop migrate` for details.",
+            "Skipped {} cops ({}). Run `nitrocop --migrate` for details.",
             s.total(),
             parts.join(", "),
         );

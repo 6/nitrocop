@@ -146,3 +146,9 @@ BEGIN {
     load_path = 'lib'
     ^^^^^^^^^^^^^^^^^ Layout/IndentationConsistency: Inconsistent indentation detected.
 }
+
+x = (a = 1
+b = 2
+^ Layout/IndentationConsistency: Inconsistent indentation detected.
+c = 3)
+^^^^^ Layout/IndentationConsistency: Inconsistent indentation detected.

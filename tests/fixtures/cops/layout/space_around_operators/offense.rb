@@ -110,3 +110,21 @@ t.warning = false
 # Setter call with extra trailing space (not aligned with neighbor)
 adapter.properties =  @props
                    ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+
+# Ternary operator: missing space before :
+incoming_page = resource.is_a?( Page ) ? resource: resource.to_page
+                                                 ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `:`.
+
+# Ternary operator: missing space after ?
+x = (name == '@')? '' : name
+                 ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `?`.
+
+# Ternary operator: missing space around both ? and : (nested)
+lend = @rl_end > 0 ? @rl_end - ((@rl_editing_mode == @vi_mode)?1:0) : @rl_end
+                                                              ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `?`.
+                                                                ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `:`.
+
+# Ternary operator: missing space in method argument context
+target_url = target_url + (target_url.include?("?")?"&":"?") + params
+                                                   ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `?`.
+                                                       ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `:`.

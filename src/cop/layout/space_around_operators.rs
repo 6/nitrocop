@@ -111,6 +111,27 @@ use ruby_prism::Visit;
 ///    RuboCop returns false (no offense). Added
 ///    `has_subsequent_assignment_neighbor` to replicate this behavior for
 ///    plain `=` assignments in the text scanner.
+///
+/// ## Corpus fix (2026-04-05)
+///
+/// Added ternary `?`/`:` operator detection via `visit_if_node`. In Prism,
+/// ternary `cond ? expr : expr` is an IfNode with `if_keyword_loc() == None`.
+/// The `?` location comes from `then_keyword_loc()`, and the `:` location
+/// from the subsequent ElseNode's `else_keyword_loc()`.
+///
+/// Corpus FN analysis showed ternary `?` (33%) and `:` (29%) account for
+/// ~62% of all FN examples sampled. Quick check (5 repos): resolved 341 FN
+/// and 15 FP with 0 new FP and 0 new FN.
+///
+/// Remaining FN categories: extra-space `=` on aligned assignments (~15%),
+/// extra-space ternary `?`/`:` (~15%), extra-space `=>` (~3%),
+/// keyword `and`/`or` (~3%).
+///
+/// Remaining FP: setter/index `=  ` trailing space where RHS is aligned with
+/// a plain assignment on a neighbor line across method boundaries. RuboCop's
+/// `excess_trailing_space?` uses `aligned_with_something?` which checks for
+/// word/space boundaries on adjacent lines — this is more permissive than our
+/// `is_aligned_rhs_standalone`.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -1629,6 +1650,33 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
 
     // `expr in pattern` (match predicate) — uses keyword `in`, not checked here
     // (Layout/SpaceAroundKeyword handles `in`)
+
+    // === Ternary operator (? and :) ===
+    // `cond ? then_expr : else_expr`
+    // In Prism, ternary is an IfNode with if_keyword_loc() == None.
+    // The `?` location comes from then_keyword_loc().
+    // The `:` location comes from the subsequent ElseNode's else_keyword_loc().
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+        let is_ternary = node.if_keyword_loc().is_none();
+        if is_ternary {
+            // Check spacing around `?`
+            if let Some(q_loc) = node.then_keyword_loc() {
+                if q_loc.as_slice() == b"?" {
+                    self.check_operator_spacing(&q_loc);
+                }
+            }
+            // Check spacing around `:`
+            if let Some(sub) = node.subsequent() {
+                if let Some(else_node) = sub.as_else_node() {
+                    let colon_loc = else_node.else_keyword_loc();
+                    if colon_loc.as_slice() == b":" {
+                        self.check_operator_spacing(&colon_loc);
+                    }
+                }
+            }
+        }
+        ruby_prism::visit_if_node(self, node);
+    }
 }
 
 #[cfg(test)]
