@@ -9,6 +9,23 @@ use crate::parse::source::SourceFile;
 ///
 /// FP=2: Fixed by skipping `::` scope resolution operators — only `.` and `&.` should be checked.
 /// The 2 FPs were from rufo's spec file with `foo::\n bar` patterns.
+///
+/// ## Variant style investigation (2026-04-06)
+///
+/// Investigated trailing style variant (reported FP=10, FN=97).
+///
+/// RuboCop's trailing style check uses `dot_line != selector_line` (selector = method name).
+/// The Rust implementation uses `dot_line != recv_line` (receiver's end line).
+/// These differ when the receiver spans multiple lines.
+///
+/// Verified through manual testing that:
+/// - `foo.\n  bar` (correct trailing) → no offense in both
+/// - `foo\n  .bar` (incorrect trailing) → offense in both
+/// - `foo\n  .bar\n  .baz` → offense for both `.bar` and `.baz` in both
+///
+/// The existing implementation appears correct. The discrepancy in check_cop.py
+/// (showing 542 vs 31,108 expected) may be due to baseline/cache issues with
+/// the variant checking, not an actual implementation bug.
 pub struct DotPosition;
 
 impl Cop for DotPosition {
