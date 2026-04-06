@@ -558,6 +558,7 @@ const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
     // Lint
     "Lint/ShadowingOuterLocalVariable", // FN=3
     "Lint/Syntax",                      // FN=4
+    "Lint/UnmodifiedReduceAccumulator", // FP: nitrocop misses `next` accumulator patterns
     "Lint/UnusedMethodArgument",        // FN=8
     "Lint/UselessAssignment",           // FN=523
     // Rails
@@ -582,6 +583,7 @@ const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
     // Style
     "Style/AccessModifierDeclarations",   // FN=16
     "Style/ConditionalAssignment",        // FN=5951
+    "Style/GlobalStdStream",              // FP: nitrocop misses STDOUT/STDERR/STDIN refs
     "Style/Documentation",                // FN=22
     "Style/DocumentationMethod",          // FN=63
     "Style/FrozenStringLiteralComment",   // FN=13
@@ -1332,6 +1334,20 @@ fn lint_source_once(
     // output should be emitted.
     if run_all_for_redundant {
         diagnostics.clear();
+    }
+
+    // Compensate for Layout/LineLength's self-suppression: the cop internally
+    // skips disabled lines, so the general mechanism never marks its directives
+    // as "used". Re-verify by checking actual line lengths.
+    if all_cops_ran && !args.ignore_disable_comments && disabled.has_directives() {
+        let ll_max = registry
+            .cops()
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.name() == "Layout/LineLength")
+            .map(|(idx, _)| active_base_configs[idx].get_usize("Max", 120))
+            .unwrap_or(120);
+        disabled.compensate_line_length_self_suppression(source, ll_max);
     }
 
     if !args.ignore_disable_comments
