@@ -915,3 +915,95 @@ mod tests {
         assert_cop_no_offenses_full_with_config(&LineLength, b"short line\n", config);
     }
 }
+
+/// Assert that every `.rb` file in a fixture directory is referenced by a test.
+///
+/// Files named `offense.rb`, `no_offense.rb`, and `corrected.rb` are auto-discovered
+/// by the `cop_fixture_tests!` / `cop_autocorrect_fixture_tests!` macros. Files in
+/// an `offense/` subdirectory are discovered by `cop_scenario_fixture_tests!`. Any
+/// other `.rb` file must be explicitly loaded via `include_bytes!` in a test — if
+/// not, it is dead code that will never be tested.
+///
+/// Call this from the macro-generated test with the fixture directory path and the
+/// path to the cop's Rust source file.
+pub fn assert_no_orphaned_fixtures(fixture_dir: &str, cop_source_path: &str) {
+    use std::path::Path;
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let dir = manifest.join("tests/fixtures").join(fixture_dir);
+    if !dir.is_dir() {
+        return;
+    }
+
+    // Read the cop's Rust source to check for include_bytes! references
+    let cop_source = std::fs::read_to_string(manifest.join(cop_source_path)).unwrap_or_default();
+
+    // Standard filenames auto-discovered by macros
+    let macro_discovered: &[&str] = &["offense.rb", "no_offense.rb", "corrected.rb"];
+
+    let mut orphans: Vec<String> = Vec::new();
+
+    fn walk_rb(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    walk_rb(&p, out);
+                } else if p.extension().is_some_and(|e| e == "rb") {
+                    out.push(p);
+                }
+            }
+        }
+    }
+
+    let mut rb_files = Vec::new();
+    walk_rb(&dir, &mut rb_files);
+
+    for rb_path in &rb_files {
+        let filename = rb_path
+            .file_name()
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or("");
+        let parent_name = rb_path
+            .parent()
+            .and_then(|p| p.file_name())
+            .unwrap_or_default()
+            .to_str()
+            .unwrap_or("");
+
+        // Standard names are auto-discovered by the macro
+        if macro_discovered.contains(&filename) && parent_name != "offense" {
+            continue;
+        }
+
+        // Files in offense/ subdirectory are loaded by cop_scenario_fixture_tests!
+        // which passes the filename explicitly — check for it in source
+        if parent_name == "offense" {
+            if cop_source.contains(filename) {
+                continue;
+            }
+        } else {
+            // Non-standard filename — must appear in the cop source via include_bytes!
+            if cop_source.contains(filename) {
+                continue;
+            }
+        }
+
+        orphans.push(rb_path.display().to_string());
+    }
+
+    if !orphans.is_empty() {
+        orphans.sort();
+        panic!(
+            "Found {} orphaned fixture file(s) in tests/fixtures/{} \
+             not referenced by any test in {}.\n\
+             Each non-standard fixture must be loaded via include_bytes!() \
+             in a #[test] function.\n\n{}\n",
+            orphans.len(),
+            fixture_dir,
+            cop_source_path,
+            orphans.join("\n"),
+        );
+    }
+}

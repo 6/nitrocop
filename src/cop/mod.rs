@@ -404,6 +404,11 @@ macro_rules! cop_fixture_tests {
                 include_bytes!(concat!("../../../tests/fixtures/", $path, "/no_offense.rb")),
             );
         }
+
+        #[test]
+        fn no_orphaned_fixtures() {
+            $crate::testutil::assert_no_orphaned_fixtures($path, file!());
+        }
     };
 }
 
