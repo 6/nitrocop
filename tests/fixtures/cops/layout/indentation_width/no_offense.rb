@@ -316,3 +316,21 @@ rescue StandardError
 else
   success
 end
+
+# case/in pattern matching — correctly indented
+case a
+in 1
+  do_one
+in String
+  do_two
+end
+
+# case/in with else — correctly indented
+case a
+in 1
+  do_one
+in 2
+  do_two
+else
+  default_action
+end
