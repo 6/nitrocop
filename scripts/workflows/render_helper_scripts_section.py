@@ -23,7 +23,7 @@ HELPERS = [
     ),
     (
         "scripts/verify_cop_locations.py",
-        "verify exact known oracle FP/FN locations",
+        "verify exact known oracle FP/FN locations (supports --style for variants)",
         "python3 scripts/verify_cop_locations.py Department/CopName",
     ),
     (
