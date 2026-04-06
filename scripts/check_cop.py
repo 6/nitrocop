@@ -922,14 +922,18 @@ def _run_rubocop_for_variant(
     """Run rubocop with --only <cop> --config <config> on a repo.
 
     Returns {"count": N} where N is the offense count, or {"count": -1} on error.
+    Applies per-repo vendor exclusions on top of *config* via gen_repo_config.
     """
+    from gen_repo_config import generate_repo_config
     from run_nitrocop import build_env
+    repo_id = Path(repo_dir).name
+    effective_config = generate_repo_config(repo_id, config, repo_dir)
     RESCUE_FILE = str(PROJECT_ROOT / "bench" / "corpus" / "rescue_parser_crashes.rb")
     env = build_env(repo_dir)
     cmd = [
         "bundle", "exec", "rubocop",
         "--require", RESCUE_FILE,
-        "--config", config,
+        "--config", effective_config,
         "--only", cop,
         "--format", "json",
         "--force-exclusion",
