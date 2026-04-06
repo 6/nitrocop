@@ -291,6 +291,80 @@ jobs:
             --result "${{ steps.gate.outputs.result }}" \
             --check-variant-regressions > /dev/null
 
+  # Perf smoke test: time nitrocop on large repos to catch performance
+  # regressions. Logs timing + phase breakdown to step summary (never fails).
+  # Only runs on pushes to main where Rust code changed.
+  perf-smoke:
+    needs: build-linux
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: nitrocop-linux
+          path: target/release
+      - run: chmod +x target/release/nitrocop
+
+      - name: Clone benchmark repos
+        run: |
+          python3 bench/corpus/clone_repos.py \
+            --dest . \
+            --manifest bench/corpus/manifest.jsonl \
+            --repo-ids "forem__forem__72d7c44,WikiEducationFoundation__WikiEduDashboard__0d6258c" \
+            --parallel 2
+
+      - name: Run perf smoke test
+        run: |
+          BINARY="target/release/nitrocop"
+          CONFIG="bench/corpus/baseline_rubocop.yml"
+          echo "## Perf Smoke Test" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          for REPO_ID in forem__forem__72d7c44 WikiEducationFoundation__WikiEduDashboard__0d6258c; do
+            REPO_DIR="repos/${REPO_ID}"
+            if [ ! -d "$REPO_DIR" ]; then
+              echo "::warning::Repo ${REPO_ID} not cloned, skipping"
+              continue
+            fi
+
+            FILE_COUNT=$(find "$REPO_DIR" -name '*.rb' | wc -l)
+            REPO_CONFIG=$(python3 bench/corpus/gen_repo_config.py "$REPO_ID" "$CONFIG" "$REPO_DIR")
+
+            echo "### ${REPO_ID}" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # Timed run (JSON output for offense count)
+            START=$(date +%s%N)
+            RESULT=$("$BINARY" --preview --format json --no-cache --config "$REPO_CONFIG" "$REPO_DIR" 2>/dev/null || true)
+            END=$(date +%s%N)
+            ELAPSED_MS=$(( (END - START) / 1000000 ))
+            ELAPSED_S=$(python3 -c "print(f'{${ELAPSED_MS}/1000:.1f}s')")
+
+            OFFENSE_COUNT=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('metadata',{}).get('offense_count',0))" 2>/dev/null || echo "?")
+
+            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|------:|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Files | ${FILE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Wall clock | ${ELAPSED_S} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Offenses | ${OFFENSE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            # Debug run for phase breakdown (--debug prints to stderr)
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            "$BINARY" --preview --no-cache --debug --config "$REPO_CONFIG" "$REPO_DIR" \
+              >/dev/null 2>/tmp/debug_out.txt || true
+            grep "^debug:" /tmp/debug_out.txt >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            echo "perf-smoke: ${REPO_ID} files=${FILE_COUNT} time=${ELAPSED_MS}ms offenses=${OFFENSE_COUNT}"
+          done
+
   # Corpus smoke test: run nitrocop + rubocop on a few cheap sentinel repos to
   # catch systemic regressions (file discovery, config, plugin loading, directives)
   # before they reach the full 1000-repo corpus oracle.
