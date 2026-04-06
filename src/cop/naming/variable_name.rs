@@ -1,12 +1,12 @@
 use crate::cop::shared::node_type::{
     BLOCK_NODE, CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
     CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_WRITE_NODE, DEF_NODE, FOR_NODE,
-    GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+    FORWARDING_SUPER_NODE, GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
     GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_WRITE_NODE, INSTANCE_VARIABLE_AND_WRITE_NODE,
     INSTANCE_VARIABLE_OPERATOR_WRITE_NODE, INSTANCE_VARIABLE_OR_WRITE_NODE,
     INSTANCE_VARIABLE_WRITE_NODE, LAMBDA_NODE, LOCAL_VARIABLE_AND_WRITE_NODE,
     LOCAL_VARIABLE_OPERATOR_WRITE_NODE, LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_READ_NODE,
-    LOCAL_VARIABLE_WRITE_NODE, MULTI_WRITE_NODE,
+    LOCAL_VARIABLE_WRITE_NODE, MULTI_WRITE_NODE, SUPER_NODE,
 };
 use crate::cop::shared::util::is_snake_case;
 use crate::cop::{CodeMap, Cop, CopConfig};
@@ -91,6 +91,31 @@ use crate::parse::source::SourceFile;
 /// `is_lower_camel_case` to use `char::is_lowercase()`/`is_uppercase()` for
 /// Unicode support and handle the optional leading underscore per the regex.
 /// Verified on 15 corpus repos: per-repo offense counts match RuboCop exactly.
+///
+/// ## Variant divergence fix (2026-04-06)
+///
+/// camelCase variant: 0 FP, 365 FN.
+///
+/// FN=365: `check_params_node` only handled `RequiredParameterNode` in
+/// `requireds()` and didn't process `posts()` at all. In Prism, destructured
+/// block/method parameters like `|(a, b)|` produce `MultiTargetNode` containing
+/// `RequiredParameterNode` children, and post-rest parameters (`|*_, post|`)
+/// appear in `posts()`. RuboCop checks these via the Parser gem which unifies
+/// them as `arg` nodes. Fixed by: (1) handling `MultiTargetNode` in
+/// `requireds()` via a new `check_destructured_params` helper that recursively
+/// checks `RequiredParameterNode` children, and (2) adding `posts()` iteration
+/// with the same handling.
+///
+/// Remaining FN=1 (pacer): `super do |avail, index_options|` — block params
+/// on `super` calls were not checked because the `BlockNode` inside
+/// `SuperNode`/`ForwardingSuperNode` is not visited as a standalone node
+/// by the walker. Fixed by adding `SUPER_NODE` and `FORWARDING_SUPER_NODE`
+/// to `interested_node_types` and extracting the block explicitly.
+///
+/// Remaining FP=2 (noosfero): file has a syntax error (`unexpected token $end`)
+/// that prevents RuboCop's Parser gem from producing any AST. Prism recovers
+/// and parses partial results, so nitrocop flags `@to_tree`. Not fixable at
+/// the cop level — parser error-recovery divergence.
 pub struct VariableName;
 
 impl Cop for VariableName {
@@ -122,6 +147,8 @@ impl Cop for VariableName {
             DEF_NODE,
             BLOCK_NODE,
             LAMBDA_NODE,
+            SUPER_NODE,
+            FORWARDING_SUPER_NODE,
         ]
     }
 
@@ -143,6 +170,20 @@ impl Cop for VariableName {
         // Handle BlockNode/LambdaNode for block parameters
         if let Some(block_node) = node.as_block_node() {
             self.check_block_parameters(source, block_node, config, diagnostics);
+            return;
+        }
+        // SuperNode/ForwardingSuperNode blocks are not visited as standalone
+        // BlockNodes by the walker — extract the block explicitly.
+        if let Some(super_node) = node.as_super_node() {
+            if let Some(block) = super_node.block().and_then(|b| b.as_block_node()) {
+                self.check_block_parameters(source, block, config, diagnostics);
+            }
+            return;
+        }
+        if let Some(fwd_super) = node.as_forwarding_super_node() {
+            if let Some(block) = fwd_super.block() {
+                self.check_block_parameters(source, block, config, diagnostics);
+            }
             return;
         }
         if let Some(lambda_node) = node.as_lambda_node() {
@@ -550,6 +591,10 @@ impl VariableName {
                 let name_str = std::str::from_utf8(name).unwrap_or("");
                 let (line, column) = source.offset_to_line_col(req.location().start_offset());
                 self.check_variable_name(source, name_str, line, column, config, diagnostics);
+            } else if let Some(mt) = param.as_multi_target_node() {
+                // Destructured params like |(a, b)| — Prism wraps these in
+                // MultiTargetNode containing RequiredParameterNode children.
+                self.check_destructured_params(source, mt, config, diagnostics);
             }
         }
 
@@ -559,6 +604,18 @@ impl VariableName {
                 let name_str = std::str::from_utf8(name).unwrap_or("");
                 let (line, column) = source.offset_to_line_col(opt.name_loc().start_offset());
                 self.check_variable_name(source, name_str, line, column, config, diagnostics);
+            }
+        }
+
+        // Post-rest required parameters (e.g., |*rest, post_param|)
+        for param in params.posts().iter() {
+            if let Some(req) = param.as_required_parameter_node() {
+                let name = req.name().as_slice();
+                let name_str = std::str::from_utf8(name).unwrap_or("");
+                let (line, column) = source.offset_to_line_col(req.location().start_offset());
+                self.check_variable_name(source, name_str, line, column, config, diagnostics);
+            } else if let Some(mt) = param.as_multi_target_node() {
+                self.check_destructured_params(source, mt, config, diagnostics);
             }
         }
 
@@ -624,6 +681,55 @@ impl VariableName {
                     let (line, column) = source.offset_to_line_col(name_loc.start_offset());
                     self.check_variable_name(source, name_str, line, column, config, diagnostics);
                 }
+            }
+        }
+    }
+
+    fn check_destructured_params(
+        &self,
+        source: &SourceFile,
+        mt: ruby_prism::MultiTargetNode<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for target in mt.lefts().iter() {
+            if let Some(req) = target.as_required_parameter_node() {
+                let name = req.name().as_slice();
+                let name_str = std::str::from_utf8(name).unwrap_or("");
+                let (line, column) = source.offset_to_line_col(req.location().start_offset());
+                self.check_variable_name(source, name_str, line, column, config, diagnostics);
+            } else if let Some(nested) = target.as_multi_target_node() {
+                self.check_destructured_params(source, nested, config, diagnostics);
+            }
+        }
+        if let Some(rest) = mt.rest() {
+            if let Some(splat) = rest.as_splat_node() {
+                if let Some(expr) = splat.expression() {
+                    if let Some(req) = expr.as_required_parameter_node() {
+                        let name = req.name().as_slice();
+                        let name_str = std::str::from_utf8(name).unwrap_or("");
+                        let (line, column) =
+                            source.offset_to_line_col(req.location().start_offset());
+                        self.check_variable_name(
+                            source,
+                            name_str,
+                            line,
+                            column,
+                            config,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+        }
+        for target in mt.rights().iter() {
+            if let Some(req) = target.as_required_parameter_node() {
+                let name = req.name().as_slice();
+                let name_str = std::str::from_utf8(name).unwrap_or("");
+                let (line, column) = source.offset_to_line_col(req.location().start_offset());
+                self.check_variable_name(source, name_str, line, column, config, diagnostics);
+            } else if let Some(nested) = target.as_multi_target_node() {
+                self.check_destructured_params(source, nested, config, diagnostics);
             }
         }
     }
@@ -873,6 +979,22 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "Variable matching forbidden pattern should be flagged"
+        );
+    }
+
+    #[test]
+    fn super_block_params_checked_under_camel_case() {
+        use crate::testutil::run_cop_full_with_config;
+        // `super do |avail, index_options|` — block params on super calls
+        // should be checked just like regular block params.
+        let source = b"def find_best_index(route)\n  super do |avail, index_options|\n    index_options\n  end\nend\n";
+        let diags = run_cop_full_with_config(&VariableName, source, camel_case_config());
+        // Should flag index_options at the param definition AND the read
+        assert_eq!(
+            diags.len(),
+            2,
+            "expected index_options flagged at param and read, got: {:?}",
+            diags
         );
     }
 }

@@ -58,3 +58,13 @@ begin
 rescue StandardError => @good_ivar
   nil
 end
+
+# Destructured block and method params with valid snake_case names
+items.each do |ok, (inner_a, inner_b)|
+end
+
+def bar((first_val, second_val)); end
+
+# Post-rest parameters
+[1].each do |*_, post_param|
+end
