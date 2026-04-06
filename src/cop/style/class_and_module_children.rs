@@ -38,6 +38,18 @@ use crate::parse::source::SourceFile;
 /// with a Symbol (`:nested`). In Ruby, `"nested" != :nested`, so the
 /// comparison always fails and falls through to `check_compact_style`.
 /// We replicate this: when the override is set, always use compact checking.
+///
+/// Variant FP fix #3 (autocorrect crash on trailing whitespace): RuboCop's
+/// `compact_definition` autocorrect crashes in `AlignmentCorrector` when
+/// the file ends with trailing whitespace (space/tab, no final newline)
+/// and the module/class starts at byte offset 0. The crash occurs because
+/// `calculate_range` produces `range_between(-2, 0)` for the first line,
+/// and Ruby's negative array indexing makes `range.source` pick up the
+/// trailing whitespace, which matches `/[ \t]+/` and triggers
+/// `corrector.remove` on the invalid range. The crash suppresses ALL
+/// offenses for the file. We skip compact checking when these conditions
+/// are met. Corpus examples: `danlucraft/redcar` (3 files in the
+/// `compact, compact` variant batch).
 pub struct ClassAndModuleChildren;
 
 impl Cop for ClassAndModuleChildren {
@@ -155,7 +167,12 @@ impl<'a> ChildrenVisitor<'a> {
         );
     }
 
-    fn check_compact_style(&mut self, body: &Option<ruby_prism::Node<'a>>, name_offset: usize) {
+    fn check_compact_style(
+        &mut self,
+        body: &Option<ruby_prism::Node<'a>>,
+        name_offset: usize,
+        keyword_offset: usize,
+    ) {
         // For compact style: flag outer nodes whose body is a single class/module
         // RuboCop: return if parent&.type?(:class, :module)
         if self.parent_is_class_or_module {
@@ -164,10 +181,49 @@ impl<'a> ChildrenVisitor<'a> {
         if !self.body_is_single_class_or_module(body) {
             return;
         }
+        // RuboCop crashes during autocorrect (AlignmentCorrector) when:
+        // 1. The module/class starts at byte offset 0 (first char of file)
+        // 2. The file ends with trailing whitespace (space/tab, no final newline)
+        // 3. The body child has content (non-empty body)
+        // The crash suppresses ALL offenses for the file. Skip to match.
+        if keyword_offset == 0 && self.source_ends_with_whitespace() {
+            if self.body_child_has_content(body) {
+                return;
+            }
+        }
         self.add_diagnostic(
             name_offset,
             "Use compact module/class definition instead of nested style.".to_string(),
         );
+    }
+
+    /// Check if the source file ends with trailing whitespace (space or tab)
+    /// without a final newline. This triggers a RuboCop autocorrect crash
+    /// in AlignmentCorrector when `calculate_range` produces a negative range.
+    fn source_ends_with_whitespace(&self) -> bool {
+        let bytes = self.source.as_bytes();
+        matches!(bytes.last(), Some(b' ' | b'\t'))
+    }
+
+    /// Check if the single class/module child in the body has a non-empty body.
+    /// When the child is empty, RuboCop's `unindent` returns early and no crash occurs.
+    fn body_child_has_content(&self, body: &Option<ruby_prism::Node<'a>>) -> bool {
+        let Some(body_node) = body else {
+            return false;
+        };
+        if let Some(stmts) = body_node.as_statements_node() {
+            let children: Vec<_> = stmts.body().iter().collect();
+            if children.len() == 1 {
+                let child = &children[0];
+                if let Some(cls) = child.as_class_node() {
+                    return cls.body().is_some();
+                }
+                if let Some(mod_node) = child.as_module_node() {
+                    return mod_node.body().is_some();
+                }
+            }
+        }
+        false
     }
 }
 
@@ -317,14 +373,15 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         // with a Symbol (:nested). In Ruby, "nested" != :nested, so the
         // comparison always fails and falls through to check_compact_style.
         // We replicate this: when the override is set, always use compact.
+        let keyword_offset = node.class_keyword_loc().start_offset();
         if !self.enforced_for_classes.is_empty() {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         } else if self.enforced_style == "nested" {
             self.check_nested_style(is_compact, name_offset);
         } else if self.enforced_style == "compact" {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         }
 
         // Visit children: set parent_is_class_or_module based on body count
@@ -362,14 +419,15 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         // Same RuboCop string/symbol mismatch: when EnforcedStyleForModules
         // is explicitly set, it returns a String that never matches :nested,
         // so check_compact_style is always used.
+        let keyword_offset = node.module_keyword_loc().start_offset();
         if !self.enforced_for_modules.is_empty() {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         } else if self.enforced_style == "nested" {
             self.check_nested_style(is_compact, name_offset);
         } else if self.enforced_style == "compact" {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         }
 
         // Visit children: set parent_is_class_or_module based on body count
@@ -691,5 +749,64 @@ mod tests {
             "Module should be flagged with compact style"
         );
         assert!(diags[0].message.contains("compact"));
+    }
+
+    /// RuboCop crashes during compact autocorrect (AlignmentCorrector) when
+    /// the file has trailing whitespace at EOF (no final newline) and the
+    /// module/class starts at byte offset 0 with a non-empty body child.
+    /// The crash produces 0 offenses. We skip to match.
+    #[test]
+    fn compact_style_skip_when_trailing_whitespace_would_crash_rubocop() {
+        use crate::testutil::{assert_cop_no_offenses_full_with_config, run_cop_full_with_config};
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyleForClasses".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+                (
+                    "EnforcedStyleForModules".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        // Module wrapping class with content, file ends with trailing spaces — NO offense
+        // (RuboCop crashes on this pattern)
+        let source_trailing =
+            b"module Redcar\n  class EditView\n    class ModifiedTabsChecker\n    end\n  end\nend\n    ";
+        assert_cop_no_offenses_full_with_config(
+            &ClassAndModuleChildren,
+            source_trailing,
+            config.clone(),
+        );
+
+        // Same content WITHOUT trailing whitespace — SHOULD flag
+        let source_clean =
+            b"module Redcar\n  class EditView\n    class ModifiedTabsChecker\n    end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ClassAndModuleChildren, source_clean, config.clone());
+        assert_eq!(
+            diags.len(),
+            1,
+            "Without trailing whitespace, should flag module wrapping single class"
+        );
+
+        // Module wrapping empty class, file ends with trailing spaces — SHOULD flag
+        // (RuboCop doesn't crash when body child is empty)
+        let source_empty_child = b"module Foo\n  class Bar\n  end\nend\n  ";
+        let diags2 =
+            run_cop_full_with_config(&ClassAndModuleChildren, source_empty_child, config.clone());
+        assert_eq!(
+            diags2.len(),
+            1,
+            "Empty body child with trailing ws should still flag"
+        );
+
+        // Class wrapping class with content, file ends with trailing spaces — NO offense
+        let source_class = b"class Outer\n  class Inner\n    def foo\n    end\n  end\nend\n  ";
+        assert_cop_no_offenses_full_with_config(&ClassAndModuleChildren, source_class, config);
     }
 }
