@@ -39,6 +39,11 @@ use crate::parse::source::SourceFile;
 ///   across them. A lambda param `token` at class body level does not suppress
 ///   detection of `self.token` inside a method definition. Blocks within a def
 ///   can still see the def's locals.
+/// - Fixed class-body leakage: block/lambda locals introduced directly under a
+///   class/module/root body do not leak into later sibling callbacks or lambdas
+///   (`scope { |profile| ... }` must not suppress later `self.profile` in
+///   `code_numbering ... -> { self.profile }`). They still leak within defs and
+///   enclosing blocks where RuboCop keeps them visible.
 pub struct RedundantSelf;
 
 /// Methods where self. is always required (Ruby keywords).
@@ -172,7 +177,7 @@ impl Cop for RedundantSelf {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            local_scopes: vec![(HashSet::new(), ScopeKind::Hard)],
+            local_scopes: vec![(HashSet::new(), ScopeKind::Root)],
             allowed_self_methods: HashSet::new(),
         };
         visitor.visit(&parse_result.node());
@@ -180,14 +185,20 @@ impl Cop for RedundantSelf {
     }
 }
 
-/// Distinguishes hard scope boundaries (def, class, module) from soft/transparent
-/// ones (block, lambda). `is_local_variable` stops searching at hard boundaries,
-/// preventing class-level locals from leaking into method scopes.
+/// Distinguishes method scopes, class/module/root scopes, and soft/transparent
+/// ones (block, lambda). This keeps block locals leaking forward where RuboCop
+/// does (within defs and enclosing blocks) without letting class-body lambda
+/// params suppress later sibling class-body callbacks.
 #[derive(Clone, Copy, PartialEq)]
 enum ScopeKind {
-    /// def, class, module, singleton_class, root — variables from outer scopes
-    /// are not visible across this boundary.
-    Hard,
+    /// root — top-level locals are not a shared "forward leak" scope for later
+    /// sibling blocks in RuboCop's implementation.
+    Root,
+    /// def — block locals may leak forward into the surrounding method scope.
+    Method,
+    /// class, module, singleton_class — block locals should not leak into later
+    /// sibling class-body statements.
+    ClassLike,
     /// block, lambda — variables are visible through this boundary.
     Soft,
 }
@@ -214,14 +225,14 @@ impl RedundantSelfVisitor<'_> {
     }
 
     fn is_local_variable(&self, name: &[u8]) -> bool {
-        // Search from innermost scope outward. Allow at most one Hard boundary
-        // (the enclosing def/class). A second Hard boundary means we've crossed
-        // a scope wall (e.g., class body → def), so we stop. This prevents
-        // class-level locals (from lambda param merges) from leaking into defs,
-        // while still letting blocks within a def see the def's variables.
+        // Search from innermost scope outward. Allow at most one non-soft scope
+        // (the enclosing def/class/module/root). A second non-soft boundary
+        // means we've crossed a scope wall (e.g., class body -> def), so we
+        // stop. This prevents class-level locals from leaking into defs while
+        // still letting blocks within a def or enclosing block see those locals.
         let mut hard_seen = false;
         for (scope, kind) in self.local_scopes.iter().rev() {
-            if *kind == ScopeKind::Hard {
+            if *kind != ScopeKind::Soft {
                 if hard_seen {
                     break;
                 }
@@ -294,8 +305,10 @@ impl RedundantSelfVisitor<'_> {
         }
 
         let (current_scope, _) = self.local_scopes.pop().unwrap();
-        if let Some((parent_scope, _)) = self.local_scopes.last_mut() {
-            parent_scope.extend(current_scope);
+        if let Some((parent_scope, parent_kind)) = self.local_scopes.last_mut() {
+            if matches!(*parent_kind, ScopeKind::Method | ScopeKind::Soft) {
+                parent_scope.extend(current_scope);
+            }
         }
     }
 
@@ -408,7 +421,7 @@ impl<'pr> Visit<'pr> for ConditionalLocalScanner {
 
 impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        self.local_scopes.push((HashSet::new(), ScopeKind::Method));
 
         if let Some(params) = node.parameters() {
             // Collect parameter names into scope first (before visiting defaults).
@@ -482,7 +495,8 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         // Push a new scope for the class body (local variables from the enclosing scope
         // are not visible inside a class body).
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        self.local_scopes
+            .push((HashSet::new(), ScopeKind::ClassLike));
         if let Some(body) = node.body() {
             self.visit(&body);
         }
@@ -490,7 +504,8 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     }
 
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        self.local_scopes
+            .push((HashSet::new(), ScopeKind::ClassLike));
         if let Some(body) = node.body() {
             self.visit(&body);
         }
@@ -498,7 +513,8 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     }
 
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        self.local_scopes
+            .push((HashSet::new(), ScopeKind::ClassLike));
         if let Some(body) = node.body() {
             self.visit(&body);
         }
