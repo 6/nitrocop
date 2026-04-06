@@ -11,6 +11,8 @@ use std::sync::OnceLock;
 /// treated as valid `snake_case` because the shared helper allows `=` suffixes.
 /// Fixed false positives for blank helper names such as `let(:"")`, which
 /// RuboCop accepts and which appear in rswag request-spec parameter helpers.
+/// Fixed false positives for lowercase-starting camelCase names (e.g., `userName`)
+/// which RuboCop's camelCase regex accepts but the old is_camel_case() rejected.
 pub struct VariableName;
 
 impl Cop for VariableName {
@@ -213,6 +215,27 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&VariableName, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("camelCase"));
+    }
+
+    #[test]
+    fn camel_case_style_accepts_lowercase_starting_camel() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("camelCase".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // RuboCop's camelCase regex accepts lowercase-starting names like userName
+        let source = b"RSpec.describe Foo do\n  let(:userName) { 'x' }\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(&VariableName, source, config);
+        assert!(
+            diags.is_empty(),
+            "camelCase style should accept lowercase-starting names like userName"
+        );
     }
 
     #[test]
