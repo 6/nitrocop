@@ -160,7 +160,6 @@ impl<'a> BlockDelimitersVisitor<'a> {
         let (open_line, _) = self.source.offset_to_line_col(opening_loc.start_offset());
         let (close_line, _) = self.source.offset_to_line_col(closing_loc.start_offset());
         let is_single_line = open_line == close_line;
-        let is_multiline = !is_single_line;
 
         // BracesRequiredMethods: must use braces (takes precedence over style)
         if self.braces_required_methods.iter().any(|m| m == method_str) {
@@ -207,7 +206,7 @@ impl<'a> BlockDelimitersVisitor<'a> {
                     block_node,
                     method_name,
                     is_single_line,
-                    is_multiline,
+                    !is_single_line,
                     is_braces,
                     rv_used,
                     rv_of_scope,
@@ -389,8 +388,7 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         // and the receiver call's return value is used.
         if let Some(receiver) = node.receiver() {
             if let Some(recv_call) = receiver.as_call_node() {
-                let recv_start = recv_call.location().start_offset();
-                self.rv_used_calls.insert(recv_start);
+                self.rv_used_calls.insert(call_node_key(&recv_call));
                 if let Some(block) = recv_call.block() {
                     if let Some(block_node) = block.as_block_node() {
                         self.chained_blocks
@@ -401,7 +399,7 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             // SuperNode as receiver of a chain
             if let Some(super_node) = receiver.as_super_node() {
                 self.rv_used_calls
-                    .insert(super_node.location().start_offset());
+                    .insert(super_node.keyword_loc().start_offset());
             }
             if let Some(fwd_super) = receiver.as_forwarding_super_node() {
                 self.rv_used_calls
@@ -422,15 +420,16 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
                 let offset = block_node.opening_loc().start_offset();
                 let block_end = block_node.closing_loc().end_offset();
 
-                let call_start = node.location().start_offset();
+                let call_range_start = node.location().start_offset();
                 let call_end = node.location().end_offset();
+                let call_key = call_node_key(node);
 
                 if self.ignored_blocks.contains(&offset) {
-                    self.suppress_range(call_start, call_end);
+                    self.suppress_range(call_range_start, call_end);
                 } else if !self.is_suppressed(offset, block_end) {
-                    let flagged = self.check_block(&block_node, method_name, call_start);
+                    let flagged = self.check_block(&block_node, method_name, call_key);
                     if flagged {
-                        self.suppress_range(call_start, call_end);
+                        self.suppress_range(call_range_start, call_end);
                     }
                 }
             }
@@ -445,13 +444,14 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             if let Some(block_node) = block.as_block_node() {
                 let offset = block_node.opening_loc().start_offset();
                 let block_end = block_node.closing_loc().end_offset();
-                let call_start = node.location().start_offset();
+                let call_range_start = node.location().start_offset();
                 let call_end = node.location().end_offset();
+                let call_key = node.keyword_loc().start_offset();
 
                 if !self.is_suppressed(offset, block_end) {
-                    let flagged = self.check_block(&block_node, b"super", call_start);
+                    let flagged = self.check_block(&block_node, b"super", call_key);
                     if flagged {
-                        self.suppress_range(call_start, call_end);
+                        self.suppress_range(call_range_start, call_end);
                     }
                 }
             }
@@ -463,13 +463,14 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         if let Some(block_node) = node.block() {
             let offset = block_node.opening_loc().start_offset();
             let block_end = block_node.closing_loc().end_offset();
-            let call_start = node.location().start_offset();
+            let call_range_start = node.location().start_offset();
             let call_end = node.location().end_offset();
+            let call_key = node.location().start_offset();
 
             if !self.is_suppressed(offset, block_end) {
-                let flagged = self.check_block(&block_node, b"super", call_start);
+                let flagged = self.check_block(&block_node, b"super", call_key);
                 if flagged {
-                    self.suppress_range(call_start, call_end);
+                    self.suppress_range(call_range_start, call_end);
                 }
             }
         }
@@ -582,6 +583,126 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         ruby_prism::visit_constant_path_operator_write_node(self, node);
     }
 
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_call_operator_write_node(self, node);
+    }
+
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_call_and_write_node(self, node);
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_call_or_write_node(self, node);
+    }
+
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_index_operator_write_node(self, node);
+    }
+
+    fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_index_and_write_node(self, node);
+    }
+
+    fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_index_or_write_node(self, node);
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_local_variable_and_write_node(self, node);
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+
+    fn visit_instance_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_instance_variable_and_write_node(self, node);
+    }
+
+    fn visit_instance_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+
+    fn visit_class_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_class_variable_and_write_node(self, node);
+    }
+
+    fn visit_class_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_class_variable_or_write_node(self, node);
+    }
+
+    fn visit_global_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_global_variable_and_write_node(self, node);
+    }
+
+    fn visit_global_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_global_variable_or_write_node(self, node);
+    }
+
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_and_write_node(self, node);
+    }
+
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_or_write_node(self, node);
+    }
+
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+    }
+
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'_>) {
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_multi_write_node(self, node);
@@ -668,11 +789,21 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 
 /// Mark a node as having its return value used (for semantic style).
 /// Only marks if the node is a CallNode, SuperNode, or ForwardingSuperNode.
+/// Unique key for a CallNode — uses the method name offset (message_loc)
+/// instead of the call's full location. In Prism, chained calls like
+/// `a.b.c` all share the same start_offset (the location includes the
+/// receiver), so using start_offset would mark ALL calls in a chain as
+/// rv_used when only the receiver is. The method name is unique per call.
+fn call_node_key(call: &ruby_prism::CallNode<'_>) -> usize {
+    call.message_loc()
+        .map_or_else(|| call.location().start_offset(), |loc| loc.start_offset())
+}
+
 fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize>) {
     if let Some(call) = node.as_call_node() {
-        rv_used.insert(call.location().start_offset());
+        rv_used.insert(call_node_key(&call));
     } else if let Some(super_node) = node.as_super_node() {
-        rv_used.insert(super_node.location().start_offset());
+        rv_used.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_used.insert(fwd_super.location().start_offset());
     } else if let Some(parens) = node.as_parentheses_node() {
@@ -690,9 +821,9 @@ fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize
 /// Mark a node as being in return-value-of-scope position (for semantic style).
 fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashSet<usize>) {
     if let Some(call) = node.as_call_node() {
-        rv_of_scope.insert(call.location().start_offset());
+        rv_of_scope.insert(call_node_key(&call));
     } else if let Some(super_node) = node.as_super_node() {
-        rv_of_scope.insert(super_node.location().start_offset());
+        rv_of_scope.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_of_scope.insert(fwd_super.location().start_offset());
     }
@@ -1522,5 +1653,34 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
         assert_eq!(diags.len(), 1, "got: {:?}", diags);
         assert!(diags[0].message.contains("functional blocks"));
+    }
+
+    #[test]
+    fn semantic_no_offense_do_end_chained_each_not_functional() {
+        // `items.each do |x| end` — .each return value not used, should be procedural (do-end OK)
+        // Regression: call_node_key must use message_loc, not location().start_offset(),
+        // because chained calls share the same start_offset in Prism.
+        let source = b"items.each do |x|\n  puts x\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(
+            diags.is_empty(),
+            "standalone .each should not be flagged as functional: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_compound_assignment() {
+        // `command.extra_schemas += [...].map { |f| ... }` — rv used via +=
+        let source =
+            b"command.extra_schemas += [\"a\", \"b\"].\n  map { |f| File.expand_path(f) }\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(
+            diags.is_empty(),
+            "braces in compound assignment should be functional: {:?}",
+            diags
+        );
     }
 }
