@@ -3,11 +3,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Corpus conformance fix: RuboCop's NodePattern for format/sprintf is
-/// `(send nil? :format _ _ ...)` — the `nil?` means it only matches bare calls
-/// with no receiver. Previously nitrocop also matched `Kernel.format(...)` and
-/// `Kernel.sprintf(...)` via `is_kernel_constant()`, causing 13 FPs in jruby and
-/// natalie corpus repos. Fixed by requiring `receiver().is_none()` for format/sprintf.
+/// RuboCop's NodePattern for format/sprintf is `(send nil? :format _ _ ...)` —
+/// the `nil?` means it only matches bare calls with no receiver. Previously
+/// nitrocop also matched `Kernel.format(...)` and `Kernel.sprintf(...)` via
+/// `is_kernel_constant()`, causing 13 FPs in jruby and natalie corpus repos.
+/// Fixed by requiring `receiver().is_none()` for format/sprintf.
+///
+/// Variant style tests (sprintf, percent) were added to verify correct behavior
+/// across all EnforcedStyle values. The implementation correctly handles:
+/// - `format`/`sprintf` with 2+ args for all styles
+/// - `String#%` with string receiver (not flagged when style=percent)
+/// - `String#%` with non-string receiver and array/hash arg (not flagged when style=percent)
 pub struct FormatString;
 
 impl Cop for FormatString {
@@ -153,5 +159,71 @@ impl Cop for FormatString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+    };
+
     crate::cop_fixture_tests!(FormatString, "cops/style/format_string");
+
+    fn sprintf_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("sprintf".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    fn percent_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("percent".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn sprintf_offense_fixture() {
+        assert_cop_offenses_full_with_config(
+            &FormatString,
+            include_bytes!("../../../tests/fixtures/cops/style/format_string/sprintf_offense.rb"),
+            sprintf_config(),
+        );
+    }
+
+    #[test]
+    fn sprintf_no_offense_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &FormatString,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/format_string/sprintf_no_offense.rb"
+            ),
+            sprintf_config(),
+        );
+    }
+
+    #[test]
+    fn percent_offense_fixture() {
+        assert_cop_offenses_full_with_config(
+            &FormatString,
+            include_bytes!("../../../tests/fixtures/cops/style/format_string/percent_offense.rb"),
+            percent_config(),
+        );
+    }
+
+    #[test]
+    fn percent_no_offense_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &FormatString,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/format_string/percent_no_offense.rb"
+            ),
+            percent_config(),
+        );
+    }
 }
