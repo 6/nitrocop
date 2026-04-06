@@ -75,10 +75,10 @@ impl Cop for EmptyStringInsideInterpolation {
                 for stmt in statements.body().iter() {
                     let is_modifier = stmt
                         .as_if_node()
-                        .map_or(false, |n| util::is_modifier_if(&n))
+                        .is_some_and(|n| util::is_modifier_if(&n))
                         || stmt
                             .as_unless_node()
-                            .map_or(false, |n| util::is_modifier_unless(&n));
+                            .is_some_and(|n| util::is_modifier_unless(&n));
                     if is_modifier {
                         add_diagnostic(
                             self,
