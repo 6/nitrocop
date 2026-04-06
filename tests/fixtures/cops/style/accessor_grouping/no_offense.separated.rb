@@ -27,3 +27,15 @@ class DifferentTypes
   attr_writer :b
   attr_accessor :c
 end
+
+# Multi-arg accessor as only statement in class with send-type superclass
+# RuboCop considers the superclass expression as the "previous sibling" in
+# the parser gem's AST when the body is a single send node, making the
+# accessor not groupable.
+class Foo < Struct.new(:a, :b)
+  attr_reader :a, :b
+end
+
+class Bar < Core::Event.new(:test_step, :hook)
+  attr_reader :test_step, :hook
+end

@@ -91,6 +91,28 @@ use crate::parse::source::SourceFile;
 /// Fix: added `check_separated()` that iterates accessor calls in the class/module body and
 /// reports an offense when `arguments.len() > 1`, applying the same comment/groupability
 /// filters. Message: "Use one attribute per `<accessor>`."
+///
+/// ## Investigation findings (2026-04-06, separated variant: 4 FP, 2 FN)
+///
+/// **FP (4):** When a class has a send-type superclass (e.g., `class Foo < Struct.new(:a, :b)`)
+/// and a single accessor as its only body statement, RuboCop considers the superclass
+/// expression as the accessor's "previous sibling" via `left_siblings.last` (because in the
+/// parser gem's AST, a single-child class body is the node itself, not wrapped in `begin`).
+/// This makes the accessor "not groupable" unless there's a blank line gap. Prism always wraps
+/// the body in `StatementsNode`, so the superclass is never a sibling. Fix: when idx == 0 and
+/// the stmt_list has exactly 1 element, check the class superclass as the "previous expression".
+///
+/// **FN (1 — access modifier with args):** `public :method_name` (with arguments) is
+/// `access_modifier?` in RuboCop (the node pattern doesn't constrain arguments), but nitrocop
+/// only treated bare `public`/`private`/`protected` as access modifiers. Fix: removed the
+/// `arguments().is_none()` constraint from the access modifier check in `is_groupable_accessor`.
+///
+/// **FN (1 — refine block):** When a module body is a single block call (e.g.,
+/// `refine Foo do ... end`) with exactly one inner send, RuboCop's `each_child_node(:send)` on
+/// the block finds the inner accessor. This is a parser gem quirk: with a single child, the
+/// body IS the block (no `begin` wrapping), so `each_child_node(:send)` reaches into the block.
+/// Fix: when the body has exactly one statement that's a call with a block whose body has
+/// exactly one statement, also check that inner statement.
 pub struct AccessorGrouping;
 
 const ACCESSOR_METHODS: &[&str] = &["attr_reader", "attr_writer", "attr_accessor", "attr"];
@@ -122,12 +144,14 @@ impl Cop for AccessorGrouping {
         let enforced_style = config.get_str("EnforcedStyle", "grouped");
 
         // Only check class and module bodies
-        let body = if let Some(class_node) = node.as_class_node() {
-            class_node.body()
+        // Also extract superclass info for the "single-body send-type superclass" quirk
+        let (body, superclass_last_line) = if let Some(class_node) = node.as_class_node() {
+            let sc_line = class_superclass_last_line(source, &class_node);
+            (class_node.body(), sc_line)
         } else if let Some(module_node) = node.as_module_node() {
-            module_node.body()
+            (module_node.body(), None)
         } else if let Some(sclass) = node.as_singleton_class_node() {
-            sclass.body()
+            (sclass.body(), None)
         } else {
             return;
         };
@@ -143,9 +167,34 @@ impl Cop for AccessorGrouping {
         };
 
         if enforced_style == "grouped" {
-            check_grouped(self, source, &stmts, diagnostics);
+            check_grouped(self, source, &stmts, superclass_last_line, diagnostics);
         } else if enforced_style == "separated" {
-            check_separated(self, source, &stmts, diagnostics);
+            check_separated(self, source, &stmts, superclass_last_line, diagnostics);
+        }
+
+        // Parser gem quirk: when a class/module body has a single statement that's a
+        // call with a block (e.g., `refine Foo do ... end`), the body IS the block node
+        // (no `begin` wrapping). `each_child_node(:send)` on the block finds sends among
+        // the block's direct children, including a single-send body. Replicate this by
+        // checking the inner block's body when it has exactly one statement.
+        let stmt_list: Vec<_> = stmts.body().iter().collect();
+        if stmt_list.len() == 1 {
+            if let Some(call) = stmt_list[0].as_call_node() {
+                if let Some(block) = call.block().and_then(|b| b.as_block_node()) {
+                    if let Some(block_body) = block.body() {
+                        if let Some(block_stmts) = block_body.as_statements_node() {
+                            let inner_stmts: Vec<_> = block_stmts.body().iter().collect();
+                            if inner_stmts.len() == 1 {
+                                if enforced_style == "grouped" {
+                                    check_grouped(self, source, &block_stmts, None, diagnostics);
+                                } else if enforced_style == "separated" {
+                                    check_separated(self, source, &block_stmts, None, diagnostics);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -166,10 +215,27 @@ struct StmtInfo {
     has_previous_line_comment: bool,
 }
 
+/// When a class has a send-type superclass expression (e.g., `Struct.new(...)`),
+/// return the last line of that expression. Used to replicate the parser gem's quirk
+/// where a single-body class has the superclass as the body node's "left sibling".
+fn class_superclass_last_line(
+    source: &SourceFile,
+    class_node: &ruby_prism::ClassNode<'_>,
+) -> Option<usize> {
+    let sc = class_node.superclass()?;
+    // Only send-type superclasses trigger this quirk (e.g., Struct.new(...), not `Bar`)
+    if sc.as_call_node().is_some() {
+        Some(source.offset_to_line_col(sc.location().end_offset()).0)
+    } else {
+        None
+    }
+}
+
 fn check_separated(
     cop: &AccessorGrouping,
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
+    superclass_last_line: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let stmt_list: Vec<_> = stmts.body().iter().collect();
@@ -194,7 +260,7 @@ fn check_separated(
         if previous_line_is_comment(source, stmt.location().start_offset()) {
             continue;
         }
-        if !is_groupable_accessor(source, &stmt_list, idx) {
+        if !is_groupable_accessor(source, &stmt_list, idx, superclass_last_line) {
             continue;
         }
 
@@ -213,6 +279,7 @@ fn check_grouped(
     cop: &AccessorGrouping,
     source: &SourceFile,
     stmts: &ruby_prism::StatementsNode<'_>,
+    superclass_last_line: Option<usize>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let stmt_list: Vec<_> = stmts.body().iter().collect();
@@ -264,7 +331,8 @@ fn check_grouped(
                     previous_line_is_comment(source, stmt.location().start_offset());
 
                 // Check groupable_accessor: examine the previous sibling
-                info.groupable = is_groupable_accessor(source, &stmt_list, idx);
+                info.groupable =
+                    is_groupable_accessor(source, &stmt_list, idx, superclass_last_line);
             }
         }
 
@@ -364,8 +432,23 @@ fn is_groupable_accessor(
     source: &SourceFile,
     stmt_list: &[ruby_prism::Node<'_>],
     idx: usize,
+    superclass_last_line: Option<usize>,
 ) -> bool {
     if idx == 0 {
+        // Parser gem quirk: when a class body has a single send node (not wrapped in
+        // `begin`), the send's `left_siblings.last` is the superclass expression.
+        // If the superclass is a send type (e.g., `Struct.new(...)`), the accessor is
+        // NOT groupable unless there's a blank line gap.
+        if stmt_list.len() == 1 {
+            if let Some(sc_line) = superclass_last_line {
+                let curr_start_line = source
+                    .offset_to_line_col(stmt_list[0].location().start_offset())
+                    .0;
+                if curr_start_line - sc_line <= 1 {
+                    return false;
+                }
+            }
+        }
         return true;
     }
 
@@ -393,10 +476,14 @@ fn is_groupable_accessor(
             return true;
         }
 
-        // Previous is a bare access modifier — groupable
-        if matches!(prev_name, "private" | "protected" | "public")
-            && prev_call.arguments().is_none()
-            && prev_call.block().is_none()
+        // Previous is an access modifier — groupable.
+        // RuboCop's `access_modifier?` matches `(send nil? {:public :private :protected
+        // :module_function})` regardless of arguments, so both bare `private` and
+        // method-level `public :method_name` are access modifiers.
+        if matches!(
+            prev_name,
+            "private" | "protected" | "public" | "module_function"
+        ) && prev_call.receiver().is_none()
         {
             return true;
         }
