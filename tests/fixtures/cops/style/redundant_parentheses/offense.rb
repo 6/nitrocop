@@ -185,3 +185,24 @@ next mem if (Array(@config[:exclude])).include? File.basename(fdir)
 
 (`convert #{ico_template} -resize #{size}x#{size} #{FILE_FAVICO_DIR}/mstile-#{size}x#{size}.png`)
 ^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+def third_party_cart(params = {})
+  add_field("id_type", "1")
+  (max_existing_line_item_id = form_fields.keys.map do |key|
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+    key
+  end.compact.max || 0)
+end
+
+if((sekrets_argv = ENV['SEKRETS_ARGV']))
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+end
+
+response = foo(
+  body: ({ cmd: "_notify-validate" }.merge(paypal_event)).to_query,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+)
+
+while (pop_messages(queue_url, 10).length > 0);
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+end

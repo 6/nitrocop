@@ -146,6 +146,20 @@ use crate::parse::source::SourceFile;
 ///   by RuboCop even though standalone parenthesized xstrings are redundant. After teaching the cop
 ///   that Prism xstrings are literals, it now keeps a narrow exemption when the parenthesized
 ///   xstring is the argument to a match operator call.
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// ### FN root causes fixed:
+/// - **Assignment in begin-like statement containers:** Prism exposes method/block/BEGIN bodies and
+///   nested `if((var = ...))` conditions through `StatementsNode` wrappers, so the previous
+///   grandparent/conditional heuristic skipped real `begin_type?` cases. Assignment parens now
+///   flag whenever the immediate parent is a non-assignment `StatementsNode`, which restores
+///   RuboCop parity for standalone body statements without re-flagging assignments used as the
+///   RHS of another assignment or inside endless method-definition bodies.
+/// - **Empty-body `while` conditions with operator calls:** RuboCop treats `while (call > 0); end`
+///   like a singular-parent context, but Prism `WhileNode` needed an explicit empty-body check.
+///   Empty-body `while` nodes now participate in the singular-parent method-call rule, while
+///   normal loop bodies remain accepted.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -208,6 +222,7 @@ struct ParentInfo {
     kind: ParentKind,
     multiline: bool,
     single_child: bool,
+    is_statements_node: bool,
     is_parentheses_body: bool,
     is_parentheses_node: bool,
     call_parenthesized: bool,
@@ -358,18 +373,11 @@ impl RedundantParensVisitor<'_> {
             }
         }
 
-        // Assignment — RuboCop flags (assignment) when parent is nil or begin_type.
-        // parent being nil maps to us having no real parent (top-level or begin statements).
-        // begin_type in RuboCop maps to a wrapping begin/statements node, which in our parent
-        // stack shows up as ParentKind::Other with no specific parent.
-        // Exclude Parameter (default param values), SingletonClass (class << expr),
-        // and Def (def receiver) because those are not begin_type in RuboCop.
-        //
-        // In Prism, ProgramNode/BeginNode call visit_statements_node directly (no push),
-        // while DefNode/BlockNode call visitor.visit(&body) which pushes StatementsNode.
-        // So when parent is Other (StatementsNode), check the grandparent:
-        // - If grandparent is Def/Block/Call/etc., parent is a body StatementsNode (NOT begin_type)
-        // - If grandparent is also Other or absent, parent is likely begin_type
+        // Assignment — RuboCop flags `(assignment)` when the immediate parent is nil or
+        // begin_type?. In Prism the comparable container is a plain StatementsNode, but we
+        // must not treat an outer assignment node the same way: `index = (state[:index] = ...)`
+        // keeps its parens in RuboCop. We therefore only flag StatementsNode-style parents
+        // that are not themselves assignment nodes.
         //
         // NOTE: When not flagging as assignment, only fall through to the
         // method argument check when inside a parenthesized call. This catches
@@ -379,22 +387,13 @@ impl RedundantParensVisitor<'_> {
             let should_flag = match parent {
                 None => true,
                 Some(p) => {
-                    if matches!(p.kind, ParentKind::Other) {
-                        // Check grandparent: if it's a specific kind (Def, Block, etc.),
-                        // the parent is a body StatementsNode inside a non-begin context.
-                        if self.parent_stack.len() >= 3 {
-                            let gp = &self.parent_stack[self.parent_stack.len() - 3];
-                            matches!(gp.kind, ParentKind::Other)
-                        } else {
-                            true // shallow stack → program level
-                        }
-                    } else {
-                        false
-                    }
+                    matches!(p.kind, ParentKind::Other)
+                        && p.is_statements_node
+                        && !p.is_assignment_parent
+                        && !self.is_endless_def_body_parent()
                 }
             };
-            // But not inside if/while/unless/until conditions
-            if should_flag && !self.has_conditional_ancestor() {
+            if should_flag {
                 self.add_offense(node, "an assignment");
                 return;
             }
@@ -568,20 +567,13 @@ impl RedundantParensVisitor<'_> {
         false
     }
 
-    /// Check if a conditional (if/while/unless/until) is an ancestor.
-    /// Used to determine if assignment parens are needed for disambiguation.
-    fn has_conditional_ancestor(&self) -> bool {
-        if self.parent_stack.len() < 2 {
+    fn is_endless_def_body_parent(&self) -> bool {
+        if self.parent_stack.len() < 3 {
             return false;
         }
-        for i in (0..self.parent_stack.len() - 1).rev() {
-            match self.parent_stack[i].kind {
-                ParentKind::If | ParentKind::While | ParentKind::Until => return true,
-                ParentKind::Other => continue,
-                _ => return false,
-            }
-        }
-        false
+
+        let grandparent = &self.parent_stack[self.parent_stack.len() - 3];
+        matches!(grandparent.kind, ParentKind::Def) && grandparent.is_endless_def
     }
 
     /// RuboCop's first_arg_begins_with_hash_literal?: when the inner expression
@@ -863,6 +855,7 @@ impl RedundantParensVisitor<'_> {
             kind,
             multiline: false,
             single_child: false,
+            is_statements_node: false,
             is_parentheses_body: false,
             is_parentheses_node: false,
             call_parenthesized: false,
@@ -1428,6 +1421,7 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
         let is_parentheses_body = self.parent_stack.len() >= 2
             && self.parent_stack[self.parent_stack.len() - 2].is_parentheses_node;
         if let Some(top) = self.parent_stack.last_mut() {
+            top.is_statements_node = true;
             top.single_child = node.body().len() == 1 && is_parentheses_body;
             top.is_parentheses_body = is_parentheses_body;
         }
@@ -1515,6 +1509,7 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::While;
+            top.single_child = node.statements().is_none();
         }
         ruby_prism::visit_while_node(self, node);
     }
