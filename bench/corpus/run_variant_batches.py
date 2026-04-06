@@ -132,11 +132,19 @@ def run_variant_batches(
         batch_cops = sorted(style_map.get(batch_name, {}).keys())
         only_flag = ["--only", ",".join(batch_cops)] if batch_cops else []
 
+        # Layer per-repo vendor exclusions on top of the batch config.
+        # This ensures variant runs skip vendor/**/* and other junk dirs
+        # just like the default-config oracle does via gen_repo_config.py.
+        from gen_repo_config import generate_repo_config
+        effective_config = generate_repo_config(
+            repo_id, str(batch_config), abs_dest,
+        )
+
         # nitrocop (always run — it's fast)
         nc_ok = _run_tool(
             cmd=[
                 binary, "--preview", "--format", "json", "--no-cache",
-                "--config", str(batch_config), *only_flag, abs_dest,
+                "--config", effective_config, *only_flag, abs_dest,
             ],
             env=env, timeout=timeout,
             stdout_path=nc_json, stderr_path=nc_err,
@@ -164,7 +172,7 @@ def run_variant_batches(
                 cmd=[
                     "bundle", "exec", "rubocop",
                     "--require", str(rescue_file),
-                    "--config", str(batch_config),
+                    "--config", effective_config,
                     *only_flag,
                     "--format", "json", "--force-exclusion", "--cache", "false",
                     abs_dest,

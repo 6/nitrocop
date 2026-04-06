@@ -144,12 +144,13 @@ Use `check_cop.py` for aggregate regression checks after a fix:
 python3 scripts/check_cop.py Department/CopName
 python3 scripts/check_cop.py Department/CopName --verbose --rerun
 python3 scripts/verify_cop_locations.py Department/CopName
+python3 scripts/verify_cop_locations.py Department/CopName --style EnforcedStyle=never
 ```
 
 Important:
 
 - `investigate_cop.py` and `investigate_repo.py` auto-download the latest corpus artifacts. Do not manually download them first.
-- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation.
+- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation. Both support `--style` for variant checks.
 - “file-drop noise” is not an excuse for FN gaps. Investigate the actual missed examples.
 - `check_cop.py --rerun` depends on the bundle under `bench/corpus/vendor/bundle/`. If needed:
 

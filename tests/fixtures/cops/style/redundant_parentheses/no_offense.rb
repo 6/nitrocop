@@ -183,6 +183,10 @@ end
 # Assignment in default keyword parameter value
 def method(key: (default = compute_default))
 end
+# Assignment used as the RHS of another assignment is still plausible
+index = (state[:index] = (state.fetch :index, 0) + 1)
+# Assignment used as the receiver of an index-or-write is still plausible
+(icon_data = AdmonitionIcons[key] || {})[:name] ||= AdmonitionIcons[:note][:name]
 # class << with assignment expression — parens needed to group assignment
 class << (RANDOM = Random.new)
 end
@@ -218,6 +222,8 @@ foo ||= (bar in baz)
 # Pattern matching in endless method definition — parens required
 def myfoo = (bar in [0, 1])
 def mybar = (baz => result)
+# Assignment in endless method definition — parens required
+def initialize(*values) = (@values = values)
 # Unary on local variable — RuboCop's method_call_with_redundant_parentheses?
 # returns false for non-call types (local variables), so these are not flagged.
 # `x` is defined above in earlier fixture lines.
@@ -259,3 +265,7 @@ opt = (mailer.default_url_options || {})
 # Multiline chained comparison
 (aa == bb)
   .to_s
+# Non-empty while body — RuboCop only flags the empty-body form
+while (pop_messages(queue_url, 10).length > 0)
+  work
+end

@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -106,12 +107,16 @@ def parse_loc(loc_str: str) -> tuple[str, str, int]:
 def run_nitrocop_on_repo(
     nitrocop_bin: Path, corpus_dir: Path, config_path: Path,
     repo_id: str, filepaths: list[str], cop_name: str,
+    *, config_override: str | None = None,
 ) -> dict[str, set[int]] | None:
     """Run nitrocop once on all files in a repo, return {filepath: set of offense lines}.
 
     Returns None when the repo directory doesn't exist or none of the
     requested files are on disk.  Callers must distinguish None (not
     checked) from an empty-set result (checked, no offenses found).
+
+    When *config_override* is set, use that config file instead of the
+    per-repo resolved config. This supports ``--style`` variant checks.
     """
     # Import shared corpus runner for oracle-identical env/config
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench" / "corpus"))
@@ -132,7 +137,7 @@ def run_nitrocop_on_repo(
     result_map: dict[str, set[int]] = {fp: set() for fp in filepaths}
 
     env = build_env(str(repo_dir))
-    resolved_config = resolve_repo_config(repo_id, str(repo_dir))
+    resolved_config = config_override if config_override else resolve_repo_config(repo_id, str(repo_dir))
 
     cmd = [
         str(nitrocop_bin),
@@ -178,12 +183,38 @@ def main():
     parser.add_argument("--fp-only", action="store_true", help="Only check FPs")
     parser.add_argument("--fn-only", action="store_true", help="Only check FNs")
     parser.add_argument("--input", type=Path, help="Path to corpus-results.json")
+    parser.add_argument("--style", type=str, default=None, metavar="PARAM=VALUE",
+                        help="Override a single cop config parameter for nitrocop. "
+                             "E.g., --style EnforcedStyleForMultiline=comma. "
+                             "Generates a temporary config inheriting from the baseline.")
     args = parser.parse_args()
 
     project_root = find_project_root()
     corpus_dir = project_root / "vendor" / "corpus"
     config_path = project_root / "bench" / "corpus" / "baseline_rubocop.yml"
     nitrocop_bin = Path(os.environ["NITROCOP_BIN"]) if "NITROCOP_BIN" in os.environ else project_root / os.environ.get("CARGO_TARGET_DIR", "target") / "release" / "nitrocop"
+
+    # Parse --style into a temp config override if specified.
+    style_config_override: str | None = None
+    if args.style:
+        if "=" not in args.style:
+            print("ERROR: --style must be PARAM=VALUE (e.g., EnforcedStyle=comma)", file=sys.stderr)
+            sys.exit(1)
+        style_param, style_value = args.style.split("=", 1)
+        # All cops in args.cops share the same style override — this matches
+        # check_cop.py's behavior where --style applies to the single cop.
+        # When multiple cops are given, use the first cop for the config
+        # (the override only affects the specified cop's section anyway).
+        cop_for_config = args.cops[0]
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yml", prefix="nitrocop_style_", delete=False,
+        ) as f:
+            f.write(f"inherit_from: {config_path}\n\n")
+            f.write(f"{cop_for_config}:\n")
+            f.write(f"  {style_param}: {style_value}\n")
+            style_config_override = f.name
+        print(f"Style override: {style_param}={style_value} (config: {style_config_override})",
+              file=sys.stderr)
 
     ensure_fresh_release_binary(project_root, nitrocop_bin)
 
@@ -275,6 +306,7 @@ def main():
             result_map = run_nitrocop_on_repo(
                 nitrocop_bin, corpus_dir, config_path,
                 repo_id, sorted(files), cop_name,
+                config_override=style_config_override,
             )
             if result_map is None:
                 skipped_repos.add(repo_id)

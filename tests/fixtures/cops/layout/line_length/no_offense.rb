@@ -53,5 +53,8 @@ puts "\nFor all saved admins, copy and paste into the wiki at https://wiki.trans
 # AllowURI: URLs with &#8203; (zero-width space entity) — # in &#8203; is not a real fragment
       markdown.should include "* PUT [https:&#8203;/&#8203;/api.sample.com&#8203;/members&#8203;/add](members_api/add-PUT.md)"
 
+# AllowURI: JSON-escaped URL with \\/\\/ slashes — URI regex matches the scheme and the escaped URL is valid
+      expect(json_body["url"]).to eq("https:\\/\\/example.com\\/very\\/long\\/path\\/that\\/pushes\\/the\\/line\\/over\\/limit")
+
 __END__
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

@@ -922,14 +922,18 @@ def _run_rubocop_for_variant(
     """Run rubocop with --only <cop> --config <config> on a repo.
 
     Returns {"count": N} where N is the offense count, or {"count": -1} on error.
+    Applies per-repo vendor exclusions on top of *config* via gen_repo_config.
     """
+    from gen_repo_config import generate_repo_config
     from run_nitrocop import build_env
+    repo_id = Path(repo_dir).name
+    effective_config = generate_repo_config(repo_id, config, repo_dir)
     RESCUE_FILE = str(PROJECT_ROOT / "bench" / "corpus" / "rescue_parser_crashes.rb")
     env = build_env(repo_dir)
     cmd = [
         "bundle", "exec", "rubocop",
         "--require", RESCUE_FILE,
-        "--config", config,
+        "--config", effective_config,
         "--only", cop,
         "--format", "json",
         "--force-exclusion",
@@ -1475,15 +1479,56 @@ def main():
             print()
 
         # Machine-readable summary for CI aggregation
-        # Format: cop|baseline_fp|baseline_fn|local_fp|local_fn|result|count_bl_fp|count_bl_fn
+        # Format: cop|baseline_fp|baseline_fn|local_fp|local_fn|result|count_bl_fp|count_bl_fn|detail
         # baseline_fp/fn = location-level from oracle
         # local_fp/fn = count-level from local run (max(0, local - rubocop))
         # count_bl_fp/fn = count-level baseline (max(0, oracle_nc - oracle_rc))
-        # The last two fields enable the CI comment to detect when a large
+        # detail = space-separated repo_id(FP:file:line,...) repo_id(FN:file:line,...)
+        # The count fields enable the CI comment to detect when a large
         # location-level FP delta has no count-level counterpart (location
         # shift or config resolution artifact, not a real regression).
         result_str = "fail" if failed else "pass"
-        print(f"SUMMARY|{args.cop}|{total_baseline_fp}|{total_baseline_fn}|{total_local_fp}|{total_local_fn}|{result_str}|{total_count_baseline_fp}|{total_count_baseline_fn}")
+
+        # Build location detail from oracle FP/FN examples for regressing repos.
+        by_cop_map = {c["cop"]: c for c in data.get("by_cop", [])}
+        cop_data = by_cop_map.get(args.cop, {})
+        # Index oracle examples by repo_id and kind
+        _repo_fp_locs: dict[str, list[str]] = {}
+        _repo_fn_locs: dict[str, list[str]] = {}
+        for ex in cop_data.get("fp_examples", []):
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, line = _parse_example_loc(loc)
+                _repo_fp_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+            except (ValueError, IndexError):
+                pass
+        for ex in cop_data.get("fn_examples", []):
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, line = _parse_example_loc(loc)
+                _repo_fn_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+            except (ValueError, IndexError):
+                pass
+        # Collect detail parts for regressing repos
+        _fp_repo_ids = {r[0] for r in fp_repos}
+        _fn_repo_ids = {r[0] for r in fn_repos}
+        detail_parts: list[str] = []
+        for repo_id in sorted(_fp_repo_ids | _fn_repo_ids):
+            fp_locs = _repo_fp_locs.get(repo_id, [])
+            fn_locs = _repo_fn_locs.get(repo_id, [])
+            if repo_id in _fp_repo_ids and fp_locs:
+                loc_str = ",".join(fp_locs[:2])
+                detail_parts.append(f"{repo_id}(FP:{loc_str})")
+            elif repo_id in _fp_repo_ids:
+                detail_parts.append(f"{repo_id}(FP)")
+            if repo_id in _fn_repo_ids and fn_locs:
+                loc_str = ",".join(fn_locs[:2])
+                detail_parts.append(f"{repo_id}(FN:{loc_str})")
+            elif repo_id in _fn_repo_ids:
+                detail_parts.append(f"{repo_id}(FN)")
+        detail = " ".join(detail_parts[:10])
+
+        print(f"SUMMARY|{args.cop}|{total_baseline_fp}|{total_baseline_fn}|{total_local_fp}|{total_local_fn}|{result_str}|{total_count_baseline_fp}|{total_count_baseline_fn}|{detail}")
 
         if failed:
             sys.exit(1)

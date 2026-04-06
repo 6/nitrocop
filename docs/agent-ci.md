@@ -60,8 +60,9 @@ Many cops have configurable `EnforcedStyle` parameters. The CI gate tests all su
 - The task prompt's **Style Variant Divergence** section lists which variants diverge and by how much.
 - Add fixture tests for non-default styles using the `# nitrocop-config: EnforcedStyle: value` directive.
 - Spot-check a specific variant locally: `python3 scripts/check_cop.py Cop --rerun --clone --sample 5 --style EnforcedStyle=value`
+- Verify per-line variant locations: `python3 scripts/verify_cop_locations.py Cop --style EnforcedStyle=value`
 - The full CI gate runs `--check-variants` automatically, which tests all variant styles.
-- When the variant check fails, it now shows which repos diverge (e.g., `repo_a NC:3 RC:2 (FP)`). Use these to inspect the exact file.
+- When the variant check fails, it shows which repos diverge with FP/FN locations (e.g., `repo_a(FP:file.rb:7) repo_b(FN:file.rb:33)`). Use these to inspect the exact file.
 - **Do not assume a default-config fix works for all variants.** Always check the variant section in the task prompt and test each diverging style.
 
 ## Failure Handling

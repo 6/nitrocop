@@ -214,3 +214,16 @@ config.wrappers :default, class: :input,
   hint_class: :field_with_hint do |b|
   b.use :placeholder
 end
+
+# Call nested in keyword hash argument of a chain — individually checked
+# when the outer chain is too long to fit on one line.
+expect(foo).to be_a(Parlour::RbsGenerator::Method) & have_attributes(
+  name: 'foo',
+  signatures: match_array([
+              ^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+    have_attributes(
+      parameters: [],
+      return_type: nil,
+    )
+  ]),
+)

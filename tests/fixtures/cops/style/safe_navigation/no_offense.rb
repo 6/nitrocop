@@ -175,3 +175,9 @@ before_save :inherit_restricted_status,
 # Ternary inside nil-method call arguments — ancestor walk finds
 # instance_variable_set as a nil-responding method
 instance_variable_set("@bar", baz.nil? ? nil : baz.to_s)
+
+# && chain length 1 inside block of dotless call args — RuboCop's
+# ancestor walk escapes the rhs expression and finds the unsafe parent
+puts(items.map { |x| x && x.b })
+Hash[list.map { |p| [p.name.to_s, p.dt && p.dt.to_s] }]
+scope :accessible, ->(u) { items.select { |i| i && i.active? } }
