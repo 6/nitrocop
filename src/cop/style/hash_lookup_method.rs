@@ -1,20 +1,24 @@
-use crate::cop::shared::node_type::CALL_NODE;
+use crate::cop::shared::node_type::{
+    CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
 /// Enforces either `fetch` or `[]` for hash-style lookups.
 ///
-/// ## Corpus investigation (2026-03-30)
+/// ## Variant style divergence (2026-04-06)
 ///
-/// Prism stores `&block` as `call.block()` with a `BlockArgumentNode`, while
-/// RuboCop's Parser-backed `node.arguments.one?` counts that block-pass as an
-/// argument. The original implementation only looked at `call.arguments()` and
-/// rejected every call with `call.block()`, so it missed `receiver.fetch(&block)`.
+/// The default `EnforcedStyle: brackets` is correct.
 ///
-/// Fix: count `BlockArgumentNode` in the effective argument count for
-/// `EnforcedStyle: brackets`, but continue excluding literal blocks (`{}` /
-/// `do...end`) so `fetch(key) { default }` remains allowed.
+/// `EnforcedStyle: fetch` had FN regression because Prism represents compound
+/// index assignments (`hash[key] ||= val`) as `IndexOrWriteNode` /
+/// `IndexAndWriteNode` / `IndexOperatorWriteNode` instead of nested `CallNode`s.
+/// RuboCop's Parser represents these as `or_asgn(send(... :[] ...), ...)` where
+/// the inner `send` with `[]` IS visited and flagged.
+///
+/// Fix: added the index-write node types to `interested_node_types` and handle
+/// them in the `fetch` style branch by treating them as implicit `[]` reads.
 pub struct HashLookupMethod;
 
 impl Cop for HashLookupMethod {
@@ -27,7 +31,12 @@ impl Cop for HashLookupMethod {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -39,12 +48,69 @@ impl Cop for HashLookupMethod {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let style = config.get_str("EnforcedStyle", "brackets");
+
+        // Handle IndexOrWriteNode, IndexAndWriteNode, IndexOperatorWriteNode
+        // for EnforcedStyle: fetch
+        if style == "fetch" {
+            // All three index-write node types have the same structure:
+            // receiver (the hash), arguments (the key), and a block/operator part.
+            // We flag them the same way as implicit [] reads.
+            if let Some(write) = node.as_index_or_write_node() {
+                if let Some(args) = write.arguments() {
+                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                    if arg_list.len() == 1 && write.receiver().is_some() {
+                        let loc = write.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use `fetch` instead of `[]`.".to_string(),
+                        ));
+                    }
+                }
+                return;
+            }
+            if let Some(write) = node.as_index_and_write_node() {
+                if let Some(args) = write.arguments() {
+                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                    if arg_list.len() == 1 && write.receiver().is_some() {
+                        let loc = write.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use `fetch` instead of `[]`.".to_string(),
+                        ));
+                    }
+                }
+                return;
+            }
+            if let Some(write) = node.as_index_operator_write_node() {
+                if let Some(args) = write.arguments() {
+                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                    if arg_list.len() == 1 && write.receiver().is_some() {
+                        let loc = write.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use `fetch` instead of `[]`.".to_string(),
+                        ));
+                    }
+                }
+                return;
+            }
+        }
+
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
         };
 
-        let style = config.get_str("EnforcedStyle", "brackets");
         let method_bytes = call.name().as_slice();
 
         match style {

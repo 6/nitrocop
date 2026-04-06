@@ -1,3 +1,6 @@
+# nitrocop-config: EnforcedStyle: brackets
+# (default)
+
 hash.fetch(:key)
      ^^^^^^^^^^^^ Style/HashLookupMethod: Use `[]` instead of `fetch`.
 hash.fetch('name')
