@@ -225,4 +225,55 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
         assert!(diags.is_empty());
     }
+
+    #[test]
+    fn block_style_flags_global_variable_first_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect { run }.to change($token, :value)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn block_style_flags_instance_variable_first_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect { run }.to change(@user, :name)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn block_style_flags_chained_method_call_first_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect { run }.to change(users.green, :count)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(diags.len(), 1);
+    }
 }
