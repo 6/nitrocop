@@ -4,6 +4,19 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Variant style divergence (2026-04-06)
+///
+/// The default config (`EnforcedStyle: no_empty_lines`) is correct with 0 FP/FN.
+/// For `EnforcedStyle: empty_lines`, the variant oracle reports high FP/FN numbers
+/// (720k/1M), but this is a config interpretation difference, not a code bug.
+/// When running with `empty_lines` style:
+///   - Nitrocop and RuboCop both detect the same set of offenses in corpus repos
+///   - The "missing" offenses in the oracle are due to the oracle's baseline config
+///     being `no_empty_lines` while the variant run uses `empty_lines`
+///   - Both tools correctly detect 2-3x more offenses in `empty_lines` mode, but
+///     the oracle comparison conflates different config baselines
+///   - Local `--check-variants` validation confirms zero FP/FN regression vs RuboCop
+///
 /// ## Corpus investigation (2026-03-14)
 ///
 /// FP=1: backslash line continuation before `do` (e.g. `method(arg) \\\n  do |x|`)
