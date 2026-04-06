@@ -924,10 +924,9 @@ def _run_rubocop_for_variant(
     Returns {"count": N} where N is the offense count, or {"count": -1} on error.
     Applies per-repo vendor exclusions on top of *config* via gen_repo_config.
     """
-    from gen_repo_config import generate_repo_config
-    from run_nitrocop import build_env
+    from run_nitrocop import build_env, resolve_repo_config
     repo_id = Path(repo_dir).name
-    effective_config = generate_repo_config(repo_id, config, repo_dir)
+    effective_config = resolve_repo_config(repo_id, repo_dir, base_config=config)
     RESCUE_FILE = str(PROJECT_ROOT / "bench" / "corpus" / "rescue_parser_crashes.rb")
     env = build_env(repo_dir)
     cmd = [

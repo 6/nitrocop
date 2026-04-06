@@ -135,10 +135,19 @@ def run_variant_batches(
         # Layer per-repo vendor exclusions on top of the batch config.
         # This ensures variant runs skip vendor/**/* and other junk dirs
         # just like the default-config oracle does via gen_repo_config.py.
-        from gen_repo_config import generate_repo_config
-        effective_config = generate_repo_config(
-            repo_id, str(batch_config), abs_dest,
-        )
+        try:
+            gen_result = subprocess.run(
+                [sys.executable, str(CORPUS_DIR / "gen_repo_config.py"),
+                 repo_id, str(batch_config), abs_dest],
+                capture_output=True, text=True, timeout=10,
+            )
+            effective_config = (
+                gen_result.stdout.strip()
+                if gen_result.returncode == 0 and gen_result.stdout.strip()
+                else str(batch_config)
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            effective_config = str(batch_config)
 
         # nitrocop (always run — it's fast)
         nc_ok = _run_tool(

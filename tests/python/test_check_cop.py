@@ -922,6 +922,7 @@ def test_run_rubocop_for_variant_filters_to_requested_cop(monkeypatch):
     def fake_run(cmd, **kwargs):
         class Result:
             stdout = rubocop_json
+            returncode = 0
         return Result()
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -948,6 +949,7 @@ def test_run_rubocop_for_variant_deduplicates_by_path_line(monkeypatch):
     def fake_run(cmd, **kwargs):
         class Result:
             stdout = rubocop_json
+            returncode = 0
         return Result()
 
     monkeypatch.setattr("subprocess.run", fake_run)
