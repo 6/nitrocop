@@ -1,12 +1,29 @@
 use crate::cop::shared::node_type::{
-    BLOCK_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, INSTANCE_VARIABLE_READ_NODE,
-    LOCAL_VARIABLE_READ_NODE, STATEMENTS_NODE, SYMBOL_NODE,
+    BLOCK_NODE, CALL_NODE, CLASS_VARIABLE_READ_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE,
+    GLOBAL_VARIABLE_READ_NODE, INSTANCE_VARIABLE_READ_NODE, LOCAL_VARIABLE_READ_NODE,
+    STATEMENTS_NODE, SYMBOL_NODE,
 };
 use crate::cop::shared::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for consistent style of change matcher.
+///
+/// Enforces either passing a receiver and message as method arguments,
+/// or a block.
+///
+/// `EnforcedStyle: method_call` (default): flags `change { obj.attr }` and
+/// suggests `change(obj, :attr)`. The receiver must be a constant or bare
+/// method call (no receiver, no arguments, no block).
+///
+/// `EnforcedStyle: block`: flags `change(obj, :attr)` and suggests
+/// `change { obj.attr }`. RuboCop's pattern accepts ANY first argument type
+/// (not just constants/variables), so the Rust implementation was too
+/// restrictive — it was missing global variables (`$token`) and chained
+/// method calls (e.g., `users.green`).
+///
+/// This cop is visited by the corpus oracle for both style variants.
 pub struct ExpectChange;
 
 impl Cop for ExpectChange {
@@ -26,8 +43,10 @@ impl Cop for ExpectChange {
         &[
             BLOCK_NODE,
             CALL_NODE,
+            CLASS_VARIABLE_READ_NODE,
             CONSTANT_PATH_NODE,
             CONSTANT_READ_NODE,
+            GLOBAL_VARIABLE_READ_NODE,
             INSTANCE_VARIABLE_READ_NODE,
             LOCAL_VARIABLE_READ_NODE,
             STATEMENTS_NODE,
@@ -70,18 +89,8 @@ impl Cop for ExpectChange {
             if arg_list.len() != 2 {
                 return;
             }
-            // First arg should be a constant or local variable, second a symbol
-            let first = &arg_list[0];
-            if first.as_constant_read_node().is_none()
-                && first.as_constant_path_node().is_none()
-                && first.as_local_variable_read_node().is_none()
-                && first.as_instance_variable_read_node().is_none()
-                && !first.as_call_node().is_some_and(|c| {
-                    c.receiver().is_none() && c.arguments().is_none() && c.block().is_none()
-                })
-            {
-                return;
-            }
+            // RuboCop's pattern `$_` accepts ANY first argument type.
+            // The second argument must be a symbol or string.
             if arg_list[1].as_symbol_node().is_none() {
                 return;
             }
