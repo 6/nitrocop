@@ -97,6 +97,26 @@ use crate::parse::source::SourceFile;
 ///   In RuboCop's Parser AST, `on_send` walks up through convertible blocks but
 ///   stops at non-convertible ones, checking only the send portion. This recovers
 ///   ~2,653 FNs and resolves ~616 FPs with zero regressions.
+///
+/// ## Fixes applied (2026-04-06)
+/// - **Data structure nesting check**: `part_of_checked_chain` now uses
+///   `is_nested_in_data_structure()` to allow calls nested inside hash, array,
+///   or other data structures within a chain to be checked independently. In
+///   RuboCop, `on_send` walks up only through parent `send_type?` nodes. Calls
+///   inside hashes (`key: match_array([...])`), arrays, or splats have non-send
+///   parents (pair, hash, array) that stop the walk-up, so they're checked
+///   independently. Previously, nitrocop's byte-range-based `checked_chain_ranges`
+///   suppressed ALL calls within a chain's range, including these nested calls.
+///   Resolves ~1350 FNs (e.g., `match_array(...)` inside `have_attributes(...)`)
+///   with zero regressions.
+/// - **`too_long` backslash fix**: The combined-line length calculation now only
+///   strips trailing line-continuation backslashes, not ALL backslash characters.
+///   Previously, `combined.retain(|&b| b != b'\\')` removed content backslashes
+///   like `\1_\2` in regex replacements and `\d` in character classes, making
+///   the combined line appear shorter than it actually is. This caused FPs for
+///   method chains containing regex patterns where the true combined length
+///   exceeded 120 chars but the backslash-stripped version didn't. Resolves
+///   ~594 FPs with zero regressions.
 pub struct RedundantLineBreak;
 
 impl Cop for RedundantLineBreak {
@@ -402,10 +422,19 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 break;
             }
             let line = lines[line_num - 1];
-            if combined.is_empty() {
-                combined.extend_from_slice(line);
+            // Strip trailing whitespace, then strip trailing backslash (line continuation).
+            // Only remove the line-continuation backslash, NOT backslashes that are part of
+            // content (e.g., \1_\2 in regex replacements, \d in character classes).
+            let trimmed_end = trim_trailing_whitespace(line);
+            let without_continuation = if trimmed_end.ends_with(b"\\") {
+                trim_trailing_whitespace(&trimmed_end[..trimmed_end.len() - 1])
             } else {
-                let trimmed = trim_leading_whitespace(line);
+                trimmed_end
+            };
+            if combined.is_empty() {
+                combined.extend_from_slice(without_continuation);
+            } else {
+                let trimmed = trim_leading_whitespace(without_continuation);
                 if starts_with_method_chain_dot(trimmed) {
                     combined.extend_from_slice(trimmed);
                 } else {
@@ -414,8 +443,6 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 }
             }
         }
-        // Remove backslash continuations
-        combined.retain(|&b| b != b'\\');
 
         combined.len() > self.max_line_length
     }
@@ -487,13 +514,48 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
     /// Calls inside block bodies within the chain are NOT suppressed — in RuboCop's
     /// Parser AST, blocks are parent nodes (not part of the send's range), so calls
     /// inside block bodies are checked independently.
+    /// Calls nested inside data structures (hashes, arrays, etc.) within arguments
+    /// are also NOT suppressed — in RuboCop's `on_send`, the walk-up only follows
+    /// parent send_type? nodes, so calls inside hash/array structures don't walk up
+    /// and are checked independently.
     fn part_of_checked_chain(&self, start_offset: usize, end_offset: usize) -> bool {
         self.checked_chain_ranges.iter().any(|&(cs, ce)| {
             start_offset >= cs
                 && end_offset <= ce
                 && (start_offset > cs || end_offset < ce)
                 && !self.inside_block_body_within_chain(start_offset, end_offset, cs, ce)
+                && !self.is_nested_in_data_structure()
         })
+    }
+
+    /// Returns true if the current call is nested inside a data structure (hash, array,
+    /// assoc pair, etc.) relative to its nearest ancestor CallNode. In RuboCop's Parser
+    /// AST, such nesting breaks the walk-up in `on_send` because the intermediate nodes
+    /// (hash, pair, array) are not `send_type?`. In Prism, ArgumentsNode is the only
+    /// intermediate wrapper that doesn't break the walk-up (it has no Parser equivalent).
+    fn is_nested_in_data_structure(&self) -> bool {
+        // ancestors includes the current node as the last element.
+        // Walk up from the second-to-last to find the nearest ancestor CallNode.
+        if self.ancestors.len() < 2 {
+            return false;
+        }
+        for i in (0..self.ancestors.len() - 1).rev() {
+            let ancestor = &self.ancestors[i];
+            // If we reach a CallNode, this node is a direct child (receiver or argument)
+            // — not nested in a data structure.
+            if ancestor.as_call_node().is_some() {
+                return false;
+            }
+            // ArgumentsNode is Prism's wrapper for arguments; it doesn't exist in Parser
+            // AST, so skip it (it doesn't break the walk-up).
+            if ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+            // Any other node type (KeywordHashNode, HashNode, ArrayNode, AssocNode,
+            // SplatNode, ParenthesesNode, etc.) breaks the walk-up in RuboCop.
+            return true;
+        }
+        false
     }
 
     /// Returns true if the node at (start, end) is inside a block body that
