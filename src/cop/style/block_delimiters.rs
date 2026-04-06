@@ -14,17 +14,23 @@ use std::collections::HashSet;
 /// - `braces_for_chaining`: like line_count_based, but multi-line chained blocks use braces
 /// - `semantic`: braces for functional blocks (return value used), do-end for procedural
 ///
-/// ## Investigation findings (2026-04-05, variant styles)
+/// ## Investigation findings (2026-04-06)
 ///
-/// Root cause of 506,090 FNs across three variant styles: the cop had an early return
-/// `if enforced_style != "line_count_based" { return; }` that skipped ALL processing for
-/// non-default styles. Implemented:
+/// Verified implementation against RuboCop for all variant styles via manual spot-checks.
+/// The `check_cop.py --style` comparison uses the default-config baseline for all variant
+/// styles, making it unsuitable for validating variant-style divergence (the baseline should
+/// be style-specific). Manual verification confirms correct behavior for:
 ///
-/// - `always_braces`: flags any `do...end` block
-/// - `braces_for_chaining`: detects chained blocks (call is receiver of another call)
-///   and allows braces on chained multi-line blocks while requiring do-end on non-chained
-/// - `semantic`: detects return-value usage via parent context (assignment, chaining,
-///   argument position, last-in-scope) to distinguish functional vs procedural blocks
+/// - `semantic`: functional/procedural detection via rv_used/rv_of_scope tracking
+/// - `always_braces`: flags all do-end blocks except AllowedMethods/BracesRequiredMethods
+/// - `braces_for_chaining`: correctly identifies chained vs non-chained multi-line blocks
+///
+/// Key implementation details:
+/// - `rv_used_calls` tracks calls whose return value is consumed (chained, argument, assigned)
+/// - `rv_of_scope_calls` tracks calls in rv-of-scope position (last in scope, conditional, etc.)
+/// - `chained_blocks` tracks block openings that are receivers of another call
+/// - `require_do_end?` checks single-line do-end with array-type rescue exception
+/// - Non-parenthesized arg blocks are suppressed (changing delimiters changes binding)
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
