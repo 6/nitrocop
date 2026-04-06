@@ -198,6 +198,8 @@ def main():
         args.repo_dir, cop=args.cop, binary=args.binary, timeout=args.timeout,
     )
 
+    is_timeout = result["error"] and "timeout" in result["error"]
+
     if args.output:
         # Write raw nitrocop JSON — the oracle's diff_results.py expects this format
         Path(args.output).write_text(result["raw"] or "{}\n")
@@ -208,6 +210,10 @@ def main():
         summary = {"count": result["count"], "error": result["error"]}
         print(json.dumps(summary, indent=2))
 
+    # Exit 124 on timeout (matches `timeout` command convention) so callers
+    # can distinguish timeouts from other failures without parsing stderr.
+    if is_timeout:
+        sys.exit(124)
     sys.exit(0 if result["count"] >= 0 else 1)
 
 
