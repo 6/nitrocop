@@ -1031,3 +1031,37 @@ def guard_with_trailing_backslash_continuation
     t.tags.delete_if { |tag| image.tags.include?(tag) }
   end
 end
+
+# FP fix: consecutive guards where next sibling has `/` division operator
+# The `/` preceded by a space was misidentified as a regex delimiter start,
+# hiding the `if` keyword from the modifier count.
+def scale_bytes_base2(amount)
+  amount = amount.to_f
+  return [ 0, "b" ] if amount == 0
+  return [ amount.to_i, "b" ] if amount < @@kib
+  return [ (amount / @@kib).round(1), "KiB" ] if amount < @@mib
+  return [ (amount / @@mib).round(2), "MiB" ] if amount < @@gib
+  return [ (amount / @@gib).round(3), "GiB" ] if amount < @@tib
+  return [ (amount / @@tib).round(4), "TiB" ] if amount < @@pib
+
+  return [ (amount / @@pib).round(5), "PiB" ]
+end
+
+# FP fix: consecutive guards with division in condition
+def hue_to_rgb(p, q, t)
+  t += 1 if (t < 0)
+  t -= 1 if (t > 1)
+  return(p + (q - p) * 6 * t) if (t < 1 / 6.0)
+  return q if (t < 1 / 2.0)
+  return(p + (q - p) * (2 / 3.0 - t) * 6) if (t < 2 / 3.0)
+
+  p
+end
+
+# FP fix: consecutive guards where next sibling has `#{}` interpolation
+# that breaks double-quote tracking in the scanner
+def validate_entry(entry, file_n, zip)
+  return "file '#{entry.name}' cannot be a #{entry.ftype}" if entry.ftype != :file
+  return "file '#{entry.name}' has flags (#{"%.8b" % entry.gp_flags})" if entry.gp_flags != 0
+  return "file has bad size" if entry.size != zip.entries[file_n].size
+end

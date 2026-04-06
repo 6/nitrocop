@@ -426,6 +426,29 @@ use crate::parse::source::SourceFile;
 ///    spanning multiple lines via backslash continuation, the AST location ends before
 ///    the `\`, so the trailing `\` was treated as "code after the guard" → false offense.
 ///    Added explicit check for `trailing == b"\\"` to skip the line continuation marker.
+///
+/// ## Corpus investigation (2026-04-06: FP=16 → FP=0)
+///
+/// Two root causes identified for all 16 FPs:
+///
+/// 1. **Division operator `/` misidentified as regex start**: The `/` regex
+///    heuristic in `count_top_level_word_occurrences` treated any `/` preceded
+///    by a space as a regex delimiter. For lines like
+///    `return [ (amount / @@kib).round(1), "KiB" ] if amount < @@mib`, the `/`
+///    in `amount / @@kib` was preceded by a space, so the scanner entered regex
+///    mode and stayed there (no closing `/`), hiding the `if` keyword entirely.
+///    The next sibling was then not recognized as a guard clause, causing 15 FPs.
+///    Fix: added `is_likely_regex_slash()` that looks past whitespace to find the
+///    real context character — identifiers and closing brackets indicate division,
+///    not regex.
+///
+/// 2. **`#{}` string interpolation breaking double-quote tracking**: For lines
+///    like `"text #{expr} #{"%.8b" % val}" if cond`, the `"` inside `#{"..."}`
+///    was treated as closing the outer double-quoted string. The scanner then
+///    misidentified `%` as starting a percent literal, hiding the `if` keyword.
+///    Fix: added `interp_depth` tracking in `count_top_level_word_occurrences`
+///    that enters `#{...}` interpolation mode and only tracks `{}`-depth until
+///    the interpolation closes, preventing inner `"` from ending the outer string.
 pub struct EmptyLineAfterGuardClause;
 
 /// Guard clause keywords that appear at the start of an expression.
@@ -2453,6 +2476,7 @@ fn count_top_level_word_occurrences(haystack: &[u8], word: &[u8]) -> usize {
     let mut in_double_quote = false;
     let mut in_regex = false;
     let mut in_percent_literal: Option<(u8, u8, usize)> = None;
+    let mut interp_depth: i32 = 0; // tracks #{...} nesting inside double-quoted strings
     let mut count = 0;
     let mut i = 0;
 
@@ -2492,11 +2516,25 @@ fn count_top_level_word_occurrences(haystack: &[u8], word: &[u8]) -> usize {
         }
 
         if in_double_quote {
+            // Inside #{...} interpolation: only track brace depth
+            if interp_depth > 0 {
+                match b {
+                    b'{' => interp_depth += 1,
+                    b'}' => interp_depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
             if b == b'\\' {
                 i += 2;
                 continue;
             } else if b == b'"' {
                 in_double_quote = false;
+            } else if b == b'#' && i + 1 < haystack.len() && haystack[i + 1] == b'{' {
+                interp_depth = 1;
+                i += 2;
+                continue;
             }
             i += 1;
             continue;
@@ -2532,27 +2570,7 @@ fn count_top_level_word_occurrences(haystack: &[u8], word: &[u8]) -> usize {
                 }
             }
             b'/' => {
-                let is_regex_start = if i == 0 {
-                    true
-                } else {
-                    let prev = haystack[i - 1];
-                    matches!(
-                        prev,
-                        b'=' | b'('
-                            | b','
-                            | b'!'
-                            | b'~'
-                            | b' '
-                            | b'\t'
-                            | b'|'
-                            | b'&'
-                            | b'{'
-                            | b'['
-                            | b';'
-                            | b':'
-                    )
-                };
-                if is_regex_start {
+                if is_likely_regex_slash(haystack, i) {
                     in_regex = true;
                     i += 1;
                     continue;
@@ -2666,6 +2684,39 @@ fn contains_pattern_at_top_level(
 
 fn is_ident_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'_' | b'!' | b'?' | b'@' | b'$')
+}
+
+/// Heuristic to determine if `/` at position `i` in `haystack` is likely a regex
+/// delimiter start rather than a division operator. When the character immediately
+/// before `/` is a space or tab, looks further back past whitespace — identifiers
+/// and closing brackets/parens indicate division (e.g., `amount / 2`), while
+/// operators and opening delimiters indicate regex (e.g., `if /pattern/`).
+fn is_likely_regex_slash(haystack: &[u8], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    let prev = haystack[i - 1];
+    if prev != b' ' && prev != b'\t' {
+        return matches!(
+            prev,
+            b'=' | b'(' | b',' | b'!' | b'~' | b'|' | b'&' | b'{' | b'[' | b';' | b':'
+        );
+    }
+    // Previous char is space/tab — look back past whitespace for context
+    for &c in haystack[..i - 1].iter().rev() {
+        if c == b' ' || c == b'\t' {
+            continue;
+        }
+        // After identifier chars (variable/method names) or closing delimiters
+        // → division operator, not regex
+        if is_ident_char(c) || matches!(c, b')' | b']' | b'}') {
+            return false;
+        }
+        // After operators or opening delimiters → regex
+        return true;
+    }
+    // Only whitespace before → start of expression → regex
+    true
 }
 
 /// Check if a line is an "allowed directive comment" per RuboCop's definition.
