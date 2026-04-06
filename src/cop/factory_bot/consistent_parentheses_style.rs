@@ -68,6 +68,16 @@ use crate::parse::source::SourceFile;
 /// This ensures only the direct parent's ambiguity affects the factory call check,
 /// matching RuboCop's `node.parent.type` behavior.
 ///
+/// ## Variant fix: omit_parentheses safe navigation (2026-04-06)
+///
+/// Variant oracle reported FP=0, FN=1 for `omit_parentheses`.
+/// FN in chatwoot/chatwoot: `create(:channel_email, ...)&.inbox` — factory
+/// call as receiver of `&.` (safe navigation). In Parser AST, parent is
+/// `csend` which is NOT in AMBIGUOUS_TYPES (only `send` is). Our code set
+/// `parent_is_ambiguous = true` for ALL receivers, including `&.`.
+/// Fix: Check `call.call_operator_loc()` for `&.`; if safe navigation,
+/// don't set ambiguity for the receiver (matching Parser's csend behavior).
+///
 /// ## Variant fix: omit_parentheses block bypass + unless handling (2026-04-05)
 ///
 /// Variant oracle reported FP=5, FN=11 for `omit_parentheses`.
@@ -270,14 +280,25 @@ impl<'pr> Visit<'pr> for ParenStyleVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         self.check_factory_call(node);
 
-        // Visit receiver — ambiguous: in Parser AST, a receiver's parent is
-        // the outer `send` node, which is in AMBIGUOUS_TYPES. Example:
-        // `create(:user).save` — create's parent is `send` (the .save call).
+        // Visit receiver — ambiguous ONLY for regular `.` calls (Parser `send`).
+        // In Parser AST, a receiver's parent is `send` (in AMBIGUOUS_TYPES).
+        // But `&.` (safe navigation) maps to `csend` which is NOT in
+        // AMBIGUOUS_TYPES. Example: `create(:user).save` is ambiguous,
+        // but `create(:user)&.save` is NOT (RuboCop flags the latter).
         if let Some(recv) = node.receiver() {
             let saved = self.parent_is_ambiguous;
             let saved_kind = self.ambiguity_kind;
-            self.parent_is_ambiguous = true;
-            self.ambiguity_kind = Some(AmbiguityKind::Call);
+            let is_safe_nav = node
+                .call_operator_loc()
+                .is_some_and(|loc| loc.as_slice() == b"&.");
+            if is_safe_nav {
+                // csend: NOT in AMBIGUOUS_TYPES — don't set ambiguity
+                self.parent_is_ambiguous = false;
+                self.ambiguity_kind = None;
+            } else {
+                self.parent_is_ambiguous = true;
+                self.ambiguity_kind = Some(AmbiguityKind::Call);
+            }
             self.visit(&recv);
             self.parent_is_ambiguous = saved;
             self.ambiguity_kind = saved_kind;
@@ -681,6 +702,51 @@ mod tests {
             diags.len(),
             1,
             "Expected 1 offense for x = create(:foo) inside unless body"
+        );
+    }
+
+    #[test]
+    fn omit_style_flags_safe_navigation_receiver() {
+        // `create(:user)&.save` — in Parser AST, parent of `create` is `csend`
+        // (safe navigation). `csend` is NOT in AMBIGUOUS_TYPES (only `send` is),
+        // so RuboCop flags this. We must distinguish `&.` from `.`.
+        let source = b"create(:user)&.save\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for create(:user)&.save, got: {}",
+            diags.len()
+        );
+
+        // But regular `.` is still ambiguous (parent is `send`)
+        let source = b"create(:user).save\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offenses for create(:user).save"
+        );
+
+        // Also test with more complex args
+        let source = b"create(:channel_email, account: account, email: email)&.inbox\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConsistentParenthesesStyle,
+            source,
+            omit_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Expected 1 offense for create(...)&.inbox, got: {}",
+            diags.len()
         );
     }
 
