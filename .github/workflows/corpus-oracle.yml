@@ -237,6 +237,19 @@ jobs:
 
             # nitrocop — uses shared script for oracle-identical invocation
             echo "=== nitrocop: ${REPO_ID} ==="
+
+            # Diagnostic: log binary version and config for first repo in shard
+            if [ "${DIAG_DONE:-}" != "1" ]; then
+              echo "--- oracle shard diagnostic ---"
+              echo "binary: $WORKSPACE/bin/nitrocop"
+              "$WORKSPACE/bin/nitrocop" --version 2>&1 || true
+              echo "config: $REPO_CONFIG"
+              head -8 "$REPO_CONFIG" 2>/dev/null || echo "(config not readable)"
+              echo "repo: $ABS_DEST ($(find "$ABS_DEST" -name '*.rb' | wc -l) .rb files)"
+              echo "--- end diagnostic ---"
+              DIAG_DONE=1
+            fi
+
             rc=0
             python3 bench/corpus/run_nitrocop.py "$ABS_DEST" \
               --binary "$WORKSPACE/bin/nitrocop" \
@@ -246,6 +259,17 @@ jobs:
 
             if [ "$rc" -eq 124 ]; then
               echo "::warning::nitrocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+            fi
+
+            # Diagnostic: log offense count for first repo
+            if [ "${DIAG_NC_DONE:-}" != "1" ] && [ -f "$WORKSPACE/results/nitrocop/${REPO_ID}.json" ]; then
+              NC_COUNT=$(python3 -c "import json; d=json.load(open('$WORKSPACE/results/nitrocop/${REPO_ID}.json')); print(len(d.get('offenses',[])))" 2>/dev/null || echo "?")
+              echo "diag: nitrocop found $NC_COUNT offenses on ${REPO_ID}"
+              if [ "$RUBOCOP_CACHED" = true ]; then
+                RC_COUNT=$(python3 -c "import json; d=json.load(open('results/rubocop/${REPO_ID}.json')); print(sum(len(f.get('offenses',[])) for f in d.get('files',[])))" 2>/dev/null || echo "?")
+                echo "diag: rubocop (cached) found $RC_COUNT offenses on ${REPO_ID}"
+              fi
+              DIAG_NC_DONE=1
             fi
 
             # rubocop — skip if we have a cached result
