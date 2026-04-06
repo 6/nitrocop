@@ -90,3 +90,16 @@ begin
 rescue => @@badCvarErr
           ^^^^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
 end
+
+items.each do |ok, (badInner, alsoBAD)|
+                    ^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+                              ^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+end
+
+def destructured((good_ok, badNested))
+                           ^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+end
+
+[1].each do |*_, postParam|
+                 ^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+end
