@@ -103,24 +103,29 @@ use crate::diagnostic::Severity;
 /// as redundant even though nitrocop keeps the cop as a compatibility stub.
 /// Standalone block disables remain conservative to match RuboCop.
 ///
-/// ## Layout/LineLength self-suppression compensation (2026-04-06)
+/// ## Reverted (twice): Layout/LineLength self-suppression compensation
 ///
-/// `Layout/LineLength` internally skips lines covered by its own disable
-/// directives, so the general `check_and_mark_used` mechanism never marks those
-/// directives as "used". Without compensation, ALL `Layout/LineLength` disables
-/// appear redundant.  Fixed via `compensate_line_length_self_suppression` in
-/// `src/parse/directives.rs` (called from `src/linter.rs`): before the
-/// redundant-disable check, re-verify unused `Layout/LineLength` directives
-/// against actual line lengths.  This resolved ~105 FN with 0 new FP.
+/// `compensate_line_length_self_suppression` re-checks unused Layout/LineLength
+/// disable directives against actual line lengths. The logic is correct (105 FN
+/// improvement, 0 FP) but causes a catastrophic perf regression on forem
+/// (3257 files): 30s → 25min+ timeout, even with an early-exit guard that
+/// skips files without unused LineLength directives.
 ///
-/// **Performance history**: The original implementation (ddf672d27) collected
-/// all lines unconditionally for every file with directives, contributing to a
-/// perf regression on forem (3257 files, 30s→15min+ timeout).  Reverted in
-/// 7670a3f6b.  Re-landed with an early-exit: `compensate_line_length_self_suppression`
-/// now checks for unused LineLength directives first and skips the `lines()`
-/// allocation for files without them (the vast majority).  If this regresses
-/// again, verify on forem-scale repos (3000+ files) that runtime stays under
-/// 2 minutes.
+/// **Attempt 1** (ddf672d27): unconditional `lines().collect()` on every file.
+///   Reverted in #1610 (7670a3f6b).
+/// **Attempt 2** (#1612, 2fcd99d50): added early-exit if no unused LineLength
+///   directives exist. Still timed out on forem — confirmed locally that the
+///   compensation code itself is the bottleneck, not the `allow_flagging` change.
+///   Reverted in f957317c9. The early-exit helps most files but forem has ~40
+///   files with LineLength disables, and the per-line `.chars().count()` +
+///   `find("# rubocop:")` on large disable ranges is too expensive at scale.
+///
+/// **What a correct fix needs:**
+/// - Pre-compute line lengths during the initial parse/codemap phase (O(1) lookup
+///   per line instead of re-scanning), or cache `source.lines()` across phases
+/// - Avoid `.chars().count()` — use byte length with a fast UTF-8 char-width check
+/// - Test on forem locally: must complete in <60s (currently 30s without the fix)
+/// - The compensation is ONLY needed when `all_cops_ran` and `has_directives()`
 pub struct RedundantCopDisableDirective;
 
 pub(crate) fn allow_redundant_disable_flagging_for_known_gap_cop(
@@ -129,7 +134,6 @@ pub(crate) fn allow_redundant_disable_flagging_for_known_gap_cop(
     is_inline: bool,
 ) -> bool {
     match cop_name {
-        "Layout/LineLength" => true,
         "Lint/UnusedMethodArgument" => true,
         "Security/YAMLLoad" => is_inline && target_ruby_version >= 3.1,
         _ => false,
@@ -180,17 +184,11 @@ mod tests {
     }
 
     #[test]
-    fn line_length_allowed_for_flagging() {
-        assert!(allow_redundant_disable_flagging_for_known_gap_cop(
+    fn line_length_stays_skiplisted() {
+        assert!(!allow_redundant_disable_flagging_for_known_gap_cop(
             "Layout/LineLength",
             2.7,
             true,
-        ));
-        // Both inline and block disables should be flagged
-        assert!(allow_redundant_disable_flagging_for_known_gap_cop(
-            "Layout/LineLength",
-            2.7,
-            false,
         ));
     }
 

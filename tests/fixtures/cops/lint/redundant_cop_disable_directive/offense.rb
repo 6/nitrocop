@@ -57,24 +57,3 @@ def create_server(cloud_server) # rubocop:disable Lint/UnusedMethodArgument
 ^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Lint/UnusedMethodArgument`.
   raise NotImplementedError
 end
-
-Gem::Version.new(RUBY_ENGINE_VERSION) >= '9.3.7.0' do # rubocop:disable Layout/LineLength
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Layout/LineLength`.
-
-Gem::Version.new(RUBY_ENGINE_VERSION) < '9.3.7.0' do # rubocop:disable Layout/LineLength
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Layout/LineLength`.
-
-# rubocop:disable Layout/LineLength
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Layout/LineLength`.
-
-# rubocop:disable Layout/LineLength
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Layout/LineLength`.
-
-# rubocop:disable Rails/UniqueValidationWithoutIndex
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Rails/UniqueValidationWithoutIndex`.
-
-it { stdout_only "#{capitalized_event} added: \"#{date}: Met Grace Hopper, and others, at 12.\"" } # rubocop:disable Layout/LineLength
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Layout/LineLength`.
-
-it { stdout_only "#{capitalized_event} added: \"#{date}: Met Grace Hopper, King James, and others at 12.\"" } # rubocop:disable Layout/LineLength
-^ Lint/RedundantCopDisableDirective: Unnecessary disabling of `Layout/LineLength`.
