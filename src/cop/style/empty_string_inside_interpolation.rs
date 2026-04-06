@@ -5,10 +5,13 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
 /// Prism exposes every `#{...}` body as an `EmbeddedStatementsNode`, including
-/// double-quoted strings, backticks, regexps, and symbols. The previous port
-/// only walked `InterpolatedStringNode` parts and reported the `#{` opener,
-/// which missed non-string interpolation forms and produced line-shifted
-/// diagnostics for multiline interpolations.
+/// double-quoted strings, backticks, regexps, and symbols. RuboCop's default
+/// style only inspects the top-level conditional in the interpolation body, but
+/// `EnforcedStyle=ternary` walks descendant modifier `if`/`unless` nodes and
+/// reports the interpolation opener itself. The previous port reused the
+/// top-level logic for `ternary`, which missed nested modifier conditionals in
+/// multi-statement interpolations and reported multiline offenses on the inner
+/// `if` line instead of the `#{` opener.
 pub struct EmptyStringInsideInterpolation;
 
 impl Cop for EmptyStringInsideInterpolation {
@@ -40,13 +43,14 @@ impl Cop for EmptyStringInsideInterpolation {
         let Some(statements) = embedded.statements() else {
             return;
         };
-        let stmt_list: Vec<_> = statements.body().iter().collect();
-        if stmt_list.len() != 1 {
-            return;
-        }
 
         match enforced_style {
             "trailing_conditional" => {
+                let stmt_list: Vec<_> = statements.body().iter().collect();
+                if stmt_list.len() != 1 {
+                    return;
+                }
+
                 if let Some(if_node) = stmt_list[0].as_if_node() {
                     if branch_is_empty(if_node.statements())
                         || else_branch_is_empty(if_node.subsequent())
@@ -64,22 +68,20 @@ impl Cop for EmptyStringInsideInterpolation {
                 }
             }
             "ternary" => {
-                if let Some(if_node) = stmt_list[0].as_if_node() {
-                    if util::is_modifier_if(&if_node) {
+                // RuboCop's each_child_node(:if) only checks direct children
+                // of the interpolation, not all descendants. Match that by
+                // iterating the statements body directly.
+                let embedded_node = embedded.as_node();
+                for stmt in statements.body().iter() {
+                    let is_modifier = stmt.as_if_node().is_some_and(|n| util::is_modifier_if(&n))
+                        || stmt
+                            .as_unless_node()
+                            .is_some_and(|n| util::is_modifier_unless(&n));
+                    if is_modifier {
                         add_diagnostic(
                             self,
                             source,
-                            &stmt_list[0],
-                            diagnostics,
-                            MSG_TRAILING_CONDITIONAL,
-                        );
-                    }
-                } else if let Some(unless_node) = stmt_list[0].as_unless_node() {
-                    if util::is_modifier_unless(&unless_node) {
-                        add_diagnostic(
-                            self,
-                            source,
-                            &stmt_list[0],
+                            &embedded_node,
                             diagnostics,
                             MSG_TRAILING_CONDITIONAL,
                         );
@@ -134,8 +136,41 @@ fn is_empty_string_or_nil(node: &ruby_prism::Node<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_yml::Value;
+
     crate::cop_fixture_tests!(
         EmptyStringInsideInterpolation,
         "cops/style/empty_string_inside_interpolation"
     );
+
+    fn ternary_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            Value::String("ternary".to_string()),
+        );
+        config
+    }
+
+    #[test]
+    fn ternary_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &EmptyStringInsideInterpolation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/empty_string_inside_interpolation/ternary_offense.rb"
+            ),
+            ternary_config(),
+        );
+    }
+
+    #[test]
+    fn ternary_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EmptyStringInsideInterpolation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/empty_string_inside_interpolation/ternary_no_offense.rb"
+            ),
+            ternary_config(),
+        );
+    }
 }
