@@ -265,6 +265,37 @@ def test_build_variant_context_empty_without_data():
     assert result == ""
 
 
+def test_build_variant_context_includes_corpus_examples():
+    """Variant context includes FP/FN code examples from oracle data."""
+    sys.path.insert(0, str(Path(__file__).parents[3] / "scripts"))
+    import dispatch_cops
+
+    saved = dispatch_cops.load_variant_data_for_cop
+    dispatch_cops.load_variant_data_for_cop = lambda *a, **kw: [
+        {
+            "style_label": "require_single_line",
+            "matches": 500, "fp": 3, "fn": 2,
+            "fp_examples": [
+                {"loc": "repo: a.rb:5", "msg": "Use endless method", "src": ["def foo = x"]},
+            ],
+            "fn_examples": [
+                {"loc": "repo: b.rb:10", "msg": "Use endless method", "src": ["def bar; x; end"]},
+            ],
+        },
+    ]
+    try:
+        result = prepare_pr_repair.build_variant_context("Style/EndlessMethod")
+        assert "False Positives" in result
+        assert "False Negatives" in result
+        assert "def foo = x" in result
+        assert "def bar; x; end" in result
+        assert "repo: a.rb:5" in result
+        assert "repo: b.rb:10" in result
+        assert "corpus examples" in result
+    finally:
+        dispatch_cops.load_variant_data_for_cop = saved
+
+
 def test_build_prompt_includes_variant_context():
     """Variant context is included in the prompt when provided."""
     run = {"number": 1, "workflowName": "Checks"}
@@ -374,6 +405,7 @@ if __name__ == "__main__":
     test_extract_cop_from_title()
     test_cop_check_gate_comment_step_detected_as_cop_check_failure()
     test_build_variant_context_empty_without_data()
+    test_build_variant_context_includes_corpus_examples()
     test_build_prompt_includes_variant_context()
     test_build_prompt_no_variant_context_when_empty()
     test_variant_regression_adds_check_variants_to_verify_commands()
