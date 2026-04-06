@@ -63,6 +63,18 @@ use ruby_prism::Visit;
 /// rejecting chained/operator continuations, then measuring the full rendered
 /// modifier line as RuboCop does: `code_before + expression + code_after`, with
 /// UTF-8 character counts instead of raw byte counts.
+///
+/// FP root cause (2026-04-06): RuboCop's `non_eligible_condition?` skips any
+/// condition containing local-variable assignment nodes (`lvasgn_type?`), which
+/// includes `||=`, `&&=`, `+=`, and multi-assignment destructuring. Prism
+/// represents those as `LocalVariableOrWriteNode`,
+/// `LocalVariableAndWriteNode`, `LocalVariableOperatorWriteNode`, and
+/// `MultiWriteNode` with local targets. The old Rust cop only detected plain
+/// `LocalVariableWriteNode`, so it falsely flagged conditions like
+/// `if (iterations += 1) > MAX_ITERATIONS` and
+/// `unless (a, b = matcher(node))`. Fixed by recognizing all Prism local-write
+/// variants while keeping the skip limited to local targets, not instance/class
+/// variable assignments.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -144,9 +156,91 @@ struct LvasgnFinder {
     found: bool,
 }
 
+fn target_contains_local_variable(node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_local_variable_target_node().is_some() {
+        return true;
+    }
+
+    if let Some(splat) = node.as_splat_node() {
+        return splat
+            .expression()
+            .is_some_and(|expr| target_contains_local_variable(&expr));
+    }
+
+    if let Some(multi_target) = node.as_multi_target_node() {
+        for target in multi_target.lefts().iter() {
+            if target_contains_local_variable(&target) {
+                return true;
+            }
+        }
+
+        if multi_target
+            .rest()
+            .is_some_and(|target| target_contains_local_variable(&target))
+        {
+            return true;
+        }
+
+        for target in multi_target.rights().iter() {
+            if target_contains_local_variable(&target) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 impl<'pr> Visit<'pr> for LvasgnFinder {
     fn visit_local_variable_write_node(&mut self, _node: &ruby_prism::LocalVariableWriteNode<'pr>) {
         self.found = true;
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        _node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+    ) {
+        self.found = true;
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        _node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+    ) {
+        self.found = true;
+    }
+
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        _node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.found = true;
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        for target in node.lefts().iter() {
+            if target_contains_local_variable(&target) {
+                self.found = true;
+                return;
+            }
+        }
+
+        if node
+            .rest()
+            .is_some_and(|target| target_contains_local_variable(&target))
+        {
+            self.found = true;
+            return;
+        }
+
+        for target in node.rights().iter() {
+            if target_contains_local_variable(&target) {
+                self.found = true;
+                return;
+            }
+        }
+
+        ruby_prism::visit_multi_write_node(self, node);
     }
 }
 
