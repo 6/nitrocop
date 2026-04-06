@@ -44,6 +44,9 @@ use crate::parse::source::SourceFile;
 ///   (`scope { |profile| ... }` must not suppress later `self.profile` in
 ///   `code_numbering ... -> { self.profile }`). They still leak within defs and
 ///   enclosing blocks where RuboCop keeps them visible.
+/// - `rescue => self.foo` references are detected via `visit_rescue_node`. Prism
+///   calls `visit_rescue_node` directly from `visit_begin_node`, bypassing the
+///   normal branch dispatch, so a dedicated visitor is needed to catch these.
 pub struct RedundantSelf;
 
 /// Methods where self. is always required (Ruby keywords).
@@ -684,6 +687,31 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
         }
 
         ruby_prism::visit_splat_node(self, node);
+    }
+
+    // Prism's RescueNode is visited via visit_rescue_node() which bypasses the
+    // normal visit_begin_node branch dispatch. We need to handle it explicitly
+    // to catch `self.` in rescue reference expressions like `rescue => self.foo`.
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        // Check the reference (e.g., `rescue => self.foo` — the `self.foo` part)
+        if let Some(reference) = node.reference() {
+            // In `rescue => self.foo`, the reference is a CallTargetNode with a
+            // SelfNode receiver. We need to check if `self.foo` is redundant.
+            if let Some(call_target) = reference.as_call_target_node() {
+                let receiver = call_target.receiver();
+                if receiver.as_self_node().is_some()
+                    && self.self_receiver_is_redundant(
+                        &call_target.call_operator_loc(),
+                        call_target.message_loc().as_slice(),
+                        false,
+                    )
+                {
+                    self.add_redundant_self_offense(receiver.location());
+                }
+            }
+        }
+        // Continue walking children
+        ruby_prism::visit_rescue_node(self, node);
     }
 }
 
