@@ -320,4 +320,26 @@ mod tests {
             "with_fixed_indentation should flag first-element alignment"
         );
     }
+
+    #[test]
+    fn with_fixed_indentation_offense_fixture() {
+        // nitrocop-config: EnforcedStyle: with_fixed_indentation
+        // Tab-indented %w[] array: nitrocop incorrectly flags as misaligned
+        // because it uses the wrong line's indentation (opening [ line vs %w line)
+        let src = include_bytes!(
+            "../../../tests/fixtures/cops/layout/array_alignment/with_fixed_indentation_offense.rb"
+        );
+        let config = CopConfig {
+            options: std::collections::HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("with_fixed_indentation".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(&ArrayAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "with_fixed_indentation should not flag tab-indented %w[] arrays"
+        );
+    }
 }
