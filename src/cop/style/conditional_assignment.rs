@@ -330,8 +330,8 @@ impl ConditionalAssignment {
         &self,
         source: &SourceFile,
         if_node: &ruby_prism::IfNode<'_>,
-        max_line_length: usize,
-        line_length_enabled: bool,
+        _max_line_length: usize,
+        _line_length_enabled: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let if_stmts = match if_node.statements() {
@@ -373,12 +373,9 @@ impl ConditionalAssignment {
             return;
         }
 
-        if line_length_enabled
-            && max_line_length > 0
-            && exceeds_line_limit(&if_node.location(), &if_info.lhs_text, max_line_length)
-        {
-            return;
-        }
+        // NOTE: We skip the line length check for ternaries because:
+        // 1. RuboCop doesn't check line length in this path
+        // 2. The if_node.location() returns the ternary's span, not the full line
 
         let loc = if_node.location();
         let (line, col) = source.offset_to_line_col(loc.start_offset());

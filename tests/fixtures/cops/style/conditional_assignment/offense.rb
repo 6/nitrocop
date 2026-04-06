@@ -157,3 +157,7 @@ if (!boolean)
 else
   match.should == false
 end
+
+# ternary with local variable assignment (FN case)
+opts[:response_timeout].nil? ? response_timeout = 0.9 : response_timeout = opts[:response_timeout].to_f
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
