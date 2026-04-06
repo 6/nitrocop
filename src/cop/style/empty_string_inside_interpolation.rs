@@ -73,9 +73,7 @@ impl Cop for EmptyStringInsideInterpolation {
                 // iterating the statements body directly.
                 let embedded_node = embedded.as_node();
                 for stmt in statements.body().iter() {
-                    let is_modifier = stmt
-                        .as_if_node()
-                        .is_some_and(|n| util::is_modifier_if(&n))
+                    let is_modifier = stmt.as_if_node().is_some_and(|n| util::is_modifier_if(&n))
                         || stmt
                             .as_unless_node()
                             .is_some_and(|n| util::is_modifier_unless(&n));
