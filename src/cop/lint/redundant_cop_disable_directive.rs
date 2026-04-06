@@ -103,24 +103,27 @@ use crate::diagnostic::Severity;
 /// as redundant even though nitrocop keeps the cop as a compatibility stub.
 /// Standalone block disables remain conservative to match RuboCop.
 ///
-/// ## Corpus investigation (2026-04-06)
+/// ## Reverted: Layout/LineLength self-suppression compensation (2026-04-06)
 ///
-/// **Layout/LineLength self-suppression compensation**: `Layout/LineLength`
-/// internally skips lines covered by its own disable directives, so the
-/// general `check_and_mark_used` mechanism never marks those directives as
-/// "used". This made ALL `Layout/LineLength` disables appear redundant when
-/// `allow_redundant_disable_flagging_for_known_gap_cop` was enabled for it.
-/// Fixed by adding `compensate_line_length_self_suppression` in the linter:
-/// before the redundant-disable check, re-verify unused `Layout/LineLength`
-/// directives against actual line lengths (code portion only, matching
-/// `AllowCopDirectives` default). Directives covering genuinely long lines
-/// are force-marked as "used". This resolved ~105 FN with 0 new FP.
+/// PR #1590 (commit ddf672d27) added `compensate_line_length_self_suppression`
+/// to `src/parse/directives.rs` and called it from `src/linter.rs` on every
+/// file. The intent was to re-check unused `Layout/LineLength` disable
+/// directives against actual line lengths, since `Layout/LineLength` internally
+/// skips disabled lines and never marks its own directives as "used."
 ///
-/// **FP-causing cops added to skip list**: `Lint/UnmodifiedReduceAccumulator`
-/// (nitrocop misses `next` accumulator patterns in `reduce` blocks) and
-/// `Style/GlobalStdStream` (nitrocop misses `STDOUT`/`STDERR`/`STDIN` refs)
-/// were added to `REDUNDANT_DISABLE_SKIP_COPS` to prevent false positives
-/// from detection gaps.
+/// This was reverted because it caused a **performance regression** that pushed
+/// large repos (forem: 3257 files, WikiEduDashboard) past the 15-minute oracle
+/// timeout. forem went from 30s to 15min+, producing zero offenses and creating
+/// ~174K false-negative regressions in the corpus.
+///
+/// **What a correct fix needs:**
+/// - The compensation logic itself was correct (105 FN improvement, 0 new FP)
+/// - The perf cost must be profiled: it may have been the compensation code, or
+///   an interaction with the `Layout/LineLength` allow-flagging change, or
+///   something else in the same commit batch
+/// - Before re-landing, verify on forem-scale repos (3000+ files) that total
+///   runtime stays under 2 minutes, well within the 25-minute timeout
+/// - The revert SHA is 7670a3f6b; the original commit is ddf672d27
 pub struct RedundantCopDisableDirective;
 
 pub(crate) fn allow_redundant_disable_flagging_for_known_gap_cop(
@@ -129,7 +132,6 @@ pub(crate) fn allow_redundant_disable_flagging_for_known_gap_cop(
     is_inline: bool,
 ) -> bool {
     match cop_name {
-        "Layout/LineLength" => true,
         "Lint/UnusedMethodArgument" => true,
         "Security/YAMLLoad" => is_inline && target_ruby_version >= 3.1,
         _ => false,
@@ -180,17 +182,11 @@ mod tests {
     }
 
     #[test]
-    fn line_length_now_allowed_for_flagging() {
-        assert!(allow_redundant_disable_flagging_for_known_gap_cop(
+    fn line_length_stays_skiplisted() {
+        assert!(!allow_redundant_disable_flagging_for_known_gap_cop(
             "Layout/LineLength",
             2.7,
             true,
-        ));
-        // Both inline and block disables should be flagged
-        assert!(allow_redundant_disable_flagging_for_known_gap_cop(
-            "Layout/LineLength",
-            2.7,
-            false,
         ));
     }
 

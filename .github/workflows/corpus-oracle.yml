@@ -221,9 +221,9 @@ jobs:
               RUBOCOP_CACHED=true
             fi
 
-            # Per-repo timeout (15 min each tool).
+            # Per-repo timeout (25 min each tool).
             # Keeps one slow repo from killing the whole batch.
-            REPO_TIMEOUT=900  # 15 minutes
+            REPO_TIMEOUT=1500  # 25 minutes
 
             # Resolve per-repo config (adds file exclusions for repos with known parser crashes)
             REPO_CONFIG=$(python3 bench/corpus/gen_repo_config.py "$REPO_ID" bench/corpus/baseline_rubocop.yml "$DEST")
@@ -258,7 +258,10 @@ jobs:
               2>"$WORKSPACE/results/nitrocop/${REPO_ID}.err" || rc=$?
 
             if [ "$rc" -eq 124 ]; then
-              echo "::warning::nitrocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+              echo "::error::nitrocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
+            elif [ "$rc" -ne 0 ]; then
+              echo "::warning::nitrocop exited with code ${rc} for ${REPO_ID}"
+              cat "$WORKSPACE/results/nitrocop/${REPO_ID}.err" 2>/dev/null || true
             fi
 
             # Diagnostic: log offense count for first repo
@@ -290,7 +293,7 @@ jobs:
                 > "$WORKSPACE/results/rubocop/${REPO_ID}.json" 2>"$WORKSPACE/results/rubocop/${REPO_ID}.err" || rc=$?
 
               if [ "$rc" -eq 124 ]; then
-                echo "::warning::rubocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+                echo "::error::rubocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
               fi
             fi
 
