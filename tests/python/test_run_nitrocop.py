@@ -2,9 +2,11 @@
 """Tests for bench/corpus/run_nitrocop.py."""
 
 import importlib.util
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[2] / "bench" / "corpus" / "run_nitrocop.py"
 sys.path.insert(0, str(SCRIPT.parent))
@@ -69,3 +71,52 @@ def test_normalize_offenses_collapses_multi_column_same_line():
         assert len(normalized) == 1, (
             "Same (path, line, cop) should collapse regardless of column"
         )
+
+
+# ---------- resolve_repo_config ----------
+
+
+def test_resolve_repo_config_default_falls_back_to_baseline():
+    """When gen_repo_config.py fails, fall back to BASELINE_CONFIG."""
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        result = run_nitrocop.resolve_repo_config("fake_repo", "/tmp/fake")
+    assert result == str(run_nitrocop.BASELINE_CONFIG)
+
+
+def test_resolve_repo_config_base_config_used_as_fallback():
+    """When base_config is given and gen_repo_config.py fails, fall back to it."""
+    custom = "/tmp/my_variant_config.yml"
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        result = run_nitrocop.resolve_repo_config(
+            "fake_repo", "/tmp/fake", base_config=custom,
+        )
+    assert result == custom
+
+
+def test_resolve_repo_config_passes_base_config_to_subprocess():
+    """When base_config is given, it's forwarded to gen_repo_config.py."""
+    custom = "/tmp/my_variant_config.yml"
+    fake_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="/tmp/generated_overlay.yml\n",
+    )
+    with mock.patch("subprocess.run", return_value=fake_result) as mock_run:
+        result = run_nitrocop.resolve_repo_config(
+            "my_repo", "/tmp/my_repo", base_config=custom,
+        )
+    # The third positional arg to gen_repo_config.py should be our custom base
+    call_args = mock_run.call_args[0][0]  # first positional arg = command list
+    assert custom in call_args, (
+        f"Expected base_config '{custom}' in subprocess args: {call_args}"
+    )
+    assert result == "/tmp/generated_overlay.yml"
+
+
+def test_resolve_repo_config_without_base_config_uses_baseline():
+    """Without base_config, BASELINE_CONFIG is passed to gen_repo_config.py."""
+    fake_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="/tmp/generated_overlay.yml\n",
+    )
+    with mock.patch("subprocess.run", return_value=fake_result) as mock_run:
+        run_nitrocop.resolve_repo_config("my_repo", "/tmp/my_repo")
+    call_args = mock_run.call_args[0][0]
+    assert str(run_nitrocop.BASELINE_CONFIG) in call_args
