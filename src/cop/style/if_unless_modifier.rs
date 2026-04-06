@@ -75,6 +75,14 @@ use ruby_prism::Visit;
 /// `unless (a, b = matcher(node))`. Fixed by recognizing all Prism local-write
 /// variants while keeping the skip limited to local targets, not instance/class
 /// variable assignments.
+///
+/// FN root cause (2026-04-06): `code_after_end_is_disallowed` returned `true`
+/// for semicolons (`;`) appearing after `end`, treating them as chained operators
+/// like `.` or `&`. But `;` is a Ruby statement separator — `unless defined?(x);
+/// foo; end; x` is actually two statements (the unless and `x`), not a chained
+/// expression. RuboCop's AST-based `another_statement_on_same_line?` correctly
+/// handles this by not treating `;` as a chained operator. Fixed by removing
+/// `;` from the disallowed characters list in `code_after_end_is_disallowed`.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -450,7 +458,6 @@ fn code_after_end_is_disallowed(after_end: &[u8]) -> bool {
             | b'~'
             | b'?'
             | b':'
-            | b';'
     )
 }
 

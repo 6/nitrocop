@@ -129,3 +129,28 @@ if data["debug_mode_p"]
 ^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
   track(data, subject: "指手受信", body: "OK → #{data['to_user_name'].inspect}", emoji: ":OK:")
 end
+
+# FN: unless with defined? and trailing statement on same line (semicolon separator)
+unless defined?(@database); parse_dbstat; end; @database
+^^^^^^ Style/IfUnlessModifier: Favor modifier `unless` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+
+unless defined?(@posted_date); parse_dbstat; end; @posted_date
+^^^^^^ Style/IfUnlessModifier: Favor modifier `unless` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+
+unless defined?(@db_len); parse_dbstat; end; @db_len
+^^^^^^ Style/IfUnlessModifier: Favor modifier `unless` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+
+unless defined?(@db_num); parse_dbstat; end; @db_num
+^^^^^^ Style/IfUnlessModifier: Favor modifier `unless` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+
+# FN: if with complex condition using && and method chain
+if renderer.assigns[:body].blank? && @url_parts.empty?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  renderer.assigns.update(:body => self.response.body)
+end
+
+# FN: if with `and` operator (lower precedence than &&)
+if default_org.in_summary? and default_org.parent_id.present?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  ret_orgs = default_org.parent.children - [default_org]
+end
