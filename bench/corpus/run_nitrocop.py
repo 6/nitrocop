@@ -43,31 +43,23 @@ def resolve_binary(binary: str | None = None) -> str:
     return "nitrocop"
 
 
-def resolve_repo_config(
-    repo_id: str, repo_dir: str, base_config: str | None = None,
-) -> str:
+def resolve_repo_config(repo_id: str, repo_dir: str) -> str:
     """Get per-repo config via gen_repo_config.py.
 
-    Returns path to config file — either the base config or a temporary
+    Returns path to config file — either the baseline or a temporary
     overlay with per-repo file exclusions for repos with known issues.
-
-    *base_config* defaults to BASELINE_CONFIG when not provided. Callers
-    that override the baseline (e.g., variant style checks) should pass
-    their override here so that per-repo exclusions are still layered on
-    top of the override config.
     """
-    effective_base = base_config or str(BASELINE_CONFIG)
     try:
         result = subprocess.run(
             [sys.executable, str(GEN_REPO_CONFIG), repo_id,
-             effective_base, repo_dir],
+             str(BASELINE_CONFIG), repo_dir],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         pass
-    return effective_base
+    return str(BASELINE_CONFIG)
 
 
 def build_env(repo_dir: str | None = None) -> dict[str, str]:
@@ -143,7 +135,7 @@ def run_nitrocop(
     repo_dir = str(repo_path)
     repo_id = repo_path.name
     if config_override:
-        config = resolve_repo_config(repo_id, repo_dir, base_config=config_override)
+        config = config_override
     else:
         config = resolve_repo_config(repo_id, repo_dir)
     env = build_env(repo_dir)
