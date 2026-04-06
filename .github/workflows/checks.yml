@@ -96,8 +96,9 @@ jobs:
       - name: Test
         run: cargo test
 
-  # macOS: build-only on PRs, build + test on main
+  # macOS: build + test on main only (skip on PRs to reduce CI queue pressure)
   build-macos:
+    if: github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 15
     steps:
@@ -110,7 +111,6 @@ jobs:
       - name: Build
         run: cargo build --profile ci
       - name: Test
-        if: github.ref == 'refs/heads/main'
         run: cargo test
 
   # Corpus cop check: for any changed cops, re-run nitrocop on corpus repos
