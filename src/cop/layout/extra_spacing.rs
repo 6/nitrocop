@@ -222,6 +222,30 @@ use std::ops::Range;
 ///     case where two chained `.` operators ARE aligned at the same column
 ///     (e.g., `expect(clo)  .to` / `expect(clo)  .not_to`). Fixes 3 FNs
 ///     from sharetribe__sharetribe (the `}          .to raise_error` patterns).
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// 26. **`find_last_equals_col` matching `=` inside string content (fixed)**:
+///     `find_last_equals_col` searched rightward from the column for any `=`
+///     character, including `=` embedded in string literals like `"\n======="`.
+///     When the string `=` coincidentally aligned with a real assignment `=` on
+///     an adjacent line, the extra space was falsely suppressed. Added
+///     `is_assignment_equals` validation on the current line's `=` before
+///     proceeding with alignment. Fixes 1 FN from publiclab__plots2.
+///
+/// 27. **`=~` match operator falsely treated as assignment `=` (fixed)**:
+///     `check_equals_alignment` used `find_last_equals_col` which returned the
+///     `=` of `=~` match operators. Since `=~` is not an assignment operator,
+///     it should not participate in equals-alignment. Added a check excluding
+///     `=` followed by `~`. Fixes 1 FN from cxn03651__writeexcel.
+///
+/// 28. **Heredoc interpolation `#{` misclassified as comment (fixed)**:
+///     `build_comment_only_lines` scanned for `#` after skipping whitespace
+///     and string literals but did not distinguish `#` (comment) from `#{`
+///     (interpolation). Lines like `#{environment.compact.map ...}` inside
+///     heredocs were marked as comment-only, breaking alignment search across
+///     those lines. Added a check: if `#` is followed by `{`, the line is not
+///     comment-only. Fixes 1 FP from ManageIQ__manageiq.
 pub struct ExtraSpacing;
 
 impl Cop for ExtraSpacing {
@@ -727,6 +751,15 @@ fn build_comment_only_lines(lines: &[&[u8]]) -> HashSet<usize> {
         let first_non_ws = line.iter().position(|&b| b != b' ' && b != b'\t');
         if let Some(pos) = first_non_ws {
             if line[pos] == b'#' {
+                // Don't classify `#{` as comment-only — it's string interpolation
+                // syntax (typically inside heredoc bodies). Treating these lines as
+                // comment-only causes them to be skipped in alignment searches,
+                // producing false positives when adjacent interpolation lines are
+                // actually aligned (e.g., two `#{...map { ... }}` lines inside
+                // a heredoc).
+                if pos + 1 < line.len() && line[pos + 1] == b'{' {
+                    continue;
+                }
                 set.insert(idx);
             }
         }
@@ -1171,50 +1204,60 @@ fn check_equals_alignment(
     adj_line_start_offset: usize,
     heredoc_opener_starts: &HashSet<usize>,
 ) -> bool {
-    // Find the LAST '=' in the operator starting at col on the current line.
+    // Forward check: find the LAST '=' in the operator starting at col on the current line.
     // RuboCop compares operators by their last_column, so we use the rightmost `=`.
     let eq_col = find_last_equals_col(current_line, col);
     if let Some(eq_col) = eq_col {
-        // Convert the byte position of the last '=' to a character column,
-        // then find the corresponding byte position on the adjacent line.
-        let eq_char_col = byte_to_char_col(current_line, eq_col);
-        let adj_eq_col = match char_col_to_byte(adj_line, eq_char_col) {
-            Some(c) => c,
-            None => return false,
-        };
-        // Check if the adjacent line has '=' at the same character column,
-        // and that it is the LAST '=' of its operator (not an interior '=' of '==').
-        if adj_eq_col < adj_line.len()
-            && adj_line[adj_eq_col] == b'='
-            && is_assignment_equals(adj_line, adj_eq_col)
-            && (adj_eq_col + 1 >= adj_line.len() || adj_line[adj_eq_col + 1] != b'=')
-        {
-            return true;
-        }
-        // Cross-alignment: current has `=` (or ends with `=`), adjacent has `<<`
-        // whose last `<` is at the same column. RuboCop's aligned_with_append_operator?
-        // checks: range.source[-1] == '=' && token.type == tLSHFT && last_column matches.
-        //
-        // RuboCop uses `detect` to find the FIRST assignment/comparison token on the
-        // adjacent line. If there's an earlier `=`/`||=`/etc. before the `<<`, the `<<`
-        // is not the first operator and should not be used for cross-alignment.
-        if adj_eq_col < adj_line.len()
-            && adj_line[adj_eq_col] == b'<'
-            && adj_eq_col > 0
-            && adj_line[adj_eq_col - 1] == b'<'
-        {
-            // Adjacent line has `<<` ending at eq_char_col — last `<` aligns with `=`
-            // Verify the `<<` is preceded by space (i.e., it's an operator, not inside something)
-            let lshift_start = adj_eq_col - 1;
-            if lshift_start == 0
-                || adj_line[lshift_start - 1] == b' '
-                || adj_line[lshift_start - 1] == b'\t'
+        // Validate that the `=` on the current line is actually an assignment/comparison
+        // operator, not an `=` inside string content (e.g., `"\n======="` where `=`
+        // coincidentally aligns with a real `=` on an adjacent line).
+        // Also exclude `=~` (match operator) which is not an assignment operator —
+        // RuboCop's `equal_sign?` does not include `tMATCH`.
+        let is_valid_equals = is_assignment_equals(current_line, eq_col)
+            && !(eq_col + 1 < current_line.len() && current_line[eq_col + 1] == b'~');
+
+        if is_valid_equals {
+            // Convert the byte position of the last '=' to a character column,
+            // then find the corresponding byte position on the adjacent line.
+            let eq_char_col = byte_to_char_col(current_line, eq_col);
+            let adj_eq_col = match char_col_to_byte(adj_line, eq_char_col) {
+                Some(c) => c,
+                None => return false,
+            };
+            // Check if the adjacent line has '=' at the same character column,
+            // and that it is the LAST '=' of its operator (not an interior '=' of '==').
+            if adj_eq_col < adj_line.len()
+                && adj_line[adj_eq_col] == b'='
+                && is_assignment_equals(adj_line, adj_eq_col)
+                && (adj_eq_col + 1 >= adj_line.len() || adj_line[adj_eq_col + 1] != b'=')
             {
-                let adj_lshift_offset = adj_line_start_offset + lshift_start;
-                if !heredoc_opener_starts.contains(&adj_lshift_offset)
-                    && !has_earlier_assignment_op(adj_line, lshift_start)
+                return true;
+            }
+            // Cross-alignment: current has `=` (or ends with `=`), adjacent has `<<`
+            // whose last `<` is at the same column. RuboCop's aligned_with_append_operator?
+            // checks: range.source[-1] == '=' && token.type == tLSHFT && last_column matches.
+            //
+            // RuboCop uses `detect` to find the FIRST assignment/comparison token on the
+            // adjacent line. If there's an earlier `=`/`||=`/etc. before the `<<`, the `<<`
+            // is not the first operator and should not be used for cross-alignment.
+            if adj_eq_col < adj_line.len()
+                && adj_line[adj_eq_col] == b'<'
+                && adj_eq_col > 0
+                && adj_line[adj_eq_col - 1] == b'<'
+            {
+                // Adjacent line has `<<` ending at eq_char_col — last `<` aligns with `=`
+                // Verify the `<<` is preceded by space (i.e., it's an operator, not inside something)
+                let lshift_start = adj_eq_col - 1;
+                if lshift_start == 0
+                    || adj_line[lshift_start - 1] == b' '
+                    || adj_line[lshift_start - 1] == b'\t'
                 {
-                    return true;
+                    let adj_lshift_offset = adj_line_start_offset + lshift_start;
+                    if !heredoc_opener_starts.contains(&adj_lshift_offset)
+                        && !has_earlier_assignment_op(adj_line, lshift_start)
+                    {
+                        return true;
+                    }
                 }
             }
         }

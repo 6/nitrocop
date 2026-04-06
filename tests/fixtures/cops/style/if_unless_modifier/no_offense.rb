@@ -88,6 +88,25 @@ if x = compute_value
   process(x)
 end
 
+# Local variable ||= in condition should not suggest modifier
+if (severity ||= UNKNOWN) > (@max_severity ||= severity)
+  @max_severity = severity
+end
+
+# Local variable operator assignment in condition should not suggest modifier
+if (iterations += 1) > MAX_ITERATIONS
+  raise InfiniteCorrectionLoop.new(source.path, offenses_by_iteration)
+end
+
+# Local multiple assignment in condition should not suggest modifier
+unless (prev_arg_node, default_value_node = default_value_argument_and_block(node.parent))
+  return
+end
+
+if (sort_node, sorter, accessor = redundant_sort?(node))
+  return [node, sort_node, sorter, accessor]
+end
+
 # Nested conditional in body: don't suggest modifier for outer if
 if x
   return true if y

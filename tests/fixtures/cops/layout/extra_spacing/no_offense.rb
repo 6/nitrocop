@@ -195,3 +195,10 @@ EOM
 code = <<~__CODE     # insert the code update
   body
 __CODE
+
+# Heredoc interpolation lines starting with #{ are not comments
+# Adjacent #{} lines can have alignment
+<<~UNIT_CONFIG_FILE
+  #{unit_settings.compact.map { |key, value| "#{key}=#{value}" }.join("\n")}
+  #{environment.compact.map   { |key, value| "Environment=#{key}=#{value}" }.join("\n")}
+UNIT_CONFIG_FILE

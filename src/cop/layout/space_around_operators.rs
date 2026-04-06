@@ -470,6 +470,16 @@ impl Cop for SpaceAroundOperators {
                     continue;
                 }
 
+                // Skip `=` that is part of an explicit `.[]=` method call with dot
+                // syntax (e.g., `@flows.[]=(*args)`).  RuboCop treats `[]=` as an
+                // irregular method and doesn't check it as an operator.
+                // Do NOT skip regular index assignments like `hash[:key]= value`
+                // — RuboCop checks those via on_setter_method.
+                if i >= 3 && bytes[i - 1] == b']' && bytes[i - 2] == b'[' && bytes[i - 3] == b'.' {
+                    i += 1;
+                    continue;
+                }
+
                 let space_before = i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t');
                 let space_after = i + 1 < len && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\t');
                 let newline_after = i + 1 >= len || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\r';
@@ -590,13 +600,11 @@ fn check_text_scanner_extra_space(
             // Check RHS alignment for trailing space.  RuboCop's
             // `excess_trailing_space?` uses `aligned_with_something?` on the
             // right operand for ALL operator types.  For index writes like
-            // `x[:key] = value`, the RuboCop alignment check is on the key
-            // position (inside the brackets), not the value — so index writes
-            // rarely appear aligned and should still be flagged.
-            //
-            // We approximate this by skipping the alignment check only for `=`
-            // where the non-space character before the operator is `]` (index
-            // write pattern).
+            // `x[:key] = value`, RuboCop still flags the trailing space even
+            // when the RHS values align, because the operator itself is not
+            // at the expected column.  We approximate this by skipping the
+            // alignment check for `=` where the non-space character before
+            // the operator is `]` (index write pattern).
             let is_index_write_eq = op_bytes == b"=" && !is_plain_assignment && {
                 let mut j = op_start;
                 while j > 0 && (bytes[j - 1] == b' ' || bytes[j - 1] == b'\t') {
@@ -607,7 +615,7 @@ fn check_text_scanner_extra_space(
 
             if !is_index_write_eq {
                 if let Some(rhs_start) = util::first_non_space_on_line(bytes, op_end) {
-                    if is_aligned_rhs_standalone(source, rhs_start) {
+                    if is_aligned_rhs_standalone(source, rhs_start, true) {
                         multi_after = false;
                     }
                 }
@@ -1006,7 +1014,7 @@ fn line_has_equals_sign_in_code(line: &[u8], line_abs_start: usize, code_map: &C
     false
 }
 
-fn is_aligned_rhs_standalone(source: &SourceFile, start: usize) -> bool {
+fn is_aligned_rhs_standalone(source: &SourceFile, start: usize, token_match: bool) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
     while ls > 0 && bytes[ls - 1] != b'\n' {
@@ -1018,8 +1026,17 @@ fn is_aligned_rhs_standalone(source: &SourceFile, start: usize) -> bool {
     let (line, _) = source.offset_to_line_col(start);
     let line_idx = line - 1;
     let char_col = bytes_to_char_col(lines[line_idx], byte_col);
+    // Only pass current_line for Check 2 (exact token match) when token_match
+    // is enabled.  For trailing_anchor paths (e.g. `=>` pair key position),
+    // the anchor is the hash key, not the value — short key names like `x`
+    // would spuriously match on adjacent lines.
+    let current_line = if token_match {
+        Some(lines[line_idx])
+    } else {
+        None
+    };
 
-    if check_rhs_alignment_standalone(&lines, line_idx, char_col, None) {
+    if check_rhs_alignment_standalone(&lines, line_idx, char_col, None, current_line) {
         return true;
     }
 
@@ -1027,7 +1044,7 @@ fn is_aligned_rhs_standalone(source: &SourceFile, start: usize) -> bool {
         .iter()
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(0);
-    check_rhs_alignment_standalone(&lines, line_idx, char_col, Some(my_indent))
+    check_rhs_alignment_standalone(&lines, line_idx, char_col, Some(my_indent), current_line)
 }
 
 fn check_rhs_alignment_standalone(
@@ -1035,6 +1052,7 @@ fn check_rhs_alignment_standalone(
     line_idx: usize,
     char_col: usize,
     indent_filter: Option<usize>,
+    current_line: Option<&[u8]>,
 ) -> bool {
     for up in [true, false] {
         let mut check_idx = if up {
@@ -1071,7 +1089,7 @@ fn check_rhs_alignment_standalone(
                         }
                     }
 
-                    if line_has_aligned_rhs_at_char_col(line_bytes, char_col) {
+                    if line_has_aligned_rhs_at_char_col(line_bytes, char_col, current_line) {
                         return true;
                     }
                     break;
@@ -1092,16 +1110,52 @@ fn check_rhs_alignment_standalone(
     false
 }
 
-fn line_has_aligned_rhs_at_char_col(line: &[u8], target_char_col: usize) -> bool {
+/// Checks RHS alignment on an adjacent line using RuboCop's `aligned_words?` logic:
+/// 1. Space/tab + non-space boundary at `target_char_col - 1` to `target_char_col`
+/// 2. Exact token match: the same text starting at `target_char_col` on both lines
+///    (only when `current_line` is `Some`)
+fn line_has_aligned_rhs_at_char_col(
+    line: &[u8],
+    target_char_col: usize,
+    current_line: Option<&[u8]>,
+) -> bool {
     let Some(byte_col) = char_col_to_bytes(line, target_char_col) else {
         return false;
     };
 
-    byte_col > 0
+    // Check 1: space/non-space boundary (RuboCop: /\s\S/)
+    if byte_col > 0
         && byte_col < line.len()
         && (line[byte_col - 1] == b' ' || line[byte_col - 1] == b'\t')
         && line[byte_col] != b' '
         && line[byte_col] != b'\t'
+    {
+        return true;
+    }
+
+    // Check 2: exact token match at the same column (RuboCop: token == line[left_edge, len])
+    // Only applied when current_line is provided (disabled for trailing_anchor
+    // paths where the anchor is a hash key, not the RHS value).
+    let Some(cur_line) = current_line else {
+        return false;
+    };
+    let Some(current_byte_col) = char_col_to_bytes(cur_line, target_char_col) else {
+        return false;
+    };
+    if current_byte_col >= cur_line.len() || byte_col >= line.len() {
+        return false;
+    }
+    // Extract the token from the current line (until whitespace or end of line)
+    let token_end = cur_line[current_byte_col..]
+        .iter()
+        .position(|&b| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r')
+        .map_or(cur_line.len(), |p| current_byte_col + p);
+    let token_len = token_end - current_byte_col;
+    if token_len > 0 && byte_col + token_len <= line.len() {
+        return line[byte_col..byte_col + token_len]
+            == cur_line[current_byte_col..current_byte_col + token_len];
+    }
+    false
 }
 
 const BINARY_OPERATORS: &[&[u8]] = &[
@@ -1263,11 +1317,14 @@ impl OperatorChecker<'_> {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
-                    if is_aligned_rhs_standalone(self.source, anchor) {
+                    // For trailing_anchor (e.g. `=>` pair key position),
+                    // disable token matching — short key names would
+                    // spuriously match on adjacent lines.
+                    if is_aligned_rhs_standalone(self.source, anchor, false) {
                         multi_space_after = false;
                     }
                 } else if let Some(rhs_start) = util::first_non_space_on_line(bytes, end) {
-                    if is_aligned_rhs_standalone(self.source, rhs_start) {
+                    if is_aligned_rhs_standalone(self.source, rhs_start, true) {
                         multi_space_after = false;
                     }
                 }

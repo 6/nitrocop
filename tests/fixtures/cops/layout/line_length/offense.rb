@@ -104,3 +104,9 @@ raise Puppet::Network::HTTP::Error::HTTPNotFoundError.new(
 
         "More information: [http://tryouts.readthedocs.org/en/latest/releases.html#create-release](http://tryouts.readthedocs.org/en/latest/releases.html#create-release)"
                                                                                                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/LineLength: Line is too long. [170/120]
+
+RECT_WHITELIST = [:grid, :g, :l, :left, :x, :fl, :top, :t, :y, :w, :width, :h, :height, :below_prev, :bp, :below_previous, :left_of_prev, :lop, :left_of_previous, :r, :right, :b, :bottom, :from_righ...
+                                                                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/LineLength: Line is too long. [201/120]
+
+*            *              |    * |--+--from_right---|*    {l: #{i_f_to_s(left_in_root_view)}, t: #{i_f_to_s(top_in_root_view)},
+                                                                                                                        ^^^^^^^^^ Layout/LineLength: Line is too long. [129/120]
