@@ -1,8 +1,19 @@
-use crate::cop::shared::node_type::CALL_NODE;
+use crate::cop::shared::node_type::{CALL_AND_WRITE_NODE, CALL_NODE, CALL_OR_WRITE_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks for use of the lambda.(args) syntax.
+///
+/// The cop handles two styles:
+/// - `call` (default): prefers `lambda.call(...)` over `lambda.()`
+/// - `braces`: prefers `lambda.()` over `lambda.call()`
+///
+/// **Variant FN fix:** The `braces` style had 2 false negatives where compound
+/// assignment forms like `call_availability.call ||= build(...)` were not detected.
+/// These are parsed as `CallOrWriteNode` / `CallAndWriteNode` in Prism, not `CallNode`.
+/// The cop now also registers interest in these node types to catch explicit `.call`
+/// calls within compound assignments (e.g., `x.call ||=`, `x.call &&=`).
 pub struct LambdaCall;
 
 impl Cop for LambdaCall {
@@ -11,7 +22,7 @@ impl Cop for LambdaCall {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
+        &[CALL_NODE, CALL_OR_WRITE_NODE, CALL_AND_WRITE_NODE]
     }
 
     fn check_node(
@@ -23,6 +34,41 @@ impl Cop for LambdaCall {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let enforced_style = config.get_str("EnforcedStyle", "call");
+
+        // Handle CallOrWriteNode and CallAndWriteNode (e.g., x.call ||= ...)
+        // These represent explicit .call method calls with compound assignment.
+        if enforced_style == "braces" {
+            if let Some(cow) = node.as_call_or_write_node() {
+                // For braces style: explicit .call with ||= should be flagged
+                // e.g., call_availability.call ||= build(...)
+                if cow.read_name().as_slice() == b"call" {
+                    let loc = node.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Prefer the use of `lambda.(...)` over `lambda.call(...)`.".to_string(),
+                    ));
+                }
+                return;
+            }
+            if let Some(caw) = node.as_call_and_write_node() {
+                if caw.read_name().as_slice() == b"call" {
+                    let loc = node.location();
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Prefer the use of `lambda.(...)` over `lambda.call(...)`.".to_string(),
+                    ));
+                }
+                return;
+            }
+        }
+
         let call = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -32,8 +78,6 @@ impl Cop for LambdaCall {
         if call.receiver().is_none() {
             return;
         }
-
-        let enforced_style = config.get_str("EnforcedStyle", "call");
 
         match enforced_style {
             "call" => {
