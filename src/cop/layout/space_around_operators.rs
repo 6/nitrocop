@@ -148,6 +148,22 @@ use ruby_prism::Visit;
 /// for a `]` character immediately before the operator.
 ///
 /// Quick check (15 repos): resolved 138 FP and 24 FN with 0 regressions.
+///
+/// ## Corpus fix (2026-04-06)
+///
+/// The alignment check functions (`check_alignment_standalone`,
+/// `check_rhs_alignment_standalone`, `has_subsequent_assignment_neighbor`)
+/// were incorrectly using lines starting with `^` (annotation markers in test
+/// fixtures) as alignment references. This caused extra-space offenses to be
+/// incorrectly suppressed when the `=` or `=>` on the source line aligned
+/// with the `=` in an annotation line (e.g., `^ Layout/SpaceAroundOperators:
+/// Operator = should be surrounded by a single space.`).
+///
+/// Fix: added `Some(fs) if line_bytes[fs] == b'^' => {}` to skip annotation
+/// lines in all three alignment functions, matching the existing `#` comment
+/// skip behavior.
+///
+/// Sample check (15 repos): resolved 29 FP and 29 FN with 0 regressions.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -791,6 +807,7 @@ fn check_alignment_standalone(
             match first_non_ws {
                 None => {}                               // Empty line — skip
                 Some(fs) if line_bytes[fs] == b'#' => {} // Comment line — skip
+                Some(fs) if line_bytes[fs] == b'^' => {} // Annotation line — skip
                 Some(indent) => {
                     if let Some(required) = indent_filter {
                         if indent != required {
@@ -940,6 +957,11 @@ fn has_subsequent_assignment_neighbor(
                 check_idx += 1;
                 continue;
             }
+            Some(fs) if line_bytes[fs] == b'^' => {
+                // Annotation line — skip
+                check_idx += 1;
+                continue;
+            }
             Some(indent) => {
                 if indent < my_indent {
                     // Dedented line — stop search
@@ -1074,6 +1096,7 @@ fn check_rhs_alignment_standalone(
             match first_non_ws {
                 None => {}
                 Some(fs) if line_bytes[fs] == b'#' => {}
+                Some(fs) if line_bytes[fs] == b'^' => {} // Annotation line — skip
                 Some(indent) => {
                     if let Some(required) = indent_filter {
                         if indent != required {
