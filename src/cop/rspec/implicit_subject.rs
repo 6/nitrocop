@@ -16,6 +16,10 @@ use ruby_prism::Visit;
 ///   source text, which is brittle for multiline brace blocks.
 /// - Fixed by walking Prism ancestors to the real enclosing example block and
 ///   deriving `its` / single-line / single-statement behavior from that block.
+/// - Added `require_implicit` style support (was completely missing): flags
+///   `expect(subject)` in example contexts when style is `require_implicit`.
+///   The RuboCop cop uses `explicit_unnamed_subject?` pattern to match
+///   `(send nil? :expect (send nil? :subject))`.
 pub struct ImplicitSubject;
 
 /// RSpec example method names (it, specify, example, scenario, its, etc.)
@@ -42,6 +46,20 @@ fn example_method_name(name: &[u8]) -> Option<&'static [u8]> {
         .iter()
         .copied()
         .find(|method| *method == name)
+}
+
+fn is_explicit_unnamed_subject(node: &ruby_prism::CallNode<'_>) -> bool {
+    // Matches expect(subject) where expect has no receiver and subject has no receiver
+    node.name().as_slice() == b"expect"
+        && node.receiver().is_none()
+        && node.arguments().map_or(false, |args| {
+            args.arguments().len() == 1
+                && args.arguments().first().map_or(false, |arg| {
+                    arg.as_call_node().map_or(false, |inner| {
+                        inner.name().as_slice() == b"subject" && inner.receiver().is_none()
+                    })
+                })
+        })
 }
 
 fn is_single_line_block(block: &ruby_prism::BlockNode<'_>) -> bool {
@@ -127,15 +145,13 @@ impl<'a, 'pr> ImplicitSubjectVisitor<'a, 'pr> {
         None
     }
 
-    fn add_offense(&mut self, node: &ruby_prism::CallNode<'pr>) {
+    fn add_offense(&mut self, node: &ruby_prism::CallNode<'pr>, msg: &'static str) {
         let loc = node.location();
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-        self.diagnostics.push(self.cop.diagnostic(
-            self.source,
-            line,
-            column,
-            "Don't use implicit subject.".to_string(),
-        ));
+        self.diagnostics.push(
+            self.cop
+                .diagnostic(self.source, line, column, msg.to_string()),
+        );
     }
 }
 
@@ -168,7 +184,7 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                 }
 
                 if self.enforced_style == "disallow" {
-                    self.add_offense(node);
+                    self.add_offense(node, "Don't use implicit subject.");
                     ruby_prism::visit_call_node(self, node);
                     return;
                 }
@@ -180,7 +196,7 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                 match self.enforced_style {
                     "single_line_only" => {
                         if !is_single_line {
-                            self.add_offense(node);
+                            self.add_offense(node, "Don't use implicit subject.");
                         }
                     }
                     "single_statement_only" => {
@@ -188,10 +204,20 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                             .as_ref()
                             .is_some_and(|(_, block)| is_single_statement_block(block));
                         if !is_single_line && !is_single_statement {
-                            self.add_offense(node);
+                            self.add_offense(node, "Don't use implicit subject.");
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // Handle require_implicit style: flag expect(subject) in examples
+            if self.enforced_style == "require_implicit" && is_explicit_unnamed_subject(node) {
+                let enclosing = self.enclosing_example();
+                if let Some((method, _)) = enclosing {
+                    if method != b"its" {
+                        self.add_offense(node, "Don't use explicit subject.");
+                    }
                 }
             }
         }
@@ -312,6 +338,48 @@ mod tests {
             diags.len(),
             1,
             "non-example contexts should still be flagged"
+        );
+    }
+
+    #[test]
+    fn require_implicit_offense_fixture() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("require_implicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ImplicitSubject,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/implicit_subject/require_implicit_offense.rb"
+            ),
+            config,
+        );
+    }
+
+    #[test]
+    fn require_implicit_no_offense_fixture() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("require_implicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ImplicitSubject,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/implicit_subject/require_implicit_no_offense.rb"
+            ),
+            config,
         );
     }
 }
