@@ -583,10 +583,10 @@ const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
     // Style
     "Style/AccessModifierDeclarations",   // FN=16
     "Style/ConditionalAssignment",        // FN=5951
-    "Style/GlobalStdStream",              // FP: nitrocop misses STDOUT/STDERR/STDIN refs
     "Style/Documentation",                // FN=22
     "Style/DocumentationMethod",          // FN=63
     "Style/FrozenStringLiteralComment",   // FN=13
+    "Style/GlobalStdStream",              // FP: nitrocop misses STDOUT/STDERR/STDIN refs
     "Style/IdenticalConditionalBranches", // FN=9
     "Style/IfUnlessModifier",             // FN=1216
     "Style/NonNilCheck",                  // FN=2
