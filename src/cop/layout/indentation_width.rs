@@ -103,6 +103,13 @@ use crate::parse::source::SourceFile;
 ///   column as base instead of `line_start_column`. Modifier-decorated defs
 ///   (`private def foo`) still use line_start_column. Resolved ~3 FP
 ///   (elasticgraph `__skip__ = def`).
+///
+/// 2026-04-06 (continued):
+/// - Fixed begin/rescue/end inline FP. When `end` is not the first non-whitespace
+///   character on its line (e.g., `begin ... rescue NameError; end` where the `end`
+///   is on the same line as `rescue NameError;`), RuboCop's `on_kwbegin` skips the
+///   indentation check entirely. Added `end_begins_its_line` helper and the check
+///   to the BeginNode handler. Resolved 8+ FP (neo4jrb, foodsoft, activescaffold).
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -244,6 +251,30 @@ fn line_uses_tab_indentation(source: &SourceFile, body_offset: usize) -> bool {
         pos += 1;
     }
     false
+}
+
+/// Check if the `end` keyword is the first non-whitespace character on its line.
+/// RuboCop's `on_kwbegin` skips indentation check when the `end` keyword is
+/// inline with other code (e.g., `begin ... rescue NameError; end`).
+/// This matches RuboCop's `begins_its_line?(node.loc.end)` check.
+fn end_begins_its_line(source: &SourceFile, end_offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    // Find the start of the line containing the end keyword
+    let mut line_start = end_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    // Find the first non-whitespace character on this line
+    let mut first_non_ws = line_start;
+    while first_non_ws < bytes.len()
+        && (bytes[first_non_ws] == b' ' || bytes[first_non_ws] == b'\t')
+    {
+        first_non_ws += 1;
+    }
+    // Find the end keyword's column
+    let end_col = end_offset - line_start;
+    // Check if the first non-whitespace is at the same column as end
+    first_non_ws - line_start == end_col
 }
 
 /// Check if the body node is not the first non-whitespace character on its line.
@@ -808,16 +839,34 @@ impl Cop for IndentationWidth {
         //   x = begin
         //     body       # indented from `end`, not from `begin`
         //   end
+        //
+        // RuboCop's `on_kwbegin` also checks `begins_its_line?(node.loc.end)` —
+        // if the `end` keyword is NOT the first non-whitespace on its line
+        // (e.g., `begin ... rescue NameError; end` where end is inline with code),
+        // indentation is NOT checked. This avoids false positives for inline
+        // begin/rescue/end constructs.
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(begin_kw_loc) = begin_node.begin_keyword_loc() {
                 // Explicit `begin...end` block
                 let kw_offset = begin_kw_loc.start_offset();
                 let (_, kw_col) = source.offset_to_line_col(kw_offset);
-                let base_col = if let Some(end_loc) = begin_node.end_keyword_loc() {
-                    source.offset_to_line_col(end_loc.start_offset()).1
+                let (base_col, end_offset) = if let Some(end_loc) = begin_node.end_keyword_loc() {
+                    (
+                        source.offset_to_line_col(end_loc.start_offset()).1,
+                        Some(end_loc.start_offset()),
+                    )
                 } else {
-                    kw_col
+                    (kw_col, None)
                 };
+                // Skip indentation check if `end` is not on its own line
+                // (RuboCop's `begins_its_line?` check)
+                if let Some(eo) = end_offset {
+                    if !end_begins_its_line(source, eo) {
+                        // Still check rescue/ensure/else clauses (these bypass the walker)
+                        self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        return;
+                    }
+                }
                 let alt_base = if base_col != kw_col {
                     Some(kw_col)
                 } else {
