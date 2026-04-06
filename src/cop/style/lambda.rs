@@ -3,7 +3,22 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// ## Corpus investigation (2026-03-11)
+/// ## Variant FP Fix (literal style)
+///
+/// With `EnforcedStyle: literal`, RuboCop's Style/Lambda only fires for
+/// `on_block`/`on_lambda` callbacks, so it never sees bare `lambda` calls
+/// without an attached block. Such calls are references to the lambda method
+/// (e.g., `b = lambda` inside a block), not lambda expressions, and should
+/// not be flagged.
+///
+/// Example of cases that should NOT be flagged under literal style:
+/// - `1.times { b = lambda }` — lambda without a block, just a method reference
+/// - `foo(lambda)` — lambda passed as argument without a block
+///
+/// The fix checks `call.block().is_none()` in the literal style branch to
+/// skip these bare lambda calls.
+///
+/// ## Original Investigation (2026-03-11)
 ///
 /// Corpus oracle reported FP=2, FN=2.
 ///
@@ -129,7 +144,14 @@ impl Lambda {
     ) {
         match style {
             "literal" => {
-                // Always flag `lambda` — use `->` instead
+                // RuboCop's Style/Lambda only fires for on_block (and
+                // on_lambda/on_numblock/on_itblock), so it never sees bare
+                // `lambda` calls without an attached block. Such calls are just
+                // references to the lambda method (e.g., `b = lambda` inside a
+                // block) and should not be flagged.
+                if call.block().is_none() {
+                    return;
+                }
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
