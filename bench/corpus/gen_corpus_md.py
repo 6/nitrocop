@@ -149,19 +149,30 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     if by_department and variant_by_cop:
         md.append("### All `EnforcedStyle` Variants")
         md.append("")
-        md.append("Results across every supported `EnforcedStyle` option (e.g. `EnforcedStyle: comma`).")
+        md.append("Results combining default config and every non-default `EnforcedStyle` option.")
         md.append("")
-        md.append("| Department | Default matches | Variant matches | Variant FP | Variant FN | All variants % |")
-        md.append("|------------|----------------:|----------------:|-----------:|-----------:|---------------:|")
+        md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
+        md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
         for d in by_department:
-            total = d["matches"] + d["fp"] + d["fn"]
             vd = variant_dept_stats.get(d["department"], {"matches": 0, "fp": 0, "fn": 0})
-            v_total = total + vd["matches"] + vd["fp"] + vd["fn"]
-            v_matches = d["matches"] + vd["matches"]
-            v_pct = fmt_pct(v_matches / v_total) if v_total > 0 else "N/A"
+            combined_matches = d["matches"] + vd["matches"]
+            combined_fp = d["fp"] + vd["fp"]
+            combined_fn = d["fn"] + vd["fn"]
+            combined_total = combined_matches + combined_fp + combined_fn
+            # Count cops diverging in variants but not in default
+            default_diverging_names = {c["cop"] for c in by_cop if c.get("diverging") and c["cop"].startswith(d["department"] + "/")}
+            variant_only_count = sum(
+                1 for cop_name, variants in variant_by_cop.items()
+                if cop_name.startswith(d["department"] + "/")
+                and cop_name not in default_diverging_names
+                and any(v["fp"] + v["fn"] > 0 for v in variants)
+            )
+            combined_diverging = d["diverging_cops"] + variant_only_count
+            combined_pct = fmt_pct(combined_matches / combined_total) if combined_total > 0 else "N/A"
             md.append(
-                f"| {d['department']} | {d['matches']:,} | "
-                f"{vd['matches']:,} | {vd['fp']:,} | {vd['fn']:,} | {v_pct} |"
+                f"| {d['department']} | {d['cops']:,} | "
+                f"{d['perfect_cops'] - variant_only_count:,} | {combined_diverging:,} | {d['inactive_cops']:,} | "
+                f"{combined_matches:,} | {combined_fp:,} | {combined_fn:,} | {combined_pct} |"
             )
         md.append("")
 

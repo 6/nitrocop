@@ -9,6 +9,12 @@ use crate::parse::source::SourceFile;
 /// gemspec stub embedded a later NUL, or the whole file was UTF-16LE without a BOM. The fix keeps
 /// the top-of-file scan byte-oriented so those headers still produce offenses, while preserving the
 /// early return for truly undecodable files that do not advertise an encoding in the leading lines.
+///
+/// It also mirrors two RuboCop quirks found in corpus false positives:
+/// - leading `=begin ... =end` document blocks do not terminate the search, so a later valid
+///   `# frozen_string_literal: true` comment still counts;
+/// - with `TargetRubyVersion >= 3.4`, files that Prism reports as `Invalid retry ...` should be
+///   skipped for this cop because RuboCop emits only `Lint/Syntax` there and no style offense.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
@@ -48,6 +54,10 @@ impl Cop for FrozenStringLiteralComment {
             && std::str::from_utf8(source.as_bytes()).is_err()
             && !has_leading_encoding_comment(&lines)
         {
+            return;
+        }
+
+        if target_ruby_version(config) >= 3.4 && has_invalid_retry_parse_error(source) {
             return;
         }
 
@@ -134,39 +144,60 @@ impl Cop for FrozenStringLiteralComment {
         // Scan leading comment and blank lines for the frozen_string_literal magic comment.
         // RuboCop's `leading_comment_lines` returns all lines before the first non-comment
         // token — blank lines are included since they don't produce tokens.
-        while idx < lines.len() && is_comment_or_blank_line(lines[idx]) {
-            if is_frozen_string_literal_comment(lines[idx]) {
-                if enforced_style == "always_true" {
-                    // Must be set to true specifically
-                    if !is_frozen_string_literal_true(lines[idx]) {
-                        let mut diag = self.diagnostic(
-                            source,
-                            idx + 1,
-                            0,
-                            "Frozen string literal comment must be set to `true`.".to_string(),
-                        );
-                        if let Some(ref mut corr) = corrections {
-                            // Replace the entire line with the correct comment
-                            if let Some(start) = source.line_col_to_offset(idx + 1, 0) {
-                                let end = source
-                                    .line_col_to_offset(idx + 2, 0)
-                                    .unwrap_or(source.as_bytes().len());
-                                corr.push(crate::correction::Correction {
-                                    start,
-                                    end,
-                                    replacement: "# frozen_string_literal: true\n".to_string(),
-                                    cop_name: self.name(),
-                                    cop_index: 0,
-                                });
-                                diag.corrected = true;
-                            }
-                        }
-                        diagnostics.push(diag);
-                    }
-                }
-                return;
+        while idx < lines.len() {
+            if is_blank_line(lines[idx]) {
+                idx += 1;
+                continue;
             }
-            idx += 1;
+
+            if is_comment_line(lines[idx]) {
+                if is_frozen_string_literal_comment(lines[idx]) {
+                    if enforced_style == "always_true" {
+                        // Must be set to true specifically
+                        if !is_frozen_string_literal_true(lines[idx]) {
+                            let mut diag = self.diagnostic(
+                                source,
+                                idx + 1,
+                                0,
+                                "Frozen string literal comment must be set to `true`.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                // Replace the entire line with the correct comment
+                                if let Some(start) = source.line_col_to_offset(idx + 1, 0) {
+                                    let end = source
+                                        .line_col_to_offset(idx + 2, 0)
+                                        .unwrap_or(source.as_bytes().len());
+                                    corr.push(crate::correction::Correction {
+                                        start,
+                                        end,
+                                        replacement: "# frozen_string_literal: true\n".to_string(),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diag);
+                        }
+                    }
+                    return;
+                }
+                idx += 1;
+                continue;
+            }
+
+            if is_embedded_doc_begin(lines[idx]) {
+                idx += 1;
+                while idx < lines.len() && !is_embedded_doc_end(lines[idx]) {
+                    idx += 1;
+                }
+                if idx < lines.len() {
+                    idx += 1;
+                    continue;
+                }
+            }
+
+            break;
         }
 
         let msg = if enforced_style == "always_true" {
@@ -269,8 +300,34 @@ fn is_blank_line(line: &[u8]) -> bool {
     first_non_padding_byte(line).is_none()
 }
 
-fn is_comment_or_blank_line(line: &[u8]) -> bool {
-    is_blank_line(line) || is_comment_line(line)
+fn target_ruby_version(config: &CopConfig) -> f64 {
+    config
+        .options
+        .get("TargetRubyVersion")
+        .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)))
+        .unwrap_or(2.7)
+}
+
+fn has_invalid_retry_parse_error(source: &SourceFile) -> bool {
+    crate::parse::parse_source(source.as_bytes())
+        .errors()
+        .any(|err| err.message().starts_with("Invalid retry"))
+}
+
+fn starts_with_embedded_doc_keyword(line: &[u8], keyword: &[u8]) -> bool {
+    let line = normalized_ascii_bytes(line);
+    if !line.starts_with(keyword) {
+        return false;
+    }
+    matches!(line.get(keyword.len()), None | Some(b' ' | b'\t' | b'\r'))
+}
+
+fn is_embedded_doc_begin(line: &[u8]) -> bool {
+    starts_with_embedded_doc_keyword(line, b"=begin")
+}
+
+fn is_embedded_doc_end(line: &[u8]) -> bool {
+    starts_with_embedded_doc_keyword(line, b"=end")
 }
 
 fn is_encoding_comment(line: &[u8]) -> bool {
@@ -394,6 +451,7 @@ fn strip_frozen_string_literal_key(s: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn utf16le_bytes(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
@@ -490,6 +548,44 @@ mod tests {
         let mut diags = Vec::new();
         FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
         assert!(diags.is_empty());
+    }
+
+    fn config_with_target_ruby_version(version: f64) -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(version)),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn retry_without_rescue_is_accepted_at_target_ruby_3_4() {
+        let source = b"#~# ORIGINAL retry\n\nretry\n\n#~# EXPECTED\nretry\n";
+        crate::testutil::assert_cop_no_offenses_with_config(
+            &FrozenStringLiteralComment,
+            source,
+            config_with_target_ruby_version(3.4),
+        );
+    }
+
+    #[test]
+    fn break_without_loop_still_requires_comment_at_target_ruby_3_4() {
+        let source = SourceFile::from_bytes("test.rb", b"#~# ORIGINAL break\n\nbreak\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_target_ruby_version(3.4),
+            &mut diags,
+            None,
+        );
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].message, "Missing frozen string literal comment.");
     }
 
     #[test]

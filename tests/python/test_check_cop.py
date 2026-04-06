@@ -991,3 +991,83 @@ def test_run_variant_checks_includes_diverging_repos():
     assert dr["repo"] == "repo_a"
     assert dr["nc"] == 3
     assert dr["rc"] == 2
+
+
+# ── SUMMARY line FN location detail tests ──
+
+
+def _build_summary_detail(
+    fp_repos: list[tuple], fn_repos: list[tuple],
+    fp_examples: list, fn_examples: list,
+) -> str:
+    """Replicate the SUMMARY detail-building logic from check_cop.py."""
+    _repo_fp_locs: dict[str, list[str]] = {}
+    _repo_fn_locs: dict[str, list[str]] = {}
+    for ex in fp_examples:
+        loc = ex["loc"] if isinstance(ex, dict) else ex
+        try:
+            repo_id, filepath, line = check_cop._parse_example_loc(loc)
+            _repo_fp_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+        except (ValueError, IndexError):
+            pass
+    for ex in fn_examples:
+        loc = ex["loc"] if isinstance(ex, dict) else ex
+        try:
+            repo_id, filepath, line = check_cop._parse_example_loc(loc)
+            _repo_fn_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+        except (ValueError, IndexError):
+            pass
+    _fp_repo_ids = {r[0] for r in fp_repos}
+    _fn_repo_ids = {r[0] for r in fn_repos}
+    detail_parts: list[str] = []
+    for repo_id in sorted(_fp_repo_ids | _fn_repo_ids):
+        fp_locs = _repo_fp_locs.get(repo_id, [])
+        fn_locs = _repo_fn_locs.get(repo_id, [])
+        if repo_id in _fp_repo_ids and fp_locs:
+            loc_str = ",".join(fp_locs[:2])
+            detail_parts.append(f"{repo_id}(FP:{loc_str})")
+        elif repo_id in _fp_repo_ids:
+            detail_parts.append(f"{repo_id}(FP)")
+        if repo_id in _fn_repo_ids and fn_locs:
+            loc_str = ",".join(fn_locs[:2])
+            detail_parts.append(f"{repo_id}(FN:{loc_str})")
+        elif repo_id in _fn_repo_ids:
+            detail_parts.append(f"{repo_id}(FN)")
+    return " ".join(detail_parts[:10])
+
+
+def test_summary_detail_includes_fn_locations():
+    """SUMMARY detail should include FN locations from oracle examples."""
+    fp_repos = [("repo-a", 12, 10, 10, 2)]
+    fn_repos = [("repo-b", 5, 10, 10, 5)]
+    fp_examples = [{"loc": "repo-a: app/models/foo.rb:10"}]
+    fn_examples = [{"loc": "repo-b: lib/bar.rb:20"}, {"loc": "repo-b: lib/baz.rb:30"}]
+    detail = _build_summary_detail(fp_repos, fn_repos, fp_examples, fn_examples)
+    assert "repo-a(FP:app/models/foo.rb:10)" in detail
+    assert "repo-b(FN:lib/bar.rb:20,lib/baz.rb:30)" in detail
+
+
+def test_summary_detail_no_examples_uses_bare_kind():
+    """When oracle has no examples for a regressing repo, use bare FP/FN tag."""
+    fp_repos = [("repo-a", 12, 10, 10, 2)]
+    fn_repos = [("repo-b", 5, 10, 10, 5)]
+    detail = _build_summary_detail(fp_repos, fn_repos, [], [])
+    assert "repo-a(FP)" in detail
+    assert "repo-b(FN)" in detail
+
+
+def test_summary_detail_both_fp_and_fn_same_repo():
+    """When a repo has both FP and FN regressions, include both entries."""
+    fp_repos = [("repo-a", 12, 10, 10, 2)]
+    fn_repos = [("repo-a", 12, 10, 10, 2)]
+    fp_examples = [{"loc": "repo-a: app/foo.rb:5"}]
+    fn_examples = [{"loc": "repo-a: lib/bar.rb:15"}]
+    detail = _build_summary_detail(fp_repos, fn_repos, fp_examples, fn_examples)
+    assert "repo-a(FP:app/foo.rb:5)" in detail
+    assert "repo-a(FN:lib/bar.rb:15)" in detail
+
+
+def test_summary_detail_empty_when_no_regressions():
+    """No detail when there are no regressing repos."""
+    detail = _build_summary_detail([], [], [], [])
+    assert detail == ""

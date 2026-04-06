@@ -39,6 +39,18 @@ use ruby_prism::Visit;
 /// `check_inline_style_statements` method called from `visit_statements_node`, where
 /// we have access to sibling nodes. For each bare modifier, we look at right siblings
 /// (stopping at the next bare modifier) and only flag if any sibling is a `DefNode`.
+///
+/// ## Inline style scope fix (2026-04-06)
+///
+/// The inline variant still had 377 FPs because `check_inline_style_statements` only
+/// checked `in_macro_scope` (from the stack) but the cop doesn't push `NotMacroScope`
+/// for `def` bodies, `begin/rescue` blocks, or `case/when` branches — it tracks those
+/// via `group_scope_active`. RuboCop's `access_modifier?` (which calls `in_macro_scope?`)
+/// returns false in these contexts because `rescue` and `case` nodes break the
+/// transparent-parent chain, and `def` explicitly exits macro scope.
+///
+/// Fix: added `group_scope_active` check to `check_inline_style_statements`, matching
+/// the same guard already used by `check_group_style_statements`.
 pub struct AccessModifierDeclarations;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -265,6 +277,13 @@ impl AccessModifierVisitor<'_> {
         }
 
         if !access_modifier_predicates::in_macro_scope(&self.macro_scope_stack) {
+            return;
+        }
+
+        // Respect the same scope restrictions as group style: def bodies,
+        // begin/rescue, and case/when branches are not macro scope in RuboCop's
+        // `in_macro_scope?` (rescue/case break the transparent-parent chain).
+        if !self.group_scope_active {
             return;
         }
 
@@ -713,6 +732,44 @@ mod tests {
         assert!(
             diags[0].message.contains("protected"),
             "offense should be on `protected`, not `private`"
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_inside_def_body() {
+        // Bare `private` inside a def body is not in macro scope — RuboCop skips it
+        let source =
+            b"class Foo\n  def some_method\n    private\n\n    def nested; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier inside def body, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_inside_begin_rescue() {
+        // Bare `private` inside begin...rescue is not in macro scope
+        let source = b"class B\n  begin\n    private\n\n    def helper; end\n  rescue\n    nil\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier inside begin/rescue, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_inside_case_when() {
+        // Bare `private` inside case/when is not in macro scope
+        let source =
+            b"class D\n  case x\n  when :a\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier inside case/when, got: {:?}",
+            diags
         );
     }
 }

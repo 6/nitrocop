@@ -314,17 +314,6 @@ def schema_example(value)
   end
 end
 
-# FN fix: Thread.new(value) — RuboCop only suppresses Ractor.new, not Thread.new
-def threaded_or_sequential(lib, &block)
-  if use_threads?
-    Thread.new { block.call(lib) }
-  else
-    value = block.call(lib)
-    Thread.new(value) { |value| value }
-                         ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `value`.
-  end
-end
-
 # FN fix: Thread.new with splat args — not suppressed (only Ractor.new is special)
 def start_thread(*args)
   Thread.new(*args) { |*args| process(*args) }
@@ -506,4 +495,29 @@ def total_sum_at_index(index)
   total ||= (0..@number_of_plots - 1).inject(0) { |total, i| total + data[i][index] }
                                                    ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `total`.
   total
+end
+
+# FN fix: for loop collection block param shadows pre-existing local
+def process_yaku_stats(yaku_stats)
+  yaku = nil
+  for yaku, count in yaku_stats.sort_by{|yaku, count| -count}
+                                         ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `yaku`.
+    puts yaku
+  end
+end
+
+# FN fix: for loop collection block param shadows pre-existing local (count)
+def process_dora_stats(dora_stats)
+  count = nil
+  for dora, count in dora_stats.sort_by{|dora, count| -count}
+                                               ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `count`.
+    puts count
+  end
+end
+
+# FN fix: method param shadowed by block param in call with same-name arg
+def complete_text(text, pos)
+  text.modify_for_completion(text, pos) do |string, trigger, pos|
+                                                             ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `pos`.
+  end
 end

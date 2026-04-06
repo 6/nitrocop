@@ -191,3 +191,9 @@ raw_response = ssl_request(method, url, (parameters ? parameters.to_json : nil),
 
 after_commit -> { container.cards.touch_all if container }
                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+do_parse_json(options, (record && record.orm_model.schema) || (model && model.schema), record)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+def penalize!(amount=(((team && team.members.size) || 6) / 6.0)*activitiy_multipler)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
