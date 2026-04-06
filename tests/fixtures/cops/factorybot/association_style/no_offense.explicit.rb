@@ -39,3 +39,13 @@ factory :company do
     premium
   end
 end
+factory :collaboration do
+  association :user
+end
+trait :ccc do
+  payment_type 2
+  ccc_entity '9000'
+end
+trait :with_user do
+  user
+end
