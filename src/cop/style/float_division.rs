@@ -40,25 +40,39 @@ impl FloatDivision {
             if call.name().as_slice() == b"last_match" {
                 // Check receiver is Regexp or ::Regexp (constant)
                 if let Some(receiver) = call.receiver() {
-                    // Use as_constant_read_node for simple constant like Regexp
+                    // Check simple constant like Regexp
                     if let Some(const_node) = receiver.as_constant_read_node() {
                         if const_node.name().as_slice() == b"Regexp" {
                             // Has exactly one integer argument
-                            if let Some(args) = call.arguments() {
-                                if args.arguments().len() == 1 {
-                                    if let Some(first_arg) = args.arguments().first() {
-                                        if first_arg.as_integer_node().is_some() {
-                                            return true;
-                                        }
-                                    }
-                                }
-                            }
+                            return Self::call_has_single_integer_arg(&call);
+                        }
+                    }
+                    // Check qualified constant like ::Regexp
+                    if let Some(path_node) = receiver.as_constant_path_node() {
+                        // path_node.name() returns Option<ConstantId> — the final segment
+                        // For ::Regexp, parent is None; for Foo::Regexp, parent is Some
+                        if path_node.name().is_some_and(|n| n.as_slice() == b"Regexp")
+                            && path_node.parent().is_none()
+                        {
+                            return Self::call_has_single_integer_arg(&call);
                         }
                     }
                 }
             }
         }
 
+        false
+    }
+
+    /// Returns true if the call has exactly one integer argument.
+    fn call_has_single_integer_arg(call: &ruby_prism::CallNode<'_>) -> bool {
+        if let Some(args) = call.arguments() {
+            if args.arguments().len() == 1 {
+                if let Some(first_arg) = args.arguments().first() {
+                    return first_arg.as_integer_node().is_some();
+                }
+            }
+        }
         false
     }
 
