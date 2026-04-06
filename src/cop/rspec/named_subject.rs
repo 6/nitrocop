@@ -68,22 +68,16 @@ use ruby_prism::Visit;
 ///
 /// Fixed FP=2 in `named_only` style for ruby-concurrency/concurrent-ruby.
 ///
-/// Root cause: When visiting a CallNode with a block (e.g., `describe '#name' do
-/// ... end`), the arguments to the call were being visited along with the block
-/// body. This caused `subject { super().name }` inside the describe block's
-/// body to be found, and its `super()` call was incorrectly visited in the
-/// parent scope, polluting the subject_named_stack.
+/// Root cause: When `in_example_or_hook` is true (we entered from an example/hook
+/// scope) and we visit a subject's block, bare subject calls inside the subject
+/// block (like `super()` or nested subject definitions) were incorrectly flagged
+/// as if they were in the example scope. The `in_example_or_hook` flag was not
+/// being reset when entering a subject block.
 ///
-/// More critically, `subject(:actor, &subject_definition)` was treated as a
-/// named subject definition even though `subject_definition` is a block argument,
-/// not a block body. RuboCop's `subject_definition_is_named?` uses `arguments?`
-/// which returns true for the symbol `:actor` argument.
-///
-/// Fix: When visiting a CallNode with a block, only visit the block's body,
-/// not the call's arguments. Arguments to scoped constructs like `describe`
-/// are metadata (strings, symbols), not executable code. This prevents subject
-/// definitions that are arguments from being incorrectly recognized as subject
-/// definitions in the current scope.
+/// Fix: When entering a subject block, save and reset `in_example_or_hook` to
+/// false. A subject block is a subject DEFINITION, not an example/hook usage,
+/// so `in_example_or_hook` should be false inside a subject block. This prevents
+/// incorrect flagging of `super()` or nested subject calls inside subject blocks.
 pub struct NamedSubject;
 
 /// EnforcedStyle:
@@ -297,15 +291,24 @@ impl<'pr> Visit<'pr> for BareSubjectFinder<'_> {
                 let subject_state = find_subject_in_block(&block_node);
                 self.subject_named_stack.push(subject_state);
 
-                // If this CallNode has a block (e.g., `describe 'foo' do ... end`),
-                // the arguments to this call are NOT executable code in the current
-                // scope — they're metadata for the scoped construct. We should only
-                // visit the block body, not the arguments. This prevents subject
-                // calls that are arguments (e.g., `describe 'name', subject { ... }`)
-                // from being incorrectly found via `find_subject_in_block` at the
-                // wrong scope level.
-                ruby_prism::visit_block_node(self, &block_node);
+                // If we're entering a subject call's block (e.g., `subject { ... }`),
+                // reset in_example_or_hook to false. A subject block is a subject
+                // DEFINITION, not an example/hook usage. This prevents super() or
+                // nested subject calls inside the subject block from being incorrectly
+                // flagged as if they were in the example scope.
+                //
+                // We only do this for subject/subject! calls, not for other calls
+                // that happen to contain subject calls in their blocks (like
+                // `expect { subject }`).
+                let is_subject_call = name == b"subject" || name == b"subject!";
+                let was_in_example_or_hook = self.in_example_or_hook;
+                if is_subject_call {
+                    self.in_example_or_hook = false;
+                }
 
+                ruby_prism::visit_call_node(self, node);
+
+                self.in_example_or_hook = was_in_example_or_hook;
                 self.subject_named_stack.pop();
                 return;
             }
