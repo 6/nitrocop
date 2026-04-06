@@ -12,7 +12,8 @@ const MSG: &str = "Use the return of the conditional for variable assignment and
 ///
 /// Supports local, instance, class, global variable writes, constant writes,
 /// setter calls (`obj.x =`), index setters (`obj[k] =`), shovel sends
-/// (`obj << value`), and compound assignments (`+=`, `&&=`, `||=`).
+/// (`obj << value`), comparison/operator sends (`==`, `!=`, `<=`, `>=`, `=~`,
+/// `!~`, `<`, `>`, `<=>`), and compound assignments (`+=`, `&&=`, `||=`).
 ///
 /// Handles `if/elsif/else` chains (all branches must assign the same target),
 /// `unless/else`, and ternary expressions with assignments.
@@ -40,6 +41,16 @@ const MSG: &str = "Use the return of the conditional for variable assignment and
 /// `foo[bar] ||=`, and `foo[bar] +=`. Those do not come through as `CallNode`
 /// or variable write nodes, so this cop must derive stable target keys from
 /// the receiver, method/index, and operator to match RuboCop.
+///
+/// FN reduction (2026-04-06): RuboCop's `assignment_type?` also treats
+/// comparison/operator sends like `match.should == true` and `foo =~ /bar/`
+/// as assignment-like for this cop. nitrocop was only handling setters and
+/// `<<`, which missed comparison-based branch patterns.
+///
+/// FN reduction (2026-04-06): the line-length guard was adding `node_col`
+/// (starting column) to the first line's length, double-counting indentation.
+/// RuboCop's `longest_line` computes each branch line's length independently
+/// of the node's column position. Dropped `node_col` to match.
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -362,11 +373,11 @@ impl ConditionalAssignment {
             return;
         }
 
-        if line_length_enabled && max_line_length > 0 {
-            let (_, col) = source.offset_to_line_col(if_node.location().start_offset());
-            if exceeds_line_limit(&if_node.location(), col, &if_info.lhs_text, max_line_length) {
-                return;
-            }
+        if line_length_enabled
+            && max_line_length > 0
+            && exceeds_line_limit(&if_node.location(), &if_info.lhs_text, max_line_length)
+        {
+            return;
         }
 
         let loc = if_node.location();
@@ -422,11 +433,12 @@ impl ConditionalAssignment {
         }
 
         // Line length guard
-        if line_length_enabled && max_line_length > 0 && !lhs_text.is_empty() {
-            let (_, col) = source.offset_to_line_col(node_loc.start_offset());
-            if exceeds_line_limit(node_loc, col, &lhs_text, max_line_length) {
-                return;
-            }
+        if line_length_enabled
+            && max_line_length > 0
+            && !lhs_text.is_empty()
+            && exceeds_line_limit(node_loc, &lhs_text, max_line_length)
+        {
+            return;
         }
 
         let (line, col) = source.offset_to_line_col(node_loc.start_offset());
@@ -535,7 +547,8 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
         });
     }
     // Setter call: obj.method= value or obj[key]= value.
-    // RuboCop also treats shovel sends as assignment-like here.
+    // RuboCop also treats shovel and comparison/operator sends as
+    // assignment-like here.
     if let Some(call) = node.as_call_node() {
         let method = call.name().as_slice();
         // Check []= BEFORE is_setter_method — is_setter_method matches any
@@ -565,6 +578,19 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
             return Some(AssignInfo {
                 key: format!("send:{}<<", recv_src),
                 lhs_text: format!("{} << ", recv_src),
+            });
+        }
+        // Comparison/operator sends: ==, !=, <=, >=, =~, !~, <=>, <, >
+        // RuboCop's assignment_type? treats these as assignment-like.
+        if matches!(
+            method,
+            b"==" | b"!=" | b"<=" | b">=" | b"=~" | b"!~" | b"<=>" | b"<" | b">"
+        ) {
+            let recv_src = receiver_source(call.receiver());
+            let method_str = String::from_utf8_lossy(method);
+            return Some(AssignInfo {
+                key: format!("send:{} {}", recv_src, method_str),
+                lhs_text: format!("{} {} ", recv_src, method_str),
             });
         }
     }
@@ -755,7 +781,6 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
 /// and check if `lhs.len() + longest > max_line_length`.
 fn exceeds_line_limit(
     node_loc: &ruby_prism::Location<'_>,
-    node_col: usize,
     lhs_text: &str,
     max_line_length: usize,
 ) -> bool {
@@ -766,17 +791,15 @@ fn exceeds_line_limit(
     };
     let lhs_trimmed = lhs_text.trim_end();
     let mut max_remaining = 0;
-    for (i, line) in src.lines().enumerate() {
-        // Compute actual line length (first line needs column offset)
-        let base_len = if i == 0 { node_col } else { 0 };
+    for line in src.lines() {
         // Try to remove the LHS from this line (at line start after whitespace)
         let trimmed = line.trim_start();
         let remaining = if let Some(stripped) = trimmed.strip_prefix(lhs_trimmed) {
             let rest = stripped.trim_start();
             let leading_ws = line.len() - trimmed.len();
-            base_len + leading_ws + rest.len()
+            leading_ws + rest.len()
         } else {
-            base_len + line.len()
+            line.len()
         };
         if remaining > max_remaining {
             max_remaining = remaining;
