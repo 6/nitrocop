@@ -126,13 +126,14 @@ jobs:
         id: rubocop-cache-key
         run: |
           # Rubocop results are deterministic for a given (repo SHA, rubocop version, config).
-          # Cache key = hash of Gemfile + config + per-repo excludes + parser crash patch.
-          # Including repo_excludes.json ensures cache invalidation when file exclusions change.
-          # Including rescue_parser_crashes.rb ensures cache invalidation when crash handling changes.
+          # Cache key = hash of Gemfile + config + per-repo excludes + parser crash patch +
+          # variant batch script. Including run_variant_batches.py ensures cache invalidation
+          # when variant invocation changes (e.g., adding vendor exclusions).
           EXCLUDES_FILE="bench/corpus/repo_excludes.json"
           RESCUE_FILE="bench/corpus/rescue_parser_crashes.rb"
+          VARIANT_SCRIPT="bench/corpus/run_variant_batches.py"
           EXTRA_HASH=""
-          for f in "$EXCLUDES_FILE" "$RESCUE_FILE"; do
+          for f in "$EXCLUDES_FILE" "$RESCUE_FILE" "$VARIANT_SCRIPT"; do
             if [ -f "$f" ]; then
               EXTRA_HASH="${EXTRA_HASH}$(sha256sum "$f" | cut -c1-16)"
             fi
@@ -540,8 +541,9 @@ jobs:
           # Same hash as oracle-repo jobs use — must stay in sync
           EXCLUDES_FILE="bench/corpus/repo_excludes.json"
           RESCUE_FILE="bench/corpus/rescue_parser_crashes.rb"
+          VARIANT_SCRIPT="bench/corpus/run_variant_batches.py"
           EXTRA_HASH=""
-          for f in "$EXCLUDES_FILE" "$RESCUE_FILE"; do
+          for f in "$EXCLUDES_FILE" "$RESCUE_FILE" "$VARIANT_SCRIPT"; do
             if [ -f "$f" ]; then
               EXTRA_HASH="${EXTRA_HASH}$(sha256sum "$f" | cut -c1-16)"
             fi
