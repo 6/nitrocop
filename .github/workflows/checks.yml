@@ -291,10 +291,9 @@ jobs:
             --result "${{ steps.gate.outputs.result }}" \
             --check-variant-regressions > /dev/null
 
-  # Perf smoke test: time nitrocop on vendor/rubocop (1665 .rb files) to catch
-  # performance regressions. Logs timing + phase breakdown to step summary.
+  # Perf smoke test: time nitrocop on vendor/rubocop (small, fast) and forem
+  # (large, catches scale regressions). Logs timing to step summary.
   # Never fails — just records data for bisecting when the nightly catches an issue.
-  # Only runs on pushes to main.
   perf-smoke:
     needs: build-linux
     runs-on: ubuntu-24.04
@@ -310,41 +309,70 @@ jobs:
           path: target/release
       - run: chmod +x target/release/nitrocop
 
+      - name: Cache forem repo
+        uses: actions/cache@v5
+        with:
+          path: repos/forem__forem__72d7c44
+          key: perf-smoke-forem-72d7c44
+
+      - name: Clone forem if not cached
+        run: |
+          if [ ! -d "repos/forem__forem__72d7c44" ]; then
+            python3 bench/corpus/clone_repos.py \
+              --dest . \
+              --manifest bench/corpus/manifest.jsonl \
+              --repo-ids "forem__forem__72d7c44" \
+              --parallel 1
+          fi
+
       - name: Run perf smoke test
         run: |
           BINARY="target/release/nitrocop"
-          REPO_DIR="vendor/rubocop"
-          FILE_COUNT=$(find "$REPO_DIR" -name '*.rb' | wc -l)
-
+          CONFIG="bench/corpus/baseline_rubocop.yml"
           echo "## Perf Smoke Test" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Repo:** vendor/rubocop (${FILE_COUNT} .rb files)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Repo | Files | Time | Offenses |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|------|------:|-----:|---------:|" >> "$GITHUB_STEP_SUMMARY"
 
-          # Timed run
-          START=$(date +%s%N)
-          RESULT=$("$BINARY" --preview --format json --no-cache "$REPO_DIR" 2>/dev/null || true)
-          END=$(date +%s%N)
-          ELAPSED_MS=$(( (END - START) / 1000000 ))
-          ELAPSED_S=$(python3 -c "print(f'{${ELAPSED_MS}/1000:.1f}s')")
+          for ENTRY in "vendor/rubocop|" "repos/forem__forem__72d7c44|forem__forem__72d7c44"; do
+            REPO_DIR="${ENTRY%%|*}"
+            REPO_ID="${ENTRY##*|}"
 
-          OFFENSE_COUNT=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('metadata',{}).get('offense_count',0))" 2>/dev/null || echo "?")
+            if [ ! -d "$REPO_DIR" ]; then
+              echo "::warning::${REPO_DIR} not available, skipping"
+              continue
+            fi
 
-          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|--------|------:|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Files | ${FILE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Wall clock | ${ELAPSED_S} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Offenses | ${OFFENSE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            FILE_COUNT=$(find "$REPO_DIR" -name '*.rb' | wc -l)
 
-          # Debug run for phase breakdown
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          "$BINARY" --preview --no-cache --debug "$REPO_DIR" \
-            >/dev/null 2>/tmp/debug_out.txt || true
-          grep "^debug:" /tmp/debug_out.txt >> "$GITHUB_STEP_SUMMARY" || true
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+            # Resolve per-repo config (vendor exclusions) for corpus repos
+            if [ -n "$REPO_ID" ]; then
+              ABS_REPO=$(cd "$REPO_DIR" && pwd)
+              REPO_CONFIG=$(python3 bench/corpus/gen_repo_config.py "$REPO_ID" "$CONFIG" "$ABS_REPO")
+              CONFIG_ARGS="--config $REPO_CONFIG"
+            else
+              CONFIG_ARGS=""
+            fi
 
-          echo "perf-smoke: vendor/rubocop files=${FILE_COUNT} time=${ELAPSED_MS}ms offenses=${OFFENSE_COUNT}"
+            # Timed run with 120s timeout
+            START=$(date +%s%N)
+            timeout 120 "$BINARY" --preview --format json --no-cache $CONFIG_ARGS "$REPO_DIR" \
+              > /tmp/perf_result.json 2>/dev/null
+            RC=$?
+            END=$(date +%s%N)
+            ELAPSED_MS=$(( (END - START) / 1000000 ))
+            ELAPSED_S=$(python3 -c "print(f'{${ELAPSED_MS}/1000:.1f}s')")
+
+            if [ "$RC" -eq 124 ]; then
+              echo "| ${REPO_DIR} | ${FILE_COUNT} | **TIMEOUT** (120s) | - |" >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::perf-smoke: ${REPO_DIR} TIMED OUT after 120s"
+            else
+              OFFENSE_COUNT=$(python3 -c "import json; d=json.load(open('/tmp/perf_result.json')); print(d['metadata']['offense_count'])" 2>/dev/null || echo "?")
+              echo "| ${REPO_DIR} | ${FILE_COUNT} | ${ELAPSED_S} | ${OFFENSE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            echo "perf-smoke: ${REPO_DIR} files=${FILE_COUNT} time=${ELAPSED_MS}ms rc=${RC}"
+          done
 
   # Corpus smoke test: run nitrocop + rubocop on a few cheap sentinel repos to
   # catch systemic regressions (file discovery, config, plugin loading, directives)
