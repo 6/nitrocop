@@ -10,6 +10,15 @@ use crate::parse::source::SourceFile;
 /// RuboCop's `(send _ :gem (str #forbidden_gem? ...))` NodePattern which only
 /// captures sends with exactly one `(str)` argument — multi-arg calls like
 /// `gem 'foo', '~> 1.0'` are not flagged.
+///
+/// ## Fixed (gemspec variant):
+/// - **FN (48)**: Trailing `#` comments containing commas (e.g.,
+///   `gem 'base64' # Ruby 3.3, removed...`) inflated `count_top_level_args`,
+///   causing single-arg gem calls to appear multi-arg and be skipped.
+///   Fix: strip trailing comments before counting arguments.
+/// - **FP (26)**: `=begin`/`=end` block comments were not tracked, so gem calls
+///   inside multi-line block comments were falsely flagged. Fix: skip lines
+///   between `=begin` and `=end`.
 pub struct DevelopmentDependencies;
 
 impl Cop for DevelopmentDependencies {
@@ -47,12 +56,24 @@ impl Cop for DevelopmentDependencies {
 
         // For "Gemfile" or "gems.rb" styles, flag add_development_dependency calls
         let lines: Vec<&[u8]> = source.lines().collect();
+        let mut in_block_comment = false;
         for (line_idx, line) in lines.iter().enumerate() {
             let line_str = match std::str::from_utf8(line) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             let trimmed = line_str.trim();
+            // Track =begin/=end block comments
+            if trimmed == "=begin" || trimmed.starts_with("=begin ") {
+                in_block_comment = true;
+                continue;
+            }
+            if in_block_comment {
+                if trimmed == "=end" || trimmed.starts_with("=end ") {
+                    in_block_comment = false;
+                }
+                continue;
+            }
             if trimmed.starts_with('#') {
                 continue;
             }
@@ -238,6 +259,33 @@ fn has_freeze_suffix(s: &str) -> bool {
     }
 }
 
+/// Strip trailing Ruby `#` comment from a string, respecting quoted strings.
+/// E.g., `'foo' # comment, here` -> `'foo' `, `"bar"#, path: ...` -> `"bar"`.
+fn strip_trailing_comment(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\'' | b'"' => {
+                let quote = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != quote {
+                    if bytes[i] == b'\\' {
+                        i += 1; // skip escaped char
+                    }
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1; // skip closing quote
+                }
+            }
+            b'#' => return &s[..i],
+            _ => i += 1,
+        }
+    }
+    s
+}
+
 /// Count top-level arguments in a method call (commas not inside brackets/parens).
 /// Returns the number of arguments (1 for a single arg, 2 for two, etc.).
 fn count_top_level_args(after_method: &str) -> usize {
@@ -303,12 +351,24 @@ fn check_gem_calls(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let lines: Vec<&[u8]> = source.lines().collect();
+    let mut in_block_comment = false;
     for (line_idx, line) in lines.iter().enumerate() {
         let line_str = match std::str::from_utf8(line) {
             Ok(s) => s,
             Err(_) => continue,
         };
         let trimmed = line_str.trim();
+        // Track =begin/=end block comments
+        if trimmed == "=begin" || trimmed.starts_with("=begin ") {
+            in_block_comment = true;
+            continue;
+        }
+        if in_block_comment {
+            if trimmed == "=end" || trimmed.starts_with("=end ") {
+                in_block_comment = false;
+            }
+            continue;
+        }
         if trimmed.starts_with('#') {
             continue;
         }
@@ -316,8 +376,11 @@ fn check_gem_calls(
             if !has_string_literal_arg(after) {
                 continue;
             }
+            // Strip trailing comment before counting args so commas in comments
+            // don't inflate the argument count.
+            let after_no_comment = strip_trailing_comment(after);
             // RuboCop's NodePattern only matches single-arg gem calls (no version constraints)
-            if count_top_level_args(after) > 1 {
+            if count_top_level_args(after_no_comment) > 1 {
                 continue;
             }
             if is_gem_allowed(after, allowed_gems) {
@@ -510,6 +573,39 @@ gem 'example'
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &DevelopmentDependencies,
             b"# nitrocop-filename: Gemfile\ngsub_file 'Gemfile', /gem 'sdoc',\\s+'~> 0.4.0'/, ''\n",
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_offense_trailing_comment_with_commas() {
+        // gem calls with trailing comments containing commas should still be flagged
+        // (RuboCop's AST ignores comments; commas in comments are not arguments)
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &DevelopmentDependencies,
+            br##"# nitrocop-filename: Gemfile
+gem 'base64'     # Deprecation notice in Ruby 3.3, removed from default gems
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+gem "deploy"#, path: "../../deploy"
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+gem "ostruct" # for Ruby 4, probably safe to delete
+^^^ Gemspec/DevelopmentDependencies: Specify development dependencies in `gemspec`.
+"##,
+            gemspec_style_config(),
+        );
+    }
+
+    #[test]
+    fn gemspec_style_no_offense_begin_end_block() {
+        // gem calls inside =begin/=end block comments should not be flagged
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DevelopmentDependencies,
+            br##"# nitrocop-filename: Gemfile
+=begin
+gem 'commented_out'
+gem 'also_commented'
+=end
+"##,
             gemspec_style_config(),
         );
     }
