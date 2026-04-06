@@ -130,11 +130,13 @@ use crate::parse::source::SourceFile;
 /// visits keys with explicit values. This fixes 1 FN in danbooru under both
 /// non_integer and snake_case.
 ///
-/// **Remaining 61 FP (non_integer):** All from jruby files where
+/// **Remaining FP (non_integer):** ~59 from jruby files where
 /// `Prism::Translation::Parser` crashes on non-UTF-8 encodings
-/// (`US-ASCII`, `windows-1252`) or unsupported pin operators (`^@a`,
-/// `^@@var`). RuboCop reports 0 offenses (parse failure), nitrocop/Prism
-/// parses successfully → FP. Not fixable at the cop level.
+/// (`US-ASCII`, `windows-1252`). Fixed in `src/linter.rs`: files with
+/// invalid UTF-8 bytes + encoding magic comment now skip all cops,
+/// matching RuboCop's "0 files inspected" crash behavior. ~2 remaining
+/// from unsupported pin operators (`^@a`, `^@@var`) — a separate
+/// Translation::Parser syntax limitation.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
