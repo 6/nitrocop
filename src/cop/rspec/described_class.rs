@@ -77,6 +77,21 @@ use ruby_prism::Visit;
 ///    so `describe self::Foo` effectively can't match any usage. Fixed by returning
 ///    `None` from `extract_const_name_from_path` when parent is `SelfNode`.
 ///    Affected all 3 Coursemology FPs.
+///
+/// ## Explicit style investigation (2026-04-06)
+///
+/// The explicit style (`EnforcedStyle: explicit`) should flag `described_class` calls
+/// and suggest using the class name instead. Verified correct behavior:
+/// - `described_class` calls ARE flagged in explicit style
+/// - Class name references ARE NOT flagged in explicit style
+/// - `described_class` with describe block params IS NOT flagged (described_class not set)
+///
+/// The reported 1,907 explicit-style FPs could not be reproduced locally. The FP
+/// messages ("Use `X` instead of `described_class`") suggest flagging `described_class`
+/// calls, which IS correct behavior for explicit style. Possible explanations:
+/// - FPs are in corpus contexts not covered by unit tests (e.g., complex nesting)
+/// - Cached corpus data may not reflect current code state
+/// - Variant oracle data for explicit style may use different baseline
 pub struct DescribedClass;
 
 impl Cop for DescribedClass {
@@ -702,6 +717,50 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&DescribedClass, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("MyClass"));
+    }
+
+    #[test]
+    fn explicit_style_does_not_flag_class_name() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        // With explicit style, class name references should NOT be flagged
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"describe MyClass do\n  it { MyClass.new }\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(&DescribedClass, source, config);
+        assert!(
+            diags.is_empty(),
+            "Explicit style should NOT flag class name references, but got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn explicit_style_with_describe_params_does_not_flag() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        // When describe has params, described_class is not set, so don't flag
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"describe MyClass do |x|\n  it { described_class.new }\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(&DescribedClass, source, config);
+        assert!(
+            diags.is_empty(),
+            "Explicit style should NOT flag described_class when describe has params, but got: {:?}",
+            diags
+        );
     }
 
     #[test]
