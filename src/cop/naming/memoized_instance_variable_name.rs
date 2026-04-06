@@ -126,6 +126,23 @@ use crate::parse::source::SourceFile;
 ///
 /// Both `check_or_write` and `check_defined_memoized` had the same bug and were
 /// fixed identically.
+///
+/// ## Variant style fix (2026-04-05) — required FN=6
+///
+/// Root cause: `get_last_child_or_write` did not traverse through `AndNode`,
+/// `OrNode`, or `LocalVariableWriteNode`. In Parser AST, `children.last` on
+/// these nodes returns the right operand (and/or) or the value (lvasgn),
+/// reaching the `or_asgn` node. Patterns affected:
+/// - `trigger && @ivar ||= expr` (AndNode → right)
+/// - `super || @ivar ||= expr` (OrNode → right)
+/// - `__skip__ = @ivar ||= expr` (LocalVariableWriteNode → value)
+///
+/// In default (disallowed) style these are invisible because ivar names
+/// happen to match the method names. In `required` style the missing `_`
+/// prefix makes them FN.
+///
+/// Fix: added AndNode, OrNode, and LocalVariableWriteNode handlers to
+/// `get_last_child_or_write`.
 pub struct MemoizedInstanceVariableName;
 
 impl MemoizedInstanceVariableName {
@@ -579,6 +596,36 @@ fn get_last_child_or_write<'pr>(
             }
         }
         return None;
+    }
+
+    // AndNode → right operand
+    // Parser: `and` children = [left, right], last = right
+    // Handles `trigger && @ivar ||= expr`
+    if let Some(and_node) = node.as_and_node() {
+        let right = and_node.right();
+        if let Some(or_write) = right.as_instance_variable_or_write_node() {
+            return Some(or_write);
+        }
+        return None;
+    }
+
+    // OrNode → right operand
+    // Parser: `or` children = [left, right], last = right
+    // Handles `super || @ivar ||= expr`
+    if let Some(or_node) = node.as_or_node() {
+        let right = or_node.right();
+        if let Some(or_write) = right.as_instance_variable_or_write_node() {
+            return Some(or_write);
+        }
+        return None;
+    }
+
+    // LocalVariableWriteNode → value
+    // Parser: `lvasgn` children = [name, value], last = value
+    // Handles `__skip__ = @ivar ||= expr`
+    if let Some(lvar_write) = node.as_local_variable_write_node() {
+        let value = lvar_write.value();
+        return value.as_instance_variable_or_write_node();
     }
 
     // ParenthesesNode → body
