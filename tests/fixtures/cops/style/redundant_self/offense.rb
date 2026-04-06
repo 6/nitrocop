@@ -122,6 +122,7 @@ self::process_api_call "projects", "advanced", search_terms, page, category_id, 
 self::process_api_call "projects", "ending-soon", "", page
 ^ Style/RedundantSelf: Redundant `self` detected.
 
+# rescue => self.method — self is redundant when no local shadows the method
 rescue => self.foo
           ^^^^ Style/RedundantSelf: Redundant `self` detected.
 
@@ -151,9 +152,3 @@ class ClassBodyLambdaParamIntoCallback
     end
   end
 end
-
-rescue => self.foo
-          ^^^^ Style/RedundantSelf: Redundant `self` detected.
-
-rescue => self.captured_error
-          ^^^^ Style/RedundantSelf: Redundant `self` detected.
