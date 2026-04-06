@@ -289,3 +289,31 @@ else
     success
     ^^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
 end
+
+# case/in pattern matching — in body with wrong indentation
+case a
+in 1
+   body1
+   ^ Layout/IndentationWidth: Use 2 (not 3) spaces for indentation.
+end
+
+# case/in pattern matching — multiple in clauses
+case a
+in Integer
+      do_something
+      ^^^^ Layout/IndentationWidth: Use 2 (not 6) spaces for indentation.
+in String
+ do_other
+ ^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+end
+
+# case/in else body checked from last in keyword (like case/when)
+case a
+in 1
+  do_one
+in 2
+  do_two
+else
+    default_action
+    ^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
+end
