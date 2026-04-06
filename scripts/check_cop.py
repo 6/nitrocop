@@ -878,10 +878,25 @@ def run_variant_checks(
 
             repo_id = Path(repo_dir).name
             if nc_count != rc_count:
+                # Compute specific FP/FN locations when available
+                nc_locs = set()
+                for o in nc_result.get("offenses", []):
+                    p = os.path.realpath(o.get("path", ""))
+                    nc_locs.add((p, o.get("line", 0)))
+                rc_locs = rc_result.get("locations", set())
+                fp_locs = sorted(nc_locs - rc_locs)[:3] if nc_locs and rc_locs else []
+                fn_locs = sorted(rc_locs - nc_locs)[:3] if nc_locs and rc_locs else []
+                # Format as relative paths
+                prefix = repo_dir.rstrip("/") + "/"
+                def fmt(loc: tuple) -> str:
+                    p = loc[0].replace(prefix, "") if loc[0].startswith(prefix) else loc[0]
+                    return f"{p}:{loc[1]}"
                 repo_counts.append({
                     "repo": repo_id,
                     "nc": max(0, nc_count),
                     "rc": max(0, rc_count),
+                    "fp_locs": [fmt(loc) for loc in fp_locs],
+                    "fn_locs": [fmt(loc) for loc in fn_locs],
                 })
 
         baseline = variant_baselines.get(label, {})
@@ -907,14 +922,17 @@ def _run_rubocop_for_variant(
     """Run rubocop with --only <cop> --config <config> on a repo.
 
     Returns {"count": N} where N is the offense count, or {"count": -1} on error.
+    Applies per-repo vendor exclusions on top of *config* via gen_repo_config.
     """
-    from run_nitrocop import build_env
+    from run_nitrocop import build_env, resolve_repo_config
+    repo_id = Path(repo_dir).name
+    effective_config = resolve_repo_config(repo_id, repo_dir, base_config=config)
     RESCUE_FILE = str(PROJECT_ROOT / "bench" / "corpus" / "rescue_parser_crashes.rb")
     env = build_env(repo_dir)
     cmd = [
         "bundle", "exec", "rubocop",
         "--require", RESCUE_FILE,
-        "--config", config,
+        "--config", effective_config,
         "--only", cop,
         "--format", "json",
         "--force-exclusion",
@@ -933,7 +951,7 @@ def _run_rubocop_for_variant(
             for o in f.get("offenses", []):
                 if o.get("cop_name") == cop:
                     seen.add((fpath, o["location"]["line"]))
-        return {"count": len(seen)}
+        return {"count": len(seen), "locations": seen}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
         return {"count": -1}
 
@@ -1460,15 +1478,56 @@ def main():
             print()
 
         # Machine-readable summary for CI aggregation
-        # Format: cop|baseline_fp|baseline_fn|local_fp|local_fn|result|count_bl_fp|count_bl_fn
+        # Format: cop|baseline_fp|baseline_fn|local_fp|local_fn|result|count_bl_fp|count_bl_fn|detail
         # baseline_fp/fn = location-level from oracle
         # local_fp/fn = count-level from local run (max(0, local - rubocop))
         # count_bl_fp/fn = count-level baseline (max(0, oracle_nc - oracle_rc))
-        # The last two fields enable the CI comment to detect when a large
+        # detail = space-separated repo_id(FP:file:line,...) repo_id(FN:file:line,...)
+        # The count fields enable the CI comment to detect when a large
         # location-level FP delta has no count-level counterpart (location
         # shift or config resolution artifact, not a real regression).
         result_str = "fail" if failed else "pass"
-        print(f"SUMMARY|{args.cop}|{total_baseline_fp}|{total_baseline_fn}|{total_local_fp}|{total_local_fn}|{result_str}|{total_count_baseline_fp}|{total_count_baseline_fn}")
+
+        # Build location detail from oracle FP/FN examples for regressing repos.
+        by_cop_map = {c["cop"]: c for c in data.get("by_cop", [])}
+        cop_data = by_cop_map.get(args.cop, {})
+        # Index oracle examples by repo_id and kind
+        _repo_fp_locs: dict[str, list[str]] = {}
+        _repo_fn_locs: dict[str, list[str]] = {}
+        for ex in cop_data.get("fp_examples", []):
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, line = _parse_example_loc(loc)
+                _repo_fp_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+            except (ValueError, IndexError):
+                pass
+        for ex in cop_data.get("fn_examples", []):
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, line = _parse_example_loc(loc)
+                _repo_fn_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+            except (ValueError, IndexError):
+                pass
+        # Collect detail parts for regressing repos
+        _fp_repo_ids = {r[0] for r in fp_repos}
+        _fn_repo_ids = {r[0] for r in fn_repos}
+        detail_parts: list[str] = []
+        for repo_id in sorted(_fp_repo_ids | _fn_repo_ids):
+            fp_locs = _repo_fp_locs.get(repo_id, [])
+            fn_locs = _repo_fn_locs.get(repo_id, [])
+            if repo_id in _fp_repo_ids and fp_locs:
+                loc_str = ",".join(fp_locs[:2])
+                detail_parts.append(f"{repo_id}(FP:{loc_str})")
+            elif repo_id in _fp_repo_ids:
+                detail_parts.append(f"{repo_id}(FP)")
+            if repo_id in _fn_repo_ids and fn_locs:
+                loc_str = ",".join(fn_locs[:2])
+                detail_parts.append(f"{repo_id}(FN:{loc_str})")
+            elif repo_id in _fn_repo_ids:
+                detail_parts.append(f"{repo_id}(FN)")
+        detail = " ".join(detail_parts[:10])
+
+        print(f"SUMMARY|{args.cop}|{total_baseline_fp}|{total_baseline_fn}|{total_local_fp}|{total_local_fn}|{result_str}|{total_count_baseline_fp}|{total_count_baseline_fn}|{detail}")
 
         if failed:
             sys.exit(1)
@@ -1588,7 +1647,12 @@ def main():
                             parts = []
                             for dr in diverging[:5]:
                                 kind = "FP" if dr["nc"] > dr["rc"] else "FN"
-                                parts.append(f"{dr['repo']}({kind})")
+                                locs = dr.get("fp_locs", []) if kind == "FP" else dr.get("fn_locs", [])
+                                if locs:
+                                    loc_str = ",".join(locs[:2])
+                                    parts.append(f"{dr['repo']}({kind}:{loc_str})")
+                                else:
+                                    parts.append(f"{dr['repo']}({kind})")
                             detail = " ".join(parts)
                         print(
                             f"SUMMARY|{args.cop} ({vr['style_label']})"
@@ -1602,6 +1666,10 @@ def main():
                             for dr in vr.get("diverging_repos", [])[:5]:
                                 fp_flag = " (FP)" if dr["nc"] > dr["rc"] else " (FN)" if dr["rc"] > dr["nc"] else ""
                                 print(f"    {dr['repo']}  NC:{dr['nc']} RC:{dr['rc']}{fp_flag}")
+                                for loc in dr.get("fp_locs", []):
+                                    print(f"      FP: {loc}")
+                                for loc in dr.get("fn_locs", []):
+                                    print(f"      FN: {loc}")
                     print()
                     if variant_failed:
                         print(f"FAIL: variant style regression detected for {args.cop}")

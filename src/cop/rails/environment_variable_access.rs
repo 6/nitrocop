@@ -82,6 +82,18 @@ impl Cop for EnvironmentVariableAccess {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &[
+            "**/app/**/*.rb",
+            "**/config/initializers/**/*.rb",
+            "**/lib/**/*.rb",
+        ]
+    }
+
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/lib/**/*.rake"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,

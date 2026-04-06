@@ -415,3 +415,40 @@ def get_login_info(sources)
     end
   end
 end
+
+# Thread.new(value) in else branch — RuboCop suppresses via check 6:
+# variable_node (begin wrapping else body) == if.else_branch
+def threaded_or_sequential(lib, &block)
+  if use_threads?
+    Thread.new { block.call(lib) }
+  else
+    value = block.call(lib)
+    Thread.new(value) { |value| value }
+  end
+end
+
+# Variable in if-branch, multi-statement block in else-branch of same if
+# Suppressed by RuboCop check 6: variable_node == else_branch
+def process_with_fallback(items, flag)
+  if flag
+    val = compute(items)
+    use(val)
+  else
+    log = setup_log
+    items.each do |val|
+      val.process
+      log.info(val)
+    end
+  end
+end
+
+# Variable and block both in same multi-statement else branch
+# Suppressed by RuboCop check 6: variable_node == else_branch
+def handle_result(items, flag)
+  if flag
+    default_value
+  else
+    val = compute(items)
+    items.each { |val| process_val(val) }
+  end
+end

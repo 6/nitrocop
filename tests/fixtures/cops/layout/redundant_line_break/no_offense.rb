@@ -290,3 +290,18 @@ def kind
            end
   result
 end
+
+# Chain with backslash content in regex — combined line exceeds 120 chars
+# when backslashes are preserved. The \1_\2 and \d are regex content,
+# not line continuations.
+module FPTest
+  class Converter
+    def self.underscore(str)
+      str.gsub(/::/, '/').
+        gsub(/([A-Z]+)([A-Z][a-z])/,'\1_\2').
+        gsub(/([a-z\d])([A-Z])/,'\1_\2').
+        tr("-", "_").
+        downcase
+    end
+  end
+end

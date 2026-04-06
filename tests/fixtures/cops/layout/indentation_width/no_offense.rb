@@ -293,3 +293,44 @@ def method_with_ensure
 ensure
   cleanup
 end
+
+# Block with rescue — correctly indented
+items.each do |item|
+  process(item)
+rescue StandardError
+  handle_error
+end
+
+# Block with ensure — correctly indented
+items.each do |item|
+  process(item)
+ensure
+  cleanup
+end
+
+# Block with rescue and else — correctly indented
+items.each do |item|
+  process(item)
+rescue StandardError
+  handle
+else
+  success
+end
+
+# case/in pattern matching — correctly indented
+case a
+in 1
+  do_one
+in String
+  do_two
+end
+
+# case/in with else — correctly indented
+case a
+in 1
+  do_one
+in 2
+  do_two
+else
+  default_action
+end

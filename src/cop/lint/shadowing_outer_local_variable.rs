@@ -31,6 +31,8 @@ struct ShadowingContext {
     /// Used to detect when a variable is assigned in multiple branches of the
     /// same conditional, which affects RHS-assignment suppression.
     branch_var_writes: Vec<(Vec<u8>, usize, usize, usize)>,
+    /// Per-block conditional parent info for replicating RuboCop's check 5/6.
+    block_cond_parents: Vec<BlockCondParentEntry>,
 }
 
 impl ShadowingContext {
@@ -48,6 +50,7 @@ impl ShadowingContext {
             defs_local_scope_ranges: Vec::new(),
             singleton_class_body_ranges: Vec::new(),
             branch_var_writes: Vec::new(),
+            block_cond_parents: Vec::new(),
         }
     }
 
@@ -230,6 +233,35 @@ impl ShadowingContext {
             })
     }
 
+    /// Check if the block containing `param_offset` is a direct statement-level
+    /// child of a conditional branch whose cond_offset matches `outer_cond`,
+    /// and the block's position matches RuboCop's check 5 (single-stmt branch)
+    /// or check 6 (else clause of if-type conditional).
+    fn block_cond_parent_suppresses(&self, param_offset: usize, outer_cond: usize) -> bool {
+        // Find the innermost block containing param_offset.
+        // block_body_ranges: (block_start, body_start, body_end).
+        // Params are between block_start and body_start, body content is
+        // between body_start and body_end. We use [block_start, body_end).
+        let innermost = self
+            .block_body_ranges
+            .iter()
+            .filter(|(block_start, _, body_end)| {
+                *block_start <= param_offset && param_offset < *body_end
+            })
+            .min_by_key(|(_, _, body_end)| *body_end - param_offset);
+
+        let Some((block_start, _, _)) = innermost else {
+            return false;
+        };
+
+        // Check if this specific block has a matching conditional parent entry.
+        self.block_cond_parents.iter().any(|entry| {
+            entry.block_start == *block_start
+                && entry.cond_offset == outer_cond
+                && (entry.is_single_stmt_branch || entry.is_else_of_if_type)
+        })
+    }
+
     /// Check whether the block param should be suppressed due to conditional
     /// branch context.
     fn should_suppress(&self, outer_info: &VarBranchInfo, param_offset: usize) -> bool {
@@ -319,6 +351,21 @@ impl ShadowingContext {
             self.in_when_body_of_case_at(param_offset),
         ) {
             if var_case == block_case {
+                return true;
+            }
+        }
+
+        // Check block-in-conditional-parent suppression (RuboCop checks 5/6).
+        // When a block is a direct statement-level child of a conditional
+        // branch body and the outer variable's nearest conditional ancestor
+        // matches, suppress if:
+        //  - The block's branch is single-statement (check 5: variable_node ==
+        //    outer_local_variable_node — block parent is the conditional node)
+        //  - The block is in an else clause of an if-type conditional (check 6:
+        //    variable_node == outer_local_variable_node.else_branch — block
+        //    parent is the else_branch node)
+        if let Some((outer_cond, _)) = outer_info.conditional_branch {
+            if self.block_cond_parent_suppresses(param_offset, outer_cond) {
                 return true;
             }
         }
@@ -415,6 +462,23 @@ struct InheritedCondEntry {
     is_if_type: bool,
 }
 
+/// Per-block conditional parent info. Records when a block (or lambda) at
+/// statement level (expression_depth == 0) is directly inside a conditional
+/// branch body. Used to replicate RuboCop's check 5 (`variable_node ==
+/// outer_local_variable_node`) and check 6 (`variable_node ==
+/// outer_local_variable_node.else_branch`).
+#[derive(Clone, Debug)]
+struct BlockCondParentEntry {
+    /// The block node's start offset (used as key to match against block_body_ranges).
+    block_start: usize,
+    /// The conditional's offset (matching the cond_offset in BranchInterval).
+    cond_offset: usize,
+    /// True if the block's branch is single-statement (check 5 equivalent).
+    is_single_stmt_branch: bool,
+    /// True if the block is in an else clause of an if-type conditional (check 6 equivalent).
+    is_else_of_if_type: bool,
+}
+
 /// Info about where a variable was declared, used for suppression checks.
 #[derive(Clone, Debug)]
 struct VarBranchInfo {
@@ -473,6 +537,7 @@ impl Cop for ShadowingOuterLocalVariable {
             defs_local_scope_ranges: Vec::new(),
             singleton_class_body_ranges: Vec::new(),
             branch_var_writes: Vec::new(),
+            block_cond_parents: Vec::new(),
             conditional_branch_stack: Vec::new(),
             when_condition_case_offset: None,
             in_when_body_of_case: None,
@@ -495,6 +560,7 @@ impl Cop for ShadowingOuterLocalVariable {
             ctx.defs_local_scope_ranges = collector.defs_local_scope_ranges;
             ctx.singleton_class_body_ranges = collector.singleton_class_body_ranges;
             ctx.branch_var_writes = collector.branch_var_writes;
+            ctx.block_cond_parents = collector.block_cond_parents;
         });
     }
 
@@ -678,6 +744,7 @@ struct ContextCollector {
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
     branch_var_writes: Vec<(Vec<u8>, usize, usize, usize)>,
+    block_cond_parents: Vec<BlockCondParentEntry>,
 
     // Tracking state
     conditional_branch_stack: Vec<CondBranchEntry>,
@@ -1112,6 +1179,25 @@ impl<'pr> Visit<'pr> for ContextCollector {
             ));
         }
 
+        // Record conditional parent info for blocks at statement level.
+        // This enables RuboCop's check 5/6 suppression for blocks that are
+        // direct children of conditional branch bodies.
+        if self.expression_depth == 0 {
+            if let Some(entry) = self
+                .conditional_branch_stack
+                .iter()
+                .rev()
+                .find(|e| e.is_body)
+            {
+                self.block_cond_parents.push(BlockCondParentEntry {
+                    block_start: node.location().start_offset(),
+                    cond_offset: entry.cond_offset,
+                    is_single_stmt_branch: entry.single_stmt,
+                    is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
+                });
+            }
+        }
+
         // Clear conditional branch stack for block body
         let saved_cond_stack = std::mem::take(&mut self.conditional_branch_stack);
         let saved_when_body = self.in_when_body_of_case.take();
@@ -1162,6 +1248,23 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 body.location().start_offset(),
                 body.location().end_offset(),
             ));
+        }
+
+        // Record conditional parent info for lambdas at statement level.
+        if self.expression_depth == 0 {
+            if let Some(entry) = self
+                .conditional_branch_stack
+                .iter()
+                .rev()
+                .find(|e| e.is_body)
+            {
+                self.block_cond_parents.push(BlockCondParentEntry {
+                    block_start: node.location().start_offset(),
+                    cond_offset: entry.cond_offset,
+                    is_single_stmt_branch: entry.single_stmt,
+                    is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
+                });
+            }
         }
 
         let saved_cond_stack = std::mem::take(&mut self.conditional_branch_stack);

@@ -38,6 +38,21 @@ use crate::parse::source::SourceFile;
 /// with a Symbol (`:nested`). In Ruby, `"nested" != :nested`, so the
 /// comparison always fails and falls through to `check_compact_style`.
 /// We replicate this: when the override is set, always use compact checking.
+///
+/// ## Known variant FP (3): RuboCop autocorrect crash on trailing whitespace
+///
+/// In the `(compact, compact)` variant, `danlucraft/redcar` has 3 FP (BL FP=3).
+/// RuboCop's `AlignmentCorrector` crashes when: (1) the module/class starts at
+/// byte offset 0, (2) the file ends with trailing whitespace (no final newline),
+/// and (3) the body child has content. The crash in `calculate_range` produces
+/// `range_between(-2, 0)` and suppresses ALL offenses for the file.
+///
+/// A prior fix attempt (PR #1592) added a guard matching these conditions, but
+/// it was too broad — it suppressed legitimate offenses on files like
+/// `chicks/sugarcrm` that start at offset 0 but don't trigger the crash. A
+/// correct fix would need to replicate RuboCop's exact crash conditions more
+/// narrowly, possibly by checking whether the corrected form would produce the
+/// negative range. Not worth the complexity for 3 baseline FP.
 pub struct ClassAndModuleChildren;
 
 impl Cop for ClassAndModuleChildren {

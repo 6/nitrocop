@@ -34,6 +34,12 @@ use crate::parse::source::SourceFile;
 /// multiple statements, RuboCop wraps them in `:begin` (allowed), so tasks ARE
 /// flagged. We mirror this by overriding `visit_rescue_node`/`visit_ensure_node`
 /// to skip `check_statements` only for single-statement bodies.
+///
+/// RuboCop also flags bare `task` calls inside string interpolation (e.g.,
+/// `"Run rake #{task}"`). In Parser AST, `#{...}` is wrapped in a `:begin`
+/// node, which is in the `can_insert_desc_to?` allowed list. Prism uses
+/// `EmbeddedStatementsNode` for the same wrapper, so we map it to
+/// `AncestorKind::Begin` to match RuboCop's behavior.
 pub struct Desc;
 
 impl Cop for Desc {
@@ -202,6 +208,7 @@ impl<'pr> Visit<'pr> for DescVisitor<'_> {
             ruby_prism::Node::ProgramNode { .. } => AncestorKind::Program,
             ruby_prism::Node::BlockNode { .. } => AncestorKind::Block,
             ruby_prism::Node::BeginNode { .. } => AncestorKind::Begin,
+            ruby_prism::Node::EmbeddedStatementsNode { .. } => AncestorKind::Begin,
             ruby_prism::Node::StatementsNode { .. } => AncestorKind::Transparent,
             _ => AncestorKind::Other,
         };

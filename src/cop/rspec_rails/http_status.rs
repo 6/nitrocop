@@ -4,6 +4,17 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// RSpecRails/HttpStatus: enforces use of symbolic, numeric, or be_status style
+/// for `have_http_status` calls.
+///
+/// Variant fixes applied:
+/// - `numeric` style: unknown symbols (not in PERMITTED_SYMBOLS and not a known
+///   status code) and ALL string arguments (including numeric strings like "200")
+///   are now flagged as "Unknown status code.", matching RuboCop's NumericStyleChecker
+///   which flags anything that is `!int_type? && !allowed_symbol?`.
+/// - `be_status` style: unknown symbols (e.g. `:oki_doki`) are now flagged with
+///   "Prefer `be_<sym>`..." rather than silently skipped, matching RuboCop's
+///   BeStatusStyleChecker which suggests `be_<sym>` for any non-allowed symbol.
 pub struct HttpStatus;
 
 fn status_code_to_symbol(code: i64) -> Option<&'static str> {
@@ -264,6 +275,9 @@ impl HttpStatus {
     }
 
     /// Numeric style: flag symbolic args, prefer numeric codes.
+    /// RuboCop's NumericStyleChecker flags anything that is not an integer
+    /// and not an allowed symbol (:error, :success, :missing, :redirect).
+    /// This includes unknown symbols and ALL strings (even numeric ones like "200").
     fn check_numeric_style(
         &self,
         source: &SourceFile,
@@ -287,7 +301,10 @@ impl HttpStatus {
                     format!("Prefer `{code}` over `:{sym_str}` to describe HTTP status code."),
                 )];
             }
-            return Vec::new();
+            // Unknown symbol (not in allowed list and not a known status code)
+            let loc = arg.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            return vec![self.diagnostic(source, line, column, "Unknown status code.".to_string())];
         }
 
         if let Some(str_node) = arg.as_string_node() {
@@ -307,12 +324,8 @@ impl HttpStatus {
                 )];
             }
 
-            // Try as numeric string -- already numeric, no offense
-            if s.bytes().all(|b| b.is_ascii_digit()) && !s.is_empty() {
-                return Vec::new();
-            }
-
-            // Non-numeric, non-symbolic string -> unknown
+            // Any other string (numeric or not) is flagged as unknown in numeric style,
+            // since RuboCop requires integer literals, not string representations.
             let (line, column) = source.offset_to_line_col(loc.start_offset());
             return vec![self.diagnostic(source, line, column, "Unknown status code.".to_string())];
         }
@@ -343,11 +356,9 @@ impl HttpStatus {
             if PERMITTED_SYMBOLS.contains(&name) {
                 return Vec::new();
             }
-            if symbol_to_status_code(name).is_some() {
-                Some(name_str.to_string())
-            } else {
-                None
-            }
+            // RuboCop's BeStatusStyleChecker suggests be_<sym> for ANY symbol
+            // (known or unknown), as long as it's not in the allowed list.
+            Some(name_str.to_string())
         } else if let Some(str_node) = arg.as_string_node() {
             let content = str_node.unescaped();
             let s = std::str::from_utf8(content).unwrap_or("");
@@ -466,5 +477,71 @@ mod tests {
         let diags = run_cop_full_with_config(&HttpStatus, source, config);
         assert!(!diags.is_empty());
         assert!(diags[0].message.contains("be_ok"));
+    }
+
+    #[test]
+    fn numeric_style_flags_unknown_symbol() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("numeric".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"it { is_expected.to have_http_status :oki_doki }\n";
+        let diags = run_cop_full_with_config(&HttpStatus, source, config);
+        assert!(
+            !diags.is_empty(),
+            "numeric style should flag unknown symbol :oki_doki"
+        );
+        assert!(diags[0].message.contains("Unknown status code"));
+    }
+
+    #[test]
+    fn numeric_style_flags_numeric_string() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("numeric".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"it { is_expected.to have_http_status \"200\" }\n";
+        let diags = run_cop_full_with_config(&HttpStatus, source, config);
+        assert!(
+            !diags.is_empty(),
+            "numeric style should flag numeric string \"200\""
+        );
+        assert!(diags[0].message.contains("Unknown status code"));
+    }
+
+    #[test]
+    fn be_status_style_flags_unknown_symbol() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("be_status".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"it { is_expected.to have_http_status :oki_doki }\n";
+        let diags = run_cop_full_with_config(&HttpStatus, source, config);
+        assert!(
+            !diags.is_empty(),
+            "be_status style should flag unknown symbol :oki_doki"
+        );
+        assert!(diags[0].message.contains("be_oki_doki"));
     }
 }

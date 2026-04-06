@@ -38,6 +38,14 @@ def with_kwarg(k:, &)
   bar(&)
       ^ Naming/BlockForwarding: Use explicit block forwarding.
 end
+# anonymous block nested inside a non-anonymous block pass expression
+def complete(&)
+             ^ Naming/BlockForwarding: Use explicit block forwarding.
+  provider.complete(messages, &wrap_streaming_block(&))
+                                                    ^ Naming/BlockForwarding: Use explicit block forwarding.
+  handle_tool_calls(response, &)
+                              ^ Naming/BlockForwarding: Use explicit block forwarding.
+end
 # block forwarding name already in use — still flag but no autocorrect
 def name_conflict(block, &)
                          ^ Naming/BlockForwarding: Use explicit block forwarding.

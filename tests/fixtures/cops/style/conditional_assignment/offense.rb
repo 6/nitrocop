@@ -149,3 +149,11 @@ if o.class == String
 else
   object_space[o.class][:memsize] += ObjectSpace.memsize_of(o)
 end
+
+# if/else with comparison sends on same receiver
+if (!boolean)
+^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  match.should == true
+else
+  match.should == false
+end

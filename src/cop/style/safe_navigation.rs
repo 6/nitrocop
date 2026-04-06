@@ -34,6 +34,17 @@ use ruby_prism::Visit;
 /// - `visit_assoc_node` no longer resets `in_unsafe_parent` for hash values, fixing FPs
 ///   where `&&` inside lambda hash values of dotless calls (e.g.,
 ///   `before_save :foo, if: -> { x && x.bar }`) was incorrectly flagged.
+/// - `in_unsafe_parent` suppression for `&&` patterns is now chain-length-aware.
+///   RuboCop's `unsafe_method_used?` ancestor walk is bounded by the rhs expression
+///   for chain length ≥ 2 (`break false if ancestor == method_chain`) but escapes for
+///   chain length 1. We now only suppress `&&` when `in_unsafe_parent > 0` AND
+///   `chain.len() == 1`, fixing FNs where chain ≥ 2 inside dotless calls was wrongly
+///   suppressed (e.g., `record && record.orm_model.schema` inside method arguments).
+/// - `visit_block_node` no longer resets `in_unsafe_parent` when entering blocks inside
+///   call arguments. RuboCop's ancestor walk crosses block boundaries, so a dotless
+///   parent like `puts(items.map { |x| x && x.b })` correctly suppresses chain-1
+///   `&&` inside the block. Only `in_call_arguments`, `in_ternary_operator_parent`,
+///   `in_assignment_or_operator_parent`, and `dotted_assignment_parent_starts` are reset.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -644,14 +655,6 @@ impl<'a> SafeNavVisitor<'a> {
         result
     }
 
-    fn with_reset_outer_expression_context<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let saved_in_call_arguments = self.in_call_arguments;
-        self.in_call_arguments = 0;
-        let result = self.with_reset_parent_operator_context(f);
-        self.in_call_arguments = saved_in_call_arguments;
-        result
-    }
-
     fn visit_flattened_and_clauses<'pr>(&mut self, node: &ruby_prism::AndNode<'pr>) {
         let bytes = self.source.as_bytes();
         for clause in SafeNavigation::top_level_and_clauses(node, bytes) {
@@ -694,6 +697,16 @@ impl<'a> SafeNavVisitor<'a> {
         }
 
         if self.in_dynamic_send_args > 0 && chain.len() == 1 {
+            ruby_prism::visit_and_node(self, node);
+            return;
+        }
+
+        // RuboCop's `unsafe_method_used?` walks send ancestors from the first
+        // call in the chain up to the rhs expression.  For chain length 1 the
+        // walk escapes the expression and finds unsafe (dotless / operator /
+        // assignment) parents above.  For chain length ≥ 2 the walk is bounded
+        // by the outermost call in the chain and never reaches them.
+        if self.in_unsafe_parent > 0 && chain.len() == 1 {
             ruby_prism::visit_and_node(self, node);
             return;
         }
@@ -904,9 +917,26 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         self.in_block += 1;
         if self.in_call_arguments > 0 && self.in_definition_argument_wrapper == 0 {
-            self.with_reset_outer_expression_context(|this| {
-                ruby_prism::visit_block_node(this, node);
-            });
+            // Reset call-argument and operator contexts for the block body, but
+            // preserve `in_unsafe_parent`.  RuboCop's `unsafe_method_used?` walks
+            // all send ancestors (crossing block boundaries) and finds dotless
+            // parents above the block.  For `&&` patterns the chain-length check
+            // in `visit_and_node` / `visit_direct_and_node` decides whether the
+            // unsafe parent actually suppresses the offense.
+            let saved_in_call_arguments = self.in_call_arguments;
+            self.in_call_arguments = 0;
+            let saved_in_ternary_operator_parent = self.in_ternary_operator_parent;
+            let saved_in_assignment_or_operator_parent = self.in_assignment_or_operator_parent;
+            let saved_dotted = std::mem::take(&mut self.dotted_assignment_parent_starts);
+            self.in_ternary_operator_parent = 0;
+            self.in_assignment_or_operator_parent = 0;
+
+            ruby_prism::visit_block_node(self, node);
+
+            self.in_assignment_or_operator_parent = saved_in_assignment_or_operator_parent;
+            self.in_ternary_operator_parent = saved_in_ternary_operator_parent;
+            self.dotted_assignment_parent_starts = saved_dotted;
+            self.in_call_arguments = saved_in_call_arguments;
         } else {
             ruby_prism::visit_block_node(self, node);
         }
@@ -1086,7 +1116,6 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         // assignment, or operator method). For example, `scope :bar, ->(user) { user && user.name }`
         // is not flagged because `scope` is a dotless method call.
         if self.in_nil_safe_call_ancestor > 0
-            || self.in_unsafe_parent > 0
             || self.in_double_colon_call_arguments > 0
             || (self.in_definition_argument_wrapper > 0 && self.in_call_arguments > 0)
         {
@@ -1131,6 +1160,12 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             }
 
             if self.in_dynamic_send_args > 0 && chain.len() == 1 {
+                continue;
+            }
+
+            // RuboCop's `unsafe_method_used?` ancestor walk is bounded by the
+            // rhs expression for chain length ≥ 2 but escapes for length 1.
+            if self.in_unsafe_parent > 0 && chain.len() == 1 {
                 continue;
             }
 

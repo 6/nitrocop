@@ -100,6 +100,20 @@ use crate::parse::source::SourceFile;
 /// in the body, with message "Use explicit block forwarding." Autocorrect replaces
 /// `&` with `&block` (or configured `BlockForwardingName`), skipping correction
 /// when the name is already used by another parameter.
+///
+/// ## Corpus investigation (2026-04-06)
+///
+/// Explicit variant had 2,700 matches, FP=0, FN=1.
+///
+/// FN=1 from `crmne__ruby_llm__4135c03` (lib/ruby_llm/chat.rb:147): the pattern
+/// `&wrap_streaming_block(&)` nests an anonymous `&` inside a non-anonymous block
+/// pass expression. RuboCop's `each_descendant(:block_pass)` finds all block_pass
+/// nodes regardless of nesting depth. `AnonBlockPassFinder` was not traversing
+/// into block argument expressions, so the inner anonymous `&` was missed.
+///
+/// Fix: call `ruby_prism::visit_block_argument_node(self, node)` in the
+/// `AnonBlockPassFinder` visitor to continue traversal into block argument
+/// expressions, matching RuboCop's descendant search behavior.
 pub struct BlockForwarding;
 
 impl Cop for BlockForwarding {
@@ -397,6 +411,11 @@ impl<'pr> Visit<'pr> for AnonBlockPassFinder {
             let loc = node.location();
             self.locations.push((loc.start_offset(), loc.end_offset()));
         }
+        // Continue traversing into the expression to find nested anonymous
+        // block passes, e.g., `&wrap_streaming_block(&)` contains an inner `&`.
+        // RuboCop's `each_descendant(:block_pass)` finds all descendants
+        // regardless of nesting inside other block_pass expressions.
+        ruby_prism::visit_block_argument_node(self, node);
     }
 
     fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {

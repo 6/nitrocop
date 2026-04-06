@@ -101,9 +101,23 @@ def format_count_summary(n: int) -> str:
     return str(n)
 
 
+def format_count_precise(n: int) -> str:
+    """Format count with two decimals: 28390000 -> '28.39M', 72659 -> '72.66K'."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    elif n >= 1_000:
+        return f"{n / 1_000:.2f}K"
+    return str(n)
+
+
 def format_match_rate(rate: float) -> str:
     """Format match rate floored to 0.1%: 0.9999 -> '99.9%', never rounds up to 100%."""
     return f"{math.floor(rate * 1000) / 10:.1f}%"
+
+
+def format_match_rate_precise(rate: float) -> str:
+    """Format match rate floored to 0.01%: 0.99829 -> '99.82%', never rounds up to 100%."""
+    return f"{math.floor(rate * 10000) / 100:.2f}%"
 
 
 def format_exact_match_pct(exact: int, total: int) -> str:
@@ -349,15 +363,25 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
         d.get("variant_perfect_cops") or 0
         for d in data.get("by_department", [])
     )
-    new_corpus_bullet = (
-        f"Tested on [**{total_repos:,} open-source repos**](docs/corpus.md): "
-        f"**{perfect_cops:,} of {total_cops:,} cops match RuboCop exactly** (default config)"
+    total_compared = summary.get("total_offenses_compared", 0)
+    total_matches = summary.get("matches", 0)
+    new_corpus_lines = (
+        f"- Tested on [**{total_repos:,} open-source repos**](docs/corpus.md):\n"
+        f"  - **{perfect_cops:,} of {total_cops:,}** cops match RuboCop exactly with default config"
     )
     if variant_perfect > 0 and variant_perfect < perfect_cops:
-        new_corpus_bullet += f", **{variant_perfect:,}** across all style variants"
+        new_corpus_lines += (
+            f"\n  - **{variant_perfect:,} of {total_cops:,}** match across all `EnforcedStyle` variants"
+        )
+    if total_compared > 0 and total_matches > 0:
+        match_pct = format_match_rate_precise(total_matches / total_compared)
+        new_corpus_lines += (
+            f"\n  - Across **{format_count_precise(total_compared)}** offenses compared, "
+            f"**{format_count_precise(total_matches)}** ({match_pct}) match exactly with default config"
+        )
     readme_text = re.sub(
-        r"- .+open-source repos.+\n",
-        f"- {new_corpus_bullet}\n",
+        r"- Tested .+?open-source repos.+?\n(?:  - .+\n)*",
+        f"{new_corpus_lines}\n",
         readme_text,
         count=1,
     )

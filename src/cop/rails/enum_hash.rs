@@ -16,6 +16,10 @@ impl Cop for EnumHash {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             ARRAY_NODE,

@@ -676,9 +676,14 @@ jobs:
           # Must run AFTER IG merge so variant department rates are computed
           # from the final (merged) default FP/FN. Without this ordering,
           # variant rates can appear higher than default rates.
+          SYNTH_ARG=""
+          if [ -f bench/synthetic/synthetic-results.json ]; then
+            SYNTH_ARG="--synthetic bench/synthetic/synthetic-results.json"
+          fi
           python3 bench/corpus/patch_variant_stats.py \
             --corpus corpus-results.json \
-            --variants style-variant-results.json
+            --variants style-variant-results.json \
+            $SYNTH_ARG
 
       - name: Regenerate report with variant data
         run: |

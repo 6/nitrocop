@@ -1,5 +1,5 @@
 use crate::cop::shared::method_identifier_predicates;
-use crate::cop::shared::node_type::{CALL_NODE, SYMBOL_NODE};
+use crate::cop::shared::node_type::{CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -226,6 +226,32 @@ use crate::parse::source::SourceFile;
 /// unlike `+@` and `-@`, so RuboCop does not rewrite those two unary operator
 /// method names. Fix: treat only `!@` and `~@` as quote-required operator
 /// symbols when building corrections.
+///
+/// ## EnforcedStyle: consistent (2026-04-06)
+///
+/// Variant divergence reported FP=155, FN=3,331 for `EnforcedStyle: consistent`.
+/// Default strict style was perfect (0 FP, 0 FN).
+///
+/// Root cause: `EnforcedStyle: consistent` was read but not implemented.
+/// The cop always used strict-mode behavior regardless of the configured style.
+///
+/// RuboCop's `consistent` style adds hash-level checking via `on_hash`:
+/// - If ANY symbol key in a hash requires quoting (value.inspect is `:"..."`
+///   or value ends with `=`), ALL unquoted symbol keys are flagged with
+///   `MSG_CONSISTENCY` ("Symbol hash key should be quoted for consistency").
+/// - If NO key requires quoting, individually quoted keys are flagged the same
+///   as strict mode ("Unnecessary symbol conversion").
+/// - Additionally, `properly_quoted?` in consistent mode does NOT short-circuit
+///   on quote-less sources or setter symbols.
+///
+/// Fix: added `HASH_NODE` and `KEYWORD_HASH_NODE` to `interested_node_types`.
+/// When `EnforcedStyle: consistent`, `check_hash_consistent` collects all
+/// symbol keys from the hash, checks if any requires quoting, and either flags
+/// bare keys for consistency (case 1) or delegates to strict-mode individual
+/// checking (case 2). In `check_symbol_node`, hash keys are skipped in
+/// consistent mode to avoid double-flagging (they're handled by the hash-level
+/// check). The `properly_quoted_source` function now takes a `strict` parameter
+/// to control the early-return behavior.
 pub struct SymbolConversion;
 
 /// Check if a character is a valid Ruby identifier start character.
@@ -331,6 +357,14 @@ fn can_be_unquoted_symbol(value: &[u8]) -> bool {
         || is_class_variable_symbol(value)
         || is_global_variable_symbol(value)
         || (is_operator_symbol(value) && !is_quote_required_operator_symbol(value))
+}
+
+/// Check if a symbol key "requires quoting" for the purposes of consistent-style
+/// hash key checking. Matches RuboCop's `requires_quotes?` which checks:
+/// `sym_node.value.inspect.match?(/^:".*?"|=$/)`.
+/// Returns true if the symbol's inspect form would be :"..." (quoted) or ends with =.
+fn requires_quotes(value: &[u8]) -> bool {
+    !can_be_unquoted_symbol(value) || value.ends_with(b"=")
 }
 
 fn escape_double_quoted_symbol(value: &str) -> String {
@@ -553,9 +587,11 @@ fn source_contains_quote_chars(source: &[u8]) -> bool {
     source.contains(&b'\'') || source.contains(&b'"')
 }
 
-fn properly_quoted_source(source: &[u8], correction: &str) -> bool {
-    (!source_contains_quote_chars(source) || correction.ends_with('='))
-        || source_matches_correction(source, correction)
+fn properly_quoted_source(source: &[u8], correction: &str, strict: bool) -> bool {
+    if strict && (!source_contains_quote_chars(source) || correction.ends_with('=')) {
+        return true;
+    }
+    source_matches_correction(source, correction)
 }
 
 impl Cop for SymbolConversion {
@@ -568,7 +604,7 @@ impl Cop for SymbolConversion {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, SYMBOL_NODE]
+        &[CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE]
     }
 
     fn check_node(
@@ -580,11 +616,23 @@ impl Cop for SymbolConversion {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _style = config.get_str("EnforcedStyle", "strict");
+        let style = config.get_str("EnforcedStyle", "strict");
+
+        // Check HashNode / KeywordHashNode: consistent style hash key checking
+        if style == "consistent" {
+            if let Some(hash) = node.as_hash_node() {
+                self.check_hash_consistent(source, hash.elements(), diagnostics);
+                return;
+            }
+            if let Some(kw_hash) = node.as_keyword_hash_node() {
+                self.check_hash_consistent(source, kw_hash.elements(), diagnostics);
+                return;
+            }
+        }
 
         // Check SymbolNode: quoted symbols (standalone or hash keys)
         if let Some(sym) = node.as_symbol_node() {
-            self.check_symbol_node(source, &sym, diagnostics);
+            self.check_symbol_node(source, &sym, style, diagnostics);
             return;
         }
 
@@ -599,16 +647,19 @@ impl SymbolConversion {
     /// Check a SymbolNode for unnecessary quoting.
     /// Handles:
     /// - Standalone quoted symbols: `:"foo"`, `:'bar'`
-    /// - Hash keys (colon-style): `'foo': val`, `"foo": val`
+    /// - Hash keys (colon-style): `'foo': val`, `"foo": val` (strict mode only;
+    ///   consistent mode handles these in `check_hash_consistent`)
     /// - Hash keys/values (rocket-style): `:'foo' => val`, `{ foo: :'bar' }`
     fn check_symbol_node(
         &self,
         source: &SourceFile,
         sym: &ruby_prism::SymbolNode<'_>,
+        style: &str,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let src = sym.location().as_slice();
         let value = sym.unescaped();
+        let is_strict = style == "strict";
 
         // Determine what kind of symbol this is based on source representation
         let opening = sym.opening_loc().map(|l| l.as_slice());
@@ -620,13 +671,24 @@ impl SymbolConversion {
             _ => false,
         };
 
+        // In consistent mode, all hash keys are handled by check_hash_consistent
+        if !is_strict {
+            if is_colon_hash_key {
+                return;
+            }
+            // Also skip rocket-style hash keys
+            if matches!(opening, Some(b":\"" | b":'")) && is_rocket_hash_key(source, sym) {
+                return;
+            }
+        }
+
         if is_colon_hash_key {
             // Hash key with colon style: 'foo': val or "foo": val
             // RuboCop normalizes any key whose value starts with /[a-z0-9_]/i,
             // even when the canonical form still needs quotes.
             if let Some(value_str) = hash_key_correction(value) {
                 let source_without_colon = src.strip_suffix(b":").unwrap_or(src);
-                if properly_quoted_source(source_without_colon, &value_str) {
+                if properly_quoted_source(source_without_colon, &value_str, true) {
                     return;
                 }
 
@@ -680,7 +742,7 @@ impl SymbolConversion {
             None => return,
         };
 
-        if properly_quoted_source(src, &correction) {
+        if properly_quoted_source(src, &correction, is_strict) {
             return;
         }
 
@@ -692,6 +754,84 @@ impl SymbolConversion {
             column,
             format!("Unnecessary symbol conversion; use `{correction}` instead."),
         ));
+    }
+
+    /// Check hash keys for consistent quoting (EnforcedStyle: consistent).
+    ///
+    /// RuboCop's `on_hash` for consistent style:
+    /// - If any symbol key requires quoting, flag all unquoted keys
+    ///   ("Symbol hash key should be quoted for consistency")
+    /// - If no key requires quoting, flag individually quoted keys
+    ///   (same as strict mode)
+    fn check_hash_consistent(
+        &self,
+        source: &SourceFile,
+        elements: ruby_prism::NodeList<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Collect all symbol keys from hash elements
+        let mut sym_keys: Vec<ruby_prism::SymbolNode<'_>> = Vec::new();
+        for element in elements.iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                if let Some(sym) = assoc.key().as_symbol_node() {
+                    sym_keys.push(sym);
+                }
+            }
+        }
+
+        if sym_keys.is_empty() {
+            return;
+        }
+
+        // Check if any key requires quoting
+        let any_requires_quoting = sym_keys.iter().any(|sym| requires_quotes(sym.unescaped()));
+
+        if any_requires_quoting {
+            // Case 1: flag all unquoted/bare keys for consistency
+            for sym in &sym_keys {
+                let value = sym.unescaped();
+
+                // Skip keys that require quoting (they're already properly quoted)
+                if requires_quotes(value) {
+                    continue;
+                }
+
+                let value_str = match std::str::from_utf8(value) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let correction = format!("\"{}\"", value_str);
+
+                // Check if the key source already matches the correction
+                let src = sym.location().as_slice();
+                // Strip trailing : for colon-style keys (Prism includes it)
+                let check_src = src.strip_suffix(b":").unwrap_or(src);
+
+                // In consistent mode, properly_quoted doesn't have the early return
+                if source_matches_correction(check_src, &correction) {
+                    continue;
+                }
+
+                let loc = sym.location();
+                let (line, column) = source.offset_to_line_col(loc.start_offset());
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Symbol hash key should be quoted for consistency; use `{}:` instead.",
+                        correction
+                    ),
+                ));
+            }
+        } else {
+            // Case 2: no keys require quoting — flag individually quoted keys
+            // Same behavior as strict mode. We call check_symbol_node with
+            // style "strict" to reuse the existing hash key checking logic.
+            for sym in &sym_keys {
+                self.check_symbol_node(source, sym, "strict", diagnostics);
+            }
+        }
     }
 
     /// Check a CallNode for .to_sym / .intern on string/symbol/dstr receivers.
@@ -1328,5 +1468,151 @@ mod tests {
                 diags[0].message
             );
         }
+    }
+
+    fn consistent_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("consistent".to_string()),
+            )]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn consistent_style_bare_key_with_quoting_required_sibling() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // When any key requires quoting, bare keys should be flagged for consistency
+        let source = b"{ a: 1, 'b-c': 2 }";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, config);
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert!(
+            diags[0]
+                .message
+                .contains("Symbol hash key should be quoted for consistency"),
+            "Expected consistency message, got: {}",
+            diags[0].message
+        );
+        assert!(
+            diags[0].message.contains(r#"`"a":`"#),
+            "Expected `\"a\":` in message, got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn consistent_style_already_quoted_is_fine() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // Already quoted keys alongside a key requiring quoting → no offense
+        let no_offense_cases: &[&[u8]] = &[
+            b"{ 'a': 1, 'b-c': 2 }",
+            b"{ \"a\": 1, 'b-c': 2 }",
+            b"{ 'a': 1, \"b\": 2, 'c-d': 3 }",
+        ];
+        for source in no_offense_cases {
+            let diags =
+                crate::testutil::run_cop_full_with_config(&cop, *source, consistent_config());
+            assert!(
+                diags.is_empty(),
+                "Expected no offense for {:?} but got: {:?}",
+                std::str::from_utf8(source).unwrap(),
+                diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn consistent_style_all_bare_no_quoting_needed() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // All bare keys, no key requires quoting → no offense
+        let source = b"{ a: 1, b: 2 }";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, config);
+        assert!(diags.is_empty(), "Expected no offense but got: {:?}", diags);
+    }
+
+    #[test]
+    fn consistent_style_all_quoted_none_required() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // All quoted keys but none require quoting → flag each (like strict)
+        let source = b"{ 'a': 1, 'b': 2 }";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, config);
+        assert_eq!(diags.len(), 2, "Expected 2 offenses but got {:?}", diags);
+        assert!(diags[0].message.contains("`a:`"));
+        assert!(diags[1].message.contains("`b:`"));
+    }
+
+    #[test]
+    fn consistent_style_multiple_bare_keys_one_requires() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // Multiple bare keys, one requires quoting → flag all bare
+        let source = b"{ a: 1, b: 2, 'c-d': 3 }";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, config);
+        assert_eq!(diags.len(), 2, "Expected 2 offenses but got {:?}", diags);
+        assert!(diags[0].message.contains("quoted for consistency"));
+        assert!(diags[0].message.contains(r#"`"a":`"#));
+        assert!(diags[1].message.contains("quoted for consistency"));
+        assert!(diags[1].message.contains(r#"`"b":`"#));
+    }
+
+    #[test]
+    fn consistent_style_keyword_hash() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // Keyword hash (method args) should also be checked
+        let source = b"method(a: 1, 'b-c': 2)";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, config);
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert!(diags[0].message.contains("quoted for consistency"));
+        assert!(diags[0].message.contains(r#"`"a":`"#));
+    }
+
+    #[test]
+    fn consistent_style_standalone_symbols_unchanged() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // Standalone symbols (not hash keys) should still be flagged
+        let offense_cases = [
+            (r#":"foo""#, ":foo"),
+            (r#":'bar'"#, ":bar"),
+            (r#""hello".to_sym"#, ":hello"),
+        ];
+        for (source, expected) in &offense_cases {
+            let diags = crate::testutil::run_cop_full_with_config(
+                &cop,
+                source.as_bytes(),
+                consistent_config(),
+            );
+            assert!(
+                !diags.is_empty(),
+                "Expected offense for {:?} but got none",
+                source
+            );
+            assert!(
+                diags[0].message.contains(&format!("`{expected}`")),
+                "Expected `{}` in message for {:?}, got: {}",
+                expected,
+                source,
+                diags[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn consistent_style_setter_key_triggers_consistency() {
+        let cop = SymbolConversion;
+        let config = consistent_config();
+        // A setter key (foo=) requires quoting → flag bare siblings
+        let source = b"{ 'foo=': 1, bar: 2 }";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, config);
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert!(diags[0].message.contains("quoted for consistency"));
+        assert!(diags[0].message.contains(r#"`"bar":`"#));
     }
 }

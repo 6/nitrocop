@@ -1167,6 +1167,31 @@ def cmd_finalize(args: list[str]) -> int:
         _git("add", "src/", "tests/", "bench/", "scripts/", check=False)
         _git("commit", "-m", f"Fix {opts.cop}: agent-generated fix{mode_note} ({opts.backend})")
 
+    # 6b. Re-validate scope after formatting commit (git add bench/ can
+    #     sweep in stray gitlinks from cloned corpus repos).
+    r = _run([
+        sys.executable, str(SCRIPTS_DIR / "validate_agent_changes.py"),
+        "--repo-root", str(REPO_ROOT),
+        "--base-ref", opts.base_sha,
+        "--profile", "agent-cop-fix",
+        "--report-out", str(scope_report_file),
+    ])
+    post_scope_valid = False
+    for line in r.stdout.strip().splitlines():
+        if line.startswith("valid="):
+            post_scope_valid = line.split("=", 1)[1] == "true"
+    if not post_scope_valid:
+        scope_report = read_file_or(scope_report_file)
+        _log(f"Post-format scope check failed:\n{scope_report}")
+        _close_pr_rejected(
+            opts.pr_url, opts.cop, opts.issue_number,
+            opts.repo, opts.run_url, scope_report,
+        )
+        _output("result", "rejected")
+        _output("has_pr", "false")
+        _output("file_guard_valid", "false")
+        return 0
+
     # 7. Push + promote
     _git("push", "origin", f"HEAD:{opts.branch}", "--force")
     pushed_sha = _git("rev-parse", "HEAD").stdout.strip()

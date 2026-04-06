@@ -108,3 +108,23 @@ XML
 
 # Spaces before a chained `.` are still offenses for single-line receivers
 data = { a: 1 } .transform_values
+
+# Extra spaces before ** (double splat) — not aligned with adjacent **
+foo 1, **x
+foo 1, **x
+
+# FN: find_last_equals_col matches = inside string "\n=" at same column as
+# real = on adjacent line (drupaltags = at col 17 aligns with \n= at col 17)
+      summ = "\n======= BEGIN TAG CONSOLIDATION ========"
+      drupaltags = Tag.count(:all)
+      summ += "\nTags:              "+drupaltags.to_s
+
+# FN: =~ match operator should not participate in equals alignment
+# (=~ at col 16 was matching the second = of == at col 16 on adjacent line)
+elsif operator == 2 or
+  !(token.to_s =~ /^([+-]?)(?=\d)/)
+
+# Multiline receiver: extra spaces before chained `.` are still offenses
+expect {
+  something
+} .to raise_error

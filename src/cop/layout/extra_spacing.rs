@@ -165,12 +165,11 @@ use std::ops::Range;
 ///     and `text ...,   layout: :title`. Extract full symbol/path/label tokens
 ///     so alignment only succeeds for genuinely matching tokens.
 ///
-/// 19. **Multiline receiver chaining FPs (fixed 2026-04-02)**: RuboCop does not
-///     report extra spaces before a chained `.` when the receiver itself spans
-///     multiple lines, such as `expect { ... }          .to ...` or
-///     `{\n  a: 1\n}  .transform_values`. Raw scanning saw those as ordinary
-///     gaps and flagged them. Ignore only the whitespace range between a
-///     multiline receiver's end and its chained `.` operator.
+/// 19. **Multiline receiver chaining FPs (added 2026-04-02, REVERTED 2026-04-05)**:
+///     Previously thought RuboCop did not report extra spaces before a chained
+///     `.` when the receiver spans multiple lines. Verification with RuboCop
+///     1.84.2 shows it DOES flag `}          .to` and `}  .transform_values`
+///     regardless of receiver span. The suppression was removed in finding 25.
 ///
 /// 20. **Heredoc opener/block-close FPs (fixed 2026-04-02)**: RuboCop allows
 ///     `let(:x) { <<~TEXT  }` style spacing before the same-line `}` that closes
@@ -201,6 +200,52 @@ use std::ops::Range;
 ///     gaps and produced FPs. Ignore the range from each heredoc opener's end
 ///     to the end of its line. Fixes ~8 FPs from rubychan, sidekiq, mcorino,
 ///     opal, ruby__optparse, and volanja.
+///
+/// ## Investigation findings (2026-04-05)
+///
+/// 24. **`*`/`**` single-character token extraction FNs (fixed)**: The `*`
+///     character fell through to the catch-all single-character case in
+///     `extract_token_at`, so `*` in `**x` on the offense line would
+///     coincidentally match a single `*` at the same column on an adjacent
+///     line (e.g., `**x` shifted by one position). Extended the multi-char
+///     operator branch to include `*`, extracting `**` and `**=` as full
+///     tokens. Fixes 2 FNs from ruby-formatter__rufo (the `foo 1,  **x`
+///     and `foo 1,  **x , **y` patterns).
+///
+/// 25. **Multiline receiver chain suppression removed (fixed)**: Previous
+///     code collected byte ranges between multiline receivers (blocks, hashes)
+///     and their chained `.` operator, treating them as non-flaggable. However,
+///     RuboCop 1.84.2 DOES flag these gaps — `}          .to` and
+///     `}  .transform_values` are flagged regardless of whether the receiver
+///     spans multiple lines. Removed `collect_multiline_receiver_chain_ranges`
+///     entirely; the normal alignment check (Mode 1/2) correctly handles the
+///     case where two chained `.` operators ARE aligned at the same column
+///     (e.g., `expect(clo)  .to` / `expect(clo)  .not_to`). Fixes 3 FNs
+///     from sharetribe__sharetribe (the `}          .to raise_error` patterns).
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// 26. **`find_last_equals_col` matching `=` inside string content (fixed)**:
+///     `find_last_equals_col` searched rightward from the column for any `=`
+///     character, including `=` embedded in string literals like `"\n======="`.
+///     When the string `=` coincidentally aligned with a real assignment `=` on
+///     an adjacent line, the extra space was falsely suppressed. Added
+///     `is_assignment_equals` validation on the current line's `=` before
+///     proceeding with alignment. Fixes 1 FN from publiclab__plots2.
+///
+/// 27. **`=~` match operator falsely treated as assignment `=` (fixed)**:
+///     `check_equals_alignment` used `find_last_equals_col` which returned the
+///     `=` of `=~` match operators. Since `=~` is not an assignment operator,
+///     it should not participate in equals-alignment. Added a check excluding
+///     `=` followed by `~`. Fixes 1 FN from cxn03651__writeexcel.
+///
+/// 28. **Heredoc interpolation `#{` misclassified as comment (fixed)**:
+///     `build_comment_only_lines` scanned for `#` after skipping whitespace
+///     and string literals but did not distinguish `#` (comment) from `#{`
+///     (interpolation). Lines like `#{environment.compact.map ...}` inside
+///     heredocs were marked as comment-only, breaking alignment search across
+///     those lines. Added a check: if `#` is followed by `{`, the line is not
+///     comment-only. Fixes 1 FP from ManageIQ__manageiq.
 pub struct ExtraSpacing;
 
 impl Cop for ExtraSpacing {
@@ -235,14 +280,6 @@ impl Cop for ExtraSpacing {
         // Collect word/symbol array interior ranges to ignore (%w, %W, %i, %I).
         // Spaces inside these arrays are element separators, not extra spacing.
         ignored_ranges.extend(collect_word_array_ranges(parse_result));
-
-        // RuboCop allows spaces before a chained `.` when the receiver spans
-        // multiple lines (for example a multiline block or hash literal).
-        ignored_ranges.extend(collect_multiline_receiver_chain_ranges(
-            parse_result,
-            source,
-            src_bytes,
-        ));
 
         // RuboCop also allows spaces between a heredoc opener and the same-line
         // `}` that closes the surrounding block.
@@ -439,74 +476,6 @@ impl HashPairCollector<'_> {
 
 fn is_in_ignored_range(ranges: &[Range<usize>], offset: usize) -> bool {
     ranges.iter().any(|r| r.contains(&offset))
-}
-
-// -- Multiline receiver chained-call ignored ranges --
-
-/// Collect byte ranges between a multiline receiver and its chained `.` call
-/// operator. RuboCop does not treat these as extra spacing.
-fn collect_multiline_receiver_chain_ranges(
-    parse_result: &ruby_prism::ParseResult<'_>,
-    source: &SourceFile,
-    src_bytes: &[u8],
-) -> Vec<Range<usize>> {
-    let mut collector = MultilineReceiverChainCollector {
-        ranges: Vec::new(),
-        source,
-        src_bytes,
-    };
-    collector.visit(&parse_result.node());
-    collector.ranges
-}
-
-struct MultilineReceiverChainCollector<'a> {
-    ranges: Vec<Range<usize>>,
-    source: &'a SourceFile,
-    src_bytes: &'a [u8],
-}
-
-impl<'pr> Visit<'pr> for MultilineReceiverChainCollector<'_> {
-    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        self.collect(node.receiver(), node.call_operator_loc());
-        ruby_prism::visit_call_node(self, node);
-    }
-}
-
-impl MultilineReceiverChainCollector<'_> {
-    fn collect(
-        &mut self,
-        receiver: Option<ruby_prism::Node<'_>>,
-        operator: Option<ruby_prism::Location<'_>>,
-    ) {
-        let Some(receiver) = receiver else {
-            return;
-        };
-        let Some(operator) = operator else {
-            return;
-        };
-
-        if operator.as_slice() != b"." {
-            return;
-        }
-
-        let receiver_loc = receiver.location();
-        if !location_spans_multiple_lines(self.source, &receiver_loc) {
-            return;
-        }
-
-        let gap_start = receiver_loc.end_offset();
-        let gap_end = operator.start_offset();
-        if gap_end <= gap_start {
-            return;
-        }
-
-        if self.src_bytes[gap_start..gap_end]
-            .iter()
-            .all(|&b| b == b' ' || b == b'\t')
-        {
-            self.ranges.push(gap_start..gap_end);
-        }
-    }
 }
 
 // -- Heredoc opener/block-close ignored ranges --
@@ -782,6 +751,15 @@ fn build_comment_only_lines(lines: &[&[u8]]) -> HashSet<usize> {
         let first_non_ws = line.iter().position(|&b| b != b' ' && b != b'\t');
         if let Some(pos) = first_non_ws {
             if line[pos] == b'#' {
+                // Don't classify `#{` as comment-only — it's string interpolation
+                // syntax (typically inside heredoc bodies). Treating these lines as
+                // comment-only causes them to be skipped in alignment searches,
+                // producing false positives when adjacent interpolation lines are
+                // actually aligned (e.g., two `#{...map { ... }}` lines inside
+                // a heredoc).
+                if pos + 1 < line.len() && line[pos + 1] == b'{' {
+                    continue;
+                }
                 set.insert(idx);
             }
         }
@@ -1040,16 +1018,16 @@ fn extract_token_at(line: &[u8], col: usize) -> &[u8] {
             // No closing quote found on same line — return just the quote
             &line[col..col + 1]
         }
-    } else if ch == b'|' || ch == b'&' || ch == b'<' || ch == b'>' {
-        // Multi-character operators: ||, &&, <<, >>, ||=, &&=, <<=, >>=, <=, >=
+    } else if ch == b'|' || ch == b'&' || ch == b'<' || ch == b'>' || ch == b'*' {
+        // Multi-character operators: ||, &&, <<, >>, **, ||=, &&=, <<=, >>=, **=, <=, >=, *=
         // Extract the full operator to avoid coincidental single-character alignment
-        // (e.g., `|` in `||=` matching `|` in `||=` at a different position).
+        // (e.g., `*` in `**x` matching a single `*` at a different position).
         let mut end = col + 1;
-        // Second character of same type (||, &&, <<, >>)
+        // Second character of same type (||, &&, <<, >>, **)
         if end < line.len() && line[end] == ch {
             end += 1;
         }
-        // Trailing = (||=, &&=, <<=, >>=, <=, >=)
+        // Trailing = (||=, &&=, <<=, >>=, **=, <=, >=, *=)
         if end < line.len() && line[end] == b'=' {
             end += 1;
         }
@@ -1226,50 +1204,60 @@ fn check_equals_alignment(
     adj_line_start_offset: usize,
     heredoc_opener_starts: &HashSet<usize>,
 ) -> bool {
-    // Find the LAST '=' in the operator starting at col on the current line.
+    // Forward check: find the LAST '=' in the operator starting at col on the current line.
     // RuboCop compares operators by their last_column, so we use the rightmost `=`.
     let eq_col = find_last_equals_col(current_line, col);
     if let Some(eq_col) = eq_col {
-        // Convert the byte position of the last '=' to a character column,
-        // then find the corresponding byte position on the adjacent line.
-        let eq_char_col = byte_to_char_col(current_line, eq_col);
-        let adj_eq_col = match char_col_to_byte(adj_line, eq_char_col) {
-            Some(c) => c,
-            None => return false,
-        };
-        // Check if the adjacent line has '=' at the same character column,
-        // and that it is the LAST '=' of its operator (not an interior '=' of '==').
-        if adj_eq_col < adj_line.len()
-            && adj_line[adj_eq_col] == b'='
-            && is_assignment_equals(adj_line, adj_eq_col)
-            && (adj_eq_col + 1 >= adj_line.len() || adj_line[adj_eq_col + 1] != b'=')
-        {
-            return true;
-        }
-        // Cross-alignment: current has `=` (or ends with `=`), adjacent has `<<`
-        // whose last `<` is at the same column. RuboCop's aligned_with_append_operator?
-        // checks: range.source[-1] == '=' && token.type == tLSHFT && last_column matches.
-        //
-        // RuboCop uses `detect` to find the FIRST assignment/comparison token on the
-        // adjacent line. If there's an earlier `=`/`||=`/etc. before the `<<`, the `<<`
-        // is not the first operator and should not be used for cross-alignment.
-        if adj_eq_col < adj_line.len()
-            && adj_line[adj_eq_col] == b'<'
-            && adj_eq_col > 0
-            && adj_line[adj_eq_col - 1] == b'<'
-        {
-            // Adjacent line has `<<` ending at eq_char_col — last `<` aligns with `=`
-            // Verify the `<<` is preceded by space (i.e., it's an operator, not inside something)
-            let lshift_start = adj_eq_col - 1;
-            if lshift_start == 0
-                || adj_line[lshift_start - 1] == b' '
-                || adj_line[lshift_start - 1] == b'\t'
+        // Validate that the `=` on the current line is actually an assignment/comparison
+        // operator, not an `=` inside string content (e.g., `"\n======="` where `=`
+        // coincidentally aligns with a real `=` on an adjacent line).
+        // Also exclude `=~` (match operator) which is not an assignment operator —
+        // RuboCop's `equal_sign?` does not include `tMATCH`.
+        let is_valid_equals = is_assignment_equals(current_line, eq_col)
+            && !(eq_col + 1 < current_line.len() && current_line[eq_col + 1] == b'~');
+
+        if is_valid_equals {
+            // Convert the byte position of the last '=' to a character column,
+            // then find the corresponding byte position on the adjacent line.
+            let eq_char_col = byte_to_char_col(current_line, eq_col);
+            let adj_eq_col = match char_col_to_byte(adj_line, eq_char_col) {
+                Some(c) => c,
+                None => return false,
+            };
+            // Check if the adjacent line has '=' at the same character column,
+            // and that it is the LAST '=' of its operator (not an interior '=' of '==').
+            if adj_eq_col < adj_line.len()
+                && adj_line[adj_eq_col] == b'='
+                && is_assignment_equals(adj_line, adj_eq_col)
+                && (adj_eq_col + 1 >= adj_line.len() || adj_line[adj_eq_col + 1] != b'=')
             {
-                let adj_lshift_offset = adj_line_start_offset + lshift_start;
-                if !heredoc_opener_starts.contains(&adj_lshift_offset)
-                    && !has_earlier_assignment_op(adj_line, lshift_start)
+                return true;
+            }
+            // Cross-alignment: current has `=` (or ends with `=`), adjacent has `<<`
+            // whose last `<` is at the same column. RuboCop's aligned_with_append_operator?
+            // checks: range.source[-1] == '=' && token.type == tLSHFT && last_column matches.
+            //
+            // RuboCop uses `detect` to find the FIRST assignment/comparison token on the
+            // adjacent line. If there's an earlier `=`/`||=`/etc. before the `<<`, the `<<`
+            // is not the first operator and should not be used for cross-alignment.
+            if adj_eq_col < adj_line.len()
+                && adj_line[adj_eq_col] == b'<'
+                && adj_eq_col > 0
+                && adj_line[adj_eq_col - 1] == b'<'
+            {
+                // Adjacent line has `<<` ending at eq_char_col — last `<` aligns with `=`
+                // Verify the `<<` is preceded by space (i.e., it's an operator, not inside something)
+                let lshift_start = adj_eq_col - 1;
+                if lshift_start == 0
+                    || adj_line[lshift_start - 1] == b' '
+                    || adj_line[lshift_start - 1] == b'\t'
                 {
-                    return true;
+                    let adj_lshift_offset = adj_line_start_offset + lshift_start;
+                    if !heredoc_opener_starts.contains(&adj_lshift_offset)
+                        && !has_earlier_assignment_op(adj_line, lshift_start)
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -1407,13 +1395,6 @@ fn line_indentation(line: &[u8]) -> usize {
     line.iter()
         .take_while(|&&b| b == b' ' || b == b'\t')
         .count()
-}
-
-fn location_spans_multiple_lines(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> bool {
-    let (start_line, _) = source.offset_to_line_col(loc.start_offset());
-    let end_offset = loc.end_offset().saturating_sub(1);
-    let (end_line, _) = source.offset_to_line_col(end_offset);
-    start_line != end_line
 }
 
 fn trim_terminal_cr(line: &[u8]) -> &[u8] {

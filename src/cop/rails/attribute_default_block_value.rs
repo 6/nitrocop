@@ -19,6 +19,10 @@ impl Cop for AttributeDefaultBlockValue {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[ARRAY_NODE, CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE]
     }

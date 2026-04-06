@@ -1,6 +1,6 @@
 [package]
 name = "nitrocop"
-version = "0.0.1-pre7"
+version = "0.0.1-pre8"
 edition = "2024"
 rust-version = "1.85"
 default-run = "nitrocop"

@@ -86,3 +86,10 @@ if condition
 else
   totals[:b] += 2
 end
+
+# if/else with comparison sends on different receivers should not be flagged
+if condition
+  match.should == true
+else
+  other.should == false
+end
