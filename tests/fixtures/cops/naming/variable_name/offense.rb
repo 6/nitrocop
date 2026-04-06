@@ -103,3 +103,10 @@ end
 [1].each do |*_, postParam|
                  ^^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
 end
+
+# super block parameters
+def find_best_index(route)
+  super do |avail, badIndex|
+                   ^^^^^^^^ Naming/VariableName: Use snake_case for variable names.
+  end
+end
