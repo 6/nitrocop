@@ -243,3 +243,16 @@ end
 
 # explicit call syntax is allowed
 def to_proc = proc { |value| self.(value) }
+
+# rescue => self.method — self is required when a local variable shadows the method
+def process
+  foo = 1
+  begin
+    risky_operation
+  rescue => self.foo
+    p foo
+  end
+end
+
+# rescue => self.keyword — self is required when method name is a keyword
+rescue => self.retry
