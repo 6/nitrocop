@@ -186,10 +186,11 @@ impl<'a> ChildrenVisitor<'a> {
         // 2. The file ends with trailing whitespace (space/tab, no final newline)
         // 3. The body child has content (non-empty body)
         // The crash suppresses ALL offenses for the file. Skip to match.
-        if keyword_offset == 0 && self.source_ends_with_whitespace() {
-            if self.body_child_has_content(body) {
-                return;
-            }
+        if keyword_offset == 0
+            && self.source_ends_with_whitespace()
+            && self.body_child_has_content(body)
+        {
+            return;
         }
         self.add_diagnostic(
             name_offset,
