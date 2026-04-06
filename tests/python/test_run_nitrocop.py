@@ -2,9 +2,11 @@
 """Tests for bench/corpus/run_nitrocop.py."""
 
 import importlib.util
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 SCRIPT = Path(__file__).parents[2] / "bench" / "corpus" / "run_nitrocop.py"
 sys.path.insert(0, str(SCRIPT.parent))
@@ -69,3 +71,59 @@ def test_normalize_offenses_collapses_multi_column_same_line():
         assert len(normalized) == 1, (
             "Same (path, line, cop) should collapse regardless of column"
         )
+
+
+# ---------- resolve_repo_config ----------
+
+
+def test_resolve_repo_config_default_falls_back_to_baseline():
+    """When gen_repo_config.py fails, fall back to BASELINE_CONFIG."""
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        result = run_nitrocop.resolve_repo_config("fake_repo", "/tmp/fake")
+    assert result == str(run_nitrocop.BASELINE_CONFIG)
+
+
+def test_resolve_repo_config_base_config_used_as_fallback():
+    """When base_config is given and gen_repo_config.py fails, fall back to it."""
+    custom = "/tmp/my_variant_config.yml"
+    with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+        result = run_nitrocop.resolve_repo_config(
+            "fake_repo", "/tmp/fake", base_config=custom,
+        )
+    assert result == custom
+
+
+def test_resolve_repo_config_passes_base_config_to_subprocess():
+    """When base_config is given, it's forwarded to gen_repo_config.py."""
+    custom = "/tmp/my_variant_config.yml"
+    fake_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="/tmp/generated_overlay.yml\n",
+    )
+    with mock.patch("subprocess.run", return_value=fake_result) as mock_run:
+        result = run_nitrocop.resolve_repo_config(
+            "my_repo", "/tmp/my_repo", base_config=custom,
+        )
+    call_args = mock_run.call_args[0][0]
+    assert custom in call_args, (
+        f"Expected base_config '{custom}' in subprocess args: {call_args}"
+    )
+    assert result == "/tmp/generated_overlay.yml"
+
+
+def test_resolve_repo_config_uses_subprocess_not_import():
+    """resolve_repo_config must use subprocess, not library import.
+
+    A library import fails in CI where bench/corpus/ isn't on sys.path.
+    This caused a corpus oracle regression (846 → 433 exact match cops).
+    """
+    fake_result = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="/tmp/overlay.yml\n",
+    )
+    with mock.patch("subprocess.run", return_value=fake_result) as mock_run:
+        run_nitrocop.resolve_repo_config("my_repo", "/tmp/my_repo")
+    # Verify subprocess.run was called (not a direct import)
+    assert mock_run.called, "resolve_repo_config must use subprocess.run"
+    cmd = mock_run.call_args[0][0]
+    assert any("gen_repo_config" in str(arg) for arg in cmd), (
+        f"subprocess should invoke gen_repo_config.py: {cmd}"
+    )
