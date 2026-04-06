@@ -330,8 +330,8 @@ impl ConditionalAssignment {
         &self,
         source: &SourceFile,
         if_node: &ruby_prism::IfNode<'_>,
-        _max_line_length: usize,
-        _line_length_enabled: bool,
+        max_line_length: usize,
+        line_length_enabled: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let if_stmts = match if_node.statements() {
@@ -373,9 +373,12 @@ impl ConditionalAssignment {
             return;
         }
 
-        // NOTE: We skip the line length check for ternaries because:
-        // 1. RuboCop doesn't check line length in this path
-        // 2. The if_node.location() returns the ternary's span, not the full line
+        if line_length_enabled
+            && max_line_length > 0
+            && exceeds_line_limit(&if_node.location(), &if_info.lhs_text, max_line_length)
+        {
+            return;
+        }
 
         let loc = if_node.location();
         let (line, col) = source.offset_to_line_col(loc.start_offset());
@@ -774,8 +777,13 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
 
 /// Check if the corrected form would exceed the configured line length.
 /// Mirrors RuboCop's `correction_exceeds_line_limit?`: for each source line,
-/// remove the assignment LHS (if present), find the longest remaining line,
-/// and check if `lhs.len() + longest > max_line_length`.
+/// remove the first occurrence of the assignment LHS (anywhere in the line),
+/// find the longest remaining line, and check if
+/// `lhs.len() + longest > max_line_length`.
+///
+/// RuboCop uses `line.sub(assignment_regex, '')` which removes the first
+/// occurrence anywhere in the line. This matters for ternaries where the
+/// assignment appears mid-line (`cond ? x = 1 : x = 2`), not at the start.
 fn exceeds_line_limit(
     node_loc: &ruby_prism::Location<'_>,
     lhs_text: &str,
@@ -789,12 +797,14 @@ fn exceeds_line_limit(
     let lhs_trimmed = lhs_text.trim_end();
     let mut max_remaining = 0;
     for line in src.lines() {
-        // Try to remove the LHS from this line (at line start after whitespace)
-        let trimmed = line.trim_start();
-        let remaining = if let Some(stripped) = trimmed.strip_prefix(lhs_trimmed) {
-            let rest = stripped.trim_start();
-            let leading_ws = line.len() - trimmed.len();
-            leading_ws + rest.len()
+        // Remove first occurrence of the LHS anywhere in the line, matching
+        // RuboCop's `line.sub(assignment_regex, '')`. For if/else branches
+        // the LHS is at the start; for ternaries it appears mid-line.
+        let remaining = if let Some(pos) = line.find(lhs_trimmed) {
+            let before = &line[..pos];
+            let after = &line[pos + lhs_trimmed.len()..];
+            let after_trimmed = after.trim_start();
+            before.len() + after_trimmed.len()
         } else {
             line.len()
         };
