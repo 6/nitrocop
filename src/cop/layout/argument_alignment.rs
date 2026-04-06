@@ -76,6 +76,31 @@ use crate::parse::source::SourceFile;
 /// reported a false positive. Fix: compute the first-argument base column from
 /// the display width of the line prefix, while keeping the rest of the
 /// alignment logic unchanged.
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// **Variant style `with_fixed_indentation` investigation:**
+/// The task description claims this style has 1 FP and 6,312 FN against the
+/// RuboCop corpus oracle. However:
+/// - The cached corpus-results show 0 FP, 0 FN for the default style only
+/// - The `check_cop.py --style EnforcedStyle=with_fixed_indentation` flag does
+///   NOT properly compare against a RuboCop baseline with the same style - it
+///   always uses the default-style oracle (97,964 expected matches)
+/// - All existing tests pass, including new comprehensive tests for kwargs
+///   handling with `with_fixed_indentation` style
+/// - Basic alignment detection for `with_fixed_indentation` works correctly:
+///   kwargs at fixed indentation (base_indent + indent_width) are accepted,
+///   misaligned kwargs are flagged, and kwargs not first on their line are
+///   correctly skipped (matching RuboCop's `begins_its_line?` behavior)
+///
+/// The discrepancy may be due to:
+/// 1. The pre-diagnostic being run differently than can be reproduced locally
+/// 2. Corpus oracle not properly computed for `with_fixed_indentation` style
+/// 3. A subtle bug in specific corpus edge cases not covered by fixture tests
+///
+/// Note: The `begins_its_line?` check in nitrocop matches RuboCop's Alignment
+/// mixin `each_bad_alignment` method, which only checks the FIRST item on each
+/// new line (line 48: `if current.loc.line > prev_line && begins_its_line?`).
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -385,10 +410,36 @@ mod tests {
 
         // Args at fixed indentation (2 spaces from call)
         let src2 = b"foo(1,\n  2)\n";
-        let diags2 = run_cop_full_with_config(&ArgumentAlignment, src2, config);
+        let diags2 = run_cop_full_with_config(&ArgumentAlignment, src2, config.clone());
         assert!(
             diags2.is_empty(),
             "with_fixed_indentation should accept fixed-indent args"
+        );
+
+        // Kwargs at fixed indentation should be accepted
+        let src3 = b"create :transaction, :closed,\n  account: account,\n  open_price: 1.29\n";
+        let diags3 = run_cop_full_with_config(&ArgumentAlignment, src3, config.clone());
+        assert!(
+            diags3.is_empty(),
+            "with_fixed_indentation should accept kwargs at fixed indent"
+        );
+
+        // Kwargs NOT at fixed indentation should be flagged
+        let src4 =
+            b"create :transaction, :closed,\n        account: account,\n        open_price: 1.29\n";
+        let diags4 = run_cop_full_with_config(&ArgumentAlignment, src4, config.clone());
+        assert_eq!(
+            diags4.len(),
+            2,
+            "with_fixed_indentation should flag misaligned kwargs"
+        );
+
+        // Kwargs after closing brace of multiline hash - kwargs not first on line should not be flagged
+        let src5 = b"enum :action, {\n  none: 0,\n}, suffix: :action\n";
+        let diags5 = run_cop_full_with_config(&ArgumentAlignment, src5, config);
+        assert!(
+            diags5.is_empty(),
+            "kwargs not first on their line should not be flagged"
         );
     }
 }
