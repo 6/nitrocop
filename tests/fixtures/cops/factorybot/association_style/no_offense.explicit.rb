@@ -31,3 +31,11 @@ factory :host do
     media { [create(:medium)] }
   end
 end
+factory :company do
+  trait :premium do
+    level { 3 }
+  end
+  factory :special_company do
+    premium
+  end
+end

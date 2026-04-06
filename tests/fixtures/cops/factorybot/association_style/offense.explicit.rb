@@ -12,3 +12,7 @@ factory :comment do
     ^^^^^^^^ FactoryBot/AssociationStyle: Use explicit style to define associations.
   end
 end
+factory :account do
+  password_confirmation(&:password)
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ FactoryBot/AssociationStyle: Use explicit style to define associations.
+end
