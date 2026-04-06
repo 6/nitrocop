@@ -560,6 +560,78 @@ impl DisabledRanges {
         }
         false
     }
+
+    /// Compensate for `Layout/LineLength`'s self-suppression behavior.
+    ///
+    /// `Layout/LineLength` internally skips lines covered by its own disable
+    /// directives, so it never generates offenses on those lines. This means
+    /// the general `check_and_mark_used` mechanism never marks those
+    /// directives as "used", making them appear redundant even when they
+    /// legitimately suppress long lines.
+    ///
+    /// This method re-checks unused `Layout/LineLength` directives against
+    /// actual line lengths and marks them as "used" if any covered line
+    /// (code portion, excluding the directive comment) exceeds `max`.
+    ///
+    /// **Performance note**: early-exits if no unused LineLength directives
+    /// exist, avoiding the `lines()` allocation for the vast majority of files.
+    /// Previously this collected all lines unconditionally, contributing to a
+    /// perf regression on large repos (see cop struct doc comment).
+    pub(crate) fn compensate_line_length_self_suppression(
+        &mut self,
+        source: &crate::parse::source::SourceFile,
+        max: usize,
+    ) {
+        // Fast path: skip if no unused LineLength directives exist.
+        let has_unused_ll = self
+            .directives
+            .iter()
+            .any(|d| !d.used && is_line_length_cop_name(&d.cop_name));
+        if !has_unused_ll {
+            return;
+        }
+
+        let lines: Vec<&[u8]> = source.lines().collect();
+        for directive in &mut self.directives {
+            if directive.used {
+                continue;
+            }
+            if !is_line_length_cop_name(&directive.cop_name) {
+                continue;
+            }
+            let (start, end) = directive.range;
+            for line_num in start..=end {
+                if line_num == 0 || line_num > lines.len() {
+                    continue;
+                }
+                let raw = lines[line_num - 1];
+                let line = raw.strip_suffix(b"\r").unwrap_or(raw);
+                let line_str = match std::str::from_utf8(line) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                // For lines with a rubocop directive comment, measure only the
+                // code portion (matching Layout/LineLength's AllowCopDirectives
+                // default of true).
+                let effective_len = if let Some(pos) = line_str.find("# rubocop:") {
+                    line_str[..pos].trim_end().chars().count()
+                } else {
+                    line_str.chars().count()
+                };
+                if effective_len > max {
+                    directive.used = true;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn is_line_length_cop_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Layout/LineLength" | "Metrics/LineLength" | "LineLength"
+    )
 }
 
 fn build_directive_legacy_aliases(
