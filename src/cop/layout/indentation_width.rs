@@ -170,7 +170,6 @@ fn def_preceded_by_modifier(source: &SourceFile, kw_offset: usize) -> bool {
         return false;
     }
     let bytes = source.as_bytes();
-    let mut pos = kw_offset;
     // Walk back to find start of line
     let mut line_start = kw_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -188,7 +187,7 @@ fn def_preceded_by_modifier(source: &SourceFile, kw_offset: usize) -> bool {
         return false;
     }
     // Skip whitespace before `def`
-    pos = kw_offset;
+    let mut pos = kw_offset;
     while pos > line_start && (bytes[pos - 1] == b' ' || bytes[pos - 1] == b'\t') {
         pos -= 1;
     }
