@@ -35,6 +35,12 @@ use crate::parse::source::SourceFile;
 ///    processing both `factory` and `trait` nodes independently in check_node:
 ///    factory nodes check their non-trait children, and trait nodes check
 ///    their own children using enclosing factory trait names.
+/// 4. Top-level trait FP: `trait` blocks defined at the `FactoryBot.define`
+///    level (siblings of factory blocks, not nested inside any factory) were
+///    falsely flagging their children as implicit associations. RuboCop's
+///    `trait_factory_node` returns nil for such traits, so they are never
+///    processed. Fixed by checking `has_enclosing_factory` before processing
+///    trait blocks.
 pub struct AssociationStyle;
 
 /// Ruby keywords that cannot be implicit associations.
@@ -189,6 +195,14 @@ impl Cop for AssociationStyle {
         if style == "explicit" {
             let my_start = call.location().start_offset();
             let my_end = call.location().end_offset();
+
+            // RuboCop's trait_factory_node returns nil for traits at the
+            // FactoryBot.define level (not inside any factory block), so they
+            // are never flagged. We replicate this: skip trait blocks that
+            // have no enclosing factory.
+            if method_name == b"trait" && !has_enclosing_factory(_parse_result, my_start, my_end) {
+                return;
+            }
 
             // Collect trait names before extracting children (body may be moved)
             let factory_trait_names = if method_name == b"factory" {
@@ -367,6 +381,48 @@ fn has_keyword_arg(node: &ruby_prism::Node<'_>) -> bool {
         }
     }
     false
+}
+
+/// Check whether the given source range is enclosed by any `factory` block.
+/// RuboCop's `trait_factory_node` returns nil for traits defined at the
+/// `FactoryBot.define` level (not nested inside any factory), causing them
+/// to be skipped. We replicate this: if a `trait` is not inside any factory,
+/// its children should NOT be flagged.
+fn has_enclosing_factory(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    my_start: usize,
+    my_end: usize,
+) -> bool {
+    struct FactoryEnclosureChecker {
+        my_start: usize,
+        my_end: usize,
+        found: bool,
+    }
+
+    impl<'pr> Visit<'pr> for FactoryEnclosureChecker {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if self.found {
+                return;
+            }
+            if method_dispatch_predicates::is_command(node, b"factory") {
+                let start = node.location().start_offset();
+                let end = node.location().end_offset();
+                if start < self.my_start && end > self.my_end {
+                    self.found = true;
+                    return;
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+
+    let mut checker = FactoryEnclosureChecker {
+        my_start,
+        my_end,
+        found: false,
+    };
+    checker.visit(&parse_result.node());
+    checker.found
 }
 
 /// Collect trait names from all factory blocks that enclose the given source range.
