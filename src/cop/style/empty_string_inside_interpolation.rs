@@ -3,7 +3,6 @@ use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
-use ruby_prism::Visit;
 
 /// Prism exposes every `#{...}` body as an `EmbeddedStatementsNode`, including
 /// double-quoted strings, backticks, regexps, and symbols. RuboCop's default
@@ -69,18 +68,26 @@ impl Cop for EmptyStringInsideInterpolation {
                 }
             }
             "ternary" => {
-                let mut counter = ModifierConditionalCounter::default();
-                counter.visit(&embedded.as_node());
-
+                // RuboCop's each_child_node(:if) only checks direct children
+                // of the interpolation, not all descendants. Match that by
+                // iterating the statements body directly.
                 let embedded_node = embedded.as_node();
-                for _ in 0..counter.count {
-                    add_diagnostic(
-                        self,
-                        source,
-                        &embedded_node,
-                        diagnostics,
-                        MSG_TRAILING_CONDITIONAL,
-                    );
+                for stmt in statements.body().iter() {
+                    let is_modifier = stmt
+                        .as_if_node()
+                        .map_or(false, |n| util::is_modifier_if(&n))
+                        || stmt
+                            .as_unless_node()
+                            .map_or(false, |n| util::is_modifier_unless(&n));
+                    if is_modifier {
+                        add_diagnostic(
+                            self,
+                            source,
+                            &embedded_node,
+                            diagnostics,
+                            MSG_TRAILING_CONDITIONAL,
+                        );
+                    }
                 }
             }
             _ => {}
@@ -90,29 +97,6 @@ impl Cop for EmptyStringInsideInterpolation {
 
 const MSG_TRAILING_CONDITIONAL: &str = "Do not use trailing conditionals in string interpolation.";
 const MSG_TERNARY: &str = "Do not return empty strings in string interpolation.";
-
-#[derive(Default)]
-struct ModifierConditionalCounter {
-    count: usize,
-}
-
-impl<'pr> Visit<'pr> for ModifierConditionalCounter {
-    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        if util::is_modifier_if(node) {
-            self.count += 1;
-        }
-
-        ruby_prism::visit_if_node(self, node);
-    }
-
-    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        if util::is_modifier_unless(node) {
-            self.count += 1;
-        }
-
-        ruby_prism::visit_unless_node(self, node);
-    }
-}
 
 fn add_diagnostic(
     cop: &EmptyStringInsideInterpolation,
