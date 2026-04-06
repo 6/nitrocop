@@ -45,6 +45,12 @@ use ruby_prism::Visit;
 ///   parent like `puts(items.map { |x| x && x.b })` correctly suppresses chain-1
 ///   `&&` inside the block. Only `in_call_arguments`, `in_ternary_operator_parent`,
 ///   `in_assignment_or_operator_parent`, and `dotted_assignment_parent_starts` are reset.
+/// - `nodes_match` no longer unwraps `ParenthesesNode` on the right (checked) side.
+///   RuboCop's `find_matching_receiver_invocation` never unwraps parentheses, so when
+///   comparing `CallNode` (body receiver) with `ParenthesesNode` (condition), the match
+///   fails. Previously, nitrocop would unwrap the right side and recursively compare,
+///   causing false positives like `obj.bar if (obj)` where RuboCop correctly skips
+///   the parenthesized condition.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -229,8 +235,13 @@ impl SafeNavigation {
             return Self::nodes_match(&inner, right, bytes);
         }
 
-        if let Some(inner) = Self::unwrapped_parenthesized_node(right) {
-            return Self::nodes_match(left, &inner, bytes);
+        // Don't unwrap right side if it's a ParenthesesNode — RuboCop's
+        // find_matching_receiver_invocation doesn't unwrap, so
+        // ParenthesesNode never matches CallNode via matching_call_nodes?
+        if right.as_parentheses_node().is_none() {
+            if let Some(inner) = Self::unwrapped_parenthesized_node(right) {
+                return Self::nodes_match(left, &inner, bytes);
+            }
         }
 
         let (Some(left_call), Some(right_call)) = (left.as_call_node(), right.as_call_node())

@@ -181,3 +181,9 @@ instance_variable_set("@bar", baz.nil? ? nil : baz.to_s)
 puts(items.map { |x| x && x.b })
 Hash[list.map { |p| [p.name.to_s, p.dt && p.dt.to_s] }]
 scope :accessible, ->(u) { items.select { |i| i && i.active? } }
+
+# Parenthesized condition in modifier if — RuboCop skips because ParenthesesNode
+# wrapping causes find_matching_receiver_invocation to fail to match the receiver
+obj.bar if (obj)
+Plugin.dialog_manager.validate(X) if (Plugin.dialog_manager)
+@cmd.set_validation_proc { Plugin.dialog_manager.validate(X) if (Plugin.dialog_manager) }
