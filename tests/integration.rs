@@ -3073,7 +3073,6 @@ fn ruby_version_gates() {
         "Style/Dir",
         "Style/DirEmpty",
         "Style/FileEmpty",
-        "Style/FrozenStringLiteralComment",
         "Style/HashExcept",
         "Style/HashFetchChain",
         "Style/HashSlice",
