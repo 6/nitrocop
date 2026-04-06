@@ -291,6 +291,61 @@ jobs:
             --result "${{ steps.gate.outputs.result }}" \
             --check-variant-regressions > /dev/null
 
+  # Perf smoke test: time nitrocop on vendor/rubocop (1665 .rb files) to catch
+  # performance regressions. Logs timing + phase breakdown to step summary.
+  # Never fails — just records data for bisecting when the nightly catches an issue.
+  # Only runs on pushes to main.
+  perf-smoke:
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+
+      - uses: actions/download-artifact@v6
+        with:
+          name: nitrocop-linux
+          path: target/release
+      - run: chmod +x target/release/nitrocop
+
+      - name: Run perf smoke test
+        run: |
+          BINARY="target/release/nitrocop"
+          REPO_DIR="vendor/rubocop"
+          FILE_COUNT=$(find "$REPO_DIR" -name '*.rb' | wc -l)
+
+          echo "## Perf Smoke Test" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Repo:** vendor/rubocop (${FILE_COUNT} .rb files)" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Timed run
+          START=$(date +%s%N)
+          RESULT=$("$BINARY" --preview --format json --no-cache "$REPO_DIR" 2>/dev/null || true)
+          END=$(date +%s%N)
+          ELAPSED_MS=$(( (END - START) / 1000000 ))
+          ELAPSED_S=$(python3 -c "print(f'{${ELAPSED_MS}/1000:.1f}s')")
+
+          OFFENSE_COUNT=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('metadata',{}).get('offense_count',0))" 2>/dev/null || echo "?")
+
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|------:|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Files | ${FILE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Wall clock | ${ELAPSED_S} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Offenses | ${OFFENSE_COUNT} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          # Debug run for phase breakdown
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          "$BINARY" --preview --no-cache --debug "$REPO_DIR" \
+            >/dev/null 2>/tmp/debug_out.txt || true
+          grep "^debug:" /tmp/debug_out.txt >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          echo "perf-smoke: vendor/rubocop files=${FILE_COUNT} time=${ELAPSED_MS}ms offenses=${OFFENSE_COUNT}"
+
   # Corpus smoke test: run nitrocop + rubocop on a few cheap sentinel repos to
   # catch systemic regressions (file discovery, config, plugin loading, directives)
   # before they reach the full 1000-repo corpus oracle.
