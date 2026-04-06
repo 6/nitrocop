@@ -106,3 +106,23 @@ define_method "accept_type" do
   return @_accept_type ||= "text/html"
          ^^^^^^^^^^^^^ Naming/MemoizedInstanceVariableName: Memoized variable `@_accept_type` does not match method name `accept_type`.
 end
+def triggerable
+  trigger && @cached_triggerable ||= compute
+             ^^^^^^^^^^^^^^^^^^^^ Naming/MemoizedInstanceVariableName: Memoized variable `@cached_triggerable` does not match method name `triggerable`.
+end
+def site
+  (self.scheme || self.authority) && @cached_site ||= begin
+                                     ^^^^^^^^^^^^ Naming/MemoizedInstanceVariableName: Memoized variable `@cached_site` does not match method name `site`.
+    "computed"
+  end
+end
+def current_user
+  super || @other_user ||= compute
+           ^^^^^^^^^^^ Naming/MemoizedInstanceVariableName: Memoized variable `@other_user` does not match method name `current_user`.
+end
+def root
+  __skip__ = @cached_root ||= begin
+             ^^^^^^^^^^^^ Naming/MemoizedInstanceVariableName: Memoized variable `@cached_root` does not match method name `root`.
+    "computed"
+  end
+end

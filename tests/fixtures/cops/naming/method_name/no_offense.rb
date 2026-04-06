@@ -87,6 +87,11 @@ module Container
   end
 end
 
+# Safe navigation (&.) calls are csend nodes — RuboCop's on_send doesn't fire for them
+obj&.define_singleton_method(:fooBar) do
+  true
+end
+
 # The same exemption applies to singleton methods defined on another receiver
 module Outer
   class Item

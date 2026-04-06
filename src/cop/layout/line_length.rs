@@ -117,6 +117,19 @@ use crate::parse::source::SourceFile;
 ///    creating longer matches than our regex. Added general merge path
 ///    that merges adjacent URI matches through these chars, with `](`
 ///    (markdown link syntax) and `\` (escape sequences) as boundaries.
+///
+/// ## Corpus investigation (2026-04-06)
+///
+/// Resolved 6 FPs (10→4) and 3 FNs (7→4):
+/// 1. Escaped-URL filter (`\\/\\/`) too aggressive — the filter skipped
+///    URI matches whose tail started with `\\/\\/` (JSON-escaped slashes)
+///    or scheme-only matches followed by `\`. These are valid URI matches
+///    that Ruby's `URI.parse` accepts (e.g. `https:` is a valid URI).
+///    Removed both filters; the scheme match extends to end of line via
+///    word-boundary extension, producing the correct AllowURI exemption.
+/// 2. Offense fixture corrections — removed 3 test cases with incorrect
+///    line content (lines too short to trigger offenses), and fixed `^`
+///    marker positions and length annotations on remaining cases.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -530,16 +543,6 @@ fn merge_query_linked_uri_matches(line: &str, uri_regex: &regex::Regex) -> Vec<U
     let mut matches: Vec<UriMatch> = Vec::new();
 
     for current in uri_regex.find_iter(line) {
-        let text = &line[current.start()..current.end()];
-        if text
-            .split_once(':')
-            .is_some_and(|(_, tail)| tail.as_bytes().starts_with(br#"\\/\\/"#))
-        {
-            continue;
-        }
-        if text.ends_with(':') && !text.contains("://") && line[current.end()..].starts_with('\\') {
-            continue;
-        }
         if let Some(previous) = matches.last_mut() {
             let previous_text = &line[previous.start..previous.end];
             let separator = &line[previous.end..current.start()];

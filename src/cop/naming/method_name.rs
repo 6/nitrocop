@@ -90,6 +90,14 @@ use ruby_prism::Visit;
 /// returned false for `_` because after consuming the leading underscore it
 /// required a second character. Fixed by returning true when the name is
 /// exactly `_` (with optional method suffix stripped).
+///
+/// ## Variant divergence fix (2026-04-06)
+/// camelCase variant: FP=1, FN=0.
+/// The FP was `obj&.define_singleton_method(:cleanup_worktrees)` in
+/// parruda/swarm. RuboCop only has `on_send` (not `on_csend`), so it
+/// never processes safe-navigation (`&.`) calls. Our `check_call_node`
+/// processed all `CallNode`s regardless. Fixed by returning early from
+/// `check_call_node` when `call_operator_loc` is `&.`.
 pub struct MethodName;
 
 /// Bundles config values needed for method name checking.
@@ -322,6 +330,13 @@ fn check_call_node(
     cfg: &MethodNameConfig,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
+    // RuboCop only has on_send, not on_csend — skip safe navigation (&.) calls
+    if let Some(op) = call_node.call_operator_loc() {
+        if op.as_slice() == b"&." {
+            return;
+        }
+    }
+
     let method = call_node.name().as_slice();
     let method_str = std::str::from_utf8(method).unwrap_or("");
 

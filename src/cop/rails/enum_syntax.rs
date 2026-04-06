@@ -14,6 +14,10 @@ impl Cop for EnumSyntax {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*.rb", "**/lib/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[ASSOC_NODE, CALL_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE]
     }

@@ -153,7 +153,7 @@ jobs:
     needs: [cop-detect, build-linux]
     if: needs.cop-detect.outputs.has_cops == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

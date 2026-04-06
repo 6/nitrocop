@@ -29,6 +29,10 @@ impl Cop for I18nLazyLookup {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/controllers/**/*.rb"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,

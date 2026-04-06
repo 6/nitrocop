@@ -75,8 +75,8 @@ def test_generate_md_with_variants():
     }
     md = gen_corpus_md.generate_md(data, variant_by_cop)
     assert "Match rate (all variants)" in md
-    assert "### All Variants" in md
-    assert "All variants %" in md
+    assert "### All `EnforcedStyle` Variants" in md
+    assert "| Match % |" in md
     assert "Variant-only divergence" in md
     assert "Style/Foo (bar)" in md
 

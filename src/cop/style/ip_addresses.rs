@@ -390,6 +390,10 @@ impl Cop for IpAddresses {
         false
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/*.gemfile", "**/Gemfile", "**/gems.rb", "**/*.gemspec"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,

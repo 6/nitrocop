@@ -26,6 +26,11 @@ def fmt_pct(rate: float) -> str:
     return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
+def fmt_pct_precise(rate: float) -> str:
+    """Two-decimal match rate, floored: 0.99829 -> '99.82%'."""
+    return f"{math.floor(rate * 10000) / 100:.2f}%"
+
+
 def _sanitize_for_md(s: str) -> str:
     return "".join(
         repr(c)[1:-1] if ord(c) < 0x20 and c not in '\n\t' else c
@@ -110,9 +115,9 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     md.append(f"| Cops with exact match | {perfect_cops:,} |")
     md.append(f"| Cops with divergence | {diverging_cops_count:,} |")
     md.append(f"| Cops with no corpus data | {inactive_cops:,} |")
-    md.append(f"| **Match rate (default config)** | **{fmt_pct(overall_rate)}** |")
+    md.append(f"| **Match rate (default config)** | **{fmt_pct_precise(overall_rate)}** |")
     if variant_by_cop:
-        md.append(f"| **Match rate (all variants)** | **{fmt_pct(variant_overall_rate)}** |")
+        md.append(f"| **Match rate (all variants)** | **{fmt_pct_precise(variant_overall_rate)}** |")
     if repos_error > 0 or warning_repos:
         md.append(f"| Repos with errors | {repos_error} |")
     if warning_repos:
@@ -123,6 +128,10 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     # Department breakdown (default config)
     if by_department:
         md.append("## Department Breakdown")
+        md.append("")
+        md.append("### Default Config")
+        md.append("")
+        md.append("Results using each cop's default RuboCop configuration.")
         md.append("")
         md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
         md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
@@ -138,19 +147,32 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
 
     # Department breakdown (all variants)
     if by_department and variant_by_cop:
-        md.append("### All Variants")
+        md.append("### All `EnforcedStyle` Variants")
         md.append("")
-        md.append("| Department | Default matches | Variant matches | Variant FP | Variant FN | All variants % |")
-        md.append("|------------|----------------:|----------------:|-----------:|-----------:|---------------:|")
+        md.append("Results combining default config and every non-default `EnforcedStyle` option.")
+        md.append("")
+        md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
+        md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
         for d in by_department:
-            total = d["matches"] + d["fp"] + d["fn"]
             vd = variant_dept_stats.get(d["department"], {"matches": 0, "fp": 0, "fn": 0})
-            v_total = total + vd["matches"] + vd["fp"] + vd["fn"]
-            v_matches = d["matches"] + vd["matches"]
-            v_pct = fmt_pct(v_matches / v_total) if v_total > 0 else "N/A"
+            combined_matches = d["matches"] + vd["matches"]
+            combined_fp = d["fp"] + vd["fp"]
+            combined_fn = d["fn"] + vd["fn"]
+            combined_total = combined_matches + combined_fp + combined_fn
+            # Count cops diverging in variants but not in default
+            default_diverging_names = {c["cop"] for c in by_cop if c.get("diverging") and c["cop"].startswith(d["department"] + "/")}
+            variant_only_count = sum(
+                1 for cop_name, variants in variant_by_cop.items()
+                if cop_name.startswith(d["department"] + "/")
+                and cop_name not in default_diverging_names
+                and any(v["fp"] + v["fn"] > 0 for v in variants)
+            )
+            combined_diverging = d["diverging_cops"] + variant_only_count
+            combined_pct = fmt_pct(combined_matches / combined_total) if combined_total > 0 else "N/A"
             md.append(
-                f"| {d['department']} | {d['matches']:,} | "
-                f"{vd['matches']:,} | {vd['fp']:,} | {vd['fn']:,} | {v_pct} |"
+                f"| {d['department']} | {d['cops']:,} | "
+                f"{d['perfect_cops'] - variant_only_count:,} | {combined_diverging:,} | {d['inactive_cops']:,} | "
+                f"{combined_matches:,} | {combined_fp:,} | {combined_fn:,} | {combined_pct} |"
             )
         md.append("")
 

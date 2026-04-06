@@ -208,3 +208,23 @@ projects  = 3.times.map { |i| i }
 # Plain = followed by non-assignment line with = only inside a string
 rel  = '/test'
 expect(foo).to eq("test?name2=val2")
+
+# Setter calls with aligned trailing space after = (RHS values align)
+# RuboCop does not flag these because aligned_with_something? returns true
+cors_rule.allowed_origins =  foo
+cors_rule.allowed_methods =  bar
+cors_rule.max_age_in_seconds = baz
+
+# Aligned values where exact token matches across lines (e.g., 1 aligns with 1 in -1)
+FTO   =  1
+BTO   = -1
+FFIND =  2
+BFIND = -2
+
+# Explicit method call for []=  should not be flagged (not an operator)
+@flows.[]=(*args)
+
+# Aligned trailing space after == (RHS token matches on adjacent line)
+return { "json_class" => Float, "raw" => "Infinity" }  if self.infinite? ==  1
+return { "json_class" => Float, "raw" => "-Infinity" } if self.infinite? == -1
+return { "json_class" => Float, "raw" => "NaN" }       if self.nan?

@@ -2,6 +2,10 @@
 
 Fast Ruby linter in Rust targeting RuboCop compatibility. Uses Prism for parsing and rayon for parallelism.
 
+## Core Principle: 1:1 RuboCop Compatibility
+
+nitrocop is a **drop-in replacement** for RuboCop. Match RuboCop's exact output on every file — including edge-case quirks. The corpus oracle treats any deviation as a regression. When you must replicate a RuboCop quirk, document it in a `///` doc comment on the cop struct.
+
 ## Mental Model
 
 - A **cop** is one RuboCop-compatible rule implemented in Rust under `src/cop/`.
@@ -140,12 +144,14 @@ Use `check_cop.py` for aggregate regression checks after a fix:
 python3 scripts/check_cop.py Department/CopName
 python3 scripts/check_cop.py Department/CopName --verbose --rerun
 python3 scripts/verify_cop_locations.py Department/CopName
+python3 scripts/verify_cop_locations.py Department/CopName --style EnforcedStyle=never
 ```
 
 Important:
 
 - `investigate_cop.py` and `investigate_repo.py` auto-download the latest corpus artifacts. Do not manually download them first.
-- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation.
+- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation. Both support `--style` for variant checks.
+- When reproducing a corpus FP/FN locally, always test from the **PR branch** (with the agent's changes), not main. Testing from main shows pre-change behavior and will not reproduce the issue.
 - “file-drop noise” is not an excuse for FN gaps. Investigate the actual missed examples.
 - `check_cop.py --rerun` depends on the bundle under `bench/corpus/vendor/bundle/`. If needed:
 

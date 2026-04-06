@@ -40,3 +40,6 @@ def deprecated_task(name, new_name)
     warn "deprecated #{name}"
   end
 end
+
+desc "Run rake #{task} for each Solidus gem"
+                 ^^^^ Rake/Desc: Describe the task with `desc` method.

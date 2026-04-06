@@ -130,3 +130,73 @@ def test_exit_code_2_in_ci_when_all_skipped(tmp_path, capsys):
     mock_exit.assert_called()
     exit_code = mock_exit.call_args[0][0]
     assert exit_code == 2, f"Expected exit code 2 in CI, got {exit_code}"
+
+
+def test_run_nitrocop_on_repo_passes_config_override(tmp_path):
+    """When config_override is set, it is used instead of per-repo resolved config."""
+    corpus_dir = tmp_path / "corpus"
+    repo_dir = corpus_dir / "test_repo"
+    repo_dir.mkdir(parents=True)
+    (repo_dir / "app.rb").write_text("puts 'hello'\n")
+
+    # Create a fake binary that outputs no offenses
+    fake_bin = tmp_path / "fake_nitrocop"
+    fake_bin.write_text('#!/bin/sh\necho \'{"offenses":[]}\'\n')
+    fake_bin.chmod(0o755)
+
+    override_config = str(tmp_path / "override.yml")
+    Path(override_config).write_text("# override\n")
+
+    # Capture the command used by patching subprocess.run
+    import subprocess
+    cmds_seen = []
+    original_run = subprocess.run
+
+    def capture_run(cmd, **kwargs):
+        cmds_seen.append(cmd)
+        return original_run(cmd, **kwargs)
+
+    with patch("subprocess.run", side_effect=capture_run):
+        vcl.run_nitrocop_on_repo(
+            Path(fake_bin), corpus_dir, Path("/unused/config.yml"),
+            "test_repo", ["app.rb"], "Style/Foo",
+            config_override=override_config,
+        )
+
+    # The nitrocop command should use the override config
+    assert any(override_config in " ".join(str(a) for a in cmd) for cmd in cmds_seen), (
+        f"Expected override config '{override_config}' in command, got: {cmds_seen}"
+    )
+
+
+def test_run_nitrocop_on_repo_uses_resolved_config_without_override(tmp_path):
+    """Without config_override, the per-repo resolved config is used."""
+    corpus_dir = tmp_path / "corpus"
+    repo_dir = corpus_dir / "test_repo"
+    repo_dir.mkdir(parents=True)
+    (repo_dir / "app.rb").write_text("puts 'hello'\n")
+
+    fake_bin = tmp_path / "fake_nitrocop"
+    fake_bin.write_text('#!/bin/sh\necho \'{"offenses":[]}\'\n')
+    fake_bin.chmod(0o755)
+
+    import subprocess
+    cmds_seen = []
+    original_run = subprocess.run
+
+    def capture_run(cmd, **kwargs):
+        cmds_seen.append(cmd)
+        return original_run(cmd, **kwargs)
+
+    # Mock resolve_repo_config to return a known path
+    resolved_path = "/resolved/config.yml"
+    with patch("subprocess.run", side_effect=capture_run):
+        with patch("run_nitrocop.resolve_repo_config", return_value=resolved_path):
+            vcl.run_nitrocop_on_repo(
+                Path(fake_bin), corpus_dir, Path("/unused/config.yml"),
+                "test_repo", ["app.rb"], "Style/Foo",
+            )
+
+    assert any(resolved_path in " ".join(str(a) for a in cmd) for cmd in cmds_seen), (
+        f"Expected resolved config '{resolved_path}' in command, got: {cmds_seen}"
+    )

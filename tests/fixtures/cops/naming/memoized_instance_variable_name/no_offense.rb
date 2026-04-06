@@ -216,3 +216,27 @@ def self.included(base)
     @title_field ||= find_field(@model)
   end
 end
+
+# && guard with matching ||= (Parser's children.last on `and` returns right operand)
+def triggerable
+  trigger && @triggerable ||= compute
+end
+
+# complex && guard with begin block and matching ivar
+def site
+  (self.scheme || self.authority) && @site ||= begin
+    "computed"
+  end
+end
+
+# || guard with super, matching ivar (Parser's children.last on `or` returns right operand)
+def current_user
+  super || @current_user ||= compute
+end
+
+# local variable assignment wrapping ||= with matching ivar
+def root
+  __skip__ = @root ||= begin
+    "computed"
+  end
+end

@@ -142,6 +142,10 @@ impl Cop for PredicatePrefix {
         "Naming/PredicatePrefix"
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["spec/**/*"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, DEF_NODE, SYMBOL_NODE]
     }
