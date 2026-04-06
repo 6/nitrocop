@@ -16,6 +16,19 @@ use crate::parse::source::SourceFile;
 /// name matches a trait defined in the enclosing `factory`. Fixed by collecting
 /// trait names from the factory body and passing them through when recursing
 /// into nested trait blocks, rather than processing trait nodes independently.
+///
+/// Two additional fixes for explicit style:
+/// 1. Block argument FN: `password_confirmation(&:password)` was not flagged
+///    because `call.block().is_some()` returned true for `BlockArgumentNode`.
+///    RuboCop's `implicit_association?` matcher uses `(send nil? ...)` which
+///    only matches `send` nodes — in RuboCop AST, `foo do ... end` is a `block`
+///    node (not `send`), but `foo(&:bar)` IS a `send` node. In Prism both are
+///    CallNodes, so we distinguish by checking for `BlockNode` specifically.
+/// 2. Nested factory FP: `premium` inside `factory :child` nested under
+///    `factory :parent` was falsely flagged when `:premium` is a trait in the
+///    parent. RuboCop's `trait_factory_node` finds the OUTERMOST enclosing
+///    factory and collects trait names from it. Fixed by collecting trait names
+///    from all enclosing factory blocks via parse tree traversal.
 pub struct AssociationStyle;
 
 /// Ruby keywords that cannot be implicit associations.
@@ -174,7 +187,18 @@ impl Cop for AssociationStyle {
             }
 
             // Collect all trait names defined in this factory (before moving body)
-            let trait_names = collect_trait_names(&body);
+            let mut trait_names = collect_trait_names(&body);
+
+            // RuboCop uses trait_factory_node which finds the OUTERMOST enclosing
+            // factory block, then collects trait names from it. For nested factories
+            // like `factory :company do; trait :premium; factory :child do; premium; end; end`,
+            // the inner factory inherits trait names from the outer. Replicate this
+            // by collecting trait names from all enclosing factory blocks.
+            let my_start = call.location().start_offset();
+            let my_end = call.location().end_offset();
+            let enclosing_trait_names =
+                collect_enclosing_factory_trait_names(_parse_result, my_start, my_end);
+            trait_names.extend(enclosing_trait_names);
 
             let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
                 stmts.body().iter().collect()
@@ -309,6 +333,50 @@ fn has_keyword_arg(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
+/// Collect trait names from all factory blocks that enclose the given source range.
+/// This replicates RuboCop's trait_factory_node behavior, which finds the outermost
+/// enclosing factory and collects trait names from it.
+fn collect_enclosing_factory_trait_names(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    my_start: usize,
+    my_end: usize,
+) -> Vec<String> {
+    struct EnclosingFactoryFinder {
+        my_start: usize,
+        my_end: usize,
+        trait_names: Vec<String>,
+    }
+
+    impl<'pr> Visit<'pr> for EnclosingFactoryFinder {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if method_dispatch_predicates::is_command(node, b"factory") {
+                let start = node.location().start_offset();
+                let end = node.location().end_offset();
+                // If this factory strictly CONTAINS our factory
+                if start < self.my_start && end > self.my_end {
+                    if let Some(block) = node.block() {
+                        if let Some(block_node) = block.as_block_node() {
+                            if let Some(body) = block_node.body() {
+                                let names = collect_trait_names(&body);
+                                self.trait_names.extend(names);
+                            }
+                        }
+                    }
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+
+    let mut finder = EnclosingFactoryFinder {
+        my_start,
+        my_end,
+        trait_names: Vec::new(),
+    };
+    finder.visit(&parse_result.node());
+    finder.trait_names
+}
+
 /// Collect all trait names defined within a factory body (recursively).
 fn collect_trait_names(body: &ruby_prism::Node<'_>) -> Vec<String> {
     struct TraitCollector {
@@ -362,8 +430,15 @@ fn is_implicit_association_with_traits(
         return false;
     }
 
-    if call.block().is_some() {
-        return false;
+    // Only exclude calls with do/end or {} blocks (BlockNode), not block
+    // arguments like &:password (BlockArgumentNode). RuboCop's implicit_association?
+    // matcher only matches `send` nodes; in RuboCop AST, `foo do ... end` is a
+    // `block` node (not a `send`), so it never matches. In Prism, both are CallNodes
+    // but we can distinguish via block type.
+    if let Some(block) = call.block() {
+        if block.as_block_node().is_some() {
+            return false;
+        }
     }
 
     true

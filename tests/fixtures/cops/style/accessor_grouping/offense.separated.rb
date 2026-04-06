@@ -62,3 +62,22 @@ module MyMod
   attr_reader :x, :y
   ^^^^^^^^^^^^^^^^^^ Style/AccessorGrouping: Use one attribute per `attr_reader`.
 end
+
+# Multi-arg accessor after access modifier with arguments (public :method_name)
+# RuboCop treats `public :foo` as an access modifier, making the accessor groupable
+class AfterPublicWithArg
+  public :method1
+  public :method2
+  attr_accessor :rc_conf, :rc_conf_local
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/AccessorGrouping: Use one attribute per `attr_accessor`.
+end
+
+# Multi-arg accessor as single statement inside refine block (single-block module body)
+# Parser gem quirk: when module body is a single block, each_child_node(:send) finds
+# send children of the block, including the inner accessor
+module RunnerExt
+  refine Foo do
+    attr_reader :name, :traits, :overrides
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/AccessorGrouping: Use one attribute per `attr_reader`.
+  end
+end
