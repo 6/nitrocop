@@ -110,6 +110,8 @@ def main():
                         help="Corpus repo IDs to benchmark (cloned if needed)")
     parser.add_argument("--timeout", type=int, default=120,
                         help="Per-repo timeout in seconds (default: 120)")
+    parser.add_argument("--warn-threshold", type=int, default=20,
+                        help="Emit ::warning:: if any repo exceeds this many seconds (default: 20)")
     args = parser.parse_args()
 
     binary = str(Path(args.binary).resolve())
@@ -152,8 +154,15 @@ def main():
         result["file_count"] = file_count
         results.append(result)
 
+        elapsed_s = result["elapsed_ms"] / 1000
         if result["timed_out"]:
             print(f"perf-smoke: {label} files={file_count} time={result['elapsed_ms']}ms TIMEOUT")
+            print(f"::warning::perf-smoke: {label} TIMED OUT after {args.timeout}s")
+        elif elapsed_s > args.warn_threshold:
+            print(f"perf-smoke: {label} files={file_count} time={result['elapsed_ms']}ms "
+                  f"offenses={result['offense_count']}")
+            print(f"::warning::perf-smoke: {label} took {elapsed_s:.1f}s "
+                  f"(threshold: {args.warn_threshold}s)")
         else:
             print(f"perf-smoke: {label} files={file_count} time={result['elapsed_ms']}ms "
                   f"offenses={result['offense_count']}")
