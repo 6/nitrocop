@@ -118,6 +118,13 @@ use crate::parse::source::SourceFile;
 ///     still filtered out. Fix: reset `expression_depth` while visiting a
 ///     class-constructor block body so its statements are checked like a normal
 ///     class/module body (2026-04-03).
+///
+/// 13. The `only_before` variant was only checking `has_blank_before` and never
+///     checked `has_blank_after`. RuboCop's `only_before` style flags a blank
+///     line AFTER the modifier (telling users to remove it), not just the one
+///     before. Fix: added `has_blank_after` check to the `only_before` branch,
+///     reporting "Remove a blank line after `{modifier}`." when a blank line
+///     follows the modifier (2026-04-06).
 pub struct EmptyLinesAroundAccessModifier;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -792,6 +799,27 @@ impl Cop for EmptyLinesAroundAccessModifier {
                         }
                         diagnostics.push(diag);
                     }
+                    if has_blank_after {
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            col,
+                            format!("Remove a blank line after `{modifier_str}`."),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            if let Some(off) = source.line_col_to_offset(line + 1, 0) {
+                                corr.push(crate::correction::Correction {
+                                    start: off,
+                                    end: off,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                        }
+                        diagnostics.push(diag);
+                    }
                 }
                 _ => {}
             }
@@ -803,6 +831,7 @@ impl Cop for EmptyLinesAroundAccessModifier {
 mod tests {
     use super::*;
     use crate::testutil::run_cop_full;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         EmptyLinesAroundAccessModifier,
@@ -812,6 +841,50 @@ mod tests {
         EmptyLinesAroundAccessModifier,
         "cops/layout/empty_lines_around_access_modifier"
     );
+
+    #[test]
+    fn flags_only_before_style_with_blank_line_after() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Test\n  def bar; end\n\n  private\n\n  def baz; end\nend\n",
+            config,
+        );
+        // only_before style: blank line AFTER is an offense (should be removed)
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 4);
+        assert!(diags[0].message.contains("Remove a blank line after"));
+    }
+
+    #[test]
+    fn flags_only_before_style_missing_blank_before() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Test\n  def bar; end\n  private\n  def baz; end\nend\n",
+            config,
+        );
+        // only_before style: missing blank line BEFORE is an offense
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 3);
+        assert!(diags[0].message.contains("Keep a blank line before"));
+    }
 
     #[test]
     fn flags_bare_modifier_inside_receiverful_block_in_class_scope() {
