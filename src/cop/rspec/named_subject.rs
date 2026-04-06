@@ -63,6 +63,27 @@ use ruby_prism::Visit;
 /// (e.g., `if subject.is_a?(Foo)`), and `subject` in before/around hooks
 /// within shared_context. All patterns confirmed handled by the
 /// `is_shared_group_call` fix. Added 3 inline tests covering these patterns.
+///
+/// ## Variant divergence fix (named_only style, 2026-04-06)
+///
+/// Fixed FP=2 in `named_only` style for ruby-concurrency/concurrent-ruby.
+///
+/// Root cause: When visiting a CallNode with a block (e.g., `describe '#name' do
+/// ... end`), the arguments to the call were being visited along with the block
+/// body. This caused `subject { super().name }` inside the describe block's
+/// body to be found, and its `super()` call was incorrectly visited in the
+/// parent scope, polluting the subject_named_stack.
+///
+/// More critically, `subject(:actor, &subject_definition)` was treated as a
+/// named subject definition even though `subject_definition` is a block argument,
+/// not a block body. RuboCop's `subject_definition_is_named?` uses `arguments?`
+/// which returns true for the symbol `:actor` argument.
+///
+/// Fix: When visiting a CallNode with a block, only visit the block's body,
+/// not the call's arguments. Arguments to scoped constructs like `describe`
+/// are metadata (strings, symbols), not executable code. This prevents subject
+/// definitions that are arguments from being incorrectly recognized as subject
+/// definitions in the current scope.
 pub struct NamedSubject;
 
 /// EnforcedStyle:
@@ -276,7 +297,14 @@ impl<'pr> Visit<'pr> for BareSubjectFinder<'_> {
                 let subject_state = find_subject_in_block(&block_node);
                 self.subject_named_stack.push(subject_state);
 
-                ruby_prism::visit_call_node(self, node);
+                // If this CallNode has a block (e.g., `describe 'foo' do ... end`),
+                // the arguments to this call are NOT executable code in the current
+                // scope — they're metadata for the scoped construct. We should only
+                // visit the block body, not the arguments. This prevents subject
+                // calls that are arguments (e.g., `describe 'name', subject { ... }`)
+                // from being incorrectly found via `find_subject_in_block` at the
+                // wrong scope level.
+                ruby_prism::visit_block_node(self, &block_node);
 
                 self.subject_named_stack.pop();
                 return;
@@ -543,6 +571,40 @@ mod tests {
             diags.len(),
             1,
             "subject inside shared_context before hook should be flagged, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn named_only_with_nested_describe_and_unnamed_subject() {
+        // When an unnamed subject is defined in an outer describe,
+        // it should not affect the named_only detection in inner describes.
+        // This was the root cause of FP=2 in concurrent-ruby.
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("named_only".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // The outer describe has an unnamed subject. The inner describe
+        // also has an unnamed subject (subject { super().reference }).
+        // The it block inside the inner describe uses bare subject.
+        // Since the nearest subject is unnamed, named_only should NOT flag it.
+        let source = b"describe 'outer' do\n\
+            \x20  subject { described_class.new }\n\
+            \n\
+            \x20  describe 'inner' do\n\
+            \x20    subject { super().reference }\n\
+            \x20    it { is_expected.to eq subject }\n\
+            \x20  end\n\
+            \x20end\n";
+        let diags = crate::testutil::run_cop_full_with_config(&NamedSubject, source, config);
+        assert!(
+            diags.is_empty(),
+            "named_only should not flag when nearest subject is unnamed, got: {diags:?}"
         );
     }
 }
