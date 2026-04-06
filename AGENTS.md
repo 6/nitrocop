@@ -151,6 +151,7 @@ Important:
 
 - `investigate_cop.py` and `investigate_repo.py` auto-download the latest corpus artifacts. Do not manually download them first.
 - `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation. Both support `--style` for variant checks.
+- When reproducing a corpus FP/FN locally, always test from the **PR branch** (with the agent's changes), not main. Testing from main shows pre-change behavior and will not reproduce the issue.
 - “file-drop noise” is not an excuse for FN gaps. Investigate the actual missed examples.
 - `check_cop.py --rerun` depends on the bundle under `bench/corpus/vendor/bundle/`. If needed:
 
