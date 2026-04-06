@@ -109,6 +109,32 @@ use crate::parse::source::SourceFile;
 /// Fix: `is_valid_snake_case` and `is_valid_non_integer` now accept `is_bare_name`
 /// and only apply the all-digits exemption for truly bare names (locals, symbols,
 /// methods), not for sigil-stripped variables.
+///
+/// ## Variant style fix (2026-04-06) — remaining FN in non_integer and snake_case
+///
+/// After the sigil fix, remaining divergence: non_integer 61 FP + 3 FN,
+/// snake_case 0 FP + 1 FN.
+///
+/// **FN fix 1: Nested multi-assignment targets.** `(a,(b1,b2)),c = [...]`
+/// creates `MultiTargetNode` inside `MultiWriteNode`. The previous code only
+/// processed immediate targets of `MultiWriteNode`, not nested
+/// `MultiTargetNode` children. `check_target_variable` now recursively
+/// descends into `MultiTargetNode` to find all target variables. This fixes
+/// 2 FN in jruby test_assignment.rb under non_integer.
+///
+/// **FN fix 2: Hash pattern keys with explicit values.** In `in { md5: String }`,
+/// Parser gem creates `:sym` for the key, so RuboCop's `on_sym` fires. In
+/// `in { k_1: }` (bare binding), Parser creates `match_var`, so `on_sym`
+/// doesn't fire. The previous `visit_hash_pattern_node` skipped ALL keys.
+/// Now it only skips keys whose value is `ImplicitNode` (bare bindings) and
+/// visits keys with explicit values. This fixes 1 FN in danbooru under both
+/// non_integer and snake_case.
+///
+/// **Remaining 61 FP (non_integer):** All from jruby files where
+/// `Prism::Translation::Parser` crashes on non-UTF-8 encodings
+/// (`US-ASCII`, `windows-1252`) or unsupported pin operators (`^@a`,
+/// `^@@var`). RuboCop reports 0 offenses (parse failure), nitrocop/Prism
+/// parses successfully → FP. Not fixable at the cop level.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -460,16 +486,25 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
     }
 
     fn visit_hash_pattern_node(&mut self, node: &ruby_prism::HashPatternNode<'pr>) {
-        // In pattern matching (`value => k_1:, k_2:`), Prism creates SymbolNode
-        // keys inside HashPatternNode. Parser gem creates match_var nodes instead,
-        // so RuboCop's on_sym never fires for pattern matching hash keys.
-        // Skip recursing into HashPatternNode to avoid false positives on symbols.
-        // We still need to visit the value side of assocs (which may contain
-        // other patterns with rescue/symbol nodes), but NOT the key symbols.
+        // In pattern matching, Prism creates SymbolNode keys inside HashPatternNode.
+        // Parser gem behavior differs based on whether the key has an explicit value:
+        //
+        // - `in { k_1: }` (bare binding): Parser creates match_var, NOT sym.
+        //   RuboCop's on_sym never fires. In Prism, the value is an ImplicitNode.
+        //   → Skip the key symbol.
+        //
+        // - `in { md5: String }` (key with value): Parser creates sym(:md5).
+        //   RuboCop's on_sym DOES fire. In Prism, the value is NOT ImplicitNode.
+        //   → Visit the key symbol.
         for assoc in node.elements().iter() {
             if let Some(assoc_node) = assoc.as_assoc_node() {
-                // Skip the key (SymbolNode in pattern matching) — visit only the value.
                 let value = assoc_node.value();
+                // If the value is ImplicitNode, this is a bare binding (match_var
+                // in Parser) — skip the key. Otherwise, the key is a real symbol.
+                if value.as_implicit_node().is_none() {
+                    let key = assoc_node.key();
+                    self.visit(&key);
+                }
                 self.visit(&value);
             } else if let Some(splat) = assoc.as_assoc_splat_node() {
                 // **rest pattern — visit the expression
@@ -486,9 +521,10 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
 }
 
 impl VariableNumber {
-    /// Check a target variable node from MultiWriteNode or ForNode.
+    /// Check a target variable node from MultiWriteNode, MultiTargetNode, or ForNode.
     /// Handles LocalVariableTargetNode, InstanceVariableTargetNode,
-    /// ClassVariableTargetNode, and GlobalVariableTargetNode.
+    /// ClassVariableTargetNode, GlobalVariableTargetNode, and recursively
+    /// handles nested MultiTargetNode (e.g., `(a,(b1,b2)),c = ...`).
     fn check_target_variable(
         &self,
         source: &SourceFile,
@@ -498,6 +534,46 @@ impl VariableNumber {
         allowed_pats: &[String],
         diagnostics: &mut Vec<Diagnostic>,
     ) {
+        // Nested destructuring: (a,(b1,b2)) creates a MultiTargetNode
+        // containing further target nodes. Recurse into it.
+        if let Some(mt) = target.as_multi_target_node() {
+            for child in mt.lefts().iter() {
+                self.check_target_variable(
+                    source,
+                    &child,
+                    enforced_style,
+                    allowed_ids,
+                    allowed_pats,
+                    diagnostics,
+                );
+            }
+            if let Some(rest) = mt.rest() {
+                if let Some(splat) = rest.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        self.check_target_variable(
+                            source,
+                            &expr,
+                            enforced_style,
+                            allowed_ids,
+                            allowed_pats,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            for child in mt.rights().iter() {
+                self.check_target_variable(
+                    source,
+                    &child,
+                    enforced_style,
+                    allowed_ids,
+                    allowed_pats,
+                    diagnostics,
+                );
+            }
+            return;
+        }
+
         let (name_bytes, loc) = if let Some(n) = target.as_local_variable_target_node() {
             (n.name().as_slice(), n.location())
         } else if let Some(n) = target.as_instance_variable_target_node() {
@@ -869,5 +945,55 @@ mod tests {
             non_integer_config(),
         );
         assert_eq!(diags.len(), 1, "expected foo_1 flagged under non_integer");
+    }
+
+    #[test]
+    fn nested_multi_assignment_under_non_integer() {
+        // Nested multi-assignment: (a,(b1,b2)),c = [[1,2],3]
+        // Under non_integer, b1 and b2 end with digits → offense.
+        // Prism creates MultiTargetNode inside MultiWriteNode for nested patterns.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"(a,(b1,b2)),c = [[1,2],3]\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            2,
+            "expected b1 and b2 flagged in nested multi-assignment under non_integer"
+        );
+    }
+
+    #[test]
+    fn hash_pattern_key_with_value_is_checked() {
+        // In `in { md5: String }`, the key :md5 is a real symbol (not a binding).
+        // Parser gem creates :sym for it, so RuboCop's on_sym fires.
+        // Under non_integer, md5 ends with digits → offense.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"case obj\nin { md5: String }\n  nil\nend\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected :md5 flagged in hash pattern under non_integer"
+        );
+    }
+
+    #[test]
+    fn hash_pattern_bare_binding_not_checked() {
+        // In `in { k_1: }`, Parser gem creates match_var (not sym),
+        // so RuboCop's on_sym never fires. Nitrocop should not flag it.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"case obj\nin { k_1: }\n  k_1\nend\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            0,
+            "expected bare binding k_1: to NOT be flagged in hash pattern"
+        );
     }
 }
