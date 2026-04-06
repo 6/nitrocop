@@ -40,6 +40,22 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: re-add `arg_list.len() > 1` guard for all style branches. Only flag when
 /// the scope symbol is the sole argument.
+///
+/// ## Variant style FP fix (2026-04-06)
+///
+/// When `EnforcedStyle` is `each` or `example`, nitrocop incorrectly flagged scopes
+/// like `:create`, `:build`, `:context`, `:suite` as "wrong style". For example,
+/// `before(:create)` was flagged as "Use `before(:each)` instead of `before(:create)`"
+/// when `EnforcedStyle: each`.
+///
+/// Root cause: the wrong-style check compared the scope symbol against the enforced
+/// style without first verifying the scope is `:each` or `:example`. RuboCop's
+/// `scoped_hook` pattern is `(any_block $(send _ #Hooks.all (sym ${:each :example})) ...)`,
+/// which ONLY matches `:each` and `:example` — other scope symbols like `:create`,
+/// `:build`, `:factory`, etc. are not in scope for this cop.
+///
+/// Fix: added early return in `each`/`example` style branches when the symbol is
+/// neither `:each` nor `:example`. These scopes are simply ignored, matching RuboCop.
 pub struct HookArgument;
 
 /// Hook methods to check.
@@ -135,6 +151,13 @@ impl Cop for HookArgument {
             // Check for wrong style: e.g., enforced "each" but got :example
             if let Some(sym) = arg_list[0].as_symbol_node() {
                 let val = sym.unescaped();
+
+                // RuboCop's scoped_hook only matches :each and :example.
+                // Other scope symbols (:create, :build, :suite, etc.) are not flagged.
+                if val != b"each" && val != b"example" {
+                    return;
+                }
+
                 if NON_EXAMPLE_SCOPES.contains(&val) {
                     return; // :suite/:context/:all are fine
                 }
@@ -227,5 +250,83 @@ mod tests {
         let source = b"before(:each) do\n  setup\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&HookArgument, source, config);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn each_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HookArgument,
+            include_bytes!("../../../tests/fixtures/cops/rspec/hook_argument/each_offense.rb"),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("each".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn each_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HookArgument,
+            include_bytes!("../../../tests/fixtures/cops/rspec/hook_argument/each_no_offense.rb"),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("each".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn example_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HookArgument,
+            include_bytes!("../../../tests/fixtures/cops/rspec/hook_argument/example_offense.rb"),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("example".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn example_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HookArgument,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/hook_argument/example_no_offense.rb"
+            ),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("example".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
     }
 }
