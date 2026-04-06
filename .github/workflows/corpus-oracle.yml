@@ -258,14 +258,10 @@ jobs:
               2>"$WORKSPACE/results/nitrocop/${REPO_ID}.err" || rc=$?
 
             if [ "$rc" -eq 124 ]; then
-              echo "::warning::nitrocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
-            elif [ "$rc" -ne 0 ] && [ -f "$WORKSPACE/results/nitrocop/${REPO_ID}.json" ]; then
-              # run_nitrocop.py handles timeouts internally (exits 1, writes {}).
-              # Detect this by checking for an empty/minimal result file.
-              NC_SIZE=$(wc -c < "$WORKSPACE/results/nitrocop/${REPO_ID}.json" 2>/dev/null || echo 0)
-              if [ "$NC_SIZE" -lt 10 ]; then
-                echo "::warning::nitrocop produced no output for ${REPO_ID} (exit $rc, ${NC_SIZE} bytes) — likely timeout or crash"
-              fi
+              echo "::error::nitrocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
+            elif [ "$rc" -ne 0 ]; then
+              echo "::warning::nitrocop exited with code ${rc} for ${REPO_ID}"
+              cat "$WORKSPACE/results/nitrocop/${REPO_ID}.err" 2>/dev/null || true
             fi
 
             # Diagnostic: log offense count for first repo
@@ -297,7 +293,7 @@ jobs:
                 > "$WORKSPACE/results/rubocop/${REPO_ID}.json" 2>"$WORKSPACE/results/rubocop/${REPO_ID}.err" || rc=$?
 
               if [ "$rc" -eq 124 ]; then
-                echo "::warning::rubocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+                echo "::error::rubocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
               fi
             fi
 
