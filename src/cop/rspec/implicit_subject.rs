@@ -52,10 +52,10 @@ fn is_explicit_unnamed_subject(node: &ruby_prism::CallNode<'_>) -> bool {
     // Matches expect(subject) where expect has no receiver and subject has no receiver
     node.name().as_slice() == b"expect"
         && node.receiver().is_none()
-        && node.arguments().map_or(false, |args| {
+        && node.arguments().is_some_and(|args| {
             args.arguments().len() == 1
-                && args.arguments().first().map_or(false, |arg| {
-                    arg.as_call_node().map_or(false, |inner| {
+                && args.arguments().first().is_some_and(|arg| {
+                    arg.as_call_node().is_some_and(|inner| {
                         inner.name().as_slice() == b"subject" && inner.receiver().is_none()
                     })
                 })
