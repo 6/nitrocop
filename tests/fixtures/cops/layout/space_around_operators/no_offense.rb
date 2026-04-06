@@ -214,3 +214,17 @@ expect(foo).to eq("test?name2=val2")
 cors_rule.allowed_origins =  foo
 cors_rule.allowed_methods =  bar
 cors_rule.max_age_in_seconds = baz
+
+# Aligned values where exact token matches across lines (e.g., 1 aligns with 1 in -1)
+FTO   =  1
+BTO   = -1
+FFIND =  2
+BFIND = -2
+
+# Explicit method call for []=  should not be flagged (not an operator)
+@flows.[]=(*args)
+
+# Aligned trailing space after == (RHS token matches on adjacent line)
+return { "json_class" => Float, "raw" => "Infinity" }  if self.infinite? ==  1
+return { "json_class" => Float, "raw" => "-Infinity" } if self.infinite? == -1
+return { "json_class" => Float, "raw" => "NaN" }       if self.nan?
