@@ -3,6 +3,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Verifies that method definitions use the correct parentheses style.
+///
+/// For `require_no_parentheses_except_multiline`: only requires parentheses when
+/// method definition arguments span multiple lines. Single-line arguments without
+/// parentheses are accepted (per RuboCop behavior where `args.multiline?` determines
+/// whether parentheses are required).
 pub struct MethodDefParentheses;
 
 impl Cop for MethodDefParentheses {
@@ -49,6 +55,18 @@ impl Cop for MethodDefParentheses {
         }
 
         let has_parens = def_node.lparen_loc().is_some();
+
+        // For require_no_parentheses_except_multiline: only require parens if args span multiple lines
+        if enforced_style == "require_no_parentheses_except_multiline" && !has_parens {
+            let params = def_node.parameters().unwrap();
+            let loc = params.location();
+            let is_multiline = source
+                .byte_slice(loc.start_offset(), loc.end_offset(), "")
+                .contains('\n');
+            if !is_multiline {
+                return;
+            }
+        }
 
         match enforced_style {
             "require_parentheses" | "require_no_parentheses_except_multiline" if !has_parens => {
