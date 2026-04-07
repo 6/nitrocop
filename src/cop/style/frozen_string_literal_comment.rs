@@ -22,6 +22,11 @@ use crate::parse::source::SourceFile;
 /// first code token), matching RuboCop's behavior. Previously, nitrocop scanned ALL lines in the
 /// file, causing 519 false positives where `frozen_string_literal` comments appearing AFTER code
 /// were incorrectly flagged. RuboCop only considers leading comments for the `never` style.
+///
+/// Additionally, the `never` style now correctly flags Emacs-style combined encoding+frozen_string_literal
+/// comments (e.g., `# -*- encoding: utf-8; frozen_string_literal: true -*-`) as unnecessary. Previously,
+/// when such a comment was detected in the encoding comment handler, it would return early without adding
+/// an offense for the `never` case, causing false negatives against RuboCop.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
@@ -106,6 +111,13 @@ impl Cop for FrozenStringLiteralComment {
                         idx + 1,
                         0,
                         "Frozen string literal comment must be set to `true`.".to_string(),
+                    ));
+                } else if enforced_style == "never" {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        idx + 1,
+                        0,
+                        "Unnecessary frozen string literal comment.".to_string(),
                     ));
                 }
                 return;
@@ -1136,6 +1148,32 @@ mod tests {
             diags.is_empty(),
             "Should not flag frozen_string_literal after code with 'never' style"
         );
+    }
+
+    #[test]
+    fn emacs_combined_frozen_never_style() {
+        // Emacs-style combined encoding + frozen_string_literal should be flagged
+        // as unnecessary with 'never' style (FN fix).
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("never".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# -*- encoding: utf-8; frozen_string_literal: true -*-\nputs 'hello'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag Emacs-style frozen_string_literal with never style"
+        );
+        assert!(diags[0].message.contains("Unnecessary"));
     }
 
     #[test]
