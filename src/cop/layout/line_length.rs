@@ -133,13 +133,14 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Fix (2026-04-07)
 ///
-/// `__END__` marker skips all subsequent lines unconditionally in RuboCop
-/// only when it appears on line 1 (making the rest of the file data).
-/// When `__END__` appears on a later line, RuboCop still checks lines
-/// after it as code. The original nitrocop code skipped all lines after
-/// `__END__` regardless of position, causing FNs on files that have
-/// `__END__` on line 1 but valid long lines in the data section. Changed
-/// condition from `if line == b"__END__"` to `if line == b"__END__" && i + 1 > 1`.
+/// RuboCop uses token boundaries to decide which lines to check.
+/// When `__END__` appears on line 2+, the last parser token is before
+/// `__END__`, so RuboCop skips all subsequent data lines. When `__END__`
+/// is on line 1, there are no tokens at all, so RuboCop falls back to
+/// checking ALL lines (including the data section). The original nitrocop
+/// code skipped all lines after `__END__` regardless of position, causing
+/// FNs for files with `__END__` on line 1 that had long data-section lines.
+/// Fixed by gating the skip on `i > 0`.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -214,10 +215,9 @@ fn check_line_lengths(
             continue;
         }
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        // RuboCop skips lines after __END__ only when __END__ is NOT on line 1.
-        // When __END__ is on line 1, RuboCop still checks subsequent lines
-        // (the file is treated as having no code section, only data).
-        if line == b"__END__" && i + 1 > 1 {
+        // RuboCop skips data lines after __END__ only when it appears on
+        // line 2+. When __END__ is on line 1 (no tokens), all lines are checked.
+        if line == b"__END__" && i > 0 {
             after_end_marker = true;
             continue;
         }
