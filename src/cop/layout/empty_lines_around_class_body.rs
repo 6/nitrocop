@@ -1,3 +1,4 @@
+use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{CLASS_NODE, SINGLETON_CLASS_NODE};
 use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
@@ -17,6 +18,27 @@ use crate::parse::source::SourceFile;
 /// using `superclass.location().end_offset()` as the keyword offset when
 /// a superclass is present, so the utility correctly identifies the first
 /// body line after the superclass.
+///
+/// Investigation: The `empty_lines_except_namespace` and `empty_lines_special`
+/// styles were not implemented - they fell through to `no_empty_lines` behavior,
+/// causing massive FP/FN divergence. Fixed by implementing proper branching:
+/// - `empty_lines_except_namespace`: uses `no_empty_lines` for namespace bodies
+///   (single class/module child), `empty_lines` otherwise
+/// - `empty_lines_special`: uses `no_empty_lines` for namespace bodies;
+///   at beginning, uses `empty_lines` only if first child requires it
+///   (def/class/module/public/private/protected), else `no_empty_lines`;
+///   always uses `empty_lines` at end
+///
+/// Investigation: The `empty_lines_special` style was missing the "deferred"
+/// empty line check. When the first child doesn't require an empty line
+/// (e.g., `include`, constant) but a subsequent child does (def/class/module),
+/// RuboCop checks for a blank line before that subsequent child and reports
+/// "Empty line missing before first <type> definition." Added
+/// `check_deferred_empty_line` and `first_empty_line_required_child_line`
+/// functions to implement this behavior. Also added inline tests for the
+/// `empty_lines_special` variant covering: def-first-child (requires blanks
+/// at both ends), include-first-child (deferred check + end check), and
+/// namespace (no_empty_lines).
 pub struct EmptyLinesAroundClassBody;
 
 impl Cop for EmptyLinesAroundClassBody {
@@ -42,7 +64,7 @@ impl Cop for EmptyLinesAroundClassBody {
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
-        let (kw_offset, end_offset) = if let Some(class_node) = node.as_class_node() {
+        let (kw_offset, end_offset, body) = if let Some(class_node) = node.as_class_node() {
             // For multiline class declarations (class Foo <\n  Bar), use the
             // superclass end line so the utility correctly identifies the body start.
             let kw = if let Some(superclass) = class_node.superclass() {
@@ -50,11 +72,16 @@ impl Cop for EmptyLinesAroundClassBody {
             } else {
                 class_node.class_keyword_loc().start_offset()
             };
-            (kw, class_node.end_keyword_loc().start_offset())
+            (
+                kw,
+                class_node.end_keyword_loc().start_offset(),
+                class_node.body(),
+            )
         } else if let Some(sclass_node) = node.as_singleton_class_node() {
             (
                 sclass_node.class_keyword_loc().start_offset(),
                 sclass_node.end_keyword_loc().start_offset(),
+                sclass_node.body(),
             )
         } else {
             return;
@@ -121,6 +148,80 @@ impl Cop for EmptyLinesAroundClassBody {
                 );
                 diagnostics.extend(diags);
             }
+            "empty_lines_except_namespace" => {
+                // Namespace (single class/module child) -> no_empty_lines
+                // Otherwise -> empty_lines
+                if is_namespace_body(&body) {
+                    diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
+                        self.name(),
+                        source,
+                        kw_offset,
+                        end_offset,
+                        "class",
+                        corrections,
+                    ));
+                } else {
+                    diagnostics.extend(
+                        util::check_missing_empty_lines_around_body_with_corrections(
+                            self.name(),
+                            source,
+                            kw_offset,
+                            end_offset,
+                            "class",
+                            corrections,
+                        ),
+                    );
+                }
+            }
+            "empty_lines_special" => {
+                // Namespace (single direct class/module child, NOT wrapped in statements) -> no_empty_lines
+                // Otherwise:
+                //   - At beginning: empty_lines if first child requires it, else no_empty_lines (but deferred check)
+                //   - At end: always empty_lines
+                if is_namespace_body(&body) {
+                    diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
+                        self.name(),
+                        source,
+                        kw_offset,
+                        end_offset,
+                        "class",
+                        corrections,
+                    ));
+                } else {
+                    // At beginning: check if first child requires empty line
+                    if first_child_requires_empty_line(&body) {
+                        // empty_lines at beginning
+                        let mut diags = util::check_missing_empty_lines_around_body(
+                            self.name(),
+                            source,
+                            kw_offset,
+                            end_offset,
+                            "class",
+                        );
+                        diags.retain(|d| d.message.contains("beginning"));
+                        diagnostics.extend(diags);
+                    }
+                    // Deferred check: when first child doesn't require empty line,
+                    // check for empty line before first def/class/module
+                    if !first_child_requires_empty_line(&body) {
+                        if let Some(deferred_diags) =
+                            check_deferred_empty_line(self.name(), source, kw_offset, body.as_ref())
+                        {
+                            diagnostics.extend(deferred_diags);
+                        }
+                    }
+                    // At end: always empty_lines
+                    let mut end_diags = util::check_missing_empty_lines_around_body(
+                        self.name(),
+                        source,
+                        kw_offset,
+                        end_offset,
+                        "class",
+                    );
+                    end_diags.retain(|d| d.message.contains("end"));
+                    diagnostics.extend(end_diags);
+                }
+            }
             _ => {
                 // "no_empty_lines" (default)
                 diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
@@ -134,6 +235,207 @@ impl Cop for EmptyLinesAroundClassBody {
             }
         }
     }
+}
+
+/// Check if the body is a "namespace" for `empty_lines_except_namespace` purposes.
+/// A namespace is a body that is:
+/// - A single class or module node, OR
+/// - A begin/statements node with exactly one child that is a class or module
+fn is_namespace_body(body: &Option<ruby_prism::Node<'_>>) -> bool {
+    match body {
+        None => false,
+        Some(node) => {
+            // Direct class or module child
+            if node.as_class_node().is_some() || node.as_module_node().is_some() {
+                return true;
+            }
+            // StatementsNode or BeginNode with single class/module child
+            let children: Vec<_> = if let Some(stmts) = node.as_statements_node() {
+                stmts.body().iter().collect()
+            } else if let Some(begin) = node.as_begin_node() {
+                if let Some(stmts) = begin.statements() {
+                    stmts.body().iter().collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                return false;
+            };
+            children.len() == 1
+                && (children[0].as_class_node().is_some() || children[0].as_module_node().is_some())
+        }
+    }
+}
+
+/// Find the first line number of a def/class/module child in the body.
+/// Returns the line number and type name ("def", "class", or "module").
+/// Returns None if no such child is found.
+fn first_empty_line_required_child_line(
+    source: &SourceFile,
+    body: Option<&ruby_prism::Node<'_>>,
+) -> Option<(usize, &'static str)> {
+    match body {
+        None => None,
+        Some(node) => {
+            let children: Vec<_> = if let Some(stmts) = node.as_statements_node() {
+                stmts.body().iter().collect()
+            } else if let Some(begin) = node.as_begin_node() {
+                if let Some(stmts) = begin.statements() {
+                    stmts.body().iter().collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                // Single node body - check it directly
+                if is_def_class_or_module(node) {
+                    let type_name = if node.as_def_node().is_some() {
+                        "def"
+                    } else if node.as_class_node().is_some() {
+                        "class"
+                    } else {
+                        "module"
+                    };
+                    let line = source.offset_to_line_col(node.location().start_offset()).0;
+                    return Some((line, type_name));
+                }
+                return None;
+            };
+            for child in &children {
+                if child.as_def_node().is_some() {
+                    let line = source.offset_to_line_col(child.location().start_offset()).0;
+                    return Some((line, "def"));
+                }
+                if child.as_class_node().is_some() {
+                    let line = source.offset_to_line_col(child.location().start_offset()).0;
+                    return Some((line, "class"));
+                }
+                if child.as_module_node().is_some() {
+                    let line = source.offset_to_line_col(child.location().start_offset()).0;
+                    return Some((line, "module"));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Check for deferred empty line requirement.
+/// When the first child doesn't require an empty line, but a subsequent
+/// def/class/module does, we need to check for a blank line before that child.
+/// Returns "Empty line missing before first <type> definition" if missing.
+fn check_deferred_empty_line(
+    cop_name: &str,
+    source: &SourceFile,
+    _kw_offset: usize,
+    body: Option<&ruby_prism::Node<'_>>,
+) -> Option<Vec<Diagnostic>> {
+    let (child_line, type_name) = first_empty_line_required_child_line(source, body)?;
+
+    // Go back to find the previous non-blank, non-comment line
+    let prev_line = previous_line_ignoring_comments(source, child_line);
+
+    // Check if previous line is blank
+    if let Some(line_content) = util::line_at(source, prev_line) {
+        if util::is_blank_line(line_content) {
+            return None; // Blank line exists, no offense
+        }
+    }
+
+    // No blank line before the first def/class/module - report offense
+    // Report at the line before the child (where the blank should be inserted)
+    let report_line = prev_line + 1; // +1 because we want to insert before this line
+    Some(vec![Diagnostic {
+        path: source.path_str().to_string(),
+        location: crate::diagnostic::Location {
+            line: report_line,
+            column: 0,
+        },
+        severity: crate::diagnostic::Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: format!("Empty line missing before first {} definition.", type_name),
+        corrected: false,
+    }])
+}
+
+/// Find the previous line that is not a blank or comment line.
+fn previous_line_ignoring_comments(source: &SourceFile, from_line: usize) -> usize {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    let mut line_num = from_line.saturating_sub(1);
+
+    while line_num > 0 {
+        line_num -= 1; // Convert to 0-indexed
+        if line_num >= lines.len() {
+            continue;
+        }
+        let line = lines[line_num];
+        // Inline trim - check if line is blank or starts with #
+        let is_blank =
+            line.is_empty() || line.iter().all(|&b| b == b' ' || b == b'\t' || b == b'\r');
+        if is_blank {
+            continue; // Skip blank lines
+        }
+        let trimmed_start = line
+            .iter()
+            .skip_while(|&&b| b == b' ' || b == b'\t')
+            .collect::<Vec<_>>();
+        if trimmed_start.first().copied() == Some(&b'#') {
+            continue; // Skip comment lines
+        }
+        // Found a non-blank, non-comment line
+        return line_num + 1; // Convert back to 1-indexed
+    }
+    1 // Return line 1 if no previous non-blank/comment line found
+}
+
+/// Check if the first child of the body requires an empty line before it.
+/// Per RuboCop: `{any_def class module (send nil? {:private :protected :public})}`
+fn first_child_requires_empty_line(body: &Option<ruby_prism::Node<'_>>) -> bool {
+    // Helper to check if a node is a bare access modifier (private/protected/public)
+    fn is_bare_access_modifier(node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(call_node) = node.as_call_node() {
+            call_node.receiver().is_none()
+                && call_node.arguments().is_none()
+                && call_node.block().is_none()
+                && access_modifier_predicates::is_access_modifier_name(call_node.name().as_slice())
+        } else {
+            false
+        }
+    }
+
+    match body {
+        None => false,
+        Some(node) => {
+            if let Some(stmts) = node.as_statements_node() {
+                let children: Vec<_> = stmts.body().iter().collect();
+                if children.is_empty() {
+                    return false;
+                }
+                let first = &children[0];
+                is_def_class_or_module(first) || is_bare_access_modifier(first)
+            } else if let Some(begin) = node.as_begin_node() {
+                if let Some(stmts) = begin.statements() {
+                    let children: Vec<_> = stmts.body().iter().collect();
+                    if children.is_empty() {
+                        return false;
+                    }
+                    let first = &children[0];
+                    is_def_class_or_module(first) || is_bare_access_modifier(first)
+                } else {
+                    false
+                }
+            } else {
+                // Single node body
+                is_def_class_or_module(node) || is_bare_access_modifier(node)
+            }
+        }
+    }
+}
+
+/// Check if a node is a def, class, or module node.
+fn is_def_class_or_module(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_def_node().is_some()
+        || node.as_class_node().is_some()
+        || node.as_module_node().is_some()
 }
 
 #[cfg(test)]
@@ -207,6 +509,95 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.message.contains("beginning")),
             "beginning_only should flag missing blank at beginning"
+        );
+    }
+
+    #[test]
+    fn empty_lines_special_with_def_first_child() {
+        // When first child is def, empty_lines_special requires empty lines at BOTH ends
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines_special".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"class Foo\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert_eq!(
+            diags.len(),
+            2,
+            "empty_lines_special with def first child should require blank lines at both ends"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("beginning")),
+            "should flag missing blank at beginning"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("end")),
+            "should flag missing blank at end"
+        );
+    }
+
+    #[test]
+    fn empty_lines_special_with_include_first_child() {
+        // When first child is NOT def/class/module, empty_lines_special:
+        // - No blank required at beginning
+        // - Deferred: blank required before first def
+        // - Blank required at end
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines_special".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // No blank at beginning, no blank before def, no blank at end
+        let src = b"class Foo\n  include Something\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("first def definition")),
+            "should flag missing blank before first def (deferred check)"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("end")),
+            "should flag missing blank at end"
+        );
+        // Should NOT flag beginning
+        assert!(
+            !diags.iter().any(|d| d.message.contains("beginning")),
+            "should NOT flag missing blank at beginning"
+        );
+    }
+
+    #[test]
+    fn empty_lines_special_namespace_no_empty_lines() {
+        // Namespace (single direct class/module child) uses no_empty_lines style
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines_special".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // Single class child - should use no_empty_lines (no blank lines)
+        let src = b"class Parent\n  class Child\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            diags.is_empty(),
+            "empty_lines_special namespace should use no_empty_lines (no offenses), got: {:?}",
+            diags
         );
     }
 }

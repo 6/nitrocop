@@ -51,6 +51,18 @@ use ruby_prism::Visit;
 ///
 /// Fix: added `group_scope_active` check to `check_inline_style_statements`, matching
 /// the same guard already used by `check_group_style_statements`.
+///
+/// ## Inline style class method fix (2026-04-06)
+///
+/// The inline variant had 342 FPs due to a Prism-vs-parser-gem AST difference.
+/// RuboCop's `select_grouped_def_nodes` uses `def_type?` which only matches `:def`
+/// nodes, NOT `:defs` nodes (singleton method definitions like `def self.method`).
+/// In RuboCop's AST, `def self.method` is a `defs` node, but in Prism it's a `DefNode`
+/// with a `SelfNode` receiver. Our `has_grouped_defs` check was using `as_def_node().is_some()`
+/// which matched both instance and class methods, causing FPs for `private def self.method`.
+///
+/// Fix: changed `has_grouped_defs` to exclude `DefNode`s with receivers (class/singleton
+/// methods), matching RuboCop's behavior where only `:def` nodes are considered.
 pub struct AccessModifierDeclarations;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -299,6 +311,10 @@ impl AccessModifierVisitor<'_> {
             // RuboCop inline style: only flag if there are grouped def nodes
             // following this bare modifier (up to the next bare access modifier).
             // This mirrors RuboCop's `select_grouped_def_nodes(node).any?`.
+            // NOTE: In RuboCop's parser gem, `def self.login` is a `defs` node (singleton
+            // method def), not a `def` node. But in Prism, both are `DefNode` - the
+            // difference is that singleton method defs have a receiver. We must exclude
+            // DefNodes with receivers to match RuboCop's behavior.
             let has_grouped_defs = stmts[index + 1..]
                 .iter()
                 .take_while(|sibling| {
@@ -306,7 +322,11 @@ impl AccessModifierVisitor<'_> {
                         .as_call_node()
                         .is_some_and(|c| access_modifier_predicates::is_bare_access_modifier(&c))
                 })
-                .any(|sibling| sibling.as_def_node().is_some());
+                .any(|sibling| {
+                    sibling
+                        .as_def_node()
+                        .is_some_and(|def_node| def_node.receiver().is_none())
+                });
 
             if !has_grouped_defs {
                 continue;
@@ -769,6 +789,22 @@ mod tests {
         assert!(
             diags.is_empty(),
             "inline style should NOT flag bare modifier inside case/when, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_bare_modifier_before_class_method() {
+        // Bare `private` followed by `def self.method` (class method) should NOT be flagged.
+        // In RuboCop's parser, `def self.method` is a `defs` node (singleton method def),
+        // not a `def` node. RuboCop's `select_grouped_def_nodes` only considers `def` nodes.
+        // In Prism, `def self.method` is a `DefNode` with a `SelfNode` receiver.
+        // We must exclude DefNodes with receivers to match RuboCop's behavior.
+        let source = b"class Foo\n  private\n\n  def self.bar; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier before class method (def self.*), got: {:?}",
             diags
         );
     }

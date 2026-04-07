@@ -7,12 +7,32 @@ use crate::parse::source::SourceFile;
 
 pub struct PredicateMatcher;
 
+/// Built-in matchers that should NOT be flagged in explicit style.
+/// These are defined in RuboCop's `ExplicitHelper::BUILT_IN_MATCHERS`.
+const BUILT_IN_MATCHERS: &[&str] = &[
+    "be_truthy",
+    "be_falsey",
+    "be_falsy",
+    "have_attributes",
+    "have_received",
+    "be_between",
+    "be_within",
+];
+
 /// Default style `inflected`: flags `expect(foo.bar?).to be_truthy` →
 /// prefer `expect(foo).to be_bar`.
 ///
-/// Corpus FP fix: safe navigation calls (`&.visible?`) cannot be rewritten
+/// Inflected FP fix: safe navigation calls (`&.visible?`) cannot be rewritten
 /// to predicate matchers because the nil-safe semantics would be lost.
 /// Fixed by checking `call_operator_loc()` for `&.` on the predicate call.
+///
+/// Explicit style: flags `expect(foo).to be_bar` → prefer `expect(foo).to bar?`.
+/// Built-in matchers (`be_truthy`, `be_falsey`, `be_falsy`, `have_attributes`,
+/// `have_received`, `be_between`, `be_within`) are excluded from the explicit
+/// style check because they are not actually predicate matchers — they are special
+/// RSpec matchers with different semantics. Also `include` and `respond_to` ARE
+/// flagged in explicit style (they don't start with `be_`/`have_` but are
+/// explicit predicate matchers per RuboCop's `predicate_matcher_name?`).
 impl Cop for PredicateMatcher {
     fn name(&self) -> &'static str {
         "RSpec/PredicateMatcher"
@@ -78,10 +98,22 @@ impl Cop for PredicateMatcher {
             }
             let matcher_name = matcher_call.name().as_slice();
             let matcher_str = std::str::from_utf8(matcher_name).unwrap_or("");
-            // Check for be_xxx or have_xxx pattern
-            if !(matcher_str.starts_with("be_") || matcher_str.starts_with("have_")) {
+
+            // Check for be_xxx or have_xxx pattern, or explicit special cases
+            let is_explicit_matcher = matcher_str.starts_with("be_")
+                || matcher_str.starts_with("have_")
+                || matcher_str == "include"
+                || matcher_str == "respond_to";
+
+            if !is_explicit_matcher {
                 return;
             }
+
+            // BUILT_IN_MATCHERS: skip these even in explicit style
+            if BUILT_IN_MATCHERS.contains(&matcher_str) {
+                return;
+            }
+
             // AllowedExplicitMatchers: skip matchers in the allowlist
             if allowed_explicit.iter().any(|m| m == matcher_str) {
                 return;
@@ -367,6 +399,69 @@ mod tests {
             diags.len(),
             1,
             "eql(true) should be flagged in non-strict mode"
+        );
+    }
+
+    #[test]
+    fn explicit_style_flags_include_and_respond_to() {
+        // include and respond_to should be flagged in explicit style
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect(foo).to include('bar')\nexpect(foo).to respond_to(:method)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert_eq!(diags.len(), 2);
+        assert!(diags[0].message.contains("include?"));
+        assert!(diags[1].message.contains("respond_to?"));
+    }
+
+    #[test]
+    fn explicit_style_built_in_matchers_not_flagged() {
+        // Built-in matchers should NOT be flagged in explicit style
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source =
+            b"expect(foo).to be_truthy\nexpect(foo).to be_falsey\nexpect(foo).to be_falsy\nexpect(foo).to have_received(:bar)\nexpect(foo).to have_attributes(name: 'foo')\nexpect(foo).to be_between(1, 10)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert!(
+            diags.is_empty(),
+            "Built-in matchers should not be flagged in explicit style"
+        );
+    }
+
+    #[test]
+    fn explicit_style_exist_not_flagged() {
+        // exist is not a be_/have_ matcher, so it should not be flagged
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect(foo).to exist\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert!(
+            diags.is_empty(),
+            "exist should not be flagged in explicit style"
         );
     }
 }

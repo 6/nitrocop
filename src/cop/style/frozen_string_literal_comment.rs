@@ -15,6 +15,13 @@ use crate::parse::source::SourceFile;
 ///   `# frozen_string_literal: true` comment still counts;
 /// - with `TargetRubyVersion >= 3.4`, files that Prism reports as `Invalid retry ...` should be
 ///   skipped for this cop because RuboCop emits only `Lint/Syntax` there and no style offense.
+///
+/// ### Variant: `EnforcedStyle: never`
+///
+/// The `never` style now correctly limits its scan to the leading comment section (lines before the
+/// first code token), matching RuboCop's behavior. Previously, nitrocop scanned ALL lines in the
+/// file, causing 519 false positives where `frozen_string_literal` comments appearing AFTER code
+/// were incorrectly flagged. RuboCop only considers leading comments for the `never` style.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
@@ -58,38 +65,6 @@ impl Cop for FrozenStringLiteralComment {
         }
 
         if target_ruby_version(config) >= 3.4 && has_invalid_retry_parse_error(source) {
-            return;
-        }
-
-        if enforced_style == "never" {
-            // Flag the presence of frozen_string_literal comment as unnecessary
-            for (i, line) in lines.iter().enumerate() {
-                if is_frozen_string_literal_comment(line) {
-                    let mut diag = self.diagnostic(
-                        source,
-                        i + 1,
-                        0,
-                        "Unnecessary frozen string literal comment.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        // Delete the entire line including its newline
-                        if let Some(start) = source.line_col_to_offset(i + 1, 0) {
-                            let end = source
-                                .line_col_to_offset(i + 2, 0)
-                                .unwrap_or(source.as_bytes().len());
-                            corr.push(crate::correction::Correction {
-                                start,
-                                end,
-                                replacement: String::new(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                    }
-                    diagnostics.push(diag);
-                }
-            }
             return;
         }
 
@@ -140,6 +115,64 @@ impl Cop for FrozenStringLiteralComment {
 
         // Remember where to insert the comment (after shebang/encoding)
         let insert_after_line = idx; // 0-indexed line number
+
+        // Compute where the leading comment section ends (before first code line).
+        // This is used for the 'never' style which should only check leading comments.
+        let mut leading_end = idx;
+        while leading_end < lines.len() {
+            if is_blank_line(lines[leading_end]) {
+                leading_end += 1;
+                continue;
+            }
+            if is_comment_line(lines[leading_end]) {
+                leading_end += 1;
+                continue;
+            }
+            if is_embedded_doc_begin(lines[leading_end]) {
+                leading_end += 1;
+                while leading_end < lines.len() && !is_embedded_doc_end(lines[leading_end]) {
+                    leading_end += 1;
+                }
+                if leading_end < lines.len() {
+                    leading_end += 1;
+                }
+                continue;
+            }
+            break;
+        }
+
+        if enforced_style == "never" {
+            // RuboCop's 'never' style only checks leading comments (before first code token),
+            // not frozen_string_literal comments that appear after code.
+            for (i, line) in lines.iter().enumerate().take(leading_end) {
+                if is_frozen_string_literal_comment(line) {
+                    let mut diag = self.diagnostic(
+                        source,
+                        i + 1,
+                        0,
+                        "Unnecessary frozen string literal comment.".to_string(),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        // Delete the entire line including its newline
+                        if let Some(start) = source.line_col_to_offset(i + 1, 0) {
+                            let end = source
+                                .line_col_to_offset(i + 2, 0)
+                                .unwrap_or(source.as_bytes().len());
+                            corr.push(crate::correction::Correction {
+                                start,
+                                end,
+                                replacement: String::new(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                    }
+                    diagnostics.push(diag);
+                }
+            }
+            return;
+        }
 
         // Scan leading comment and blank lines for the frozen_string_literal magic comment.
         // RuboCop's `leading_comment_lines` returns all lines before the first non-comment
@@ -1078,6 +1111,31 @@ mod tests {
         let cs = crate::correction::CorrectionSet::from_vec(corrections);
         let corrected = cs.apply(input);
         assert_eq!(corrected, b"puts 'hello'\n");
+    }
+
+    #[test]
+    fn enforced_style_never_ignores_frozen_after_code() {
+        // RuboCop's never style only checks leading comments, not frozen_string_literal
+        // comments that appear after code. This is a false positive regression.
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("never".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // frozen_string_literal after code should NOT be flagged
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"puts 'hello'\n# frozen_string_literal: true\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "Should not flag frozen_string_literal after code with 'never' style"
+        );
     }
 
     #[test]
