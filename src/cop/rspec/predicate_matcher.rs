@@ -33,6 +33,11 @@ const BUILT_IN_MATCHERS: &[&str] = &[
 /// RSpec matchers with different semantics. Also `include` and `respond_to` ARE
 /// flagged in explicit style (they don't start with `be_`/`have_` but are
 /// explicit predicate matchers per RuboCop's `predicate_matcher_name?`).
+///
+/// Explicit style FP fix: `include` with no arguments or multiple arguments cannot
+/// be rewritten to `include?` and should not be flagged. RuboCop's
+/// `replaceable_matcher?` returns false for these cases. Fixed by checking that
+/// `include` has exactly one argument before flagging.
 impl Cop for PredicateMatcher {
     fn name(&self) -> &'static str {
         "RSpec/PredicateMatcher"
@@ -107,6 +112,18 @@ impl Cop for PredicateMatcher {
 
             if !is_explicit_matcher {
                 return;
+            }
+
+            // In explicit style, `include` must have exactly one argument to be flaggable.
+            // `include` with no args or multiple args cannot be rewritten to `include?`.
+            if matcher_str == "include" {
+                if let Some(args) = matcher_call.arguments() {
+                    if args.arguments().iter().count() != 1 {
+                        return;
+                    }
+                } else {
+                    return;
+                }
             }
 
             // BUILT_IN_MATCHERS: skip these even in explicit style
