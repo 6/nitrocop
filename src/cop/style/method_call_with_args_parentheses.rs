@@ -148,6 +148,18 @@ use crate::parse::source::SourceFile;
 /// Added interpolation-parent tracking for interpolated x-strings and
 /// interpolated regular expressions.
 ///
+/// ## Variant fix: omit_parentheses style FP from when clause handling
+///
+/// FP root cause: `visit_when_node` pushed `ParentKind::When` before visiting
+/// conditions, then popped it before visiting statements. This meant calls in the
+/// when body (e.g., `comments_path(...)` inside `when :comment`) had their
+/// parent_stack topped with whatever context preceded the when node, not `When`.
+/// RuboCop's `node.parent.when_type?` correctly returns true for calls inside
+/// when bodies. Fixed by re-pushing `ParentKind::When` before visiting statements,
+/// then popping after. This reduces FP by ~17 in the e621ng repo alone.
+///
+/// ## Prior validation (2026-04-01, attempt 5)
+///
 /// Validation: `python3 scripts/check_cop.py Style/MethodCallWithArgsParentheses
 /// --rerun --clone --sample 15` reported `0` new FP, `0` new FN, and all `41`
 /// sampled oracle FN resolved.
@@ -1441,14 +1453,19 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
     }
 
     fn visit_when_node(&mut self, node: &ruby_prism::WhenNode<'pr>) {
+        // Push When before visiting conditions so they have correct parent context
         self.parent_stack.push(ParentKind::When);
         for cond in node.conditions().iter() {
             self.visit(&cond);
         }
         self.parent_stack.pop();
 
+        // Push When before visiting statements so calls in the when body
+        // have When as parent (matching RuboCop's node.parent.when_type? check)
         if let Some(stmts) = node.statements() {
+            self.parent_stack.push(ParentKind::When);
             self.visit_statements_node(&stmts);
+            self.parent_stack.pop();
         }
     }
 
