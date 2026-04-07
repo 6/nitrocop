@@ -130,6 +130,33 @@ use crate::parse::source::SourceFile;
 /// 2. Offense fixture corrections — removed 3 test cases with incorrect
 ///    line content (lines too short to trigger offenses), and fixed `^`
 ///    marker positions and length annotations on remaining cases.
+///
+/// ## Corpus investigation (2026-04-07)
+///
+/// Investigated remaining 4 FP / 4 FN in metasm, schema.rb, and disp_referrer.
+///
+/// Metasm/decompile.rb (1 FP, 1 FN): In multi-line `if` statements with
+/// continuation lines, the cop and RuboCop both detect [133/120] violations
+/// but on different lines. The cop flags the second continuation (2373),
+/// while RuboCop flags the third continuation (2374). Both lines are 127+
+/// characters; the issue is which line RuboCop attributes the violation to.
+///
+/// Schema.rb (4 FP): `equivalentClass: ["http://...", "http://..."]` and
+/// `"...closeMatch": ["http://...", "http://..."]` lines are flagged by the
+/// cop but not by RuboCop. These are 135-168 characters inside array literals
+/// within method call hash arguments. The AllowURI exemption may be incorrectly
+/// NOT applying when URLs are comma-separated inside array brackets.
+///
+/// Disp_referrer.rb: In tests, both RuboCop and nitrocop flag the `r << sprintf`
+/// lines (at different line numbers due to 1-index vs 0-index). The pre-diagnostic
+/// classification may reflect full-file vs snippet context differences.
+///
+/// TDiary-core disp_referrer.rb FN (1141/1143): Pre-diagnostic showed these as
+/// "when RefList" and "end" with [168/120]/[163/120] but actual lines are
+/// short. The offense context may be misattributed in the pre-diagnostic.
+///
+/// Remaining investigation needed: the multi-line continuation attribution in
+/// metasm, and the URL-array-in-hash-argument exemption in schema.rb.
 pub struct LineLength;
 
 impl Cop for LineLength {
