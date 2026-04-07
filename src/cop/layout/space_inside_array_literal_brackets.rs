@@ -17,13 +17,6 @@
 ///   accepts multiline arrays with `[ <spaces>\n  # comment` after the opening
 ///   bracket. Fixed by detecting the trailing-comma array-pattern context and by
 ///   treating comment-on-next-line as an allowed multiline opening-bracket case.
-/// - FP=27 fix (compact variant, 2026-04-07): The byte-level
-///   `is_adjacent_bracket_forward`/`is_adjacent_bracket_backward` helpers falsely
-///   detected `%w[...]`, `%i[...]`, etc. as nested bracket arrays, causing FPs on
-///   multiline arrays like `[ %w[a b], %w[c d] ]`. Fixed by replacing byte-level
-///   bracket adjacency scanning with AST-based `is_bracket_array()` that checks
-///   whether the first/last child element is actually an `ArrayNode` or
-///   `ArrayPatternNode` with `[` as the opening delimiter.
 use crate::cop::shared::node_type::{ARRAY_NODE, ARRAY_PATTERN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -72,49 +65,15 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
             return;
         }
 
-        // For compact style, determine multi-dimensional status from the AST
-        // (not raw bytes, which can't distinguish `[` from `%w[`/`%i[`).
-        let (multi_dim_left, multi_dim_right) = if let Some(array) = node.as_array_node() {
-            let elems: Vec<_> = array.elements().iter().collect();
-            (
-                elems.first().is_some_and(|e| is_bracket_array(e)),
-                elems.last().is_some_and(|e| is_bracket_array(e)),
-            )
-        } else if let Some(pattern) = node.as_array_pattern_node() {
-            let reqs: Vec<_> = pattern.requireds().iter().collect();
-            let posts: Vec<_> = pattern.posts().iter().collect();
-            let first = reqs.first();
-            let last = posts.last().or(reqs.last());
-            (
-                first.is_some_and(|e| is_bracket_array(e)),
-                last.is_some_and(|e| is_bracket_array(e)),
-            )
-        } else {
-            (false, false)
-        };
-
         self.check_brackets(
             source,
             &opening,
             &closing,
             is_array_pattern,
-            multi_dim_left,
-            multi_dim_right,
             config,
             diagnostics,
             corrections,
         );
-    }
-}
-
-/// Check if a node is an array (or array pattern) with `[` brackets (not `%w[`, `%i[`, etc.).
-fn is_bracket_array(node: &ruby_prism::Node<'_>) -> bool {
-    if let Some(array) = node.as_array_node() {
-        matches!(array.opening_loc(), Some(loc) if loc.as_slice() == b"[")
-    } else if let Some(pattern) = node.as_array_pattern_node() {
-        matches!(pattern.opening_loc(), Some(loc) if loc.as_slice() == b"[")
-    } else {
-        false
     }
 }
 
@@ -126,8 +85,6 @@ impl SpaceInsideArrayLiteralBrackets {
         opening: &ruby_prism::Location<'_>,
         closing: &ruby_prism::Location<'_>,
         is_array_pattern: bool,
-        multi_dim_left: bool,
-        multi_dim_right: bool,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -337,6 +294,9 @@ impl SpaceInsideArrayLiteralBrackets {
                 }
             }
             "compact" => {
+                let multi_dim_left = is_adjacent_bracket_forward(bytes, open_end);
+                let multi_dim_right = is_adjacent_bracket_backward(bytes, close_start);
+
                 // Left side: whitespace check includes newlines for compact collapse
                 let ws_after_open =
                     matches!(bytes.get(open_end), Some(b' ' | b'\t' | b'\n' | b'\r'));
@@ -530,6 +490,33 @@ fn next_line_starts_with_comment(bytes: &[u8], pos: usize) -> bool {
     }
 
     bytes.get(i) == Some(&b'#')
+}
+
+/// Check if the next non-whitespace character (including newlines) after `pos` is `[`.
+fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b'[' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Check if the previous non-whitespace character (including newlines) before `pos` is `]`.
+fn is_adjacent_bracket_backward(bytes: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b']' => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Scan forward from `pos` past all whitespace including newlines.
