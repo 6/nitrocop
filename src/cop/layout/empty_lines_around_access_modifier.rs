@@ -979,6 +979,34 @@ mod tests {
     }
 
     #[test]
+    fn only_before_block_in_class_counts_as_nested_content() {
+        // A block inside a class body should count as nested content, so
+        // a modifier after the block with a blank line before it is correct
+        // in only_before style (no FP).
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Foo\n  some_method do\n    something\n  end\n\n  private\n\n  def baz; end\nend\n",
+            config,
+        );
+        // only_before: blank after private is the only offense
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert!(
+            diags[0].message.contains("Remove a blank line after"),
+            "Expected blank-after offense, got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn ignores_receiverful_block_inside_rescue_wrapper() {
         let diags = run_cop_full(
             &EmptyLinesAroundAccessModifier,
