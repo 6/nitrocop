@@ -197,3 +197,18 @@ do_parse_json(options, (record && record.orm_model.schema) || (model && model.sc
 
 def penalize!(amount=(((team && team.members.size) || 6) / 6.0)*activitiy_multipler)
                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+if opponent_names then opponent_names.split(' ') end
+^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+if number_of_hands then number_of_hands.to_i end
+^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+text_field_tag("#{name}[value]", (value ? value.to_d : nil))
+                                  ^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+text_field_tag("#{name}[value]", (value ? value.to_d : nil))
+                                  ^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+Packet.from_source(self, (session.event_type if session))
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
