@@ -3,6 +3,13 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-03-09)
+///
+/// Corpus oracle reported FP=2, FN=0.
+///
+/// FP=2: Fixed by skipping `::` scope resolution operators — only `.` and `&.` should be checked.
+/// The 2 FPs were from rufo's spec file with `foo::\n bar` patterns.
+///
 /// ## Variant style divergence (trailing, 2026-04-06)
 ///
 /// With `EnforcedStyle: trailing`, nitrocop misses offenses where the receiver is
