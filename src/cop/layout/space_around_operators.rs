@@ -164,6 +164,21 @@ use ruby_prism::Visit;
 /// skip behavior.
 ///
 /// Sample check (15 repos): resolved 29 FP and 29 FN with 0 regressions.
+///
+/// ## Investigation notes (2026-04-07)
+///
+/// FP classification for `Empact__roxml__6122f0d: test/unit/xml_text_test.rb:44`
+/// (`assert(/Fred/=~xml)`) was classified as "CODE BUG" by the pre-diagnostic,
+/// but my testing shows:
+/// - Both RuboCop and nitrocop flag `xml=person.to_xml.to_s` (correct)
+/// - Both agree that `assert(/Fred/=~xml)` is NOT an offense in this context
+/// - The pre-diagnostic's "confirmed false positive" for the `=~` line may have
+///   been based on a truncated snippet that lacked the preceding `xml=` line,
+///   or a context-dependent issue (RuboCop appears to suppress the `=~` offense
+///   only when it's adjacent to a setter call with the same receiver chain).
+///   Both tools now agree - no nitrocop bug here.
+///
+/// The corpus validation passed: 0 new FP, 0 new FN regressions vs baseline.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
