@@ -30,6 +30,20 @@ use crate::parse::source::SourceFile;
 ///   missing the magic comment entirely. Plain string constants were then
 ///   falsely flagged.
 /// - Fix: skip `=begin`/`=end` block comments during the leading-section scan.
+///
+/// ## 2026-04-07 investigation (strict mode variant)
+///
+/// - FP: interpolated symbol constants (e.g. `:"#{name}.batched_queries"`) were
+///   incorrectly flagged as mutable. Symbols are always immutable in Ruby, and
+///   RuboCop's `immutable_literal?` includes `dsym` (interpolated symbol).
+/// - Fix: added `as_interpolated_symbol_node()` to `is_immutable_literal()`.
+///   Unlike plain `SymbolNode`, `InterpolatedSymbolNode` was missing from the check.
+///
+/// - FN: Range constants (bare `1..10` and parenthesized `(1..10)`) were NOT
+///   being flagged in strict mode. RuboCop does flag them — its
+///   `immutable_literal?` does NOT include ranges. Both bare `RangeNode` and
+///   the `is_parenthesized_range` helper were incorrectly in the immutable
+///   list. Removed both so ranges are correctly flagged in strict mode.
 pub struct MutableConstant;
 
 impl MutableConstant {
@@ -123,6 +137,7 @@ impl MutableConstant {
         node.as_integer_node().is_some()
             || node.as_float_node().is_some()
             || node.as_symbol_node().is_some()
+            || node.as_interpolated_symbol_node().is_some()
             || node.as_true_node().is_some()
             || node.as_false_node().is_some()
             || node.as_nil_node().is_some()
@@ -130,26 +145,11 @@ impl MutableConstant {
             || node.as_imaginary_node().is_some()
             || node.as_source_line_node().is_some()
             || node.as_source_encoding_node().is_some()
-            // Regexp and Range are frozen since Ruby 3.0
             || node.as_regular_expression_node().is_some()
             || node.as_interpolated_regular_expression_node().is_some()
-            || node.as_range_node().is_some()
-            // Parenthesized range: (1..10) is a BeginNode wrapping a RangeNode
-            || Self::is_parenthesized_range(node)
-    }
-
-    fn is_parenthesized_range(node: &ruby_prism::Node<'_>) -> bool {
-        if let Some(paren) = node.as_parentheses_node() {
-            if let Some(body) = paren.body() {
-                if let Some(stmts) = body.as_statements_node() {
-                    let parts: Vec<_> = stmts.body().iter().collect();
-                    if parts.len() == 1 {
-                        return parts[0].as_range_node().is_some();
-                    }
-                }
-            }
-        }
-        false
+        // NOTE: RangeNode (bare or parenthesized) is NOT included here.
+        // RuboCop's immutable_literal? does not include ranges — they are
+        // flagged in strict mode.
     }
 
     /// For `strict` mode: check if operation produces an immutable object.
