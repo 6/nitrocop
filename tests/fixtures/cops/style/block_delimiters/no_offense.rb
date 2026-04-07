@@ -136,3 +136,8 @@ Hash[list.map { |k, v|
 Hash[info.map { |k, v|
   [k, v]
 }.compact]
+
+# Block inside splat argument — changing delimiters would change binding
+foo *items.map { |x|
+  x.to_s
+}
