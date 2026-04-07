@@ -1034,16 +1034,13 @@ impl Cop for FirstArrayElementIndentation {
             let expected_elem = indent_base + width;
 
             if elem_col != expected_elem {
-                // For single-pair hash value arrays with line-relative OR
-                // bracket-relative indent, accept element at line-indent level.
-                // RuboCop accepts this indentation (paren-relative path) even for
-                // align_brackets style when the array is inside a hash value.
+                // For single-pair hash value arrays with line-relative indent
+                // (StartOfLine base type), accept element at line-indent level.
+                // This applies to `consistent` style. For `align_brackets` style
+                // (LeftBracket base type), bracket-relative indentation is required.
                 let accept_line_relative_element = hash_key_col.is_some()
                     && !matches!(base_type, IndentBaseType::ParentHashKey)
-                    && matches!(
-                        base_type,
-                        IndentBaseType::StartOfLine | IndentBaseType::LeftBracket
-                    )
+                    && matches!(base_type, IndentBaseType::StartOfLine)
                     && elem_col == open_line_indent + width;
 
                 if !accept_line_relative_element {
@@ -1100,14 +1097,12 @@ impl Cop for FirstArrayElementIndentation {
             };
 
             if effective_close_col != indent_base {
-                // For single-pair hash value arrays with line-relative OR
-                // bracket-relative indent, accept closing bracket at line-indent
-                // level. RuboCop doesn't flag closing brackets for arrays that
-                // are single-pair hash values when the closing bracket is at
-                // line-indent level (even for align_brackets style).
-                // In paren-relative mode, closing bracket must match indent_base.
-                if (matches!(base_type, IndentBaseType::StartOfLine)
-                    || matches!(base_type, IndentBaseType::LeftBracket))
+                // For single-pair hash value arrays with line-relative indent
+                // (StartOfLine base type), accept closing bracket at line-indent
+                // level. This applies to `consistent` style. For `align_brackets`
+                // style (LeftBracket base type), bracket-relative closing position
+                // is required.
+                if matches!(base_type, IndentBaseType::StartOfLine)
                     && hash_key_col.is_some()
                     && !matches!(base_type, IndentBaseType::ParentHashKey)
                     && effective_close_col == open_line_indent
