@@ -32,3 +32,12 @@ expect(foo).to exist
 # nitrocop-config: EnforcedStyle: explicit
 expect(foo).to be(true)
 expect(foo).to be(false)
+
+# Explicit style: include with no arguments should NOT be flagged
+# nitrocop-config: EnforcedStyle: explicit
+expect(foo).to include
+expect(foo).to include, 'fail'
+
+# Explicit style: include with multiple arguments should NOT be flagged
+# nitrocop-config: EnforcedStyle: explicit
+expect(foo).to include(foo, bar)
