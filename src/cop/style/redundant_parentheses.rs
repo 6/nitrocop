@@ -1625,7 +1625,7 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_block_argument_node(&mut self, node: &ruby_prism::BlockArgumentNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::BlockArgument;
-            // BlockArgumentNode always wraps a single expression (the &(...))
+            // BlockArgumentNode wraps a single expression (the value after &)
             top.single_child = true;
         }
         ruby_prism::visit_block_argument_node(self, node);
