@@ -337,8 +337,20 @@ def dept_dir_name(dept: str) -> str:
 
 
 def find_rust_source(dept: str, snake: str) -> Path:
-    """Find the cop's Rust source file."""
-    return PROJECT_ROOT / "src" / "cop" / dept_dir_name(dept) / f"{snake}.rs"
+    """Find the cop's Rust source file.
+
+    Some cops use a ``_cop`` suffix because their snake_case name is a Rust
+    keyword (``for``, ``loop``, ``yield``).  Try the plain name first, then
+    fall back to ``{snake}_cop.rs``.
+    """
+    base = PROJECT_ROOT / "src" / "cop" / dept_dir_name(dept)
+    plain = base / f"{snake}.rs"
+    if plain.exists():
+        return plain
+    suffixed = base / f"{snake}_cop.rs"
+    if suffixed.exists():
+        return suffixed
+    return plain  # return expected path for error messaging
 
 
 def find_vendor_ruby_source(dept: str, snake: str) -> Path | None:
@@ -524,8 +536,32 @@ def load_variant_data_for_cop(cop: str, run_id: int | str | None = None) -> list
                     "matches": cop_entry.get("matches", 0),
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
+                    "fp_examples": cop_entry.get("fp_examples", []),
+                    "fn_examples": cop_entry.get("fn_examples", []),
                 })
     return variants
+
+
+def _infer_variant_config_key(variant: dict) -> str:
+    """Infer the Enforced* config key for a variant from batch YAML files.
+
+    Falls back to 'EnforcedStyle' which covers the vast majority of cops.
+    """
+    batches_dir = PROJECT_ROOT / "bench" / "corpus" / "variant_batches"
+    style_label = variant.get("style_label", "")
+    try:
+        import yaml
+        for batch_path in sorted(batches_dir.glob("variant_batch_*.yml")):
+            data = yaml.safe_load(batch_path.read_text()) or {}
+            for cop_name, cop_config in data.items():
+                if cop_name == "inherit_from" or not isinstance(cop_config, dict):
+                    continue
+                for param, val in cop_config.items():
+                    if param.startswith("Enforced") and str(val) == style_label:
+                        return param
+    except Exception:
+        pass
+    return "EnforcedStyle"
 
 
 def load_variant_only_candidates(
@@ -1649,6 +1685,45 @@ def generate_task(
     else:
         focus = "both FP and FN"
         focus_detail = "both directions"
+    # Build variant-aware step 1 and step 7
+    variant_only = default_perfect and bool(diverging_variants)
+    if variant_only:
+        # Primary variant style for commands (highest divergence)
+        primary_variant = max(diverging_variants, key=lambda v: v["fp"] + v["fn"])
+        primary_style = primary_variant["style_label"]
+        # Detect the config key (e.g., "EnforcedStyle") from variant data
+        variant_config_key = _infer_variant_config_key(primary_variant)
+        step1_text = (
+            "1. Read the **Variant FP/FN Examples** section below — it contains actual "
+            "Ruby code from the corpus that diverges under the non-default style"
+        )
+        step7_text = (
+            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+            f"   ```bash\n"
+            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
+            f"--style {variant_config_key}={primary_style}\n"
+            f"   ```\n"
+            f"   Also validate the default config is not regressed:\n"
+            f"   ```bash\n"
+            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+            f"   ```\n"
+            f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+        )
+    else:
+        if diagnostics:
+            step1_text = "1. Read the **Pre-diagnostic Results** section below first"
+        elif not default_perfect:
+            step1_text = "1. Read the **Corpus FP/FN Examples** section below first"
+        else:
+            step1_text = "1. Read the sections below for context"
+        step7_text = (
+            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+            f"   ```bash\n"
+            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+            f"   ```\n"
+            f"   If this reports FP or FN regression, your fix is too broad — narrow it down."
+        )
+
     parts.append(f"""## Instructions
 
 You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for parsing.
@@ -1659,7 +1734,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 **⚠ {corpus['matches']:,} existing matches must not regress.** Validate with `check_cop.py` before committing.
 
 ### Workflow
-1. Read the **Pre-diagnostic Results** and **Corpus FP/FN Examples** sections below first
+{step1_text}
 2. **Verify with RuboCop first** (for FP fixes): before writing any code, confirm RuboCop's
    behavior on BOTH the specific FP case AND the general pattern:
    ```bash
@@ -1675,11 +1750,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 4. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
 5. Fix `src/cop/{dept_snake}/{snake}.rs`
 6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
-7. **Validate against corpus** (REQUIRED before finishing):
-   ```bash
-   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15
-   ```
-   If this reports FP or FN regression, your fix is too broad — narrow it down.
+{step7_text}
 8. Add a `///` doc comment on the cop struct documenting what you found and fixed
 9. Leave your changes unstaged — the workflow commits for you
 
@@ -1877,6 +1948,13 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
                 "**The default config is already perfect.** Your task is fixing "
                 "non-default style variants listed below.\n"
             )
+            lines.append(
+                "**⚠ The variant FP/FN numbers below are real.** They come from a "
+                "dedicated variant oracle run (not the default config baseline). "
+                "Do NOT conclude that the oracle data is stale or inapplicable. "
+                "If `check_cop.py --style` shows unexpected results, re-read the "
+                "variant instructions.\n"
+            )
         else:
             lines.append(
                 "This cop also has divergence under non-default style configurations.\n"
@@ -1888,6 +1966,11 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
                 f"| {v['style_label']} | {v['matches']:,} | {v['fp']:,} | {v['fn']:,} |"
             )
         lines.append("")
+
+        # Include actual FP/FN examples from variant oracle data
+        if default_perfect:
+            lines.extend(_variant_examples_section())
+
         lines.append("### How to fix variant divergence\n")
         lines.append(
             "1. **Find the config read:** Look for `config.get_str(\"EnforcedStyle\", ...)` or "
@@ -1926,6 +2009,70 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
             "6. **All variants must pass.** The CI gate (`--check-variants`) runs ALL "
             "variant styles automatically. Fixing one variant must not break another.\n"
         )
+        return lines
+
+    def _variant_examples_section() -> list[str]:
+        """Format FP/FN examples from variant oracle data for variant-only cops."""
+        lines = ["## Variant FP/FN Examples\n"]
+        max_examples_per_kind = 8
+        has_examples = False
+        for v in sorted(diverging_variants, key=lambda x: x["fp"] + x["fn"], reverse=True):
+            label = v["style_label"]
+            fp_ex = v.get("fp_examples", [])
+            fn_ex = v.get("fn_examples", [])
+            if not fp_ex and not fn_ex:
+                continue
+            has_examples = True
+            lines.append(f"### Style: `{label}`\n")
+            if fp_ex:
+                lines.append(
+                    f"**False Positives** ({len(fp_ex)} total — "
+                    f"nitrocop flags these but RuboCop does not with `{label}`):\n"
+                )
+                for ex in fp_ex[:max_examples_per_kind]:
+                    loc, msg, src = _normalize_example(ex)
+                    lines.append(f"- `{loc}`")
+                    if msg:
+                        lines.append(f"  Message: {msg}")
+                    if src:
+                        lines.append("  ```ruby")
+                        for s in src:
+                            lines.append(f"  {s}")
+                        lines.append("  ```")
+                if len(fp_ex) > max_examples_per_kind:
+                    lines.append(
+                        f"\n_Omitted {len(fp_ex) - max_examples_per_kind} additional FP example(s)._\n"
+                    )
+                lines.append("")
+            if fn_ex:
+                lines.append(
+                    f"**False Negatives** ({len(fn_ex)} total — "
+                    f"RuboCop flags these but nitrocop misses with `{label}`):\n"
+                )
+                for ex in fn_ex[:max_examples_per_kind]:
+                    loc, msg, src = _normalize_example(ex)
+                    lines.append(f"- `{loc}`")
+                    if msg:
+                        lines.append(f"  Message: {msg}")
+                    if src:
+                        lines.append("  ```ruby")
+                        for s in src:
+                            lines.append(f"  {s}")
+                        lines.append("  ```")
+                if len(fn_ex) > max_examples_per_kind:
+                    lines.append(
+                        f"\n_Omitted {len(fn_ex) - max_examples_per_kind} additional FN example(s)._\n"
+                    )
+                lines.append("")
+        if not has_examples:
+            lines.append(
+                "No example source code is available from the variant oracle data. "
+                "Use `verify_cop_locations.py --style` to find specific diverging files:\n"
+                f"```bash\n"
+                f"python3 scripts/verify_cop_locations.py {cop} "
+                f"--style EnforcedStyle=<value>\n"
+                f"```\n"
+            )
         return lines
 
     start_here = build_start_here_section(cop, corpus)

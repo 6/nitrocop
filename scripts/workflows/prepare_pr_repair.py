@@ -387,6 +387,43 @@ def build_variant_context(cop: str, binary: Path | None = None) -> str:
     for v in sorted(diverging, key=lambda x: x["fp"] + x["fn"], reverse=True):
         lines.append(f"| {v['style_label']} | {v['matches']:,} | {v['fp']:,} | {v['fn']:,} |")
 
+    # Include actual FP/FN code examples from the variant oracle data
+    from dispatch_cops import _normalize_example
+
+    max_examples = 5
+    for v in sorted(diverging, key=lambda x: x["fp"] + x["fn"], reverse=True):
+        fp_ex = v.get("fp_examples", [])
+        fn_ex = v.get("fn_examples", [])
+        if not fp_ex and not fn_ex:
+            continue
+        lines.extend(["", f"### Variant `{v['style_label']}` — corpus examples", ""])
+        if fp_ex:
+            lines.append("**False Positives** (nitrocop flags but RuboCop does not):\n")
+            for ex in fp_ex[:max_examples]:
+                loc, msg, src = _normalize_example(ex)
+                lines.append(f"- `{loc}`")
+                if msg:
+                    lines.append(f"  Message: {msg}")
+                if src:
+                    lines.append("  ```ruby")
+                    for s in src:
+                        lines.append(f"  {s}")
+                    lines.append("  ```")
+            lines.append("")
+        if fn_ex:
+            lines.append("**False Negatives** (RuboCop flags but nitrocop misses):\n")
+            for ex in fn_ex[:max_examples]:
+                loc, msg, src = _normalize_example(ex)
+                lines.append(f"- `{loc}`")
+                if msg:
+                    lines.append(f"  Message: {msg}")
+                if src:
+                    lines.append("  ```ruby")
+                    for s in src:
+                        lines.append(f"  {s}")
+                    lines.append("  ```")
+            lines.append("")
+
     # Run a quick spot-check for the worst variant to get concrete examples
     worst = sorted(diverging, key=lambda x: x["fp"] + x["fn"], reverse=True)[0]
     worst_style = worst["style_label"]

@@ -131,6 +131,27 @@ def test_detect_prism_pitfalls_none():
     assert len(pitfalls) == 0
 
 
+def test_find_rust_source_plain():
+    """Normal cop resolves to {snake}.rs."""
+    path = gct.find_rust_source("Style", "negated_while")
+    assert path.name == "negated_while.rs"
+
+
+def test_find_rust_source_keyword_suffix():
+    """Cops whose snake name is a Rust keyword resolve to {snake}_cop.rs."""
+    path = gct.find_rust_source("Style", "for")
+    assert path.name == "for_cop.rs"
+    assert path.exists()
+
+    path = gct.find_rust_source("Lint", "loop")
+    assert path.name == "loop_cop.rs"
+    assert path.exists()
+
+    path = gct.find_rust_source("RSpec", "yield")
+    assert path.name == "yield_cop.rs"
+    assert path.exists()
+
+
 def test_format_with_diagnostics_fn_snippet_detects_fullfile_does_not_is_code_bug():
     """When snippet detects an FN but the full-file test does NOT detect it,
     it should be classified as a CODE BUG (context-sensitive detection failure)."""
@@ -995,6 +1016,216 @@ def test_load_variant_only_candidates_finds_variant_diverging():
         variant_cache.unlink(missing_ok=True)
 
 
+def _setup_generate_task_env(tmp_path, corpus_overrides=None, variant_data=None):
+    """Helper to set up generate_task environment with mocked deps."""
+    dept_dir = tmp_path / "src" / "cop" / "style"
+    dept_dir.mkdir(parents=True)
+    (dept_dir / "foo_bar.rs").write_text("pub struct FooBar;\n")
+    fix_dir = tmp_path / "tests" / "fixtures" / "cops" / "style" / "foo_bar"
+    fix_dir.mkdir(parents=True)
+    (fix_dir / "offense.rb").write_text("x = 1\n^ Style/FooBar: msg\n")
+    (fix_dir / "no_offense.rb").write_text("y = 2\n")
+
+    default_corpus = {
+        "fp": 0, "fn": 0, "matches": 100,
+        "repo_breakdown": {},
+        "fp_examples": [],
+        "fn_examples": [],
+    }
+    if corpus_overrides:
+        default_corpus.update(corpus_overrides)
+
+    saved = {
+        "PROJECT_ROOT": gct.PROJECT_ROOT,
+        "get_corpus_data": gct.get_corpus_data,
+        "find_vendor_ruby_source": gct.find_vendor_ruby_source,
+        "find_vendor_spec": gct.find_vendor_spec,
+        "load_variant_data_for_cop": gct.load_variant_data_for_cop,
+    }
+    gct.PROJECT_ROOT = tmp_path
+    gct.get_corpus_data = lambda *a, **kw: default_corpus
+    gct.find_vendor_ruby_source = lambda *a: None
+    gct.find_vendor_spec = lambda *a: None
+    gct.load_variant_data_for_cop = lambda *a, **kw: variant_data or []
+    return saved
+
+
+def _teardown_generate_task_env(saved):
+    for k, v in saved.items():
+        setattr(gct, k, v)
+
+
+def test_generate_task_variant_only_step1_references_variant_examples(tmp_path):
+    """For variant-only cops, step 1 should reference Variant FP/FN Examples."""
+    saved = _setup_generate_task_env(tmp_path, variant_data=[
+        {"style_label": "require_single_line", "matches": 500, "fp": 10, "fn": 20,
+         "fp_examples": [{"loc": "repo: a.rb:5", "msg": "bad", "src": ["def foo = x"]}],
+         "fn_examples": [{"loc": "repo: b.rb:10", "msg": "missed", "src": ["def bar; x; end"]}]},
+    ])
+    try:
+        task = gct.generate_task("Style/FooBar")
+        assert "Variant FP/FN Examples" in task
+        assert "Pre-diagnostic Results" not in task
+        assert "Corpus FP/FN Examples" not in task
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_generate_task_variant_only_step7_uses_style_flag(tmp_path):
+    """For variant-only cops, step 7 should include --style flag."""
+    saved = _setup_generate_task_env(tmp_path, variant_data=[
+        {"style_label": "require_single_line", "matches": 500, "fp": 10, "fn": 20,
+         "fp_examples": [], "fn_examples": []},
+    ])
+    try:
+        task = gct.generate_task("Style/FooBar")
+        # Step 7 should use --style for the primary variant
+        assert "--style" in task
+        assert "require_single_line" in task
+        # Should also verify default config is not regressed
+        assert "Also validate the default config is not regressed" in task
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_generate_task_variant_only_includes_fp_fn_examples(tmp_path):
+    """Variant-only tasks should include actual FP/FN code examples."""
+    saved = _setup_generate_task_env(tmp_path, variant_data=[
+        {"style_label": "require_single_line", "matches": 500, "fp": 2, "fn": 1,
+         "fp_examples": [
+             {"loc": "repo: a.rb:5", "msg": "Use endless method", "src": ["def foo = x"]},
+             {"loc": "repo: c.rb:15", "msg": "Use endless method", "src": ["def baz = y"]},
+         ],
+         "fn_examples": [
+             {"loc": "repo: b.rb:10", "msg": "Use endless method", "src": ["def bar; x; end"]},
+         ]},
+    ])
+    try:
+        task = gct.generate_task("Style/FooBar")
+        assert "False Positives" in task
+        assert "False Negatives" in task
+        assert "def foo = x" in task
+        assert "def bar; x; end" in task
+        assert "repo: a.rb:5" in task
+        assert "repo: b.rb:10" in task
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_generate_task_variant_only_includes_guardrail_note(tmp_path):
+    """Variant-only tasks should include guardrail about real oracle data."""
+    saved = _setup_generate_task_env(tmp_path, variant_data=[
+        {"style_label": "comma", "matches": 300, "fp": 5, "fn": 3,
+         "fp_examples": [], "fn_examples": []},
+    ])
+    try:
+        task = gct.generate_task("Style/FooBar")
+        assert "variant FP/FN numbers below are real" in task
+        assert "Do NOT conclude that the oracle data is stale" in task
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_generate_task_variant_only_no_examples_shows_fallback(tmp_path):
+    """When variant data has no examples, prompt suggests verify_cop_locations."""
+    saved = _setup_generate_task_env(tmp_path, variant_data=[
+        {"style_label": "comma", "matches": 300, "fp": 5, "fn": 3,
+         "fp_examples": [], "fn_examples": []},
+    ])
+    try:
+        task = gct.generate_task("Style/FooBar")
+        assert "verify_cop_locations.py" in task
+        assert "No example source code is available" in task
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_generate_task_nonvariant_step1_references_prediagnostic(tmp_path):
+    """Non-variant cops with diagnostics should reference Pre-diagnostic in step 1."""
+    saved = _setup_generate_task_env(
+        tmp_path,
+        corpus_overrides={"fp": 3, "fn": 1,
+                          "fn_examples": [{"loc": "r: f.rb:1", "msg": "m"}],
+                          "fp_examples": [{"loc": "r: f.rb:2", "msg": "m"}]},
+    )
+    try:
+        # No variant data, not variant-only → uses default step 1
+        task = gct.generate_task("Style/FooBar")
+        # Without binary, no diagnostics, so step 1 references Corpus FP/FN
+        assert "Corpus FP/FN Examples" in task
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_generate_task_nonvariant_step7_no_style_flag(tmp_path):
+    """Non-variant cops step 7 should NOT include --style flag."""
+    saved = _setup_generate_task_env(
+        tmp_path,
+        corpus_overrides={"fp": 2, "fn": 0,
+                          "fp_examples": [{"loc": "r: f.rb:1", "msg": "m"}]},
+    )
+    try:
+        task = gct.generate_task("Style/FooBar")
+        assert "check_cop.py Style/FooBar --rerun --clone --sample 15\n" in task
+        assert "--style" not in task.split("### Workflow")[1].split("### Fixture")[0]
+    finally:
+        _teardown_generate_task_env(saved)
+
+
+def test_load_variant_data_includes_examples():
+    """load_variant_data_for_cop extracts fp_examples and fn_examples."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    original_download = gct._download_corpus
+    try:
+        cache_dir = Path(tempfile.gettempdir()) / "nitrocop-corpus-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        fake_run_id = 99999
+        variant_cache = cache_dir / f"style-variant-results-{fake_run_id}.json"
+        variant_cache.write_text(json.dumps({
+            "batches": [{
+                "name": "batch_1",
+                "by_cop": [
+                    {
+                        "cop": "Style/Foo",
+                        "style_label": "comma",
+                        "fp": 5, "fn": 3, "matches": 100,
+                        "fp_examples": [{"loc": "r: a.rb:1", "msg": "fp msg"}],
+                        "fn_examples": [{"loc": "r: b.rb:2", "msg": "fn msg"}],
+                    },
+                ],
+            }],
+        }))
+        corpus_path = cache_dir / "fake-corpus-2.json"
+        corpus_path.write_text("{}")
+        gct._download_corpus = lambda: (corpus_path, fake_run_id, "abc")
+
+        result = gct.load_variant_data_for_cop("Style/Foo")
+        assert len(result) == 1
+        assert result[0]["fp_examples"] == [{"loc": "r: a.rb:1", "msg": "fp msg"}]
+        assert result[0]["fn_examples"] == [{"loc": "r: b.rb:2", "msg": "fn msg"}]
+    finally:
+        gct._download_corpus = original_download
+        variant_cache.unlink(missing_ok=True)
+
+
+def test_infer_variant_config_key_finds_enforced_style():
+    """_infer_variant_config_key finds the right param from batch YAMLs."""
+    # This test uses the real batch files in the repo
+    variant = {"style_label": "require_single_line"}
+    result = gct._infer_variant_config_key(variant)
+    assert result == "EnforcedStyle"
+
+
+def test_infer_variant_config_key_fallback():
+    """_infer_variant_config_key falls back to EnforcedStyle for unknown labels."""
+    variant = {"style_label": "nonexistent_style_value_xyz"}
+    result = gct._infer_variant_config_key(variant)
+    assert result == "EnforcedStyle"
+
+
 if __name__ == "__main__":
     test_pascal_to_snake()
     test_parse_cop_name()
@@ -1032,4 +1263,7 @@ if __name__ == "__main__":
     test_render_issue_body_no_variants()
     test_load_variant_data_for_cop_no_data()
     test_load_variant_only_candidates_finds_variant_diverging()
+    test_load_variant_data_includes_examples()
+    test_infer_variant_config_key_finds_enforced_style()
+    test_infer_variant_config_key_fallback()
     print("All tests passed.")
