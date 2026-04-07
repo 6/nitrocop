@@ -11,18 +11,18 @@ Every offense is compared by file path, line number, and cop name.
 | Metric | Value |
 |--------|------:|
 | Repos | 5590 |
-| Repos with 100% match | 3544 |
+| Repos with 100% match | 3547 |
 | Files inspected | 590,786 |
-| Offenses compared | 28,387,807 |
-| Matches (both agree) | 28,342,274 |
-| FP (nitrocop extra) | 10,562 |
-| FN (nitrocop missing) | 34,971 |
+| Offenses compared | 28,387,814 |
+| Matches (both agree) | 28,342,297 |
+| FP (nitrocop extra) | 10,569 |
+| FN (nitrocop missing) | 34,948 |
 | Registered cops | 915 |
-| Cops with exact match | 848 |
-| Cops with divergence | 39 |
+| Cops with exact match | 847 |
+| Cops with divergence | 40 |
 | Cops with no corpus data | 28 |
 | **Match rate (default config)** | **99.83%** |
-| **Match rate (all variants)** | **93.04%** |
+| **Match rate (all variants)** | **93.10%** |
 | Repos with errors | 1 |
 
 ## Department Breakdown
@@ -36,7 +36,7 @@ Results using each cop's default RuboCop configuration.
 | Bundler | 7 | 7 | 0 | 0 | 157,864 | 0 | 0 | 100.0% |
 | FactoryBot | 11 | 11 | 0 | 0 | 48,577 | 0 | 0 | 100.0% |
 | Gemspec | 10 | 10 | 0 | 0 | 53,971 | 0 | 0 | 100.0% |
-| Layout | 100 | 91 | 9 | 0 | 4,197,075 | 9,232 | 10,490 | 99.5% |
+| Layout | 100 | 90 | 10 | 0 | 4,197,079 | 9,238 | 10,486 | 99.5% |
 | Lint | 148 | 142 | 3 | 3 | 4,624,912 | 431 | 1,001 | 99.9% |
 | Metrics | 10 | 10 | 0 | 0 | 680,828 | 0 | 0 | 100.0% |
 | Migration | 1 | 1 | 0 | 0 | 155 | 0 | 0 | 100.0% |
@@ -47,7 +47,7 @@ Results using each cop's default RuboCop configuration.
 | Rails | 138 | 99 | 18 | 21 | 432,432 | 663 | 23,123 | 94.7% |
 | Rake | 5 | 5 | 0 | 0 | 3,512 | 0 | 0 | 100.0% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
-| Style | 287 | 276 | 9 | 2 | 14,768,899 | 236 | 357 | 99.9% |
+| Style | 287 | 276 | 9 | 2 | 14,768,918 | 237 | 338 | 99.9% |
 
 ### All `EnforcedStyle` Variants
 
@@ -58,31 +58,31 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Bundler | 7 | 7 | 0 | 0 | 169,515 | 0 | 0 | 100.0% |
 | FactoryBot | 11 | 11 | 0 | 0 | 317,179 | 0 | 0 | 100.0% |
 | Gemspec | 10 | 10 | 0 | 0 | 70,397 | 0 | 0 | 100.0% |
-| Layout | 100 | 60 | 40 | 0 | 33,621,041 | 1,587,061 | 2,606,540 | 88.9% |
+| Layout | 100 | 60 | 40 | 0 | 33,617,618 | 1,541,154 | 2,609,963 | 89.0% |
 | Lint | 148 | 141 | 4 | 3 | 4,636,317 | 431 | 1,139 | 99.9% |
 | Metrics | 10 | 10 | 0 | 0 | 680,828 | 0 | 0 | 100.0% |
 | Migration | 1 | 1 | 0 | 0 | 155 | 0 | 0 | 100.0% |
 | Naming | 19 | 18 | 1 | 0 | 2,253,057 | 61 | 0 | 99.9% |
 | Performance | 52 | 52 | 0 | 0 | 112,164 | 0 | 0 | 100.0% |
-| RSpec | 113 | 102 | 10 | 1 | 3,990,702 | 20,231 | 2,644 | 99.4% |
+| RSpec | 113 | 103 | 9 | 1 | 3,990,866 | 18,582 | 2,480 | 99.4% |
 | RSpecRails | 8 | 7 | 0 | 1 | 50,821 | 0 | 0 | 100.0% |
 | Rails | 138 | 92 | 25 | 21 | 484,986 | 2,237 | 24,873 | 94.7% |
 | Rake | 5 | 5 | 0 | 0 | 3,512 | 0 | 0 | 100.0% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
-| Style | 287 | 239 | 46 | 2 | 23,567,851 | 169,745 | 812,163 | 96.0% |
+| Style | 287 | 243 | 42 | 2 | 23,558,506 | 159,672 | 821,508 | 96.0% |
 
 ## Top Divergence Contributors (repos with most diverging cops)
 
 | Repo | Diverging Cops | FP Cops | FN Cops | Total FP | Total FN |
 |------|---------------:|--------:|--------:|---------:|---------:|
 | department-of-veterans-affairs__vets-api__038d1df | 19 | 11 | 9 | 160 | 21 |
-| noosfero__noosfero__299a0b9 | 17 | 5 | 13 | 22 | 21 |
+| noosfero__noosfero__299a0b9 | 18 | 6 | 13 | 25 | 21 |
 | seek4science__seek__573bc1a | 16 | 5 | 14 | 30 | 43 |
 | forem__forem__72d7c44 | 15 | 6 | 12 | 41 | 16 |
 | Coursemology__coursemology2__70d42e7 | 14 | 4 | 11 | 72 | 12 |
 | benwbrum__fromthepage__fe3b4ed | 14 | 4 | 11 | 13 | 19 |
 | discourse__discourse__9c8f125 | 14 | 4 | 13 | 261 | 440 |
-| opf__openproject__f5a451d | 14 | 7 | 11 | 157 | 498 |
+| opf__openproject__f5a451d | 14 | 7 | 10 | 157 | 497 |
 | theforeman__foreman__7a2fc6c | 14 | 5 | 11 | 9 | 18 |
 | GSA__search-gov__4acf0bf | 13 | 3 | 12 | 33 | 16 |
 | WikiEducationFoundation__WikiEduDashboard__0d6258c | 13 | 2 | 12 | 27 | 31 |
@@ -102,12 +102,12 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 | Repo | Issue | Files Dropped | Error |
 |------|-------|--------------|-------|
-| jruby__jruby__0303464 | crashed_rubocop | all |  |
+| jruby__jruby__0303464 | crashed_rubocop | all | `An error occurred while Lint/LiteralAsCondition cop was inspecting /home/runner/work/nitrocop/nitrocop/repos/jruby__jruby__0303464/spec/ruby/language/if_spec.rb:108:4.` |
 
 ## Diverging Cops
 
-39 cops diverge from RuboCop on the corpus (default config). 848 cops match RuboCop exactly. 28 cops have no corpus data.
- 87 additional cops diverge only in non-default style variants.
+40 cops diverge from RuboCop on the corpus (default config). 847 cops match RuboCop exactly. 28 cops have no corpus data.
+ 81 additional cops diverge only in non-default style variants.
 
 | Cop | Matches | FP | FN | Match % |
 |-----|--------:|---:|---:|--------:|
@@ -122,25 +122,27 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Layout/SpaceAroundOperators (space, space) | 33,911 | 200 | 90 | 99.1% |
 | Rails/UniqueValidationWithoutIndex | 543 | 46 | 22 | 88.8% |
 | Lint/RedundantCopDisableDirective | 1,850 | 14 | 466 | 79.3% |
-| Style/RedundantParentheses | 23,477 | 58 | 128 | 99.2% |
+| Style/RedundantParentheses | 23,481 | 58 | 124 | 99.2% |
 | Style/ConditionalAssignment (default) | 12,977 | 1 | 128 | 99.0% |
 | ↳ Style/ConditionalAssignment (assign_inside_condition) | 0 | 0 | 24,932 | 0.0% |
-| Style/SafeNavigation | 13,084 | 72 | 38 | 99.1% |
+| Style/SafeNavigation | 13,097 | 73 | 25 | 99.2% |
 | Style/DocumentationMethod | 1,095,475 | 41 | 52 | 99.9% |
 | Layout/IndentationWidth (default) | 255,648 | 0 | 45 | 99.9% |
 | ↳ Layout/IndentationWidth (relative_to_receiver) | 88,668 | 2,066 | 4,282 | 93.3% |
 | Rails/Delegate | 21,192 | 41 | 0 | 99.8% |
-| Style/IfUnlessModifier | 118,914 | 32 | 7 | 99.9% |
+| Style/IfUnlessModifier | 118,916 | 32 | 5 | 99.9% |
 | Lint/ShadowingOuterLocalVariable | 4,313 | 17 | 12 | 99.3% |
 | Layout/ExtraSpacing | 44,460 | 11 | 5 | 99.9% |
-| Layout/LineLength | 452,962 | 7 | 7 | 99.9% |
 | Style/RedundantSelf | 78,225 | 12 | 1 | 99.9% |
 | Style/RedundantLineContinuation | 2,706 | 9 | 3 | 99.5% |
 | Layout/EmptyLineAfterMultilineCondition | 7,040 | 10 | 0 | 99.8% |
+| Layout/LineLength | 452,966 | 7 | 3 | 99.9% |
 | Layout/BlockAlignment (default) | 2,552 | 8 | 0 | 99.6% |
 | ↳ Layout/BlockAlignment (start_of_block) | 6,866 | 0 | 0 | 100.0% |
 | ↳ Layout/BlockAlignment (start_of_line) | 2,904 | 1 | 11,425 | 20.2% |
 | Style/CombinableLoops | 881 | 7 | 0 | 99.2% |
+| Layout/EmptyLinesAroundAccessModifier (default) | 10,186 | 6 | 0 | 99.9% |
+| ↳ Layout/EmptyLinesAroundAccessModifier (only_before) | 33,117 | 78 | 1 | 99.7% |
 | Style/StringLiteralsInInterpolation (default) | 15,219 | 4 | 0 | 99.9% |
 | ↳ Style/StringLiteralsInInterpolation (double_quotes) | 14,188 | 341 | 0 | 97.6% |
 | Rails/ActionControllerTestCase | 1,306 | 359 | 0 | 78.4% |
@@ -169,7 +171,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Layout/EmptyLinesAroundClassBody (default) | 58,919 | 0 | 0 | 100.0% |
 | ↳ Layout/EmptyLinesAroundClassBody (empty_lines) | 163,838 | 139,225 | 144,969 | 36.5% |
 | ↳ Layout/EmptyLinesAroundClassBody (empty_lines_except_namespace) | 151,310 | 138,762 | 144,954 | 34.7% |
-| ↳ Layout/EmptyLinesAroundClassBody (empty_lines_special) | 75,039 | 201,408 | 149,043 | 17.6% |
+| ↳ Layout/EmptyLinesAroundClassBody (empty_lines_special) | 71,612 | 155,496 | 152,470 | 18.8% |
 | Layout/TrailingEmptyLines (default) | 31,154 | 0 | 0 | 100.0% |
 | ↳ Layout/TrailingEmptyLines (final_blank_line) | 5,060 | 210,411 | 210,420 | 1.1% |
 | Layout/SpaceInsideArrayLiteralBrackets (default) | 40,556 | 0 | 0 | 100.0% |
@@ -199,7 +201,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Style/HashSyntax (never, no_mixed_keys) | 48,495 | 534 | 1,129 | 96.6% |
 | ↳ Style/HashSyntax (consistent, ruby19_no_mixed_keys) | 223,952 | 3,291 | 58,541 | 78.3% |
 | Style/MethodCallWithArgsParentheses (default) | 3,360,422 | 0 | 0 | 100.0% |
-| ↳ Style/MethodCallWithArgsParentheses (omit_parentheses) | 1,525,096 | 44,584 | 48,408 | 94.2% |
+| ↳ Style/MethodCallWithArgsParentheses (omit_parentheses) | 1,515,687 | 35,186 | 57,817 | 94.2% |
 | Layout/FirstHashElementIndentation (default) | 52,374 | 0 | 0 | 100.0% |
 | ↳ Layout/FirstHashElementIndentation (consistent) | 9,716 | 413 | 67,037 | 12.5% |
 | ↳ Layout/FirstHashElementIndentation (align_braces) | 196,969 | 4 | 0 | 99.9% |
@@ -218,7 +220,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Layout/SpaceInsideHashLiteralBraces (no_space, space) | 261,070 | 3 | 0 | 99.9% |
 | ↳ Layout/SpaceInsideHashLiteralBraces (compact) | 69,495 | 687 | 13,414 | 83.1% |
 | RSpec/PredicateMatcher (default) | 12,361 | 0 | 0 | 100.0% |
-| ↳ RSpec/PredicateMatcher (explicit) | 175,855 | 12,552 | 0 | 93.3% |
+| ↳ RSpec/PredicateMatcher (explicit) | 175,855 | 10,936 | 0 | 94.1% |
 | Style/RegexpLiteral (default) | 32,779 | 0 | 0 | 100.0% |
 | ↳ Style/RegexpLiteral (mixed) | 11,727 | 3 | 8,086 | 59.1% |
 | RSpec/ReturnFromStub (default) | 3,385 | 0 | 0 | 100.0% |
@@ -257,9 +259,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Style/StringLiterals (double_quotes) | 1,358,634 | 973 | 0 | 99.9% |
 | Layout/ParameterAlignment (default) | 679 | 0 | 0 | 100.0% |
 | ↳ Layout/ParameterAlignment (with_fixed_indentation) | 5,750 | 0 | 703 | 89.1% |
-| Style/FormatStringToken (default) | 13,236 | 0 | 0 | 100.0% |
-| ↳ Style/FormatStringToken (template) | 2,078 | 630 | 4 | 76.6% |
-| ↳ Style/FormatStringToken (unannotated) | 6,603 | 19 | 0 | 99.7% |
 | Style/TernaryParentheses (default) | 4,715 | 0 | 0 | 100.0% |
 | ↳ Style/TernaryParentheses (require_parentheses_when_complex) | 8,883 | 0 | 318 | 96.5% |
 | Style/MagicCommentFormat (default) | 827 | 0 | 0 | 100.0% |
@@ -268,17 +267,15 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Style/FrozenStringLiteralComment (never) | 106,027 | 7 | 255 | 99.7% |
 | RSpec/VariableName (default) | 538 | 0 | 0 | 100.0% |
 | ↳ RSpec/VariableName (camelCase) | 109,477 | 173 | 32 | 99.8% |
-| RSpec/ImplicitSubject (default) | 17,695 | 0 | 0 | 100.0% |
-| ↳ RSpec/ImplicitSubject (single_statement_only) | 1,731 | 33 | 5 | 97.8% |
-| ↳ RSpec/ImplicitSubject (require_implicit) | 10,516 | 0 | 144 | 98.6% |
 | Layout/SpaceInsideReferenceBrackets (default) | 3,262 | 0 | 0 | 100.0% |
 | ↳ Layout/SpaceInsideReferenceBrackets (space, space) | 636,735 | 0 | 165 | 99.9% |
 | Style/EndlessMethod (default) | 205 | 0 | 0 | 100.0% |
 | ↳ Style/EndlessMethod (require_single_line) | 259,550 | 33 | 124 | 99.9% |
-| Style/NumericPredicate (default) | 38,062 | 0 | 0 | 100.0% |
-| ↳ Style/NumericPredicate (comparison) | 3,723 | 147 | 0 | 96.2% |
 | Lint/SymbolConversion (default) | 159,073 | 0 | 0 | 100.0% |
 | ↳ Lint/SymbolConversion (consistent) | 11,285 | 0 | 138 | 98.7% |
+| Style/FormatStringToken (default) | 13,236 | 0 | 0 | 100.0% |
+| ↳ Style/FormatStringToken (template) | 2,078 | 100 | 4 | 95.2% |
+| ↳ Style/FormatStringToken (unannotated) | 6,603 | 19 | 0 | 99.7% |
 | Layout/AccessModifierIndentation (default) | 4,855 | 0 | 0 | 100.0% |
 | ↳ Layout/AccessModifierIndentation (outdent) | 37,000 | 110 | 0 | 99.7% |
 | Layout/SpaceAroundBlockParameters (default) | 2,118 | 0 | 0 | 100.0% |
@@ -289,8 +286,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Layout/DotPosition (trailing) | 84,005 | 12 | 84 | 99.8% |
 | Style/MixinGrouping (default) | 815 | 0 | 0 | 100.0% |
 | ↳ Style/MixinGrouping (grouped) | 22,044 | 25 | 62 | 99.6% |
-| Layout/EmptyLinesAroundAccessModifier (default) | 10,186 | 0 | 0 | 100.0% |
-| ↳ Layout/EmptyLinesAroundAccessModifier (only_before) | 33,117 | 79 | 1 | 99.7% |
 | Style/AccessModifierDeclarations (default) | 1,294 | 0 | 0 | 100.0% |
 | ↳ Style/AccessModifierDeclarations (inline) | 37,687 | 78 | 0 | 99.7% |
 | Layout/MultilineHashBraceLayout (default) | 3,835 | 0 | 0 | 100.0% |
@@ -307,17 +302,13 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Layout/MultilineArrayBraceLayout (same_line) | 46,918 | 38 | 0 | 99.9% |
 | Rails/TimeZone (default) | 34,767 | 0 | 0 | 100.0% |
 | ↳ Rails/TimeZone (strict) | 17,609 | 35 | 0 | 99.8% |
-| Style/MutableConstant (default) | 34,103 | 0 | 0 | 100.0% |
-| ↳ Style/MutableConstant (strict) | 21,363 | 2 | 32 | 99.8% |
 | Layout/MultilineMethodCallBraceLayout (default) | 17,676 | 0 | 0 | 100.0% |
 | ↳ Layout/MultilineMethodCallBraceLayout (new_line) | 73,821 | 0 | 6 | 99.9% |
 | ↳ Layout/MultilineMethodCallBraceLayout (same_line) | 128,190 | 15 | 10 | 99.9% |
-| Style/HashLookupMethod (default) | 17,739 | 0 | 0 | 100.0% |
-| ↳ Style/HashLookupMethod (fetch) | 546,555 | 21 | 5 | 99.9% |
+| Style/MutableConstant (default) | 34,103 | 0 | 0 | 100.0% |
+| ↳ Style/MutableConstant (strict) | 21,395 | 29 | 0 | 99.8% |
 | Layout/IndentationConsistency (default) | 76,306 | 0 | 0 | 100.0% |
 | ↳ Layout/IndentationConsistency (indented_internal_methods) | 9,082 | 20 | 4 | 99.7% |
-| RSpec/ExpectChange (default) | 6,553 | 0 | 0 | 100.0% |
-| ↳ RSpec/ExpectChange (block) | 5,043 | 0 | 20 | 99.6% |
 | Style/YodaCondition (default) | 1,935 | 0 | 0 | 100.0% |
 | ↳ Style/YodaCondition (require_for_all_comparison_operators) | 162,816 | 16 | 1 | 99.9% |
 | Rails/UniqBeforePluck (default) | 35 | 0 | 0 | 100.0% |
@@ -329,17 +320,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Style/TrailingCommaInArrayLiteral (diff_comma) | 26,590 | 4 | 2 | 99.9% |
 | RSpec/ImplicitExpect (default) | 45,996 | 0 | 0 | 100.0% |
 | ↳ RSpec/ImplicitExpect (should) | 25,256 | 8 | 0 | 99.9% |
-| Style/FormatString (default) | 14,217 | 0 | 0 | 100.0% |
-| ↳ Style/FormatString (sprintf) | 7,481 | 0 | 4 | 99.9% |
-| ↳ Style/FormatString (percent) | 3,930 | 0 | 4 | 99.8% |
 | Layout/EndOfLine (default) | 1,215 | 0 | 0 | 100.0% |
 | ↳ Layout/EndOfLine (crlf) | 229,353 | 6 | 0 | 99.9% |
 | Style/UnlessLogicalOperators (default) | 697 | 0 | 0 | 100.0% |
 | ↳ Style/UnlessLogicalOperators (forbid_logical_operators) | 7,468 | 6 | 0 | 99.9% |
+| RSpec/ImplicitSubject (default) | 17,695 | 0 | 0 | 100.0% |
+| ↳ RSpec/ImplicitSubject (single_statement_only) | 1,731 | 0 | 5 | 99.7% |
 | Style/ObjectThen (default) | 743 | 0 | 0 | 100.0% |
 | ↳ Style/ObjectThen (yield_self) | 658 | 5 | 0 | 99.2% |
-| Style/QuotedSymbols (default) | 49,466 | 0 | 0 | 100.0% |
-| ↳ Style/QuotedSymbols (double_quotes) | 8,382 | 4 | 0 | 99.9% |
 | Layout/FirstArrayElementIndentation (default) | 30,485 | 0 | 0 | 100.0% |
 | ↳ Layout/FirstArrayElementIndentation (align_brackets) | 68,511 | 3 | 0 | 99.9% |
 | Style/ClassAndModuleChildren (default) | 46,755 | 0 | 0 | 100.0% |
@@ -348,8 +336,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ RSpec/NamedSubject (named_only) | 2,819 | 2 | 0 | 99.9% |
 | Rails/I18nLazyLookup (default) | 167 | 0 | 0 | 100.0% |
 | ↳ Rails/I18nLazyLookup (explicit) | 502 | 1 | 1 | 99.6% |
-| Style/NumericLiteralPrefix (default) | 5,912 | 0 | 0 | 100.0% |
-| ↳ Style/NumericLiteralPrefix (zero_only) | 621 | 2 | 0 | 99.6% |
 | Style/ReturnNil (default) | 20,358 | 0 | 0 | 100.0% |
 | ↳ Style/ReturnNil (return_nil) | 36,017 | 0 | 2 | 99.9% |
 | Layout/LineContinuationSpacing (default) | 8,888 | 0 | 0 | 100.0% |
@@ -364,599 +350,1962 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Style/NilComparison (comparison) | 31,796 | 1 | 0 | 99.9% |
 | Style/NumberedParameters (default) | 499 | 0 | 0 | 100.0% |
 | ↳ Style/NumberedParameters (disallow) | 1,476 | 0 | 1 | 99.9% |
+| Style/QuotedSymbols (default) | 49,466 | 0 | 0 | 100.0% |
+| ↳ Style/QuotedSymbols (double_quotes) | 8,382 | 1 | 0 | 99.9% |
 | Style/RaiseArgs (default) | 9,863 | 0 | 0 | 100.0% |
 | ↳ Style/RaiseArgs (exploded) | 3,198 | 1 | 0 | 99.9% |
 
 <details>
 <summary><strong>Layout/RedundantLineBreak</strong> — 271,781 matches, 3,962 FP, 4,531 FN (96.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (3,962 FP, 4,531 FN):
 
-- `AaronC81__parlour__ffc0e09: lib/parlour/rbi_generator/method.rb:145  [Redundant line break detected.]`
-- `AaronC81__parlour__ffc0e09: lib/parlour/rbs_generator/method_signature.rb:77  [Redundant line break detected.]`
-- `AaronC81__sord__8713f8a: lib/sord/generator.rb:42  [Redundant line break detected.]`
-- ... and 97 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `AaronC81__sord__8713f8a: lib/sord/type_converter.rb:203  [Redundant line break detected.]`
-- `AaronC81__sord__8713f8a: lib/sord/type_converter.rb:236  [Redundant line break detected.]`
-- `AaronC81__sord__8713f8a: lib/sord/type_converter.rb:241  [Redundant line break detected.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `AaronC81__parlour__ffc0e09: lib/parlour/rbi_generator/method.rb:145  [Redundant line break detected.]`
+- FP: `AaronC81__parlour__ffc0e09: lib/parlour/rbs_generator/method_signature.rb:77  [Redundant line break detected.]`
+- FP: `AaronC81__sord__8713f8a: lib/sord/generator.rb:42  [Redundant line break detected.]`
+- ... and 97 more FP
+- FN: `AaronC81__sord__8713f8a: lib/sord/type_converter.rb:203  [Redundant line break detected.]`
+- FN: `AaronC81__sord__8713f8a: lib/sord/type_converter.rb:236  [Redundant line break detected.]`
+- FN: `AaronC81__sord__8713f8a: lib/sord/type_converter.rb:241  [Redundant line break detected.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
-<summary><strong>Layout/MultilineMethodCallIndentation</strong> — 38,415 matches, 4,625 FP, 2,231 FN (84.8%)</summary>
+<summary><strong>Layout/MultilineMethodCallIndentation</strong> — 38,415 matches, 7,663 FP, 24,605 FN (84.8%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (4,625 FP, 2,231 FN):
 
-- `AaronC81__sord__8713f8a: lib/sord/generator.rb:434  [Align `.map` with `parameter_names_and_defaults_to_tags` on line 432.]`
-- `AaronC81__sord__8713f8a: lib/sord/resolver.rb:20  [Align `.merge` with `.all` on line 16.]`
-- `ActiveCampaign__postmark-gem__a50ff39: spec/unit/postmark/message_extensions/mail_spec.rb:341  [Align `and_return` with `receive(:get_template)` on line 340.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `AaronC81__sord__8713f8a: lib/sord/generator.rb:434  [Align `.map` with `parameter_names_and_defaults_to_tags` on line 432.]`
+- FP: `AaronC81__sord__8713f8a: lib/sord/resolver.rb:20  [Align `.merge` with `.all` on line 16.]`
+- FP: `ActiveCampaign__postmark-gem__a50ff39: spec/unit/postmark/message_extensions/mail_spec.rb:341  [Align `and_return` with `receive(:get_template)` on line 340.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/models/aggregation_filter.rb:7  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/user.rb:241  [Align `.compact` with `(organisations_string || "")` on line 238.]`
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: app/models/alchemy/page/page_elements.rb:175  [Align `.collect` with `.richtexts` on line 172.]`
+- ... and 97 more FN
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**indented** (666 FP, 232 FN):
 
-- `24pullrequests__24pullrequests__381028d: app/models/aggregation_filter.rb:7  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- `24pullrequests__24pullrequests__381028d: app/models/user.rb:241  [Align `.compact` with `(organisations_string || "")` on line 238.]`
-- `AlchemyCMS__alchemy_cms__4c2023f: app/models/alchemy/page/page_elements.rb:175  [Align `.collect` with `.richtexts` on line 172.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `Freika__dawarich__3d1ae95: spec/services/places/name_fetcher_spec.rb:108  [Use 2 (not 0) spaces for indentation of a chained method call.]`
+- FP: `Freika__dawarich__3d1ae95: spec/services/places/name_fetcher_spec.rb:109  [Use 2 (not 0) spaces for indentation of a chained method call.]`
+- FP: `Freika__dawarich__3d1ae95: spec/services/points/raw_data_lonlat_extractor_spec.rb:26  [Use 2 (not 0) spaces for indentation of a chained method call.]`
+- ... and 97 more FP
+- FN: `Arachni__arachni__c1710d6: components/checks/active/code_injection.rb:54  [Use 2 (not 4) spaces for indenting an expression in an assignment spanning multiple lines.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/element/capabilities/analyzable/timeout.rb:377  [Use 2 (not 4) spaces for indenting an expression in an assignment spanning multiple lines.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/framework/parts/browser.rb:126  [Use 2 (not 4) spaces for indenting a condition in an `if` statement spanning multiple lines.]`
+- ... and 97 more FN
+
+**indented_relative_to_receiver** (2,372 FP, 22,142 FN):
+
+- FP: `Eric-Guo__wechat__84e1e9c: spec/lib/wechat/corp_api_spec.rb:574  [Use 2 (not 28) spaces for indentation of a chained method call.]`
+- FP: `Eric-Guo__wechat__84e1e9c: spec/lib/wechat/corp_api_spec.rb:592  [Use 2 (not 28) spaces for indentation of a chained method call.]`
+- FP: `Eric-Guo__wechat__84e1e9c: spec/lib/wechat/corp_api_spec.rb:594  [Use 2 (not 28) spaces for indentation of a chained method call.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:7  [Indent `.contributions_ignoring_organisations` 2 spaces more than `current_user` on line 6.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:8  [Indent `.year` 2 spaces more than `current_user` on line 6.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:9  [Indent `.order` 2 spaces more than `current_user` on line 6.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
-<summary><strong>Layout/MultilineOperationIndentation</strong> — 43,806 matches, 214 FP, 3,331 FN (92.5%)</summary>
+<summary><strong>Layout/MultilineOperationIndentation</strong> — 43,806 matches, 237 FP, 6,271 FN (92.5%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (214 FP, 3,331 FN):
 
-- `BlogBowl__BlogBowl__7c138f9: config/environments/development.rb:87  [Align the operands of an expression in an assignment spanning multiple lines.]`
-- `CoralineAda__alice__8b7efd5: alice/pipeline/listener.rb:40  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- `Coursemology__coursemology2__70d42e7: app/controllers/components/course/stories_component.rb:18  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `BlogBowl__BlogBowl__7c138f9: config/environments/development.rb:87  [Align the operands of an expression in an assignment spanning multiple lines.]`
+- FP: `CoralineAda__alice__8b7efd5: alice/pipeline/listener.rb:40  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- FP: `Coursemology__coursemology2__70d42e7: app/controllers/components/course/stories_component.rb:18  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- ... and 97 more FP
+- FN: `AlexB52__retest__548f9d2: features/bundler-app/lib/bundler_app/bottles.rb:37  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- FN: `AlexB52__retest__548f9d2: features/bundler-app/lib/bundler_app/bottles.rb:38  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- FN: `AlexB52__retest__548f9d2: features/bundler-app/lib/bundler_app/bottles.rb:39  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- ... and 97 more FN
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**indented** (23 FP, 2,940 FN):
 
-- `AlexB52__retest__548f9d2: features/bundler-app/lib/bundler_app/bottles.rb:37  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- `AlexB52__retest__548f9d2: features/bundler-app/lib/bundler_app/bottles.rb:38  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- `AlexB52__retest__548f9d2: features/bundler-app/lib/bundler_app/bottles.rb:39  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `Shopify__ruby-lsp__0d5d95f: lib/ruby_lsp/requests/semantic_highlighting.rb:115  [Use 2 (not 4) spaces for indenting a condition in an `if` statement spanning multiple lines.]`
+- FP: `antiwork__gumroad__782a69f: app/models/charge.rb:213  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- FP: `chef__chef__e58e1a1: lib/chef/provider/link.rb:49  [Use 2 (not 4) spaces for indenting an expression spanning multiple lines.]`
+- ... and 20 more FP
+- FN: `Arachni__arachni__c1710d6: components/plugins/webhook_notify.rb:38  [Use 2 (not 13) spaces for indenting an expression spanning multiple lines.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/component/manager.rb:391  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/component/manager.rb:396  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Lint/UselessAssignment</strong> — 26,723 matches, 400 FP, 523 FN (96.6%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (400 FP, 523 FN):
 
-- `0dayInc__pwn__c3d3e6d: lib/pwn/plugins/baresip.rb:394  [Useless assignment to variable - `baresip_obj`.]`
-- `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/packets/parsers/limits_parser.rb:123  [Useless assignment to variable - `err`.]`
-- `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/packets/parsers/limits_parser.rb:124  [Useless assignment to variable - `err`.]`
-- ... and 97 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `0dayInc__pwn__c3d3e6d: bin/pwn_serial_msr206:53  [Useless assignment to variable - `exec_resp`.]`
-- `0dayInc__pwn__c3d3e6d: lib/pwn/plugins/fuzz.rb:147  [Useless assignment to variable - `sock_obj`.]`
-- `0dayInc__pwn__c3d3e6d: lib/pwn/plugins/msr206.rb:622  [Useless assignment to variable - `exec_resp`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `0dayInc__pwn__c3d3e6d: lib/pwn/plugins/baresip.rb:394  [Useless assignment to variable - `baresip_obj`.]`
+- FP: `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/packets/parsers/limits_parser.rb:123  [Useless assignment to variable - `err`.]`
+- FP: `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/packets/parsers/limits_parser.rb:124  [Useless assignment to variable - `err`.]`
+- ... and 97 more FP
+- FN: `0dayInc__pwn__c3d3e6d: bin/pwn_serial_msr206:53  [Useless assignment to variable - `exec_resp`.]`
+- FN: `0dayInc__pwn__c3d3e6d: lib/pwn/plugins/fuzz.rb:147  [Useless assignment to variable - `sock_obj`.]`
+- FN: `0dayInc__pwn__c3d3e6d: lib/pwn/plugins/msr206.rb:622  [Useless assignment to variable - `exec_resp`.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
-<summary><strong>Layout/SpaceAroundOperators</strong> — 151,157 matches, 395 FP, 340 FN (99.5%)</summary>
+<summary><strong>Layout/SpaceAroundOperators</strong> — 151,157 matches, 595 FP, 430 FN (99.5%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (395 FP, 340 FN):
 
-- `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/packets/packet_item.rb:473  [Operator `=` should be surrounded by a single space.]`
-- `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/utilities/quaternion.rb:120  [Operator `=` should be surrounded by a single space.]`
-- `ConfigLMM__ConfigLMM__26d3a20: lib/ConfigLMM/io/dhcp.rb:81  [Operator `=` should be surrounded by a single space.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/packets/packet_item.rb:473  [Operator `=` should be surrounded by a single space.]`
+- FP: `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/utilities/quaternion.rb:120  [Operator `=` should be surrounded by a single space.]`
+- FP: `ConfigLMM__ConfigLMM__26d3a20: lib/ConfigLMM/io/dhcp.rb:81  [Operator `=` should be surrounded by a single space.]`
+- ... and 97 more FP
+- FN: `Arachni__arachni__c1710d6: lib/arachni/element/capabilities/analyzable/signature.rb:38  [Operator `=>` should be surrounded by a single space.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/rpc/server/framework/distributor.rb:160  [Operator `=` should be surrounded by a single space.]`
+- FN: `DavyJonesLocker__postgres_ext-serializers__5de27f2: test/sideloading_test.rb:16  [Operator `=` should be surrounded by a single space.]`
+- ... and 97 more FN
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**space, space** (200 FP, 90 FN):
 
-- `Arachni__arachni__c1710d6: lib/arachni/element/capabilities/analyzable/signature.rb:38  [Operator `=>` should be surrounded by a single space.]`
-- `Arachni__arachni__c1710d6: lib/arachni/rpc/server/framework/distributor.rb:160  [Operator `=` should be surrounded by a single space.]`
-- `DavyJonesLocker__postgres_ext-serializers__5de27f2: test/sideloading_test.rb:16  [Operator `=` should be surrounded by a single space.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `ManageIQ__manageiq__b530ec7: spec/models/ems_event_spec.rb:75  [Operator `=` should be surrounded by a single space.]`
+- FP: `Shopify__ruby-lsp__0d5d95f: test/fixtures/rubocop_continuation.rb:2  [Surrounding space missing for operator `+`.]`
+- FP: `SquareSquash__web__e73f280: lib/workers/occurrences_worker.rb:155  [Operator `||=` should be surrounded by a single space.]`
+- ... and 97 more FP
+- FN: `Arachni__arachni__c1710d6: lib/arachni/element/capabilities/analyzable/signature.rb:38  [Operator `=>` should be surrounded by a single space.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/rpc/server/framework/distributor.rb:160  [Operator `=` should be surrounded by a single space.]`
+- FN: `Eigenfocus__eigenfocus__0bf9c6c: spec/support/capybara.rb:12  [Operator `=` should be surrounded by a single space.]`
+- ... and 87 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/UniqueValidationWithoutIndex</strong> — 543 matches, 46 FP, 22 FN (88.8%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (46 FP, 22 FN):
 
-- `Coursemology__coursemology2__70d42e7: app/models/course/assessment/question_bundle_question.rb:9  [Uniqueness validation should have a unique index on the database column.]`
-- `Coursemology__coursemology2__70d42e7: app/models/course/scholaistic_assessment.rb:5  [Uniqueness validation should have a unique index on the database column.]`
-- `Gokul595__api_guard__120328a: spec/dummy/app/models/admin.rb:10  [Uniqueness validation should have a unique index on the database column.]`
-- ... and 43 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `adamcooke__staytus__3e20435: app/models/service_status.rb:19  [Uniqueness validation should have a unique index on the database column.]`
-- `akicho8__shogi-extend__3650350: app/models/kiwi/banana/basic_methods.rb:89  [Uniqueness validation should have a unique index on the database column.]`
-- `akicho8__shogi-extend__3650350: app/models/ppl/membership.rb:43  [Uniqueness validation should have a unique index on the database column.]`
-- ... and 19 more (see corpus-results.json for full list)
+- FP: `Coursemology__coursemology2__70d42e7: app/models/course/assessment/question_bundle_question.rb:9  [Uniqueness validation should have a unique index on the database column.]`
+- FP: `Coursemology__coursemology2__70d42e7: app/models/course/scholaistic_assessment.rb:5  [Uniqueness validation should have a unique index on the database column.]`
+- FP: `Gokul595__api_guard__120328a: spec/dummy/app/models/admin.rb:10  [Uniqueness validation should have a unique index on the database column.]`
+- ... and 43 more FP
+- FN: `adamcooke__staytus__3e20435: app/models/service_status.rb:19  [Uniqueness validation should have a unique index on the database column.]`
+- FN: `akicho8__shogi-extend__3650350: app/models/kiwi/banana/basic_methods.rb:89  [Uniqueness validation should have a unique index on the database column.]`
+- FN: `akicho8__shogi-extend__3650350: app/models/ppl/membership.rb:43  [Uniqueness validation should have a unique index on the database column.]`
+- ... and 19 more FN
 
 </details>
 
 <details>
 <summary><strong>Lint/RedundantCopDisableDirective</strong> — 1,850 matches, 14 FP, 466 FN (79.3%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (14 FP, 466 FN):
 
-- `GeorgeKaraszi__ActiveRecordExtended__fe0e094: lib/active_record_extended/query_methods/unionize.rb:184  [Unnecessary disabling of `Lint/UnmodifiedReduceAccumulator`.]`
-- `IBM__aspera-cli__49b967c: lib/aspera/cli/formatter.rb:199  [Unnecessary disabling of `Style/GlobalStdStream`.]`
-- `apexatoll__aoc-cli__4797740: spec/support/concern_helpers.rb:8  [Unnecessary disabling of `Style/RedundantInitialize`.]`
-- ... and 11 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `DataDog__dd-trace-rb__e3406de: spec/datadog/core/error_spec.rb:135  [Unnecessary disabling of `Layout/LineLength`.]`
-- `DataDog__dd-trace-rb__e3406de: spec/datadog/core/error_spec.rb:159  [Unnecessary disabling of `Layout/LineLength`.]`
-- `DataDog__dd-trace-rb__e3406de: spec/datadog/tracing/diagnostics/health_spec.rb:31  [Unnecessary disabling of `Layout/LineLength`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `GeorgeKaraszi__ActiveRecordExtended__fe0e094: lib/active_record_extended/query_methods/unionize.rb:184  [Unnecessary disabling of `Lint/UnmodifiedReduceAccumulator`.]`
+- FP: `IBM__aspera-cli__49b967c: lib/aspera/cli/formatter.rb:199  [Unnecessary disabling of `Style/GlobalStdStream`.]`
+- FP: `apexatoll__aoc-cli__4797740: spec/support/concern_helpers.rb:8  [Unnecessary disabling of `Style/RedundantInitialize`.]`
+- ... and 11 more FP
+- FN: `DataDog__dd-trace-rb__e3406de: spec/datadog/core/error_spec.rb:135  [Unnecessary disabling of `Layout/LineLength`.]`
+- FN: `DataDog__dd-trace-rb__e3406de: spec/datadog/core/error_spec.rb:159  [Unnecessary disabling of `Layout/LineLength`.]`
+- FN: `DataDog__dd-trace-rb__e3406de: spec/datadog/tracing/diagnostics/health_spec.rb:31  [Unnecessary disabling of `Layout/LineLength`.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
-<summary><strong>Style/RedundantParentheses</strong> — 23,477 matches, 58 FP, 128 FN (99.2%)</summary>
+<summary><strong>Style/RedundantParentheses</strong> — 23,481 matches, 58 FP, 124 FN (99.2%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (58 FP, 124 FN):
 
-- `ConnorAtherton__rb-readline__9fba246: lib/rbreadline.rb:4279  [Don't use parentheses around a logical expression.]`
-- `Faveod__arel-extensions__b8d316b: test/visitors/test_to_sql.rb:567  [Don't use parentheses around a method call.]`
-- `Faveod__arel-extensions__b8d316b: test/visitors/test_to_sql.rb:569  [Don't use parentheses around a method call.]`
-- ... and 55 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `ManageIQ__manageiq__b530ec7: app/models/chargeback.rb:222  [Don't use parentheses around an assignment.]`
-- `ageweke__flex_columns__3870086: spec/flex_columns/unit/contents/column_data_spec.rb:256  [Don't use parentheses around a method call.]`
-- `ageweke__flex_columns__3870086: spec/flex_columns/unit/contents/column_data_spec.rb:275  [Don't use parentheses around a method call.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `ConnorAtherton__rb-readline__9fba246: lib/rbreadline.rb:4279  [Don't use parentheses around a logical expression.]`
+- FP: `Faveod__arel-extensions__b8d316b: test/visitors/test_to_sql.rb:567  [Don't use parentheses around a method call.]`
+- FP: `Faveod__arel-extensions__b8d316b: test/visitors/test_to_sql.rb:569  [Don't use parentheses around a method call.]`
+- ... and 55 more FP
+- FN: `ManageIQ__manageiq__b530ec7: app/models/chargeback.rb:222  [Don't use parentheses around an assignment.]`
+- FN: `ageweke__flex_columns__3870086: spec/flex_columns/unit/contents/column_data_spec.rb:256  [Don't use parentheses around a method call.]`
+- FN: `ageweke__flex_columns__3870086: spec/flex_columns/unit/contents/column_data_spec.rb:275  [Don't use parentheses around a method call.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
-<summary><strong>Style/ConditionalAssignment</strong> — 12,977 matches, 1 FP, 128 FN (99.0%)</summary>
+<summary><strong>Style/ConditionalAssignment</strong> — 12,977 matches, 1 FP, 25,060 FN (99.0%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (1 FP, 128 FN):
 
-- `nepalez__pg_trunk__d8d55e5: lib/pg_trunk/operations/sequences/base.rb:76  [Use the return of the conditional for variable assignment and comparison.]`
+- FP: `nepalez__pg_trunk__d8d55e5: lib/pg_trunk/operations/sequences/base.rb:76  [Use the return of the conditional for variable assignment and comparison.]`
+- FN: `CanineHQ__canine__df55ff3: app/helpers/application_helper.rb:8  [Use the return of the conditional for variable assignment and comparison.]`
+- FN: `CompanyBook__massive_record__dbb5758: lib/massive_record/adapters/thrift/scanner.rb:27  [Use the return of the conditional for variable assignment and comparison.]`
+- FN: `DigitPaint__skyline__745a605: app/controllers/skyline/published_publications_controller.rb:24  [Use the return of the conditional for variable assignment and comparison.]`
+- ... and 97 more FN
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**assign_inside_condition** (0 FP, 24,932 FN):
 
-- `CanineHQ__canine__df55ff3: app/helpers/application_helper.rb:8  [Use the return of the conditional for variable assignment and comparison.]`
-- `CompanyBook__massive_record__dbb5758: lib/massive_record/adapters/thrift/scanner.rb:27  [Use the return of the conditional for variable assignment and comparison.]`
-- `DigitPaint__skyline__745a605: app/controllers/skyline/published_publications_controller.rb:24  [Use the return of the conditional for variable assignment and comparison.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:11  [Assign variables inside of conditionals.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/contribution.rb:39  [Assign variables inside of conditionals.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/project.rb:153  [Assign variables inside of conditionals.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
-<summary><strong>Style/SafeNavigation</strong> — 13,084 matches, 72 FP, 38 FN (99.1%)</summary>
+<summary><strong>Style/SafeNavigation</strong> — 13,097 matches, 73 FP, 25 FN (99.2%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (73 FP, 25 FN):
 
-- `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/interfaces/tcpip_server_interface.rb:449  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
-- `HoneyryderChuck__httpx__116fbe7: lib/httpx/plugins/webdav.rb:26  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
-- `ManageIQ__manageiq__b530ec7: app/models/mixins/miq_policy_mixin.rb:133  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
-- ... and 69 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `brewster__elastictastic__eb52f42: lib/elastictastic/scope.rb:170  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
-- `diaspora__diaspora__49f3442: lib/diaspora/federation/receive.rb:313  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
-- `dmorrill10__acpc_poker_gui_client__56e524b: bin/acpc_cli_client:28  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
-- ... and 35 more (see corpus-results.json for full list)
+- FP: `BallAerospace__COSMOS__01afe3c: cosmos/lib/cosmos/interfaces/tcpip_server_interface.rb:449  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
+- FP: `HoneyryderChuck__httpx__116fbe7: lib/httpx/plugins/webdav.rb:26  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
+- FP: `ManageIQ__manageiq__b530ec7: app/models/mixins/miq_policy_mixin.rb:133  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
+- ... and 70 more FP
+- FN: `diaspora__diaspora__49f3442: lib/diaspora/federation/receive.rb:313  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
+- FN: `ekylibre__ekylibre__1d5a3b5: app/helpers/backend/form_helper.rb:58  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
+- FN: `ekylibre__ekylibre__1d5a3b5: app/helpers/backend/form_helper.rb:87  [Use safe navigation (`&.`) instead of checking if an object exists before calling the method.]`
+- ... and 22 more FN
 
 </details>
 
 <details>
 <summary><strong>Style/DocumentationMethod</strong> — 1,095,475 matches, 41 FP, 52 FN (99.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (41 FP, 52 FN):
 
-- `DataDog__dd-trace-rb__e3406de: spec/datadog/tracing/contrib/rails/rack_spec.rb:110  [Missing method documentation comment.]`
-- `HoneyryderChuck__httpx__116fbe7: lib/httpx/extensions.rb:10  [Missing method documentation comment.]`
-- `ManageIQ__optimist__821dade: test/optimist/parser_test.rb:401  [Missing method documentation comment.]`
-- ... and 38 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `DigitPaint__skyline__745a605: app/controllers/skyline/articles_controller.rb:110  [Missing method documentation comment.]`
-- `Shopify__roast__9c72794: lib/roast/cog/output.rb:21  [Missing method documentation comment.]`
-- `apotonick__disposable__f709dbb: test/twin/skip_unchanged_test.rb:49  [Missing method documentation comment.]`
-- ... and 49 more (see corpus-results.json for full list)
+- FP: `DataDog__dd-trace-rb__e3406de: spec/datadog/tracing/contrib/rails/rack_spec.rb:110  [Missing method documentation comment.]`
+- FP: `HoneyryderChuck__httpx__116fbe7: lib/httpx/extensions.rb:10  [Missing method documentation comment.]`
+- FP: `ManageIQ__optimist__821dade: test/optimist/parser_test.rb:401  [Missing method documentation comment.]`
+- ... and 38 more FP
+- FN: `DigitPaint__skyline__745a605: app/controllers/skyline/articles_controller.rb:110  [Missing method documentation comment.]`
+- FN: `Shopify__roast__9c72794: lib/roast/cog/output.rb:21  [Missing method documentation comment.]`
+- FN: `apotonick__disposable__f709dbb: test/twin/skip_unchanged_test.rb:49  [Missing method documentation comment.]`
+- ... and 49 more FN
 
 </details>
 
 <details>
-<summary><strong>Layout/IndentationWidth</strong> — 255,648 matches, 0 FP, 45 FN (99.9%)</summary>
+<summary><strong>Layout/IndentationWidth</strong> — 255,648 matches, 2,066 FP, 4,327 FN (99.9%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 45 FN):
 
-- `Netflix-Skunkworks__Scumblr__66ed69a: lib/scumblr_tasks/security/python_analyzer.rb:285  [Use 2 (not 0) spaces for indentation.]`
-- `Netflix-Skunkworks__Scumblr__66ed69a: lib/scumblr_tasks/security/rails_analyzer.rb:208  [Use 2 (not 0) spaces for indentation.]`
-- `Netflix-Skunkworks__Scumblr__66ed69a: lib/scumblr_tasks/security/rails_analyzer.rb:222  [Use 2 (not 0) spaces for indentation.]`
-- ... and 42 more (see corpus-results.json for full list)
+- FN: `Netflix-Skunkworks__Scumblr__66ed69a: lib/scumblr_tasks/security/python_analyzer.rb:285  [Use 2 (not 0) spaces for indentation.]`
+- FN: `Netflix-Skunkworks__Scumblr__66ed69a: lib/scumblr_tasks/security/rails_analyzer.rb:208  [Use 2 (not 0) spaces for indentation.]`
+- FN: `Netflix-Skunkworks__Scumblr__66ed69a: lib/scumblr_tasks/security/rails_analyzer.rb:222  [Use 2 (not 0) spaces for indentation.]`
+- ... and 42 more FN
+
+**relative_to_receiver** (2,066 FP, 4,282 FN):
+
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/resource_description.rb:67  [Use 2 (not -6) spaces for indentation.]`
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/resource_description.rb:69  [Use 2 (not -6) spaces for indentation.]`
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/resource_description.rb:71  [Use 2 (not -6) spaces for indentation.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:12  [Use 1 (not 6) tabs for indentation.]`
+- FN: `24pullrequests__24pullrequests__381028d: config/initializers/pull_requests_downloader.rb:2  [Use 1 (not 26) tabs for indentation.]`
+- FN: `ActsAsParanoid__acts_as_paranoid__050702d: lib/acts_as_paranoid/core.rb:208  [Use 1 (not 5) tabs for indentation.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/Delegate</strong> — 21,192 matches, 41 FP, 0 FN (99.8%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (41 FP, 0 FN):
 
-- `CompanyBook__massive_record__dbb5758: spec/orm/cases/log_subscriber_spec.rb:143  [Use `delegate` to define delegations.]`
-- `ManageIQ__manageiq__b530ec7: spec/models/time_profile_spec.rb:460  [Use `delegate` to define delegations.]`
-- `activeadmin__activeadmin__c3de750: lib/active_admin/resource_controller/resource_class_methods.rb:19  [Use `delegate` to define delegations.]`
-- ... and 38 more (see corpus-results.json for full list)
+- FP: `CompanyBook__massive_record__dbb5758: spec/orm/cases/log_subscriber_spec.rb:143  [Use `delegate` to define delegations.]`
+- FP: `ManageIQ__manageiq__b530ec7: spec/models/time_profile_spec.rb:460  [Use `delegate` to define delegations.]`
+- FP: `activeadmin__activeadmin__c3de750: lib/active_admin/resource_controller/resource_class_methods.rb:19  [Use `delegate` to define delegations.]`
+- ... and 38 more FP
 
 </details>
 
 <details>
-<summary><strong>Style/IfUnlessModifier</strong> — 118,914 matches, 32 FP, 7 FN (99.9%)</summary>
+<summary><strong>Style/IfUnlessModifier</strong> — 118,916 matches, 32 FP, 5 FN (99.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (32 FP, 5 FN):
 
-- `JacobEvelyn__friends__3915987: test/add_event_helper.rb:145  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
-- `JacobEvelyn__friends__3915987: test/add_event_helper.rb:154  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
-- `Shopify__active_utils__493630c: lib/active_utils/posts_data.rb:46  [Modifier form of `unless` makes the line too long.]`
-- ... and 29 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `DigitPaint__skyline__745a605: app/controllers/skyline/site/pages_controller.rb:12  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
-- `boazsegev__plezi__a40459d: lib/plezi/render/render.rb:35  [Modifier form of `if` makes the line too long.]`
-- `celluloid__celluloid__0a307cf: lib/celluloid/supervision/container/behavior.rb:31  [Modifier form of `if` makes the line too long.]`
-- ... and 4 more (see corpus-results.json for full list)
+- FP: `JacobEvelyn__friends__3915987: test/add_event_helper.rb:145  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
+- FP: `JacobEvelyn__friends__3915987: test/add_event_helper.rb:154  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
+- FP: `Shopify__active_utils__493630c: lib/active_utils/posts_data.rb:46  [Modifier form of `unless` makes the line too long.]`
+- ... and 29 more FP
+- FN: `DigitPaint__skyline__745a605: app/controllers/skyline/site/pages_controller.rb:12  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
+- FN: `chengdh__manage-huo-baby__afc35d0: app/helpers/orgs_helper.rb:69  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
+- FN: `rails__rails__d7c8ae6: activerecord/lib/active_record/connection_adapters/abstract_adapter.rb:207  [Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.]`
+- ... and 2 more FN
 
 </details>
 
 <details>
 <summary><strong>Lint/ShadowingOuterLocalVariable</strong> — 4,313 matches, 17 FP, 12 FN (99.3%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (17 FP, 12 FN):
 
-- `ZeroChaos-__blue_hydra__c7462b9: lib/blue_hydra/parser.rb:284  [Shadowing outer local variable - `line`.]`
-- `danlucraft__redcar__ff1a671: plugins/edit_view/features/step_definitions/window_steps.rb:47  [Shadowing outer local variable - `win`.]`
-- `dry-rb__dry-schema__105559a: lib/dry/schema/extensions/info/schema_compiler.rb:77  [Shadowing outer local variable - `el`.]`
-- ... and 14 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `appoxy__aws__bd57c8f: lib/awsbase/require_relative.rb:10  [Shadowing outer local variable - `path`.]`
-- `braintree__braintree_ruby__0059dd4: spec/spec_helper.rb:182  [Shadowing outer local variable - `http`.]`
-- `gimite__mjai__312c0c6: lib/mjai/game_stats.rb:217  [Shadowing outer local variable - `yaku`.]`
-- ... and 9 more (see corpus-results.json for full list)
+- FP: `ZeroChaos-__blue_hydra__c7462b9: lib/blue_hydra/parser.rb:284  [Shadowing outer local variable - `line`.]`
+- FP: `danlucraft__redcar__ff1a671: plugins/edit_view/features/step_definitions/window_steps.rb:47  [Shadowing outer local variable - `win`.]`
+- FP: `dry-rb__dry-schema__105559a: lib/dry/schema/extensions/info/schema_compiler.rb:77  [Shadowing outer local variable - `el`.]`
+- ... and 14 more FP
+- FN: `appoxy__aws__bd57c8f: lib/awsbase/require_relative.rb:10  [Shadowing outer local variable - `path`.]`
+- FN: `braintree__braintree_ruby__0059dd4: spec/spec_helper.rb:182  [Shadowing outer local variable - `http`.]`
+- FN: `gimite__mjai__312c0c6: lib/mjai/game_stats.rb:217  [Shadowing outer local variable - `yaku`.]`
+- ... and 9 more FN
 
 </details>
 
 <details>
 <summary><strong>Layout/ExtraSpacing</strong> — 44,460 matches, 11 FP, 5 FN (99.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (11 FP, 5 FN):
 
-- `OpenVoxProject__openvox__2665666: acceptance/tests/parser_functions/calling_all_functions.rb:103  [Unnecessary spacing detected.]`
-- `OpenVoxProject__openvox__2665666: acceptance/tests/parser_functions/calling_all_functions.rb:106  [Unnecessary spacing detected.]`
-- `OpenVoxProject__openvox__2665666: acceptance/tests/parser_functions/calling_all_functions.rb:111  [Unnecessary spacing detected.]`
-- ... and 8 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `SUSE__machinery__e41b642: spec/unit/compare_task_spec.rb:183  [Unnecessary spacing detected.]`
-- `eduardordm__cnab240__c86ad20: lib/cnab240/ext/attribute_accessors.rb:38  [Unnecessary spacing detected.]`
-- `github__octocatalog-diff__59d46a6: lib/octocatalog-diff/external/pson/pure/parser.rb:8  [Unnecessary spacing detected.]`
-- ... and 2 more (see corpus-results.json for full list)
-
-</details>
-
-<details>
-<summary><strong>Layout/LineLength</strong> — 452,962 matches, 7 FP, 7 FN (99.9%)</summary>
-
-**False positives** (nitrocop reports, RuboCop does not):
-
-- `jjyg__metasm__a70271c: metasm/decompile.rb:2373  [Line is too long. [133/120]]`
-- `structured-data__linter__28f870b: lib/rdf/vocab/schema.rb:1153  [Line is too long. [135/120]]`
-- `structured-data__linter__28f870b: lib/rdf/vocab/schema.rb:2356  [Line is too long. [168/120]]`
-- ... and 4 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `infinitered__bluepotion__293730b: lib/project/ruby_motion_query/rmq_rect.rb:4  [Line is too long. [368/120]]`
-- `infinitered__bluepotion__293730b: lib/project/ruby_motion_query/rmq_rect.rb:187  [Line is too long. [156/120]]`
-- `infinitered__bluepotion__293730b: lib/project/ruby_motion_query/rmq_rect.rb:559  [Line is too long. [129/120]]`
-- ... and 4 more (see corpus-results.json for full list)
+- FP: `OpenVoxProject__openvox__2665666: acceptance/tests/parser_functions/calling_all_functions.rb:103  [Unnecessary spacing detected.]`
+- FP: `OpenVoxProject__openvox__2665666: acceptance/tests/parser_functions/calling_all_functions.rb:106  [Unnecessary spacing detected.]`
+- FP: `OpenVoxProject__openvox__2665666: acceptance/tests/parser_functions/calling_all_functions.rb:111  [Unnecessary spacing detected.]`
+- ... and 8 more FP
+- FN: `SUSE__machinery__e41b642: spec/unit/compare_task_spec.rb:183  [Unnecessary spacing detected.]`
+- FN: `eduardordm__cnab240__c86ad20: lib/cnab240/ext/attribute_accessors.rb:38  [Unnecessary spacing detected.]`
+- FN: `github__octocatalog-diff__59d46a6: lib/octocatalog-diff/external/pson/pure/parser.rb:8  [Unnecessary spacing detected.]`
+- ... and 2 more FN
 
 </details>
 
 <details>
 <summary><strong>Style/RedundantSelf</strong> — 78,225 matches, 12 FP, 1 FN (99.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (12 FP, 1 FN):
 
-- `benchmark-driver__benchmark-driver__67a7729: lib/benchmark_driver/struct.rb:79  [Redundant `self` detected.]`
-- `gdelugre__origami__ac1df80: lib/origami/array.rb:185  [Redundant `self` detected.]`
-- `gdelugre__origami__ac1df80: lib/origami/array.rb:186  [Redundant `self` detected.]`
-- ... and 9 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `noosfero__noosfero__299a0b9: plugins/open_graph/models/open_graph_plugin/activity.rb:96  [Redundant `self` detected.]`
+- FP: `benchmark-driver__benchmark-driver__67a7729: lib/benchmark_driver/struct.rb:79  [Redundant `self` detected.]`
+- FP: `gdelugre__origami__ac1df80: lib/origami/array.rb:185  [Redundant `self` detected.]`
+- FP: `gdelugre__origami__ac1df80: lib/origami/array.rb:186  [Redundant `self` detected.]`
+- ... and 9 more FP
+- FN: `noosfero__noosfero__299a0b9: plugins/open_graph/models/open_graph_plugin/activity.rb:96  [Redundant `self` detected.]`
 
 </details>
 
 <details>
 <summary><strong>Style/RedundantLineContinuation</strong> — 2,706 matches, 9 FP, 3 FN (99.5%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (9 FP, 3 FN):
 
-- `derails__derails__7f68b11: src/railties/test/application/zeitwerk_integration_test.rb:253  [Redundant line continuation.]`
-- `gazay__gon__75dc0dc: spec/gon/helpers_spec.rb:108  [Redundant line continuation.]`
-- `gazay__gon__75dc0dc: spec/gon/helpers_spec.rb:129  [Redundant line continuation.]`
-- ... and 6 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `nakajima__acts_as_fu__7f20ff6: spec/acts_as_fu_spec.rb:160  [Redundant line continuation.]`
-- `riscv__riscv-unified-db__10a1537: tools/ruby-gems/idlc/lib/idlc/type.rb:216  [Redundant line continuation.]`
-- `riscv__riscv-unified-db__10a1537: tools/ruby-gems/idlc/lib/idlc/type.rb:286  [Redundant line continuation.]`
+- FP: `derails__derails__7f68b11: src/railties/test/application/zeitwerk_integration_test.rb:253  [Redundant line continuation.]`
+- FP: `gazay__gon__75dc0dc: spec/gon/helpers_spec.rb:108  [Redundant line continuation.]`
+- FP: `gazay__gon__75dc0dc: spec/gon/helpers_spec.rb:129  [Redundant line continuation.]`
+- ... and 6 more FP
+- FN: `nakajima__acts_as_fu__7f20ff6: spec/acts_as_fu_spec.rb:160  [Redundant line continuation.]`
+- FN: `riscv__riscv-unified-db__10a1537: tools/ruby-gems/idlc/lib/idlc/type.rb:216  [Redundant line continuation.]`
+- FN: `riscv__riscv-unified-db__10a1537: tools/ruby-gems/idlc/lib/idlc/type.rb:286  [Redundant line continuation.]`
 
 </details>
 
 <details>
 <summary><strong>Layout/EmptyLineAfterMultilineCondition</strong> — 7,040 matches, 10 FP, 0 FN (99.8%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (10 FP, 0 FN):
 
-- `gree__lwfs__aa38aec: lib/swf2lwf/lib/htmlparser.rb:543  [Use empty line after multiline condition.]`
-- `gree__lwfs__aa38aec: lib/swf2lwf/lib/htmlparser.rb:551  [Use empty line after multiline condition.]`
-- `gree__lwfs__aa38aec: lib/swf2lwf/lib/htmlparser.rb:591  [Use empty line after multiline condition.]`
-- ... and 7 more (see corpus-results.json for full list)
+- FP: `gree__lwfs__aa38aec: lib/swf2lwf/lib/htmlparser.rb:543  [Use empty line after multiline condition.]`
+- FP: `gree__lwfs__aa38aec: lib/swf2lwf/lib/htmlparser.rb:551  [Use empty line after multiline condition.]`
+- FP: `gree__lwfs__aa38aec: lib/swf2lwf/lib/htmlparser.rb:591  [Use empty line after multiline condition.]`
+- ... and 7 more FP
 
 </details>
 
 <details>
-<summary><strong>Layout/BlockAlignment</strong> — 2,552 matches, 8 FP, 0 FN (99.6%)</summary>
+<summary><strong>Layout/LineLength</strong> — 452,966 matches, 7 FP, 3 FN (99.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (7 FP, 3 FN):
 
-- `avalonmediasystem__avalon__c6af9b3: app/controllers/playlists_controller.rb:348  [Align `end` with the start of the line where the block is defined.]`
-- `department-of-veterans-affairs__vets-api__038d1df: spec/models/form_submission_spec.rb:25  [Align `end` with the start of the line where the block is defined.]`
-- `evolve75__RubyTree__97f5bdc: lib/tree.rb:970  [Align `}` with the start of the line where the block is defined.]`
-- ... and 5 more (see corpus-results.json for full list)
+- FP: `jjyg__metasm__a70271c: metasm/decompile.rb:2373  [Line is too long. [133/120]]`
+- FP: `structured-data__linter__28f870b: lib/rdf/vocab/schema.rb:1153  [Line is too long. [135/120]]`
+- FP: `structured-data__linter__28f870b: lib/rdf/vocab/schema.rb:2356  [Line is too long. [168/120]]`
+- ... and 4 more FP
+- FN: `jjyg__metasm__a70271c: metasm/decompile.rb:2374  [Line is too long. [133/120]]`
+- FN: `tdiary__tdiary-core__16562cc: misc/plugin/disp_referrer.rb:1141  [Line is too long. [168/120]]`
+- FN: `tdiary__tdiary-core__16562cc: misc/plugin/disp_referrer.rb:1143  [Line is too long. [163/120]]`
+
+</details>
+
+<details>
+<summary><strong>Layout/BlockAlignment</strong> — 2,552 matches, 9 FP, 11,425 FN (99.6%)</summary>
+
+**Default config** (8 FP, 0 FN):
+
+- FP: `avalonmediasystem__avalon__c6af9b3: app/controllers/playlists_controller.rb:348  [Align `end` with the start of the line where the block is defined.]`
+- FP: `department-of-veterans-affairs__vets-api__038d1df: spec/models/form_submission_spec.rb:25  [Align `end` with the start of the line where the block is defined.]`
+- FP: `evolve75__RubyTree__97f5bdc: lib/tree.rb:970  [Align `}` with the start of the line where the block is defined.]`
+- ... and 5 more FP
+
+**start_of_line** (1 FP, 11,425 FN):
+
+- FP: `flyerhzm__bullet__d01d0ae: lib/bullet/stack_trace_filter.rb:20  [Align `}` with the start of the line where the block is defined.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/contribution.rb:23  [`}` at 23, 2 is not aligned with `-> {` at 21, 26.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/contribution.rb:27  [`}` at 27, 2 is not aligned with `-> (excluded_organisations) {` at 24, 34.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/organisation.rb:10  [`end` at 10, 2 is not aligned with `-> do` at 8, 33.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Style/CombinableLoops</strong> — 881 matches, 7 FP, 0 FN (99.2%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (7 FP, 0 FN):
 
-- `chef__chef__e58e1a1: spec/unit/resource/windows_service_spec.rb:81  [Combine this loop with the previous loop.]`
-- `keygen-sh__typed_params__68825f1: spec/typed_params/transforms/key_casing_spec.rb:31  [Combine this loop with the previous loop.]`
-- `keygen-sh__typed_params__68825f1: spec/typed_params/transforms/key_casing_spec.rb:77  [Combine this loop with the previous loop.]`
-- ... and 4 more (see corpus-results.json for full list)
+- FP: `chef__chef__e58e1a1: spec/unit/resource/windows_service_spec.rb:81  [Combine this loop with the previous loop.]`
+- FP: `keygen-sh__typed_params__68825f1: spec/typed_params/transforms/key_casing_spec.rb:31  [Combine this loop with the previous loop.]`
+- FP: `keygen-sh__typed_params__68825f1: spec/typed_params/transforms/key_casing_spec.rb:77  [Combine this loop with the previous loop.]`
+- ... and 4 more FP
 
 </details>
 
 <details>
-<summary><strong>Style/StringLiteralsInInterpolation</strong> — 15,219 matches, 4 FP, 0 FN (99.9%)</summary>
+<summary><strong>Layout/EmptyLinesAroundAccessModifier</strong> — 10,186 matches, 84 FP, 1 FN (99.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (6 FP, 0 FN):
 
-- `flexera-public__right_link__b33a209: spec/instance/login_manager_spec.rb:204  [Prefer single-quoted strings inside interpolations.]`
-- `lorint__brick__fa07b7f: lib/brick/reflect_tables.rb:605  [Prefer single-quoted strings inside interpolations.]`
-- `lorint__brick__fa07b7f: lib/brick/reflect_tables.rb:606  [Prefer single-quoted strings inside interpolations.]`
-- ... and 1 more (see corpus-results.json for full list)
+- FP: `CanineHQ__canine__df55ff3: app/helpers/loggable.rb:27  [Keep a blank line before and after `private`.]`
+- FP: `coinfi__coinfi__aa2f286: test/application_integration_test.rb:8  [Keep a blank line before and after `protected`.]`
+- FP: `coinfi__coinfi__aa2f286: test/services/tweet_trending_news_item_test.rb:151  [Keep a blank line before and after `protected`.]`
+- ... and 3 more FP
+
+**only_before** (78 FP, 1 FN):
+
+- FP: `Netflix-Skunkworks__Scumblr__66ed69a: lib/search_providers/play.rb:69  [Remove a blank line after `private`.]`
+- FP: `Shopify__ruby-lsp__0d5d95f: test/fixtures/minitest_tests.rb:22  [Remove a blank line after `private`.]`
+- FP: `cyberark__conjur__8031a2a: app/domain/authentication/authenticate.rb:33  [Remove a blank line after `private`.]`
+- ... and 75 more FP
+- FN: `troessner__reek__577be39: samples/smelly_source/inline.rb:122  [Remove a blank line after `protected`.]`
+
+</details>
+
+<details>
+<summary><strong>Style/StringLiteralsInInterpolation</strong> — 15,219 matches, 345 FP, 0 FN (99.9%)</summary>
+
+**Default config** (4 FP, 0 FN):
+
+- FP: `flexera-public__right_link__b33a209: spec/instance/login_manager_spec.rb:204  [Prefer single-quoted strings inside interpolations.]`
+- FP: `lorint__brick__fa07b7f: lib/brick/reflect_tables.rb:605  [Prefer single-quoted strings inside interpolations.]`
+- FP: `lorint__brick__fa07b7f: lib/brick/reflect_tables.rb:606  [Prefer single-quoted strings inside interpolations.]`
+- ... and 1 more FP
+
+**double_quotes** (341 FP, 0 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/libraries/alchemy/configuration_spec.rb:199  [Prefer double-quoted strings inside interpolations.]`
+- FP: `Casecommons__pg_search__fc45445: lib/pg_search/features/tsearch.rb:89  [Prefer double-quoted strings inside interpolations.]`
+- FP: `CocoaPods__CocoaPods__458dd19: lib/cocoapods/generator/module_map.rb:24  [Prefer double-quoted strings inside interpolations.]`
+- ... and 97 more FP
 
 </details>
 
 <details>
 <summary><strong>Rails/ActionControllerTestCase</strong> — 1,306 matches, 359 FP, 0 FN (78.4%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (359 FP, 0 FN):
 
-- `Apipie__apipie-demo__ed07d23: test/functional/v1/tweets_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
-- `Apipie__apipie-demo__ed07d23: test/functional/v1/users_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
-- `Apipie__apipie-demo__ed07d23: test/functional/v2/tweets_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `Apipie__apipie-demo__ed07d23: test/functional/v1/tweets_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
+- FP: `Apipie__apipie-demo__ed07d23: test/functional/v1/users_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
+- FP: `Apipie__apipie-demo__ed07d23: test/functional/v2/tweets_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
+- ... and 97 more FP
 
 </details>
 
 <details>
 <summary><strong>Rails/AddColumnIndex</strong> — 0 matches, 0 FP, 205 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 205 FN):
 
-- `Coursemology__coursemology2__70d42e7: db/migrate/20161219105620_change_course_user_invitations.rb:5  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- `Coursemology__coursemology2__70d42e7: db/migrate/20170307043218_add_instructor_id_to_virtual_classrooms.rb:4  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- `Coursemology__coursemology2__70d42e7: db/migrate/20181130061333_add_personal_times.rb:14  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `Coursemology__coursemology2__70d42e7: db/migrate/20161219105620_change_course_user_invitations.rb:5  [`add_column` does not accept an `index` key, use `add_index` instead.]`
+- FN: `Coursemology__coursemology2__70d42e7: db/migrate/20170307043218_add_instructor_id_to_virtual_classrooms.rb:4  [`add_column` does not accept an `index` key, use `add_index` instead.]`
+- FN: `Coursemology__coursemology2__70d42e7: db/migrate/20181130061333_add_personal_times.rb:14  [`add_column` does not accept an `index` key, use `add_index` instead.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/BulkChangeTable</strong> — 2,296 matches, 16 FP, 173 FN (92.3%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (16 FP, 173 FN):
 
-- `avo-hq__avo__c7b9fc8: spec/dummy/db/migrate/20220502080845_add_country_and_city_to_courses.rb:3  [You can use `change_table :courses, bulk: true` to combine alter queries.]`
-- `avo-hq__avo__c7b9fc8: spec/dummy/db/migrate/20230313191146_add_coordinates_to_cities.rb:3  [You can use `change_table :cities, bulk: true` to combine alter queries.]`
-- `avo-hq__avo__c7b9fc8: spec/dummy/db/migrate/20250619140631_add_grouped_select_fields_to_volunteers.rb:3  [You can use `change_table :volunteers, bulk: true` to combine alter queries.]`
-- ... and 13 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `Ariel-Thomas__adventurers-league-log__9d605f8: db/migrate/20150416085946_add_player_details_to_user.rb:3  [You can use `change_table :users, bulk: true` to combine alter queries.]`
-- `Ariel-Thomas__adventurers-league-log__9d605f8: db/migrate/20150417074809_add_type_and_user_id_to_log_entry.rb:3  [You can use `change_table :log_entries, bulk: true` to combine alter queries.]`
-- `Ariel-Thomas__adventurers-league-log__9d605f8: db/migrate/20160720042040_add_season_origin_to_characters.rb:3  [You can use `change_table :characters, bulk: true` to combine alter queries.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FP: `avo-hq__avo__c7b9fc8: spec/dummy/db/migrate/20220502080845_add_country_and_city_to_courses.rb:3  [You can use `change_table :courses, bulk: true` to combine alter queries.]`
+- FP: `avo-hq__avo__c7b9fc8: spec/dummy/db/migrate/20230313191146_add_coordinates_to_cities.rb:3  [You can use `change_table :cities, bulk: true` to combine alter queries.]`
+- FP: `avo-hq__avo__c7b9fc8: spec/dummy/db/migrate/20250619140631_add_grouped_select_fields_to_volunteers.rb:3  [You can use `change_table :volunteers, bulk: true` to combine alter queries.]`
+- ... and 13 more FP
+- FN: `Ariel-Thomas__adventurers-league-log__9d605f8: db/migrate/20150416085946_add_player_details_to_user.rb:3  [You can use `change_table :users, bulk: true` to combine alter queries.]`
+- FN: `Ariel-Thomas__adventurers-league-log__9d605f8: db/migrate/20150417074809_add_type_and_user_id_to_log_entry.rb:3  [You can use `change_table :log_entries, bulk: true` to combine alter queries.]`
+- FN: `Ariel-Thomas__adventurers-league-log__9d605f8: db/migrate/20160720042040_add_season_origin_to_characters.rb:3  [You can use `change_table :characters, bulk: true` to combine alter queries.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/CreateTableWithTimestamps</strong> — 0 matches, 0 FP, 3,546 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 3,546 FN):
 
-- `24pullrequests__24pullrequests__381028d: db/migrate/20131202171451_create_organisations.rb:11  [Add timestamps when creating a new table.]`
-- `24pullrequests__24pullrequests__381028d: db/schema.rb:93  [Add timestamps when creating a new table.]`
-- `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140215192014_acts_as_taggable_on_migration.rb:5  [Add timestamps when creating a new table.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20131202171451_create_organisations.rb:11  [Add timestamps when creating a new table.]`
+- FN: `24pullrequests__24pullrequests__381028d: db/schema.rb:93  [Add timestamps when creating a new table.]`
+- FN: `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140215192014_acts_as_taggable_on_migration.rb:5  [Add timestamps when creating a new table.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/DangerousColumnNames</strong> — 0 matches, 0 FP, 227 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 227 FN):
 
-- `Coursemology__coursemology2__70d42e7: db/migrate/20160730044448_chang_attachment_references.rb:7  [Avoid dangerous column names.]`
-- `DigitPaint__skyline__745a605: db/migrate/20090408115155_create_ref_objects.rb:4  [Avoid dangerous column names.]`
-- `DigitPaint__skyline__745a605: db/migrate/20090710145157_add_skyline_users_destroyed.rb:3  [Avoid dangerous column names.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `Coursemology__coursemology2__70d42e7: db/migrate/20160730044448_chang_attachment_references.rb:7  [Avoid dangerous column names.]`
+- FN: `DigitPaint__skyline__745a605: db/migrate/20090408115155_create_ref_objects.rb:4  [Avoid dangerous column names.]`
+- FN: `DigitPaint__skyline__745a605: db/migrate/20090710145157_add_skyline_users_destroyed.rb:3  [Avoid dangerous column names.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/EnumSyntax</strong> — 256 matches, 175 FP, 3 FN (58.9%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (175 FP, 3 FN):
 
-- `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/campaign.rb:21  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
-- `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/campaign.rb:22  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
-- `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/character.rb:31  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
-- ... and 97 more (see corpus-results.json for full list)
-
-**False negatives** (RuboCop reports, nitrocop does not):
-
-- `sudara__alonetone__ebf728b: app/models/account_request.rb:12  [Enum defined with keyword arguments in `entity_type` enum declaration. Use positional arguments instead.]`
-- `sudara__alonetone__ebf728b: app/models/account_request.rb:22  [Enum defined with keyword arguments in `status` enum declaration. Use positional arguments instead.]`
-- `sudara__alonetone__ebf728b: app/models/playlist.rb:43  [Enum defined with keyword arguments in `cover_quality` enum declaration. Use positional arguments instead.]`
+- FP: `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/campaign.rb:21  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
+- FP: `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/campaign.rb:22  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
+- FP: `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/character.rb:31  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
+- ... and 97 more FP
+- FN: `sudara__alonetone__ebf728b: app/models/account_request.rb:12  [Enum defined with keyword arguments in `entity_type` enum declaration. Use positional arguments instead.]`
+- FN: `sudara__alonetone__ebf728b: app/models/account_request.rb:22  [Enum defined with keyword arguments in `status` enum declaration. Use positional arguments instead.]`
+- FN: `sudara__alonetone__ebf728b: app/models/playlist.rb:43  [Enum defined with keyword arguments in `cover_quality` enum declaration. Use positional arguments instead.]`
 
 </details>
 
 <details>
 <summary><strong>Rails/HttpPositionalArguments</strong> — 0 matches, 0 FP, 1,016 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 1,016 FN):
 
-- `HamptonMakes__make_resourceful__31ad652: spec/integration_spec.rb:47  [Use keyword arguments instead of positional arguments for http call: `get`.]`
-- `HamptonMakes__make_resourceful__31ad652: spec/integration_spec.rb:52  [Use keyword arguments instead of positional arguments for http call: `get`.]`
-- `HamptonMakes__make_resourceful__31ad652: spec/integration_spec.rb:58  [Use keyword arguments instead of positional arguments for http call: `get`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `HamptonMakes__make_resourceful__31ad652: spec/integration_spec.rb:47  [Use keyword arguments instead of positional arguments for http call: `get`.]`
+- FN: `HamptonMakes__make_resourceful__31ad652: spec/integration_spec.rb:52  [Use keyword arguments instead of positional arguments for http call: `get`.]`
+- FN: `HamptonMakes__make_resourceful__31ad652: spec/integration_spec.rb:58  [Use keyword arguments instead of positional arguments for http call: `get`.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/I18nLocaleAssignment</strong> — 0 matches, 0 FP, 722 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 722 FN):
 
-- `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/i18n_spec.rb:27  [Use `I18n.with_locale` with block instead of `I18n.locale=`.]`
-- `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/i18n_spec.rb:31  [Use `I18n.with_locale` with block instead of `I18n.locale=`.]`
-- `AlchemyCMS__alchemy_cms__4c2023f: spec/rails_helper.rb:87  [Use `I18n.with_locale` with block instead of `I18n.locale=`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/i18n_spec.rb:27  [Use `I18n.with_locale` with block instead of `I18n.locale=`.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/i18n_spec.rb:31  [Use `I18n.with_locale` with block instead of `I18n.locale=`.]`
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: spec/rails_helper.rb:87  [Use `I18n.with_locale` with block instead of `I18n.locale=`.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/MigrationClassName</strong> — 0 matches, 0 FP, 11 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 11 FN):
 
-- `dradis__dradis-ce__87cf070: db/migrate/20131002215400_clean_openvas_settings.rb:1  [Replace with `CleanOpenvasSettings` that matches the file name.]`
-- `noosfero__noosfero__299a0b9: db/migrate/20180808151237_add_rpush.rb:46  [Replace with `AddRpush` that matches the file name.]`
-- `noosfero__noosfero__299a0b9: db/migrate/20180808151237_add_rpush.rb:76  [Replace with `AddRpush` that matches the file name.]`
-- ... and 8 more (see corpus-results.json for full list)
+- FN: `dradis__dradis-ce__87cf070: db/migrate/20131002215400_clean_openvas_settings.rb:1  [Replace with `CleanOpenvasSettings` that matches the file name.]`
+- FN: `noosfero__noosfero__299a0b9: db/migrate/20180808151237_add_rpush.rb:46  [Replace with `AddRpush` that matches the file name.]`
+- FN: `noosfero__noosfero__299a0b9: db/migrate/20180808151237_add_rpush.rb:76  [Replace with `AddRpush` that matches the file name.]`
+- ... and 8 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/NotNullColumn</strong> — 0 matches, 0 FP, 409 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 409 FN):
 
-- `CanineHQ__canine__df55ff3: db/migrate/20250823202522_add_provider_id_to_build_configurations.rb:3  [Do not add a NOT NULL column without a default value.]`
-- `CanineHQ__canine__df55ff3: db/migrate/20250901180141_add_container_registry_url_to_build_configurations.rb:3  [Do not add a NOT NULL column without a default value.]`
-- `Coursemology__coursemology2__70d42e7: db/migrate/20141222074908_add_userstamps_to_courses.rb:4  [Do not add a NOT NULL column without a default value.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `CanineHQ__canine__df55ff3: db/migrate/20250823202522_add_provider_id_to_build_configurations.rb:3  [Do not add a NOT NULL column without a default value.]`
+- FN: `CanineHQ__canine__df55ff3: db/migrate/20250901180141_add_container_registry_url_to_build_configurations.rb:3  [Do not add a NOT NULL column without a default value.]`
+- FN: `Coursemology__coursemology2__70d42e7: db/migrate/20141222074908_add_userstamps_to_courses.rb:4  [Do not add a NOT NULL column without a default value.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/RedundantTravelBack</strong> — 62 matches, 26 FP, 0 FN (70.4%)</summary>
 
-**False positives** (nitrocop reports, RuboCop does not):
+**Default config** (26 FP, 0 FN):
 
-- `InfluxCommunity__influxdb-rails__cdc4b26: spec/spec_helper.rb:30  [Redundant `travel_back` detected. It is automatically called after each test.]`
-- `KnapsackPro__knapsack_pro-ruby__876c051: rails-app-with-knapsack_pro/spec/time_helpers_spec.rb:8  [Redundant `travel_back` detected. It is automatically called after each test.]`
-- `ackama__rails-template__a88fa84: variants/backend-base/spec/rails_helper.rb:96  [Redundant `travel_back` detected. It is automatically called after each test.]`
-- ... and 23 more (see corpus-results.json for full list)
+- FP: `InfluxCommunity__influxdb-rails__cdc4b26: spec/spec_helper.rb:30  [Redundant `travel_back` detected. It is automatically called after each test.]`
+- FP: `KnapsackPro__knapsack_pro-ruby__876c051: rails-app-with-knapsack_pro/spec/time_helpers_spec.rb:8  [Redundant `travel_back` detected. It is automatically called after each test.]`
+- FP: `ackama__rails-template__a88fa84: variants/backend-base/spec/rails_helper.rb:96  [Redundant `travel_back` detected. It is automatically called after each test.]`
+- ... and 23 more FP
 
 </details>
 
 <details>
 <summary><strong>Rails/ResponseParsedBody</strong> — 0 matches, 0 FP, 2,924 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 2,924 FN):
 
-- `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:154  [Prefer `response.parsed_body` to `JSON.parse(response.body)`.]`
-- `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:175  [Prefer `response.parsed_body` to `JSON.parse(response.body)`.]`
-- `24pullrequests__24pullrequests__381028d: spec/controllers/users_controller_spec.rb:75  [Prefer `response.parsed_body` to `JSON.parse(response.body)`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:154  [Prefer `response.parsed_body` to `JSON.parse(response.body)`.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:175  [Prefer `response.parsed_body` to `JSON.parse(response.body)`.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/controllers/users_controller_spec.rb:75  [Prefer `response.parsed_body` to `JSON.parse(response.body)`.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/ReversibleMigration</strong> — 0 matches, 0 FP, 3,518 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 3,518 FN):
 
-- `24pullrequests__24pullrequests__381028d: db/migrate/20141026172558_change_description_from_string_to_text_in_events.rb:3  [change_column is not reversible.]`
-- `24pullrequests__24pullrequests__381028d: db/migrate/20161202190959_add_ignored_organisations.rb:5  [change_column_default(without :from and :to) is not reversible.]`
-- `24pullrequests__24pullrequests__381028d: db/migrate/20161209105217_change_uids_to_integer.rb:3  [change_column is not reversible.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20141026172558_change_description_from_string_to_text_in_events.rb:3  [change_column is not reversible.]`
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20161202190959_add_ignored_organisations.rb:5  [change_column_default(without :from and :to) is not reversible.]`
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20161209105217_change_uids_to_integer.rb:3  [change_column is not reversible.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/ReversibleMigrationMethodDefinition</strong> — 0 matches, 0 FP, 3,046 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 3,046 FN):
 
-- `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140118045711_change_projects_attributes.rb:3  [Migrations must contain either a `change` method, or both an `up` and a `down` method.]`
-- `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140127043432_acts_as_follower_migration.rb:3  [Migrations must contain either a `change` method, or both an `up` and a `down` method.]`
-- `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140130073721_add_created_by_to_documents.rb:3  [Migrations must contain either a `change` method, or both an `up` and a `down` method.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140118045711_change_projects_attributes.rb:3  [Migrations must contain either a `change` method, or both an `up` and a `down` method.]`
+- FN: `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140127043432_acts_as_follower_migration.rb:3  [Migrations must contain either a `change` method, or both an `up` and a `down` method.]`
+- FN: `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140130073721_add_created_by_to_documents.rb:3  [Migrations must contain either a `change` method, or both an `up` and a `down` method.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/ThreeStateBooleanColumn</strong> — 0 matches, 0 FP, 7,021 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 7,021 FN):
 
-- `24pullrequests__24pullrequests__381028d: db/migrate/20121125210249_create_pull_requests.rb:8  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
-- `24pullrequests__24pullrequests__381028d: db/migrate/20131201095112_add_inactive_to_project.rb:3  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
-- `24pullrequests__24pullrequests__381028d: db/migrate/20131202234014_create_pull_request_archive.rb:8  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20121125210249_create_pull_requests.rb:8  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20131201095112_add_inactive_to_project.rb:3  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
+- FN: `24pullrequests__24pullrequests__381028d: db/migrate/20131202234014_create_pull_request_archive.rb:8  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
+- ... and 97 more FN
 
 </details>
 
 <details>
 <summary><strong>Rails/TimeZoneAssignment</strong> — 0 matches, 0 FP, 280 FN (0.0%)</summary>
 
-**False negatives** (RuboCop reports, nitrocop does not):
+**Default config** (0 FP, 280 FN):
 
-- `Betterment__delayed__00d575c: spec/delayed/job_spec.rb:340  [Use `Time.use_zone` with block instead of `Time.zone=`.]`
-- `Betterment__delayed__00d575c: spec/delayed/job_spec.rb:361  [Use `Time.use_zone` with block instead of `Time.zone=`.]`
-- `Betterment__delayed__00d575c: spec/delayed/job_spec.rb:408  [Use `Time.use_zone` with block instead of `Time.zone=`.]`
-- ... and 97 more (see corpus-results.json for full list)
+- FN: `Betterment__delayed__00d575c: spec/delayed/job_spec.rb:340  [Use `Time.use_zone` with block instead of `Time.zone=`.]`
+- FN: `Betterment__delayed__00d575c: spec/delayed/job_spec.rb:361  [Use `Time.use_zone` with block instead of `Time.zone=`.]`
+- FN: `Betterment__delayed__00d575c: spec/delayed/job_spec.rb:408  [Use `Time.use_zone` with block instead of `Time.zone=`.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/AccessModifierIndentation</strong> — 4,855 matches, 110 FP, 0 FN (100.0%)</summary>
+
+**outdent** (110 FP, 0 FN):
+
+- FP: `JEG2__highline__0321f84: lib/highline/string_extensions.rb:75  [Outdent access modifiers like `private`.]`
+- FP: `activeadmin__activeadmin__c3de750: lib/active_admin/resource_controller/resource_class_methods.rb:17  [Outdent access modifiers like `private`.]`
+- FP: `ankane__blazer__c17d8ec: lib/blazer/adapters/snowflake_adapter.rb:23  [Outdent access modifiers like `private`.]`
+- ... and 97 more FP
+
+</details>
+
+<details>
+<summary><strong>Layout/ArgumentAlignment</strong> — 97,964 matches, 1 FP, 6,312 FN (100.0%)</summary>
+
+**with_fixed_indentation** (1 FP, 6,312 FN):
+
+- FP: `pact-foundation__pact-ruby__9f6e706: spec/lib/pact/consumer/consumer_contract_builder_spec.rb:75  [Align the arguments of a method call if they span more than one line.]`
+- FN: `Arachni__arachni__c1710d6: Rakefile:174  [Use one level of indentation for arguments following the first line of a multi-line method call.]`
+- FN: `Arachni__arachni__c1710d6: components/checks/active/file_inclusion.rb:22  [Use one level of indentation for arguments following the first line of a multi-line method call.]`
+- FN: `Arachni__arachni__c1710d6: components/checks/active/response_splitting.rb:32  [Use one level of indentation for arguments following the first line of a multi-line method call.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/ArrayAlignment</strong> — 20,862 matches, 10 FP, 3,209 FN (100.0%)</summary>
+
+**with_fixed_indentation** (10 FP, 3,209 FN):
+
+- FP: `commander-rb__commander__98dee54: lib/commander/runner.rb:66  [Align the elements of an array literal if they span more than one line.]`
+- FP: `commander-rb__commander__98dee54: lib/commander/runner.rb:67  [Align the elements of an array literal if they span more than one line.]`
+- FP: `coreinfrastructure__best-practices-badge__a3a2fb7: config/environments/development.rb:31  [Align the elements of an array literal if they span more than one line.]`
+- ... and 7 more FP
+- FN: `Apipie__apipie-rails__2692590: spec/dummy/app/controllers/pets_using_self_describing_classes_controller.rb:32  [Use one level of indentation for elements following the first line of a multi-line array.]`
+- FN: `Apipie__apipie-rails__2692590: spec/dummy/app/controllers/pets_using_self_describing_classes_controller.rb:49  [Use one level of indentation for elements following the first line of a multi-line array.]`
+- FN: `Arachni__arachni__c1710d6: Rakefile:169  [Use one level of indentation for elements following the first line of a multi-line array.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/DotPosition</strong> — 31,108 matches, 12 FP, 84 FN (100.0%)</summary>
+
+**trailing** (12 FP, 84 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:52  [Place the `.` on the previous line, together with the method call receiver.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:53  [Place the `.` on the previous line, together with the method call receiver.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:92  [Place the `.` on the previous line, together with the method call receiver.]`
+- ... and 9 more FP
+- FN: `ankane__ruby-polars__f274df0: lib/polars/functions/eager.rb:134  [Place the . on the previous line, together with the method call receiver.]`
+- FN: `antiwork__gumroad__782a69f: app/sidekiq/utm_link_sale_attribution_job.rb:29  [Place the . on the previous line, together with the method call receiver.]`
+- FN: `avo-hq__avo__c7b9fc8: app/components/avo/media_library/list_component.rb:21  [Place the . on the previous line, together with the method call receiver.]`
+- ... and 81 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/EmptyLinesAroundBlockBody</strong> — 62,599 matches, 720,389 FP, 1,054,572 FN (100.0%)</summary>
+
+**empty_lines** (720,389 FP, 1,054,572 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: Gemfile:38  [Empty line missing at block body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: Gemfile:68  [Empty line missing at block body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/decorators/app_decorator.rb:10  [Empty line missing at block body end.]`
+- ... and 97 more FP
+- FN: `2016rshah__githubchart-api__639b3ff: app.rb:13  [Empty line missing at block body end.]`
+- FN: `2016rshah__githubchart-api__639b3ff: app.rb:25  [Empty line missing at block body end.]`
+- FN: `2016rshah__githubchart-api__639b3ff: app.rb:46  [Empty line missing at block body end.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/EmptyLinesAroundClassBody</strong> — 58,919 matches, 433,483 FP, 442,393 FN (100.0%)</summary>
+
+**empty_lines** (139,225 FP, 144,969 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:18  [Empty line missing at class body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:49  [Empty line missing at class body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/application_controller.rb:60  [Empty line missing at class body end.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:19  [Empty line missing at class body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:50  [Empty line missing at class body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/application_controller.rb:61  [Empty line missing at class body end.]`
+- ... and 97 more FN
+
+**empty_lines_except_namespace** (138,762 FP, 144,954 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:18  [Empty line missing at class body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:49  [Empty line missing at class body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/application_controller.rb:60  [Empty line missing at class body end.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:19  [Empty line missing at class body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:50  [Empty line missing at class body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/application_controller.rb:61  [Empty line missing at class body end.]`
+- ... and 97 more FN
+
+**empty_lines_special** (155,496 FP, 152,470 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:18  [Empty line missing at class body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:49  [Empty line missing at class body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/application_controller.rb:60  [Empty line missing at class body end.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:19  [Empty line missing at class body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:50  [Empty line missing at class body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/application_controller.rb:61  [Empty line missing at class body end.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/EmptyLinesAroundModuleBody</strong> — 37,844 matches, 144,801 FP, 149,300 FN (100.0%)</summary>
+
+**empty_lines** (78,495 FP, 79,891 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:19  [Empty line missing at module body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:50  [Empty line missing at module body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:79  [Empty line missing at module body end.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/dasher_controller.rb:20  [Empty line missing at module body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/admin/projects_controller.rb:51  [Empty line missing at module body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:80  [Empty line missing at module body end.]`
+- ... and 97 more FN
+
+**empty_lines_except_namespace** (32,516 FP, 33,853 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:79  [Empty line missing at module body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/count_helper.rb:22  [Empty line missing at module body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/project_helper.rb:22  [Empty line missing at module body end.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:80  [Empty line missing at module body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/count_helper.rb:23  [Empty line missing at module body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/project_helper.rb:23  [Empty line missing at module body end.]`
+- ... and 97 more FN
+
+**empty_lines_special** (33,790 FP, 35,556 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:79  [Empty line missing at module body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/count_helper.rb:22  [Empty line missing at module body end.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/helpers/project_helper.rb:22  [Empty line missing at module body end.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:80  [Empty line missing at module body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/count_helper.rb:23  [Empty line missing at module body end.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/project_helper.rb:23  [Empty line missing at module body end.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/EndAlignment</strong> — 14,864 matches, 951 FP, 103 FN (100.0%)</summary>
+
+**variable** (54 FP, 97 FN):
+
+- FP: `DamirSvrtan__fasterer__5c113a9: lib/fasterer/method_call.rb:78  [Align `end` with `if`.]`
+- FP: `Sorcery__sorcery__883852e: lib/sorcery/controller/submodules/http_basic_auth.rb:55  [Align `end` with `if`.]`
+- FP: `activeadmin__activeadmin__c3de750: lib/active_admin/views/components/status_tag.rb:40  [Align `end` with `if`.]`
+- ... and 51 more FP
+- FN: `CocoaPods__CocoaPods__458dd19: lib/cocoapods/command/spec/lint.rb:111  [`end` at 111, 31 is not aligned with `raise Informative, if` at 107, 12.]`
+- FN: `DefactoSoftware__Hours__d695140: lib/tasks/stats.rake:10  [`end` at 10, 94 is not aligned with `format("%-18s  | %5s users | %5s entries | %s", account, User.count, Entry.count, (if` at 8, 11.]`
+- FN: `SciRuby__daru__6a97a7c: lib/daru/maths/statistics/vector.rb:961  [`end` at 961, 20 is not aligned with `res + if` at 957, 14.]`
+- ... and 94 more FN
+
+**start_of_line** (897 FP, 6 FN):
+
+- FP: `BuffaloWill__oxml_xxe__2773627: lib/util.rb:159  [Align `end` with `while`.]`
+- FP: `BuffaloWill__oxml_xxe__2773627: lib/util.rb:178  [Align `end` with `while`.]`
+- FP: `BuffaloWill__oxml_xxe__2773627: lib/util.rb:198  [Align `end` with `while`.]`
+- ... and 97 more FP
+- FN: `cesarferreira__dryrun__3cdd6e8: lib/dryrun/device.rb:10  [`end` at 10, 0 is not aligned with `﻿module Dryrun` at 1, 0.]`
+- FN: `cesarferreira__dryrun__3cdd6e8: lib/dryrun/version.rb:3  [`end` at 3, 0 is not aligned with `﻿module Dryrun` at 1, 0.]`
+- FN: `urbanadventurer__WhatWeb__c42e1b9: plugins/title.rb:29  [`end` at 29, 1 is not aligned with `if @body =~ /<title>[^<]+<\/title>/i` at 19, 2.]`
+- ... and 3 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/EndOfLine</strong> — 1,215 matches, 6 FP, 0 FN (100.0%)</summary>
+
+**crlf** (6 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:1  [Carriage return character missing.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/enc/test_euc_jp.rb:1  [Carriage return character missing.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/enc/test_shift_jis.rb:1  [Carriage return character missing.]`
+- ... and 3 more FP
+
+</details>
+
+<details>
+<summary><strong>Layout/FirstArgumentIndentation</strong> — 13,634 matches, 3,632 FP, 1,207 FN (100.0%)</summary>
+
+**consistent_relative_to_receiver** (3,627 FP, 12 FN):
+
+- FP: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction.rb:56  [Indent the first argument one step more than `Dir.glob(`.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: app/models/concerns/alchemy/publishable.rb:13  [Indent the first argument one step more than the start of the previous line.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: app/services/alchemy/duplicate_element.rb:29  [Indent the first argument one step more than the start of the previous line.]`
+- ... and 97 more FP
+- FN: `ManageIQ__manageiq__b530ec7: app/models/user.rb:481  [Indent the first argument one step more than the start of the previous line.]`
+- FN: `andymeneely__squib__d052e1f: lib/squib/sprues/sprue.rb:96  [Indent the first argument one step more than `@template_hash['crop_line']['lines'].map(`.]`
+- FN: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-jwt/validate_and_decode/fetch_issuer_value_spec.rb:236  [Indent the first argument one step more than the start of the previous line.]`
+- ... and 9 more FN
+
+**special_for_inner_method_call** (5 FP, 1,195 FN):
+
+- FP: `chrisk__fakeweb__2b08c1f: lib/fake_web/registry.rb:103  [Indent the first argument one step more than the start of the previous line.]`
+- FP: `jfelchner__ruby-progressbar__bafa278: lib/ruby-progressbar/output.rb:15  [Indent the first argument one step more than the start of the previous line.]`
+- FP: `jfelchner__ruby-progressbar__bafa278: lib/ruby-progressbar/projectors/smoothed_average.rb:45  [Indent the first argument one step more than the start of the previous line.]`
+- ... and 2 more FP
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: app/components/alchemy/ingredients/color_editor.rb:48  [Indent the first argument one step more than `tag.option(`.]`
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: app/controllers/concerns/alchemy/admin/resource_filter.rb:26  [Indent the first argument one step more than `"Alchemy::Admin::Filters::#{type.to_s.camelize}".constantize.new(`.]`
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: app/models/alchemy/ingredients/richtext.rb:47  [Indent the first argument one step more than `Rails::Html::SafeListSanitizer.new.sanitize(`.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/FirstArrayElementIndentation</strong> — 30,485 matches, 3 FP, 0 FN (100.0%)</summary>
+
+**align_brackets** (3 FP, 0 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/o_auth/discover_identity_provider_spec.rb:30  [Use 2 spaces for indentation in an array, relative to the position of the opening bracket.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/o_auth/discover_identity_provider_spec.rb:39  [Indent the right bracket the same as the left bracket.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:436  [Use 2 spaces for indentation in an array, relative to the position of the opening bracket.]`
+
+</details>
+
+<details>
+<summary><strong>Layout/FirstHashElementIndentation</strong> — 52,374 matches, 417 FP, 67,037 FN (100.0%)</summary>
+
+**consistent** (413 FP, 67,037 FN):
+
+- FP: `2016rshah__githubchart-api__639b3ff: color.rb:2  [Use 2 (not 4) spaces for indentation of the first element.]`
+- FP: `Arachni__arachni__c1710d6: components/checks/active/code_injection_timing.rb:31  [Use 2 (not 4) spaces for indentation of the first element.]`
+- FP: `Arachni__arachni__c1710d6: components/checks/active/response_splitting.rb:34  [Use 2 (not 4) spaces for indentation of the first element.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:64  [Use 2 spaces for indentation in a hash, relative to the start of the line where the left curly brace is.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:72  [Use 2 spaces for indentation in a hash, relative to the start of the line where the left curly brace is.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/contribution.rb:47  [Use 2 spaces for indentation in a hash, relative to the start of the line where the left curly brace is.]`
+- ... and 97 more FN
+
+**align_braces** (4 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:74  [Use 2 (not 0) spaces for indentation of the first element.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:86  [Indent the right brace the same as the left brace.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:96  [Use 2 (not 0) spaces for indentation of the first element.]`
+- ... and 1 more FP
+
+</details>
+
+<details>
+<summary><strong>Layout/HashAlignment</strong> — 225,412 matches, 8,965 FP, 227,516 FN (100.0%)</summary>
+
+**separator, separator, always_ignore** (7,489 FP, 179,016 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: spec/mailers/reminder_mailer_spec.rb:10  [Align the separators of a hash literal if they span more than one line.]`
+- FP: `24pullrequests__24pullrequests__381028d: spec/mailers/reminder_mailer_spec.rb:11  [Align the separators of a hash literal if they span more than one line.]`
+- FP: `24pullrequests__24pullrequests__381028d: spec/mailers/reminder_mailer_spec.rb:12  [Align the separators of a hash literal if they span more than one line.]`
+- ... and 97 more FP
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:3  [Align the separators of a hash literal if they span more than one line.]`
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:4  [Align the separators of a hash literal if they span more than one line.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:24  [Align the separators of a hash literal if they span more than one line.]`
+- ... and 97 more FN
+
+**table, table, ignore_implicit** (833 FP, 6,202 FN):
+
+- FP: `alexreisner__geocoder__2d3be47: lib/geocoder/results/ban_data_gouv_fr.rb:24  [Align the keys and values of a hash literal if they span more than one line.]`
+- FP: `antiwork__gumroad__782a69f: lib/utilities/compliance.rb:100  [Align the keys and values of a hash literal if they span more than one line.]`
+- FP: `antiwork__gumroad__782a69f: lib/utilities/compliance.rb:116  [Align the keys and values of a hash literal if they span more than one line.]`
+- ... and 97 more FP
+- FN: `Apipie__apipie-rails__2692590: lib/apipie/extractor/recorder.rb:133  [Align the keys and values of a hash literal if they span more than one line.]`
+- FN: `Apipie__apipie-rails__2692590: lib/apipie/routes_formatter.rb:12  [Align the keys and values of a hash literal if they span more than one line.]`
+- FN: `Apipie__apipie-rails__2692590: lib/tasks/apipie.rake:282  [Align the keys and values of a hash literal if they span more than one line.]`
+- ... and 97 more FN
+
+**ignore_explicit** (643 FP, 42,298 FN):
+
+- FP: `ManageIQ__manageiq__b530ec7: app/models/miq_policy.rb:83  [Align the keys of a hash literal if they span more than one line.]`
+- FP: `ManageIQ__manageiq__b530ec7: app/models/miq_policy.rb:85  [Align the keys of a hash literal if they span more than one line.]`
+- FP: `ManageIQ__manageiq__b530ec7: app/models/miq_provision/options_helper.rb:42  [Align the keys of a hash literal if they span more than one line.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:23  [Align the keys of a hash literal if they span more than one line.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:25  [Align the keys of a hash literal if they span more than one line.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:26  [Align the keys of a hash literal if they span more than one line.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/IndentationConsistency</strong> — 76,306 matches, 20 FP, 4 FN (100.0%)</summary>
+
+**indented_internal_methods** (20 FP, 4 FN):
+
+- FP: `rails__rails__d7c8ae6: activerecord/test/cases/connection_adapters/mysql_type_lookup_test.rb:61  [Inconsistent indentation detected.]`
+- FP: `rails__rails__d7c8ae6: activerecord/test/cases/connection_adapters/mysql_type_lookup_test.rb:66  [Inconsistent indentation detected.]`
+- FP: `rails__rails__d7c8ae6: activerecord/test/cases/connection_adapters/mysql_type_lookup_test.rb:74  [Inconsistent indentation detected.]`
+- ... and 17 more FP
+- FN: `pluginaweek__state_machine__8a3ba81: test/unit/machine_test.rb:1122  [Inconsistent indentation detected.]`
+- FN: `pluginaweek__state_machine__8a3ba81: test/unit/machine_test.rb:1134  [Inconsistent indentation detected.]`
+- FN: `radiant__radiant__756bb49: lib/radiant/taggable.rb:23  [Inconsistent indentation detected.]`
+- ... and 1 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/IndentationStyle</strong> — 215,467 matches, 1,165 FP, 15,918 FN (100.0%)</summary>
+
+**tabs** (1,165 FP, 15,918 FN):
+
+- FP: `ManageIQ__manageiq__b530ec7: spec/support/ems_refresh_helper.rb:38  [Space detected in indentation.]`
+- FP: `ManageIQ__manageiq__b530ec7: spec/support/ems_refresh_helper.rb:46  [Space detected in indentation.]`
+- FP: `Shopify__identity_cache__4e9907d: test/test_helper.rb:124  [Space detected in indentation.]`
+- ... and 97 more FP
+- FN: `JoshCheek__seeing_is_believing__cea723c: spec/binary/comment_lines_spec.rb:41  [Space detected in indentation.]`
+- FN: `JoshCheek__seeing_is_believing__cea723c: spec/binary/comment_lines_spec.rb:79  [Space detected in indentation.]`
+- FN: `JoshCheek__seeing_is_believing__cea723c: spec/binary/comment_lines_spec.rb:111  [Space detected in indentation.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/LineContinuationSpacing</strong> — 8,888 matches, 1 FP, 0 FN (100.0%)</summary>
+
+**no_space** (1 FP, 0 FN):
+
+- FP: `opf__openproject__f5a451d: modules/reporting/lib/report/query_utils.rb:161  [No space before backslash.]`
+
+</details>
+
+<details>
+<summary><strong>Layout/LineEndStringConcatenationIndentation</strong> — 6,014 matches, 26 FP, 19 FN (100.0%)</summary>
+
+**indented** (26 FP, 19 FN):
+
+- FP: `Shopify__cli-ui__fc757aa: test/cli/ui/widgets/status_test.rb:16  [Indent the first part of a string concatenated with backslash.]`
+- FP: `Shopify__cli-ui__fc757aa: test/cli/ui/widgets/status_test.rb:19  [Indent the first part of a string concatenated with backslash.]`
+- FP: `cyberark__conjur__8031a2a: app/models/audit/event/authn/authenticate.rb:47  [Indent the first part of a string concatenated with backslash.]`
+- ... and 23 more FP
+- FN: `cyberark__conjur__8031a2a: app/models/audit/event/authn/inject_client_cert.rb:44  [Indent the first part of a string concatenated with backslash.]`
+- FN: `cyberark__conjur__8031a2a: app/models/audit/event/authn/inject_client_cert.rb:47  [Indent the first part of a string concatenated with backslash.]`
+- FN: `cyberark__conjur__8031a2a: app/models/audit/event/authn/login.rb:44  [Indent the first part of a string concatenated with backslash.]`
+- ... and 16 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/MultilineArrayBraceLayout</strong> — 4,485 matches, 38 FP, 0 FN (100.0%)</summary>
+
+**same_line** (38 FP, 0 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/o_auth/discover_identity_provider_spec.rb:39  [The closing array brace must be on the same line as the last array element.]`
+- FP: `fxn__zeitwerk__5f2528a: test/lib/zeitwerk/test_eager_load.rb:77  [The closing array brace must be on the same line as the last array element.]`
+- FP: `fxn__zeitwerk__5f2528a: test/lib/zeitwerk/test_eager_load.rb:306  [The closing array brace must be on the same line as the last array element.]`
+- ... and 35 more FP
+
+</details>
+
+<details>
+<summary><strong>Layout/MultilineHashBraceLayout</strong> — 3,835 matches, 73 FP, 0 FN (100.0%)</summary>
+
+**same_line** (73 FP, 0 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/o_auth/discover_identity_provider_spec.rb:38  [Closing hash brace must be on the same line as the last hash element.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/o_auth/discover_identity_provider_spec.rb:40  [Closing hash brace must be on the same line as the last hash element.]`
+- FP: `decidim__decidim__bc448c8: decidim-design/app/helpers/decidim/design/tab_panels_helper.rb:90  [Closing hash brace must be on the same line as the last hash element.]`
+- ... and 70 more FP
+
+</details>
+
+<details>
+<summary><strong>Layout/MultilineMethodCallBraceLayout</strong> — 17,676 matches, 15 FP, 16 FN (100.0%)</summary>
+
+**new_line** (0 FP, 6 FN):
+
+- FN: `opf__openproject__f5a451d: lib/api/v3/attachments/attachments_api.rb:65  [Closing method call brace must be on the line after the last argument.]`
+- FN: `opf__openproject__f5a451d: lib/api/v3/work_packages/work_packages_api.rb:64  [Closing method call brace must be on the line after the last argument.]`
+- FN: `opf__openproject__f5a451d: modules/bim/app/controllers/bim/bcf/api/v2_1/viewpoints/api.rb:77  [Closing method call brace must be on the line after the last argument.]`
+- ... and 3 more FN
+
+**same_line** (15 FP, 10 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:56  [Closing method call brace must be on the same line as the last argument.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:57  [Closing method call brace must be on the same line as the last argument.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:97  [Closing method call brace must be on the same line as the last argument.]`
+- ... and 12 more FP
+- FN: `andymeneely__squib__d052e1f: lib/squib/sprues/sprue.rb:97  [Closing method call brace must be on the same line as the last argument.]`
+- FN: `discourse__discourse__9c8f125: lib/tasks/users.rake:164  [Closing method call brace must be on the same line as the last argument.]`
+- FN: `discourse__discourse__9c8f125: lib/turbo_tests/json_example.rb:18  [Closing method call brace must be on the same line as the last argument.]`
+- ... and 7 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/ParameterAlignment</strong> — 679 matches, 0 FP, 703 FN (100.0%)</summary>
+
+**with_fixed_indentation** (0 FP, 703 FN):
+
+- FN: `Arachni__arachni__c1710d6: lib/arachni/element/capabilities/mutable.rb:401  [Use one level of indentation for parameters following the first line of a multi-line method definition.]`
+- FN: `celluloid__celluloid__0a307cf: lib/celluloid/call/sync.rb:8  [Use one level of indentation for parameters following the first line of a multi-line method definition.]`
+- FN: `fluent__fluentd__1327bed: lib/fluent/plugin_helper/child_process.rb:66  [Use one level of indentation for parameters following the first line of a multi-line method definition.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceAroundBlockParameters</strong> — 2,118 matches, 4 FP, 105 FN (100.0%)</summary>
+
+**space** (4 FP, 105 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:50  [No space after last block parameter detected.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:90  [No space after last block parameter detected.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:109  [No space after last block parameter detected.]`
+- ... and 1 more FP
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/base.rb:95  [Space after last block parameter missing.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/filters/array_filter.rb:121  [Space after last block parameter missing.]`
+- FN: `CanineHQ__canine__df55ff3: app/controllers/users/registrations_controller.rb:6  [Space before first block parameter missing.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceBeforeBlockBraces</strong> — 44,371 matches, 7 FP, 51 FN (100.0%)</summary>
+
+**no_space, no_space** (7 FP, 51 FN):
+
+- FP: `bridgetownrb__bridgetown__c8618d7: bridgetown-core/test/test_generated_site.rb:36  [Space detected to the left of {.]`
+- FP: `camping__camping__f2479aa: setup.rb:204  [Space detected to the left of {.]`
+- FP: `chrisk__fakeweb__2b08c1f: test/vendor/right_http_connection-1.2.4/setup.rb:201  [Space detected to the left of {.]`
+- ... and 4 more FP
+- FN: `ElMassimo__vite_ruby__60914d2: vite_ruby/lib/vite_ruby/cli/build.rb:14  [Space detected to the left of {.]`
+- FN: `ElMassimo__vite_ruby__60914d2: vite_ruby/lib/vite_ruby/cli/dev.rb:11  [Space detected to the left of {.]`
+- FN: `ManageIQ__manageiq__b530ec7: lib/manageiq/reporting/formatter/c3_series.rb:14  [Space detected to the left of {.]`
+- ... and 48 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceInsideArrayLiteralBrackets</strong> — 40,556 matches, 1 FP, 363,816 FN (100.0%)</summary>
+
+**space, space** (1 FP, 0 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/o_auth/discover_identity_provider_spec.rb:37  [Space inside array literal brackets missing.]`
+
+**compact** (0 FP, 363,816 FN):
+
+- FN: `2016rshah__githubchart-api__639b3ff: app.rb:39  [Use space inside array brackets.]`
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:2  [Use space inside array brackets.]`
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:3  [Use space inside array brackets.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceInsideBlockBraces</strong> — 70,141 matches, 0 FP, 977 FN (100.0%)</summary>
+
+**no_space, space** (0 FP, 977 FN):
+
+- FN: `24pullrequests__24pullrequests__381028d: spec/models/project_spec.rb:8  [Space inside } detected.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/check/auditor.rb:104  [Space inside } detected.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/check/auditor.rb:111  [Space inside } detected.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceInsideHashLiteralBraces</strong> — 207,455 matches, 690 FP, 13,414 FN (100.0%)</summary>
+
+**no_space, space** (3 FP, 0 FN):
+
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:96  [Space inside } detected.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:140  [Space inside } detected.]`
+- FP: `cyberark__conjur__8031a2a: spec/app/domain/authentication/authn-oidc/v2/oidc_client_spec.rb:178  [Space inside } detected.]`
+
+**compact** (687 FP, 13,414 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: lib/json_api.rb:51  [Space inside } missing.]`
+- FP: `Arachni__arachni__c1710d6: spec/arachni/rpc/server/plugin/manager_spec.rb:22  [Space inside } missing.]`
+- FP: `Arachni__arachni__c1710d6: spec/arachni/rpc/server/plugin/manager_spec.rb:32  [Space inside } missing.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/models/contribution.rb:87  [Space inside } detected.]`
+- FN: `24pullrequests__24pullrequests__381028d: config/initializers/simple_form_bootstrap.rb:33  [Space inside } detected.]`
+- FN: `24pullrequests__24pullrequests__381028d: config/initializers/simple_form_bootstrap.rb:49  [Space inside } detected.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceInsideParens</strong> — 45,368 matches, 1,278 FP, 1,024 FN (100.0%)</summary>
+
+**space** (35 FP, 2 FN):
+
+- FP: `ManageIQ__manageiq__b530ec7: app/models/miq_report_result.rb:389  [No space inside parentheses detected.]`
+- FP: `ManageIQ__manageiq__b530ec7: spec/models/chargeback_rate_detail_spec.rb:215  [No space inside parentheses detected.]`
+- FP: `antiwork__gumroad__782a69f: app/modules/user/stats.rb:15  [No space inside parentheses detected.]`
+- ... and 32 more FP
+- FN: `ruby-formatter__rufo__a90e654: spec/lib/rufo/formatter_source_specs/pattern_matching.rb.spec:996  [No space inside parentheses detected.]`
+- FN: `ruby-formatter__rufo__a90e654: spec/lib/rufo/formatter_source_specs/pattern_matching.rb.spec:1002  [No space inside parentheses detected.]`
+
+**compact** (1,243 FP, 1,022 FN):
+
+- FP: `ManageIQ__manageiq__b530ec7: app/models/miq_report_result.rb:389  [No space inside parentheses detected.]`
+- FP: `ManageIQ__manageiq__b530ec7: spec/models/chargeback_rate_detail_spec.rb:215  [No space inside parentheses detected.]`
+- FP: `antiwork__gumroad__782a69f: app/modules/user/stats.rb:15  [No space inside parentheses detected.]`
+- ... and 97 more FP
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: app/helpers/alchemy/elements_helper.rb:165  [No space inside parentheses detected.]`
+- FN: `Arachni__arachni__c1710d6: Rakefile:11  [Space inside parentheses detected.]`
+- FN: `Arachni__arachni__c1710d6: arachni.gemspec:11  [Space inside parentheses detected.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceInsideReferenceBrackets</strong> — 3,262 matches, 0 FP, 165 FN (100.0%)</summary>
+
+**space, space** (0 FP, 165 FN):
+
+- FN: `Arachni__arachni__c1710d6: components/plugins/exec.rb:81  [Use space inside reference brackets.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/element/cookie.rb:273  [Use space inside reference brackets.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/element/cookie.rb:274  [Use space inside reference brackets.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Layout/SpaceInsideStringInterpolation</strong> — 3,520 matches, 1 FP, 0 FN (100.0%)</summary>
+
+**space** (1 FP, 0 FN):
+
+- FP: `pivotal__LicenseFinder__00b04cb: spec/lib/license_finder/package_managers/cocoa_pods_spec.rb:65  [Missing space inside string interpolation.]`
+
+</details>
+
+<details>
+<summary><strong>Layout/TrailingEmptyLines</strong> — 31,154 matches, 210,411 FP, 210,420 FN (100.0%)</summary>
+
+**final_blank_line** (210,411 FP, 210,420 FN):
+
+- FP: `2016rshah__githubchart-api__639b3ff: Gemfile:5  [Trailing blank line missing.]`
+- FP: `2016rshah__githubchart-api__639b3ff: app.rb:46  [Trailing blank line missing.]`
+- FP: `2016rshah__githubchart-api__639b3ff: config.ru:2  [Trailing blank line missing.]`
+- ... and 97 more FP
+- FN: `2016rshah__githubchart-api__639b3ff: Gemfile:6  [Trailing blank line missing.]`
+- FN: `2016rshah__githubchart-api__639b3ff: app.rb:47  [Trailing blank line missing.]`
+- FN: `2016rshah__githubchart-api__639b3ff: config.ru:3  [Trailing blank line missing.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Lint/SymbolConversion</strong> — 159,073 matches, 0 FP, 138 FN (100.0%)</summary>
+
+**consistent** (0 FP, 138 FN):
+
+- FN: `CocoaPods__CocoaPods__458dd19: lib/cocoapods/resolver/lazy_specification.rb:12  [Unnecessary symbol conversion; use `:is_a?` instead.]`
+- FN: `CocoaPods__CocoaPods__458dd19: lib/cocoapods/resolver/lazy_specification.rb:41  [Unnecessary symbol conversion; use `:is_a?` instead.]`
+- FN: `MiniProfiler__rack-mini-profiler__92610ca: spec/spec_helper.rb:58  [Unnecessary symbol conversion; use `:clock_gettime` instead.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Naming/VariableNumber</strong> — 41,296 matches, 61 FP, 0 FN (100.0%)</summary>
+
+**non_integer** (61 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/ruby/enc/test_windows_1252.rb:16  [Use non_integer for method name numbers.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/enc/test_windows_1252.rb:17  [Use non_integer for variable numbers.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/enc/test_windows_1252.rb:18  [Use non_integer for variable numbers.]`
+- ... and 58 more FP
+
+</details>
+
+<details>
+<summary><strong>RSpec/DescribedClass</strong> — 133,434 matches, 1,907 FP, 0 FN (100.0%)</summary>
+
+**explicit** (1,907 FP, 0 FN):
+
+- FP: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/base_spec.rb:363  [Use `ActiveInteraction::Base` instead of `described_class`.]`
+- FP: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/inputs_spec.rb:162  [Use `ActiveInteraction::Inputs` instead of `described_class`.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/libraries/alchemy/configuration_spec.rb:8  [Use `Alchemy::Configuration` instead of `described_class`.]`
+- ... and 97 more FP
+
+</details>
+
+<details>
+<summary><strong>RSpec/ImplicitExpect</strong> — 45,996 matches, 8 FP, 0 FN (100.0%)</summary>
+
+**should** (8 FP, 0 FN):
+
+- FP: `SciRuby__daru__6a97a7c: spec/vector_spec.rb:1433  [Prefer `should` over `is_expected.to`.]`
+- FP: `dependabot__dependabot-core__0ed9632: docker/spec/dependabot/docker/file_updater_spec.rb:518  [Prefer `should` over `is_expected.to`.]`
+- FP: `dependabot__dependabot-core__0ed9632: docker/spec/dependabot/docker/file_updater_spec.rb:557  [Prefer `should` over `is_expected.to`.]`
+- ... and 5 more FP
+
+</details>
+
+<details>
+<summary><strong>RSpec/ImplicitSubject</strong> — 17,695 matches, 0 FP, 5 FN (100.0%)</summary>
+
+**single_statement_only** (0 FP, 5 FN):
+
+- FN: `TheOdinProject__theodinproject__a556fbc: spec/models/interview_concept_spec.rb:6  [Don't use implicit subject.]`
+- FN: `TheOdinProject__theodinproject__a556fbc: spec/models/interview_survey_concept_spec.rb:6  [Don't use implicit subject.]`
+- FN: `TheOdinProject__theodinproject__a556fbc: spec/models/interview_survey_concept_spec.rb:7  [Don't use implicit subject.]`
+- ... and 2 more FN
+
+</details>
+
+<details>
+<summary><strong>RSpec/MessageExpectation</strong> — 77,003 matches, 0 FP, 1 FN (100.0%)</summary>
+
+**expect** (0 FP, 1 FN):
+
+- FN: `dependabot__dependabot-core__0ed9632: updater/spec/dependabot/updater/group_update_creation_spec.rb:112  [Prefer `expect` for setting message expectations.]`
+
+</details>
+
+<details>
+<summary><strong>RSpec/NamedSubject</strong> — 154,305 matches, 2 FP, 0 FN (100.0%)</summary>
+
+**named_only** (2 FP, 0 FN):
+
+- FP: `ruby-concurrency__concurrent-ruby__30dc89e: spec/concurrent/actor_spec.rb:66  [Name your test subject if you need to reference it explicitly.]`
+- FP: `ruby-concurrency__concurrent-ruby__30dc89e: spec/concurrent/actor_spec.rb:73  [Name your test subject if you need to reference it explicitly.]`
+
+</details>
+
+<details>
+<summary><strong>RSpec/PredicateMatcher</strong> — 12,361 matches, 10,936 FP, 0 FN (100.0%)</summary>
+
+**explicit** (10,936 FP, 0 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: spec/models/gift_form_spec.rb:21  [Prefer using `include?` over `include` matcher.]`
+- FP: `24pullrequests__24pullrequests__381028d: spec/models/gift_form_spec.rb:26  [Prefer using `include?` over `include` matcher.]`
+- FP: `24pullrequests__24pullrequests__381028d: spec/models/gift_form_spec.rb:30  [Prefer using `include?` over `include` matcher.]`
+- ... and 97 more FP
+
+</details>
+
+<details>
+<summary><strong>RSpec/ReturnFromStub</strong> — 3,385 matches, 4,578 FP, 2,442 FN (100.0%)</summary>
+
+**block** (4,578 FP, 2,442 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:140  [Use a block for static values.]`
+- FP: `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:161  [Use a block for static values.]`
+- FP: `24pullrequests__24pullrequests__381028d: spec/models/pull_request_downloader_spec.rb:10  [Use a block for static values.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:142  [Use block for static values.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/controllers/projects_controller_spec.rb:163  [Use block for static values.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/services/repo_with_labels_spec.rb:40  [Use block for static values.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>RSpec/VariableDefinition</strong> — 142 matches, 978 FP, 0 FN (100.0%)</summary>
+
+**strings** (978 FP, 0 FN):
+
+- FP: `DatabaseCleaner__database_cleaner__f50ccb2: spec/database_cleaner/cleaner_spec.rb:31  [Use strings for variable names.]`
+- FP: `DatabaseCleaner__database_cleaner__f50ccb2: spec/database_cleaner/cleaner_spec.rb:51  [Use strings for variable names.]`
+- FP: `DatabaseCleaner__database_cleaner__f50ccb2: spec/database_cleaner/cleaner_spec.rb:64  [Use strings for variable names.]`
+- ... and 97 more FP
+
+</details>
+
+<details>
+<summary><strong>RSpec/VariableName</strong> — 538 matches, 173 FP, 32 FN (100.0%)</summary>
+
+**camelCase** (173 FP, 32 FN):
+
+- FP: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/filter/column_spec.rb:35  [Use camelCase for variable names.]`
+- FP: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/filter/column_spec.rb:65  [Use camelCase for variable names.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/models/alchemy/page/fixed_attributes_spec.rb:50  [Use camelCase for variable names.]`
+- ... and 97 more FP
+- FN: `Freika__dawarich__3d1ae95: spec/swagger/api/v1/users_controller_spec.rb:16  [Use camelCase for variable names.]`
+- FN: `Freika__dawarich__3d1ae95: spec/swagger/api/v1/visits_controller_spec.rb:25  [Use camelCase for variable names.]`
+- FN: `Freika__dawarich__3d1ae95: spec/swagger/api/v1/visits_controller_spec.rb:58  [Use camelCase for variable names.]`
+- ... and 29 more FN
+
+</details>
+
+<details>
+<summary><strong>Rails/Date</strong> — 3,896 matches, 0 FP, 1,426 FN (100.0%)</summary>
+
+**strict** (0 FP, 1,426 FN):
+
+- FN: `24pullrequests__24pullrequests__381028d: spec/requests/gifts_spec.rb:14  [Do not use `Date.yesterday` without zone. Use `Time.zone.yesterday` instead.]`
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: lib/alchemy/test_support/shared_publishable_examples.rb:41  [Do not use `Date.yesterday` without zone. Use `Time.zone.yesterday` instead.]`
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: lib/alchemy/test_support/shared_publishable_examples.rb:56  [Do not use `Date.yesterday` without zone. Use `Time.zone.yesterday` instead.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Rails/HttpStatus</strong> — 3,772 matches, 1,510 FP, 272 FN (100.0%)</summary>
+
+**numeric** (1,510 FP, 272 FN):
+
+- FP: `CanineHQ__canine__df55ff3: app/controllers/accounts/sso_providers_controller.rb:36  [Prefer `422` over `:unprocessable_entity` to define HTTP status code.]`
+- FP: `CanineHQ__canine__df55ff3: app/controllers/accounts/sso_providers_controller.rb:66  [Prefer `422` over `:unprocessable_entity` to define HTTP status code.]`
+- FP: `CanineHQ__canine__df55ff3: app/controllers/accounts/stack_managers_controller.rb:99  [Prefer `422` over `:unprocessable_entity` to define HTTP status code.]`
+- ... and 97 more FP
+- FN: `Freika__dawarich__3d1ae95: app/controllers/api/v1/areas_controller.rb:22  [Prefer `422` over `:unprocessable_content` to define HTTP status code.]`
+- FN: `Freika__dawarich__3d1ae95: app/controllers/api/v1/areas_controller.rb:30  [Prefer `422` over `:unprocessable_content` to define HTTP status code.]`
+- FN: `Freika__dawarich__3d1ae95: app/controllers/api/v1/settings_controller.rb:26  [Prefer `422` over `:unprocessable_content` to define HTTP status code.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Rails/I18nLazyLookup</strong> — 167 matches, 1 FP, 1 FN (100.0%)</summary>
+
+**explicit** (1 FP, 1 FN):
+
+- FP: `pupilfirst__pupilfirst__001ec46: app/controllers/courses_controller.rb:53  [Use explicit lookup for i18n keys.]`
+- FN: `pupilfirst__pupilfirst__001ec46: app/controllers/courses_controller.rb:54  [Use explicit lookup for the text used in controllers.]`
+
+</details>
+
+<details>
+<summary><strong>Rails/PluckInWhere</strong> — 118 matches, 0 FP, 9 FN (100.0%)</summary>
+
+**aggressive** (0 FP, 9 FN):
+
+- FN: `consuldemocracy__consuldemocracy__9d2544d: app/models/poll/booth_assignment.rb:29  [Use `select` instead of `pluck` within `where` query method.]`
+- FN: `docuseal__docuseal__33ca930: app/controllers/api/templates_controller.rb:16  [Use `select` instead of `pluck` within `where` query method.]`
+- FN: `otwcode__otwarchive__412f04f: app/models/subscription.rb:22  [Use `select` instead of `pluck` within `where` query method.]`
+- ... and 6 more FN
+
+</details>
+
+<details>
+<summary><strong>Rails/TimeZone</strong> — 34,767 matches, 35 FP, 0 FN (100.0%)</summary>
+
+**strict** (35 FP, 0 FN):
+
+- FP: `Shopify__maintenance_tasks__58e544a: app/helpers/maintenance_tasks/tasks_helper.rb:184  [Use `Time.zone.now` instead of `Time.now`.]`
+- FP: `Shopify__maintenance_tasks__58e544a: test/helpers/maintenance_tasks/tasks_helper_test.rb:124  [Use `Time.zone.now` instead of `Time.now`.]`
+- FP: `jmettraux__rufus-scheduler__4a73a05: spec/spec_helper.rb:26  [Use `Time.zone.now` instead of `Time.now`.]`
+- ... and 32 more FP
+
+</details>
+
+<details>
+<summary><strong>Rails/UniqBeforePluck</strong> — 35 matches, 0 FP, 14 FN (100.0%)</summary>
+
+**aggressive** (0 FP, 14 FN):
+
+- FN: `bigbluebutton__greenlight__4d67cd7: spec/models/recording_spec.rb:61  [Use `distinct` before `pluck`.]`
+- FN: `bigbluebutton__greenlight__4d67cd7: spec/models/role_spec.rb:39  [Use `distinct` before `pluck`.]`
+- FN: `bigbluebutton__greenlight__4d67cd7: spec/models/room_spec.rb:60  [Use `distinct` before `pluck`.]`
+- ... and 11 more FN
+
+</details>
+
+<details>
+<summary><strong>Rails/WhereExists</strong> — 1,078 matches, 28 FP, 28 FN (100.0%)</summary>
+
+**where** (28 FP, 28 FN):
+
+- FP: `alphagov__whitehall__a640792: app/models/document.rb:127  [Use `where(...).exists?` instead of `exists?(...)`.]`
+- FP: `antiwork__gumroad__782a69f: app/models/concerns/with_filtering.rb:142  [Use `where(...).exists?` instead of `exists?(...)`.]`
+- FP: `antiwork__gumroad__782a69f: app/services/collaborator/create_service.rb:64  [Use `where(...).exists?` instead of `exists?(...)`.]`
+- ... and 25 more FP
+- FN: `alphagov__whitehall__a640792: app/models/document.rb:130  [Prefer `where(document_id: id).exists?` over `exists?(document_id: id)`.]`
+- FN: `antiwork__gumroad__782a69f: app/models/concerns/with_filtering.rb:146  [Prefer `where(email:).exists?` over `exists?(email:)`.]`
+- FN: `antiwork__gumroad__782a69f: app/services/collaborator/create_service.rb:67  [Prefer `where(affiliate_user: seller).exists?` over `exists?(affiliate_user: seller)`.]`
+- ... and 25 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/AccessModifierDeclarations</strong> — 1,294 matches, 78 FP, 0 FN (100.0%)</summary>
+
+**inline** (78 FP, 0 FN):
+
+- FP: `cyberark__conjur__8031a2a: app/domain/authentication/authenticate.rb:33  [`private` should be inlined in method definitions.]`
+- FP: `cyberark__conjur__8031a2a: app/domain/authentication/authn/authenticator.rb:24  [`private` should be inlined in method definitions.]`
+- FP: `cyberark__conjur__8031a2a: app/domain/authentication/authn/login.rb:23  [`private` should be inlined in method definitions.]`
+- ... and 75 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/BlockDelimiters</strong> — 66,667 matches, 1,369 FP, 504 FN (100.0%)</summary>
+
+**semantic** (1,324 FP, 504 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: app/controllers/alchemy/admin/elements_controller.rb:73  [Prefer `{...}` over `do...end` for functional blocks.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: lib/alchemy/configurations/uploader.rb:11  [Prefer `do...end` over `{...}` for procedural blocks.]`
+- FP: `Arachni__arachni__c1710d6: lib/arachni/browser.rb:872  [Prefer `{...}` over `do...end` for functional blocks.]`
+- ... and 97 more FP
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/filters/abstract_date_time_filter.rb:26  [Prefer `do...end` over `{...}` for procedural blocks.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/filters/array_filter.rb:90  [Prefer `do...end` over `{...}` for procedural blocks.]`
+- FN: `Arachni__arachni__c1710d6: components/plugins/proxy.rb:357  [Prefer `{...}` over `do...end` for functional blocks.]`
+- ... and 97 more FN
+
+**braces_for_chaining** (10 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:30  [Prefer `do...end` for multi-line blocks without chaining.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:30  [Prefer `do...end` for multi-line blocks without chaining.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:307  [Prefer `do...end` for multi-line blocks without chaining.]`
+- ... and 7 more FP
+
+**always_braces** (35 FP, 0 FN):
+
+- FP: `bridgetownrb__bridgetown__c8618d7: bridgetown-core/lib/bridgetown-core/resource/permalink_processor.rb:112  [Prefer `{...}` over `do...end` for blocks.]`
+- FP: `bridgetownrb__bridgetown__c8618d7: bridgetown-core/test/resources/src/_pages/i-am-ruby.rb:44  [Prefer `{...}` over `do...end` for blocks.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:87  [Prefer `{...}` over `do...end` for blocks.]`
+- ... and 32 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/ClassAndModuleChildren</strong> — 46,755 matches, 3 FP, 0 FN (100.0%)</summary>
+
+**compact, compact** (3 FP, 0 FN):
+
+- FP: `danlucraft__redcar__ff1a671: plugins/edit_view/lib/edit_view/modified_tabs_checker.rb:1  [Use compact module/class definition instead of nested style.]`
+- FP: `danlucraft__redcar__ff1a671: plugins/test_runner/lib/test_runner/rspec_runner.rb:1  [Use compact module/class definition instead of nested style.]`
+- FP: `danlucraft__redcar__ff1a671: plugins/test_runner/lib/test_runner/runnable_test_runner.rb:1  [Use compact module/class definition instead of nested style.]`
+
+</details>
+
+<details>
+<summary><strong>Style/EndlessMethod</strong> — 205 matches, 33 FP, 124 FN (100.0%)</summary>
+
+**require_single_line** (33 FP, 124 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:9  [Use endless method definitions for single line methods.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:21  [Use endless method definitions for single line methods.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:25  [Use endless method definitions for single line methods.]`
+- ... and 30 more FP
+- FN: `SciRuby__daru__6a97a7c: lib/daru/core/query.rb:45  [Use endless method definitions for single line methods.]`
+- FN: `SciRuby__daru__6a97a7c: lib/daru/dataframe.rb:2698  [Use endless method definitions for single line methods.]`
+- FN: `catarse__catarse__0d73a61: db/migrate/20180926175700_project_fiscal_data_as_a_table.rb:163  [Use endless method definitions for single line methods.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/FormatStringToken</strong> — 13,236 matches, 119 FP, 4 FN (100.0%)</summary>
+
+**template** (100 FP, 4 FN):
+
+- FP: `BetterErrors__better_errors__fde3b70: lib/better_errors/code_formatter/text.rb:10  [Prefer template tokens (like `%{foo}`) over unannotated tokens (like `%s`).]`
+- FP: `Eric-Guo__wechat__84e1e9c: bin/wechat:196  [Prefer template tokens (like `%{foo}`) over unannotated tokens (like `%s`).]`
+- FP: `david942j__seccomp-tools__4445b20: lib/seccomp-tools/cli/emu.rb:72  [Prefer template tokens (like `%{foo}`) over unannotated tokens (like `%s`).]`
+- ... and 97 more FP
+- FN: `coreinfrastructure__best-practices-badge__a3a2fb7: script/memory_stress_test.rb:364  [Prefer template tokens (like `%{foo}`) over annotated tokens (like `%<foo>s`).]`
+- FN: `coreinfrastructure__best-practices-badge__a3a2fb7: script/memory_stress_test.rb:456  [Prefer template tokens (like `%{foo}`) over annotated tokens (like `%<foo>s`).]`
+- FN: `coreinfrastructure__best-practices-badge__a3a2fb7: script/monitor_memory.rb:101  [Prefer template tokens (like `%{foo}`) over annotated tokens (like `%<foo>s`).]`
+- ... and 1 more FN
+
+**unannotated** (19 FP, 0 FN):
+
+- FP: `Shopify__shipit-engine__ff8282b: test/models/tasks_test.rb:20  [Prefer unannotated tokens (like `%s`) over annotated tokens (like `%<foo>s`).]`
+- FP: `asciidoctor__asciidoctor__33c50c7: test/lists_test.rb:5240  [Prefer unannotated tokens (like `%s`) over annotated tokens (like `%<foo>s`).]`
+- FP: `asciidoctor__asciidoctor__33c50c7: test/lists_test.rb:5241  [Prefer unannotated tokens (like `%s`) over annotated tokens (like `%<foo>s`).]`
+- ... and 16 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/FrozenStringLiteralComment</strong> — 374,287 matches, 7 FP, 255 FN (100.0%)</summary>
+
+**never** (7 FP, 255 FN):
+
+- FP: `discourse__discourse__9c8f125: db/migrate/20200611104600_create_missing_badge_indexes.rb:8  [Unnecessary frozen string literal comment.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:2  [Unnecessary frozen string literal comment.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/enc/test_windows_1252.rb:2  [Unnecessary frozen string literal comment.]`
+- ... and 4 more FP
+- FN: `gettalong__hexapdf__f1176c6: lib/hexapdf.rb:1  [Unnecessary frozen string literal comment.]`
+- FN: `gettalong__hexapdf__f1176c6: lib/hexapdf/cli.rb:1  [Unnecessary frozen string literal comment.]`
+- FN: `gettalong__hexapdf__f1176c6: lib/hexapdf/cli/batch.rb:1  [Unnecessary frozen string literal comment.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/HashSyntax</strong> — 580,842 matches, 10,588 FP, 86,679 FN (100.0%)</summary>
+
+**always, hash_rockets** (6,763 FP, 27,009 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: app/controllers/concerns/alchemy/legacy_page_redirects.rb:47  [Omit the hash value.]`
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/dsl_definition.rb:108  [Omit the hash value.]`
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/dsl_definition.rb:371  [Omit the hash value.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/gifts_controller.rb:68  [Use hash rockets syntax.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/gifts_controller.rb:69  [Use hash rockets syntax.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/filters/time_filter_spec.rb:60  [Use hash rockets syntax.]`
+- ... and 97 more FN
+
+**never, no_mixed_keys** (534 FP, 1,129 FN):
+
+- FP: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/inputs_spec.rb:91  [Don't mix styles in the same hash.]`
+- FP: `Arachni__arachni__c1710d6: spec/arachni/browser/element_locator_spec.rb:169  [Don't mix styles in the same hash.]`
+- FP: `Freika__dawarich__3d1ae95: config/routes.rb:32  [Don't mix styles in the same hash.]`
+- ... and 97 more FP
+- FN: `AaronLasseigne__active_interaction__97667c8: spec/active_interaction/inputs_spec.rb:92  [Don't mix styles in the same hash.]`
+- FN: `Arachni__arachni__c1710d6: spec/arachni/browser/element_locator_spec.rb:170  [Don't mix styles in the same hash.]`
+- FN: `Arachni__arachni__c1710d6: spec/arachni/browser/element_locator_spec.rb:171  [Don't mix styles in the same hash.]`
+- ... and 97 more FN
+
+**consistent, ruby19_no_mixed_keys** (3,291 FP, 58,541 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: lib/alchemy/test_support/factories/picture_factory.rb:20  [Don't mix explicit and shorthand hash values.]`
+- FP: `CanineHQ__canine__df55ff3: app/actions/projects/deploy_latest_commit.rb:17  [Don't mix explicit and shorthand hash values.]`
+- FP: `CanineHQ__canine__df55ff3: app/actions/projects/deploy_latest_commit.rb:23  [Don't mix explicit and shorthand hash values.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/gifts_controller.rb:7  [Omit the hash value.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/gifts_controller.rb:16  [Omit the hash value.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/gifts_controller.rb:34  [Omit the hash value.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/ItBlockParameter</strong> — 4,106 matches, 43 FP, 31,792 FN (100.0%)</summary>
+
+**always** (43 FP, 31,792 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:33  [Use `it` block parameter.]`
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:34  [Use `it` block parameter.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:68  [Use `it` block parameter.]`
+- ... and 40 more FP
+- FN: `24pullrequests__24pullrequests__381028d: spec/models/user_spec.rb:89  [Use `it` block parameter.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/models/user_spec.rb:412  [Use `it` block parameter.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: active_interaction.gemspec:53  [Use `it` block parameter.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/Lambda</strong> — 17,308 matches, 1 FP, 0 FN (100.0%)</summary>
+
+**literal** (1 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:391  [Use the `-> {}` lambda literal syntax for all lambdas.]`
+
+</details>
+
+<details>
+<summary><strong>Style/MagicCommentFormat</strong> — 827 matches, 252 FP, 43 FN (100.0%)</summary>
+
+**kebab_case** (252 FP, 43 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/dummy/config/initializers/application_controller_renderer.rb:1  [Prefer lower kebab case for magic comments.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/dummy/config/initializers/mime_types.rb:1  [Prefer lower kebab case for magic comments.]`
+- FP: `DavyJonesLocker__client_side_validations__071980a: lib/generators/templates/client_side_validations/initializer.rb:1  [Prefer lower kebab case for magic comments.]`
+- ... and 97 more FP
+- FN: `soutaro__steep__86f2b02: bin/generate-diagnostics-docs.rb:1  [Prefer lower kebab case for magic comments.]`
+- FN: `topfunky__gruff__e98e42d: lib/gruff.rb:3  [Prefer lower kebab case for magic comments.]`
+- FN: `topfunky__gruff__e98e42d: lib/gruff/accumulator_bar.rb:3  [Prefer lower kebab case for magic comments.]`
+- ... and 40 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/MethodCallWithArgsParentheses</strong> — 3,360,422 matches, 35,186 FP, 57,817 FN (100.0%)</summary>
+
+**omit_parentheses** (35,186 FP, 57,817 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/projects_controller.rb:105  [Omit parentheses for method calls with arguments.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/controllers/users_controller.rb:18  [Omit parentheses for method calls with arguments.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/models/project_search.rb:45  [Omit parentheses for method calls with arguments.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/projects_controller.rb:12  [Omit parentheses for method calls with arguments.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/projects_controller.rb:26  [Omit parentheses for method calls with arguments.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/unsubscribes_controller.rb:7  [Omit parentheses for method calls with arguments.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/MethodDefParentheses</strong> — 24,575 matches, 24,762 FP, 295,747 FN (100.0%)</summary>
+
+**require_no_parentheses** (24,762 FP, 869 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: app/decorators/app_decorator.rb:5  [Use `def` without parentheses.]`
+- FP: `24pullrequests__24pullrequests__381028d: bin/setup:6  [Use `def` without parentheses.]`
+- FP: `24pullrequests__24pullrequests__381028d: bin/update:8  [Use `def` without parentheses.]`
+- ... and 97 more FP
+- FN: `BuffaloWill__oxml_xxe__2773627: lib/lib.rb:14  [Use def without parentheses.]`
+- FN: `BuffaloWill__oxml_xxe__2773627: lib/lib.rb:28  [Use def without parentheses.]`
+- FN: `DamirSvrtan__fasterer__5c113a9: spec/support/method_definition/simple_method.rb:1  [Use def without parentheses.]`
+- ... and 97 more FN
+
+**require_no_parentheses_except_multiline** (0 FP, 294,878 FN):
+
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:10  [Use def without parentheses.]`
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:20  [Use def without parentheses.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:95  [Use def without parentheses.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/MixinGrouping</strong> — 815 matches, 25 FP, 62 FN (100.0%)</summary>
+
+**grouped** (25 FP, 62 FN):
+
+- FP: `rouge-ruby__rouge__1a40dda: lib/rouge/lexers/biml.rb:17  [Put `prepend` mixins in a single statement.]`
+- FP: `rouge-ruby__rouge__1a40dda: lib/rouge/lexers/biml.rb:23  [Put `prepend` mixins in a single statement.]`
+- FP: `rouge-ruby__rouge__1a40dda: lib/rouge/lexers/cpp.rb:52  [Put `prepend` mixins in a single statement.]`
+- ... and 22 more FP
+- FN: `antiwork__gumroad__782a69f: app/controllers/application_controller.rb:21  [Put `include` mixins in a single statement.]`
+- FN: `antiwork__gumroad__782a69f: app/controllers/links_controller.rb:4  [Put `include` mixins in a single statement.]`
+- FN: `antiwork__gumroad__782a69f: app/controllers/links_controller.rb:8  [Put `include` mixins in a single statement.]`
+- ... and 59 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/MutableConstant</strong> — 34,103 matches, 29 FP, 0 FN (100.0%)</summary>
+
+**strict** (29 FP, 0 FN):
+
+- FP: `Shopify__cli-ui__fc757aa: lib/cli/ui/formatter.rb:56  [Freeze mutable objects assigned to constants.]`
+- FP: `Shopify__cli-ui__fc757aa: lib/cli/ui/truncater.rb:21  [Freeze mutable objects assigned to constants.]`
+- FP: `Shopify__cli-ui__fc757aa: lib/cli/ui/truncater.rb:22  [Freeze mutable objects assigned to constants.]`
+- ... and 26 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/Next</strong> — 5,000 matches, 53 FP, 54 FN (100.0%)</summary>
+
+**always** (53 FP, 54 FN):
+
+- FP: `Parallels__vagrant-parallels__dda5c93: lib/vagrant-parallels/action/setup_package_files.rb:39  [Use `next` to skip iteration.]`
+- FP: `Shopify__shopify_app__6c1c2ec: lib/shopify_app/configuration.rb:160  [Use `next` to skip iteration.]`
+- FP: `Shopify__shopify_app__6c1c2ec: lib/shopify_app/session/session_repository.rb:114  [Use `next` to skip iteration.]`
+- ... and 50 more FP
+- FN: `Parallels__vagrant-parallels__dda5c93: lib/vagrant-parallels/action/setup_package_files.rb:38  [Use `next` to skip iteration.]`
+- FN: `Shopify__shopify_app__6c1c2ec: lib/shopify_app/configuration.rb:157  [Use `next` to skip iteration.]`
+- FN: `Shopify__shopify_app__6c1c2ec: lib/shopify_app/session/session_repository.rb:111  [Use `next` to skip iteration.]`
+- ... and 51 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/NilComparison</strong> — 4,911 matches, 1 FP, 0 FN (100.0%)</summary>
+
+**comparison** (1 FP, 0 FN):
+
+- FP: `twilio__twilio-ruby__42c76f5: lib/twilio-ruby/jwt/access_token.rb:82  [Prefer the use of the `==` comparison.]`
+
+</details>
+
+<details>
+<summary><strong>Style/NumberedParameters</strong> — 499 matches, 0 FP, 1 FN (100.0%)</summary>
+
+**disallow** (0 FP, 1 FN):
+
+- FN: `rom-rb__rom__7cdb1a2: core/lib/rom/schema.rb:208  [Avoid using numbered parameters.]`
+
+</details>
+
+<details>
+<summary><strong>Style/ObjectThen</strong> — 743 matches, 5 FP, 0 FN (100.0%)</summary>
+
+**yield_self** (5 FP, 0 FN):
+
+- FP: `ruby-concurrency__concurrent-ruby__30dc89e: lib/concurrent-ruby-edge/concurrent/edge/erlang_actor.rb:1135  [Prefer `yield_self` over `then`.]`
+- FP: `ruby-concurrency__concurrent-ruby__30dc89e: lib/concurrent-ruby-edge/concurrent/edge/promises.rb:26  [Prefer `yield_self` over `then`.]`
+- FP: `ruby-concurrency__concurrent-ruby__30dc89e: lib/concurrent-ruby-edge/concurrent/edge/promises.rb:40  [Prefer `yield_self` over `then`.]`
+- ... and 2 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/QuotedSymbols</strong> — 49,466 matches, 1 FP, 0 FN (100.0%)</summary>
+
+**double_quotes** (1 FP, 0 FN):
+
+- FP: `ruby-i18n__i18n__b0fffb8: test/backend/interpolation_compiler_test.rb:54  [Prefer double-quoted symbols.]`
+
+</details>
+
+<details>
+<summary><strong>Style/RaiseArgs</strong> — 9,863 matches, 1 FP, 0 FN (100.0%)</summary>
+
+**exploded** (1 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/logger/test_logger.rb:352  [Provide an exception class and message as arguments to `raise`.]`
+
+</details>
+
+<details>
+<summary><strong>Style/RegexpLiteral</strong> — 32,779 matches, 3 FP, 8,086 FN (100.0%)</summary>
+
+**mixed** (3 FP, 8,086 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:412  [Use `//` around regular expression.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:465  [Use `//` around regular expression.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:1092  [Use `//` around regular expression.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/projects_controller.rb:77  [Use `%r` around regular expression.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/project.rb:29  [Use `%r` around regular expression.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/project.rb:65  [Use `%r` around regular expression.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/ReturnNil</strong> — 20,358 matches, 0 FP, 2 FN (100.0%)</summary>
+
+**return_nil** (0 FP, 2 FN):
+
+- FN: `openSUSE__osem__44db914: app/controllers/admin/booths_controller.rb:128  [Use `return nil` instead of `return`.]`
+- FN: `openSUSE__osem__44db914: app/controllers/admin/events_controller.rb:192  [Use `return nil` instead of `return`.]`
+
+</details>
+
+<details>
+<summary><strong>Style/SignalException</strong> — 20,947 matches, 0 FP, 47,369 FN (100.0%)</summary>
+
+**only_fail** (0 FP, 446 FN):
+
+- FN: `Shopify__tapioca__ca6acae: lib/tapioca/helpers/rbi_files_helper.rb:137  [Always use `fail` to signal exceptions.]`
+- FN: `Shopify__tapioca__ca6acae: lib/tapioca/helpers/sorbet_helper.rb:37  [Always use `fail` to signal exceptions.]`
+- FN: `Shopify__tapioca__ca6acae: lib/tapioca/runtime/reflection.rb:134  [Always use `fail` to signal exceptions.]`
+- ... and 97 more FN
+
+**semantic** (0 FP, 46,923 FN):
+
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/languages_controller.rb:34  [Use `fail` instead of `raise` to signal exceptions.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/score_calculator.rb:15  [Use `fail` instead of `raise` to signal exceptions.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/base.rb:96  [Use `fail` instead of `raise` to signal exceptions.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/SpecialGlobalVars</strong> — 11,088 matches, 2,474 FP, 1,757 FN (100.0%)</summary>
+
+**use_perl_names** (13 FP, 49 FN):
+
+- FP: `natalie-lang__natalie__b507cff: lib/English.rb:21  [Prefer `$&` over `$MATCH`.]`
+- FP: `natalie-lang__natalie__b507cff: lib/English.rb:22  [Prefer `$`` over `$PREMATCH`.]`
+- FP: `natalie-lang__natalie__b507cff: lib/English.rb:23  [Prefer `$'` over `$POSTMATCH`.]`
+- ... and 10 more FP
+- FN: `alexch__rerun__36f2d23: lib/rerun/runner.rb:160  [Prefer `$$` over `$PID`.]`
+- FN: `github-linguist__linguist__fbdd23b: script/normalise-url:123  [Prefer `$/` over `$RS`.]`
+- FN: `kpumuk__meta-tags__1d16a4c: lib/meta_tags/text_normalizer.rb:99  [Prefer `$,` over `$OFS`.]`
+- ... and 46 more FN
+
+**use_builtin_english_names** (2,461 FP, 1,708 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: alchemy_cms.gemspec:4  [Prefer `$:` over `$LOAD_PATH`.]`
+- FP: `AndyObtiva__glimmer__90326e6: lib/glimmer.rb:26  [Prefer `$:` over `$LOAD_PATH`.]`
+- FP: `AndyObtiva__glimmer__90326e6: spec/spec_helper.rb:17  [Prefer `$:` over `$LOAD_PATH`.]`
+- ... and 97 more FP
+- FN: `Apipie__apipie-rails__2692590: apipie-rails.gemspec:3  [Prefer `$LOAD_PATH` over `$:`.]`
+- FN: `Apipie__apipie-rails__2692590: spec/dummy/components/test_engine/test_engine.gemspec:1  [Prefer `$LOAD_PATH` over `$:`.]`
+- FN: `Apipie__apipie-rails__2692590: spec/dummy/config/boot.rb:10  [Prefer `$LOAD_PATH` over `$:`.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/StringLiterals</strong> — 4,180,939 matches, 973 FP, 0 FN (100.0%)</summary>
+
+**double_quotes** (973 FP, 0 FN):
+
+- FP: `Arachni__arachni__c1710d6: components/checks/active/os_cmd_injection.rb:41  [Prefer double-quoted strings unless you need single quotes to avoid extra backslashes for escaping.]`
+- FP: `Arachni__arachni__c1710d6: components/checks/active/os_cmd_injection.rb:42  [Prefer double-quoted strings unless you need single quotes to avoid extra backslashes for escaping.]`
+- FP: `Arachni__arachni__c1710d6: spec/support/servers/checks/active/os_cmd_injection.rb:11  [Prefer double-quoted strings unless you need single quotes to avoid extra backslashes for escaping.]`
+- ... and 97 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/SymbolArray</strong> — 55,881 matches, 0 FP, 17,172 FN (100.0%)</summary>
+
+**brackets** (0 FP, 17,172 FN):
+
+- FN: `24pullrequests__24pullrequests__381028d: app/models/user.rb:64  [Use `[:email, :name, :blog]` for an array of symbols.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/filter/column.rb:48  [Use `[:integer, :float]` for an array of symbols.]`
+- FN: `AaronLasseigne__active_interaction__97667c8: lib/active_interaction/filters/array_filter.rb:35  [Use `[:from, :methods]` for an array of symbols.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/TernaryParentheses</strong> — 4,715 matches, 0 FP, 318 FN (100.0%)</summary>
+
+**require_parentheses_when_complex** (0 FP, 318 FN):
+
+- FN: `Arachni__arachni__c1710d6: lib/arachni/options.rb:348  [Only use parentheses for ternary expressions with complex conditions.]`
+- FN: `Arachni__arachni__c1710d6: lib/arachni/options.rb:366  [Only use parentheses for ternary expressions with complex conditions.]`
+- FN: `Freika__dawarich__3d1ae95: app/queries/stats/time_of_day_query.rb:86  [Use parentheses for ternary expressions with complex conditions.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/TrailingCommaInArguments</strong> — 52,545 matches, 37,475 FP, 97,693 FN (100.0%)</summary>
+
+**comma** (0 FP, 1,703 FN):
+
+- FN: `AlchemyCMS__alchemy_cms__4c2023f: lib/alchemy/test_support/capybara_helpers.rb:23  [Put a comma after the last parameter of a multiline method call.]`
+- FN: `Arachni__arachni__c1710d6: spec/arachni/http/client_spec.rb:1039  [Avoid comma after the last parameter of a method call, unless each item is on its own line.]`
+- FN: `Arachni__arachni__c1710d6: ui/cli/framework/option_parser.rb:183  [Avoid comma after the last parameter of a method call, unless each item is on its own line.]`
+- ... and 97 more FN
+
+**consistent_comma** (2,751 FP, 302 FN):
+
+- FP: `24pullrequests__24pullrequests__381028d: spec/mailers/reminder_mailer_spec.rb:16  [Put a comma after the last parameter of a multiline method call.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: app/components/alchemy/admin/element_select.rb:22  [Put a comma after the last parameter of a multiline method call.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: app/components/alchemy/ingredients/picture_view.rb:56  [Put a comma after the last parameter of a multiline method call.]`
+- ... and 97 more FP
+- FN: `Arachni__arachni__c1710d6: spec/arachni/http/client_spec.rb:1039  [Avoid comma after the last parameter of a method call, unless items are split onto multiple lines.]`
+- FN: `JoshCheek__seeing_is_believing__cea723c: lib/seeing_is_believing/binary/align_chunk.rb:26  [Put a comma after the last parameter of a multiline method call.]`
+- FN: `JoshCheek__seeing_is_believing__cea723c: lib/seeing_is_believing/binary/align_chunk.rb:36  [Put a comma after the last parameter of a multiline method call.]`
+- ... and 97 more FN
+
+**diff_comma** (34,724 FP, 95,688 FN):
+
+- FP: `AndyObtiva__glimmer__90326e6: spec/lib/glimmer/data_binding/model_binding_spec.rb:648  [Avoid comma after the last parameter of a method call.]`
+- FP: `AndyObtiva__glimmer__90326e6: spec/lib/glimmer/data_binding/model_binding_spec.rb:679  [Avoid comma after the last parameter of a method call.]`
+- FP: `AndyObtiva__glimmer__90326e6: spec/lib/glimmer/data_binding/model_binding_spec.rb:745  [Avoid comma after the last parameter of a method call.]`
+- ... and 97 more FP
+- FN: `24pullrequests__24pullrequests__381028d: app/services/downloader.rb:32  [Put a comma after the last parameter of a multiline method call.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/services/repo_with_labels_spec.rb:75  [Put a comma after the last parameter of a multiline method call.]`
+- FN: `24pullrequests__24pullrequests__381028d: spec/support/login_helpers.rb:21  [Put a comma after the last parameter of a multiline method call.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/TrailingCommaInArrayLiteral</strong> — 35,148 matches, 7 FP, 2 FN (100.0%)</summary>
+
+**consistent_comma** (3 FP, 0 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:50  [Put a comma after the last item of a multiline array.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:426  [Put a comma after the last item of a multiline array.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:455  [Put a comma after the last item of a multiline array.]`
+
+**diff_comma** (4 FP, 2 FN):
+
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:50  [Put a comma after the last item of a multiline array.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:426  [Put a comma after the last item of a multiline array.]`
+- FP: `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:455  [Put a comma after the last item of a multiline array.]`
+- ... and 1 more FP
+- FN: `castwide__solargraph__676da4c: Rakefile:117  [Put a comma after the last item of a multiline array.]`
+- FN: `pickhardt__betty__f95c4e3: lib/files.rb:133  [Put a comma after the last item of a multiline array.]`
+
+</details>
+
+<details>
+<summary><strong>Style/TrailingCommaInHashLiteral</strong> — 97,270 matches, 45,584 FP, 106,958 FN (100.0%)</summary>
+
+**comma** (1,318 FP, 3,193 FN):
+
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/controllers/alchemy/admin/attachments_controller_spec.rb:205  [Put a comma after the last item of a multiline hash.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/controllers/alchemy/admin/attachments_controller_spec.rb:223  [Put a comma after the last item of a multiline hash.]`
+- FP: `AlchemyCMS__alchemy_cms__4c2023f: spec/controllers/alchemy/admin/attachments_controller_spec.rb:251  [Put a comma after the last item of a multiline hash.]`
+- ... and 97 more FP
+- FN: `Eric-Guo__wechat__84e1e9c: spec/lib/wechat/api_spec.rb:946  [Avoid comma after the last item of a hash, unless each item is on its own line.]`
+- FN: `Eric-Guo__wechat__84e1e9c: spec/lib/wechat/api_spec.rb:958  [Avoid comma after the last item of a hash, unless each item is on its own line.]`
+- FN: `Shopify__identity_cache__4e9907d: performance/externals.rb:13  [Avoid comma after the last item of a hash, unless each item is on its own line.]`
+- ... and 97 more FN
+
+**consistent_comma** (0 FP, 10,773 FN):
+
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:26  [Put a comma after the last item of a multiline hash.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/controllers/dashboards_controller.rb:97  [Put a comma after the last item of a multiline hash.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/gift.rb:14  [Put a comma after the last item of a multiline hash.]`
+- ... and 97 more FN
+
+**diff_comma** (44,266 FP, 92,992 FN):
+
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/generator/swagger/param_description.rb:14  [Avoid comma after the last item of a hash.]`
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/generator/swagger/param_description/builder.rb:78  [Avoid comma after the last item of a hash.]`
+- FP: `Apipie__apipie-rails__2692590: lib/apipie/generator/swagger/param_description/builder.rb:86  [Avoid comma after the last item of a hash.]`
+- ... and 97 more FP
+- FN: `2016rshah__githubchart-api__639b3ff: color.rb:4  [Put a comma after the last item of a multiline hash.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:65  [Put a comma after the last item of a multiline hash.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:69  [Put a comma after the last item of a multiline hash.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/UnlessLogicalOperators</strong> — 697 matches, 6 FP, 0 FN (100.0%)</summary>
+
+**forbid_logical_operators** (6 FP, 0 FN):
+
+- FP: `danbooru__danbooru__fd45f0f: app/logical/source/url/my_portfolio.rb:43  [Do not use any logical operator in an `unless`.]`
+- FP: `danbooru__danbooru__fd45f0f: app/logical/source/url/naver_blog.rb:56  [Do not use any logical operator in an `unless`.]`
+- FP: `danbooru__danbooru__fd45f0f: app/logical/source/url/naver_post.rb:47  [Do not use any logical operator in an `unless`.]`
+- ... and 3 more FP
+
+</details>
+
+<details>
+<summary><strong>Style/WordArray</strong> — 55,062 matches, 0 FP, 43,798 FN (100.0%)</summary>
+
+**brackets** (0 FP, 43,798 FN):
+
+- FN: `24pullrequests__24pullrequests__381028d: app/helpers/application_helper.rb:43  [Use `['en', 'es', 'el', 'pt_br', 'fi', 'fr', 'de', 'ru', 'uk', 'th', 'it', 'nb', 'ta', 'tr', 'zh_Hans', 'zh_Hant', 'ja', 'cs', 'hi', 'pl']` for an array of words.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/event.rb:4  [Use `['http', 'https']` for an array of words.]`
+- FN: `24pullrequests__24pullrequests__381028d: app/models/user.rb:194  [Use `['daily', 'weekly']` for an array of words.]`
+- ... and 97 more FN
+
+</details>
+
+<details>
+<summary><strong>Style/YodaCondition</strong> — 1,935 matches, 16 FP, 1 FN (100.0%)</summary>
+
+**require_for_all_comparison_operators** (16 FP, 1 FN):
+
+- FP: `asciidoctor__asciidoctor-pdf__dadceca: lib/asciidoctor/pdf/converter.rb:5015  [Prefer Yoda conditions.]`
+- FP: `castwide__solargraph__676da4c: lib/solargraph/pin/reference.rb:25  [Prefer Yoda conditions.]`
+- FP: `dependabot__dependabot-core__0ed9632: common/lib/dependabot/source.rb:221  [Prefer Yoda conditions.]`
+- ... and 13 more FP
+- FN: `jruby__jruby__0303464: test/jruby/test_core_arities.rb:28  [Reverse the order of the operands `(2**500).<(1,2)`.]`
 
 </details>
 
@@ -1170,7 +2519,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | charkost__prosopite__891000f | 11 | 99.6% | 752 | 3 | 0 |
 | clear-code__redmine_full_text_search__f16c2b7 | 110 | 99.6% | 6,576 | 7 | 19 |
 | endoflife-date__endoflife.date__a0d0676 | 11 | 99.6% | 1,265 | 0 | 5 |
-| infinitered__bluepotion__293730b | 116 | 99.6% | 4,483 | 15 | 3 |
 | marcotc__rack-brotli__e48f93f | 10 | 99.6% | 503 | 0 | 2 |
 | metanorma__metanorma__c6f953a | 75 | 99.6% | 7,293 | 20 | 9 |
 | nepalez__rspec-sqlimit__ddc6435 | 17 | 99.6% | 252 | 0 | 1 |
@@ -1208,7 +2556,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | stripe-contrib__stripe-cli__ee98caa | 31 | 99.6% | 1,705 | 6 | 0 |
 | LunarLogic__pg_morph__e4d17b3 | 41 | 99.6% | 877 | 2 | 1 |
 | busyloop__lolcat__f4cca56 | 8 | 99.6% | 285 | 1 | 0 |
-| infochimps-labs__ironfan__5a30f94 | 109 | 99.6% | 9,244 | 28 | 4 |
 | k0kubun__md2key__5666e5d | 22 | 99.6% | 291 | 1 | 0 |
 | rubocop__rubocop-rspec__51dab28 | 288 | 99.6% | 4,389 | 8 | 7 |
 | syhsyh9696__javlibrary-rails__1021473 | 98 | 99.6% | 1,163 | 4 | 0 |
@@ -1216,6 +2563,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | JacobEvelyn__friends__3915987 | 60 | 99.6% | 2,653 | 2 | 7 |
 | Mange__emoji-data__cd70ebf | 14 | 99.6% | 603 | 1 | 1 |
 | Vasfed__csso-rails__afa08af | 19 | 99.6% | 297 | 0 | 1 |
+| infinitered__bluepotion__293730b | 116 | 99.6% | 4,486 | 15 | 0 |
 | noraj__ctf-party__83abcce | 36 | 99.6% | 591 | 2 | 0 |
 | samg__diffy__72dc29f | 12 | 99.6% | 883 | 0 | 3 |
 | c10l__vagrant-butcher__169cc1d | 21 | 99.6% | 308 | 0 | 1 |
@@ -1226,6 +2574,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | halostatue__color__3299b65 | 22 | 99.6% | 1,837 | 0 | 6 |
 | hamcrest__ramcrest__0a02f5e | 35 | 99.6% | 619 | 0 | 2 |
 | hschne__rails-mini-profiler__b9c3798 | 144 | 99.6% | 1,841 | 4 | 2 |
+| infochimps-labs__ironfan__5a30f94 | 109 | 99.6% | 9,246 | 28 | 2 |
 | kaitai-io__kaitai_struct_visualizer__23ec082 | 20 | 99.6% | 908 | 3 | 0 |
 | perryn__blinky__089adb2 | 29 | 99.6% | 914 | 1 | 2 |
 | pupilfirst__pupilfirst__001ec46 | 1,964 | 99.6% | 49,259 | 69 | 92 |
@@ -1329,10 +2678,8 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | sparklemotion__rexical__5a4ed38 | 16 | 99.7% | 1,505 | 2 | 2 |
 | swdyh__gisty__1b6e3fc | 16 | 99.7% | 745 | 0 | 2 |
 | test-unit__test-unit__5545156 | 103 | 99.7% | 11,986 | 17 | 15 |
-| westonganger__active_snapshot__90da202 | 45 | 99.7% | 1,141 | 1 | 2 |
 | aziz__virastar__1fa7589 | 7 | 99.7% | 398 | 1 | 0 |
 | devopsgroup-io__vagrant-digitalocean__7e3418d | 28 | 99.7% | 785 | 0 | 2 |
-| dmorrill10__acpc_poker_gui_client__56e524b | 55 | 99.7% | 2,324 | 4 | 2 |
 | ebobby__has-many-with-set__a184de1 | 15 | 99.7% | 388 | 0 | 1 |
 | fastlane__boarding__97384cc | 33 | 99.7% | 389 | 0 | 1 |
 | janko__image_processing__3b870f2 | 16 | 99.7% | 1,195 | 2 | 1 |
@@ -1528,6 +2875,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | capistrano__sshkit__76759c7 | 72 | 99.8% | 2,886 | 4 | 1 |
 | cenit-io__cenit__0106da3 | 463 | 99.8% | 22,395 | 18 | 22 |
 | digital-fabric__tipi__7fd15c9 | 84 | 99.8% | 2,848 | 0 | 5 |
+| dmorrill10__acpc_poker_gui_client__56e524b | 55 | 99.8% | 2,326 | 4 | 0 |
 | elastic__docs__f946b12 | 106 | 99.8% | 6,863 | 1 | 11 |
 | faradayio__hangar__14bdda5 | 53 | 99.8% | 556 | 0 | 1 |
 | flori__term-ansicolor__e64ada9 | 33 | 99.8% | 2,302 | 2 | 2 |
@@ -1579,7 +2927,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | khamusa__rspec-graphql_matchers__97324d2 | 29 | 99.8% | 589 | 1 | 0 |
 | levinmr__rspec-snapshot__5c1212c | 20 | 99.8% | 590 | 1 | 0 |
 | monora__rgl__e4bc2d6 | 61 | 99.8% | 3,655 | 0 | 6 |
-| opf__openproject__f5a451d | 9,286 | 99.8% | 397,869 | 157 | 498 |
+| opf__openproject__f5a451d | 9,286 | 99.8% | 397,870 | 157 | 497 |
 | pawurb__rails-pg-extras__674c01f | 25 | 99.8% | 607 | 1 | 0 |
 | premailer__premailer__36b8cec | 23 | 99.8% | 1,764 | 0 | 3 |
 | rails__globalid__26544d2 | 30 | 99.8% | 1,201 | 2 | 0 |
@@ -1595,7 +2943,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | JonMidhir__Redcrumbs__d9c1023 | 22 | 99.8% | 1,277 | 0 | 2 |
 | RubyMoney__money-rails__3ec279c | 72 | 99.8% | 2,640 | 2 | 2 |
 | alexreisner__geocoder__2d3be47 | 251 | 99.8% | 11,973 | 7 | 12 |
-| asciidoctor__jekyll-asciidoc__ad406c5 | 23 | 99.8% | 2,538 | 0 | 4 |
 | basecamp__once-campfire__dde94b0 | 263 | 99.8% | 6,264 | 3 | 7 |
 | dkubb__adamantium__bf38d4a | 35 | 99.8% | 633 | 0 | 1 |
 | edavis10__redmine__2d6f552 | 1,006 | 99.8% | 107,853 | 48 | 122 |
@@ -1732,7 +3079,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | aquariumbio__aquarium__325c06d | 527 | 99.8% | 13,837 | 7 | 11 |
 | baoagency__polaris_view_components__1db02a4 | 349 | 99.8% | 9,262 | 12 | 0 |
 | benchmark-driver__benchmark-driver__67a7729 | 52 | 99.8% | 1,637 | 2 | 0 |
-| boazsegev__plezi__a40459d | 41 | 99.8% | 1,628 | 0 | 2 |
 | cantierecreativo__admino__e8aceab | 40 | 99.8% | 1,577 | 0 | 2 |
 | chef-boneyard__chef-provisioning-aws__c8c8d93 | 162 | 99.8% | 10,258 | 3 | 10 |
 | chesterbr__ruby2600__7a947c9 | 44 | 99.8% | 4,066 | 1 | 4 |
@@ -2013,6 +3359,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | codeplant__simple-navigation__3d92d9c | 65 | 99.9% | 2,474 | 1 | 1 |
 | congaengr__dynamics_crm__962b141 | 74 | 99.9% | 3,414 | 0 | 3 |
 | cookpad__miam__f1d53f4 | 33 | 99.9% | 3,350 | 0 | 3 |
+| coopdevs__timeoverflow__b515afb | 277 | 99.9% | 5,877 | 2 | 3 |
 | dasch__avro_turf__9048155 | 56 | 99.9% | 3,451 | 2 | 1 |
 | dev-sec__chef-ssh-hardening__5d626a7 | 23 | 99.9% | 1,135 | 0 | 1 |
 | dry-rb__dry-validation__4a16523 | 75 | 99.9% | 2,492 | 0 | 2 |
@@ -2057,7 +3404,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | timdorr__tesla-api__c90d995 | 12 | 99.9% | 1,135 | 1 | 0 |
 | tramlinehq__tramline__fc1fb31 | 1,106 | 99.9% | 43,543 | 18 | 21 |
 | virolea__rosetta__7a447dd | 90 | 99.9% | 1,115 | 1 | 0 |
-| watsonbox__pocketsphinx-ruby__12c71c3 | 38 | 99.9% | 1,162 | 0 | 1 |
+| westonganger__active_snapshot__90da202 | 45 | 99.9% | 1,143 | 1 | 0 |
 | wvanbergen__request-log-analyzer__b83865d | 116 | 99.9% | 6,006 | 0 | 5 |
 | xcres__xcres__4747b07 | 52 | 99.9% | 2,349 | 0 | 2 |
 | Betterment__claws__cb534e2 | 50 | 99.9% | 1,342 | 0 | 1 |
@@ -2096,6 +3443,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | blockbridge__blockbridge-docker-volume__3e5dbb6 | 46 | 99.9% | 2,507 | 1 | 1 |
 | briandunn__flatware__63e2ce7 | 71 | 99.9% | 1,364 | 1 | 0 |
 | codemancers__rbkit__b1f8a4d | 29 | 99.9% | 1,421 | 0 | 1 |
+| coinfi__coinfi__aa2f286 | 475 | 99.9% | 11,281 | 6 | 3 |
 | contribsys__einhorn__9c17d44 | 48 | 99.9% | 2,609 | 1 | 1 |
 | coyote-team__coyote__24000f4 | 412 | 99.9% | 9,962 | 4 | 3 |
 | danmayer__churn__b76db8e | 30 | 99.9% | 1,368 | 0 | 1 |
@@ -2204,17 +3552,15 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | bcwik9__robinhood-on-rails__96d11a9 | 61 | 99.9% | 1,618 | 1 | 0 |
 | bdewey__org-ruby__e4a6e7d | 28 | 99.9% | 4,344 | 3 | 0 |
 | bloom-lang__bud__cbcc907 | 78 | 99.9% | 12,460 | 4 | 4 |
+| boazsegev__plezi__a40459d | 41 | 99.9% | 1,629 | 0 | 1 |
 | braintree__pg_column_byte_packer__3416f1a | 21 | 99.9% | 1,645 | 1 | 0 |
-| brewster__elastictastic__eb52f42 | 72 | 99.9% | 4,826 | 1 | 2 |
 | briandoll__Rit__f1826d3 | 86 | 99.9% | 3,091 | 1 | 1 |
 | brotandgames__ciao__63a79aa | 84 | 99.9% | 1,454 | 0 | 1 |
 | castwide__solargraph__676da4c | 367 | 99.9% | 19,335 | 7 | 5 |
 | chef-boneyard__stove__933cf50 | 47 | 99.9% | 1,457 | 1 | 0 |
 | chubchenko__inquisition__63e1279 | 222 | 99.9% | 3,184 | 2 | 0 |
-| coinfi__coinfi__aa2f286 | 475 | 99.9% | 11,281 | 4 | 3 |
 | collectiveidea__audited__dbf8432 | 61 | 99.9% | 3,280 | 2 | 0 |
 | concerto__concerto__2877234 | 266 | 99.9% | 8,294 | 1 | 4 |
-| coopdevs__timeoverflow__b515afb | 277 | 99.9% | 5,877 | 1 | 3 |
 | customerio__customerio-ruby__f3760d0 | 18 | 99.9% | 1,620 | 0 | 1 |
 | damwhit__harvest_helper__cb7b631 | 84 | 99.9% | 1,479 | 1 | 0 |
 | deivid-rodriguez__byebug__a102dcd | 198 | 99.9% | 4,705 | 3 | 0 |
@@ -2273,7 +3619,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | red-data-tools__charty__ef2b343 | 110 | 99.9% | 10,644 | 3 | 4 |
 | rouge-ruby__rouge__1a40dda | 557 | 99.9% | 41,278 | 25 | 0 |
 | rsim__ruby-plsql__7bee9ba | 35 | 99.9% | 6,576 | 0 | 4 |
-| ruby-amqp__march_hare__aaf3cc9 | 66 | 99.9% | 3,132 | 0 | 2 |
 | rughh__on_ruby__9b2a3f9 | 262 | 99.9% | 4,325 | 3 | 0 |
 | ryanckulp__speedrail__68154a1 | 95 | 99.9% | 1,520 | 1 | 0 |
 | salsify__avromatic__35c7765 | 99 | 99.9% | 3,244 | 0 | 2 |
@@ -2301,6 +3646,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | weg-li__weg-li__14dfca6 | 385 | 99.9% | 10,495 | 7 | 0 |
 | yippee-fun__literal__b4c8a11 | 147 | 99.9% | 15,150 | 3 | 7 |
 | zauberware__rails-devise-graphql__f3e71d3 | 102 | 99.9% | 1,532 | 0 | 1 |
+| CanineHQ__canine__df55ff3 | 739 | 99.9% | 17,933 | 4 | 5 |
 | ConnorAtherton__rb-readline__9fba246 | 18 | 99.9% | 7,884 | 2 | 2 |
 | EndlessInternational__intelligence__2ea7d4c | 160 | 99.9% | 13,986 | 6 | 2 |
 | ManageIQ__optimist__821dade | 29 | 99.9% | 3,747 | 2 | 0 |
@@ -2338,7 +3684,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | fablabbcn__fablabs.io__da1a9e1 | 480 | 99.9% | 11,207 | 6 | 0 |
 | fluent__fluentd__1327bed | 456 | 99.9% | 63,317 | 15 | 22 |
 | fnichol__knife-server__8b1bbae | 27 | 99.9% | 3,759 | 0 | 2 |
-| gareth__live_f1-core__405e9bd | 92 | 99.9% | 1,957 | 0 | 1 |
 | globocom__GloboDNS__d745871 | 240 | 99.9% | 14,802 | 2 | 6 |
 | graphiti-api__graphiti-rails__5ebba98 | 117 | 99.9% | 1,671 | 1 | 0 |
 | grosser__parallel__8d638d0 | 71 | 99.9% | 1,686 | 1 | 0 |
@@ -2417,7 +3762,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | zhandao__zero-rails_openapi__48d98e7 | 41 | 99.9% | 1,704 | 0 | 1 |
 | ActsAsParanoid__acts_as_paranoid__050702d | 24 | 99.9% | 2,336 | 1 | 0 |
 | AndyObtiva__glimmer-dsl-web__fd77e68 | 90 | 99.9% | 4,286 | 0 | 2 |
-| CanineHQ__canine__df55ff3 | 739 | 99.9% | 17,933 | 3 | 5 |
 | DivanteLtd__anonymizer__694eb35 | 40 | 99.9% | 2,138 | 1 | 0 |
 | GoogleCloudPlatform__ruby-docs-samples__d1a2aa3 | 980 | 99.9% | 20,101 | 7 | 2 |
 | HamptonMakes__wikimedia-mobile__7f8dada | 63 | 99.9% | 2,306 | 0 | 1 |
@@ -2440,11 +3784,11 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | bborn__lewsnetter__bfad76a | 184 | 99.9% | 4,760 | 0 | 2 |
 | bitbucket-rest-api__bitbucket__2fc8fa5 | 119 | 99.9% | 4,092 | 0 | 2 |
 | blambeau__viiite__172b519 | 82 | 99.9% | 2,405 | 0 | 1 |
+| brewster__elastictastic__eb52f42 | 72 | 99.9% | 4,827 | 1 | 1 |
 | buildkite__docs__963bc5c | 97 | 99.9% | 6,121 | 2 | 1 |
 | burrito-brothers__shiba__63f6cb1 | 56 | 99.9% | 2,448 | 0 | 1 |
 | calagator__calagator__19da19a | 218 | 99.9% | 4,885 | 1 | 1 |
 | castsbrasil__castsbrasil__7101a10 | 129 | 99.9% | 2,316 | 1 | 0 |
-| celluloid__celluloid__0a307cf | 154 | 99.9% | 6,211 | 0 | 3 |
 | cfndsl__cfndsl__4fb133a | 81 | 99.9% | 2,054 | 1 | 0 |
 | chef__omnibus-software__2799d14 | 139 | 99.9% | 4,421 | 0 | 2 |
 | chengdh__manage-huo-baby__afc35d0 | 1,827 | 99.9% | 70,297 | 6 | 23 |
@@ -2591,6 +3935,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | berk__will_filter__53ff0c9 | 96 | 99.9% | 2,732 | 0 | 1 |
 | bit-of-a-shambles__open-tender-watch__e028de9 | 130 | 99.9% | 7,868 | 2 | 1 |
 | blackopsrepl__elphame__2f596a2 | 136 | 99.9% | 2,646 | 1 | 0 |
+| celluloid__celluloid__0a307cf | 154 | 99.9% | 6,212 | 0 | 2 |
 | chef__knife-azure__52cef32 | 36 | 99.9% | 8,819 | 3 | 0 |
 | chef__knife-ec2__3ef69fd | 22 | 99.9% | 5,275 | 1 | 1 |
 | chuckremes__ffi-rzmq__1fd1dfe | 41 | 99.9% | 3,289 | 1 | 0 |
@@ -2644,7 +3989,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | natalie-lang__natalie__b507cff | 3,587 | 99.9% | 215,071 | 38 | 41 |
 | neo4jrb__neo4j-core__4b649fc | 62 | 99.9% | 3,144 | 0 | 1 |
 | next-l__enju_leaf__cd21db6 | 1,314 | 99.9% | 48,583 | 18 | 0 |
-| noosfero__noosfero__299a0b9 | 2,600 | 99.9% | 124,814 | 22 | 21 |
+| noosfero__noosfero__299a0b9 | 2,600 | 99.9% | 124,814 | 25 | 21 |
 | nov__paypal-express__198de92 | 49 | 99.9% | 2,522 | 1 | 0 |
 | ondra-m__ruby-spark__d1b9787 | 130 | 99.9% | 5,691 | 0 | 2 |
 | onetimesecret__onetimesecret__eb85a76 | 1,082 | 99.9% | 73,599 | 12 | 13 |
@@ -2668,6 +4013,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | rroblak__seed_dump__b79848d | 27 | 99.9% | 2,684 | 0 | 1 |
 | rsim__mondrian-olap__65864d3 | 24 | 99.9% | 6,138 | 0 | 2 |
 | ruboto__ruboto__a5d3ff7 | 117 | 99.9% | 6,447 | 0 | 2 |
+| ruby-amqp__march_hare__aaf3cc9 | 66 | 99.9% | 3,133 | 0 | 1 |
 | ruby-protobuf__protobuf__b700faf | 175 | 99.9% | 9,642 | 0 | 3 |
 | ruby__syntax_suggest__3173de6 | 58 | 99.9% | 2,799 | 1 | 0 |
 | rubycocoa__rubycocoa__773ca0c | 312 | 99.9% | 22,052 | 3 | 5 |
@@ -2681,7 +4027,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | sitepress__sitepress__734f885 | 158 | 99.9% | 5,968 | 1 | 1 |
 | siwapp__siwapp-ror__83f8878 | 201 | 99.9% | 6,504 | 0 | 2 |
 | sleede__fab-manager__54393b3 | 1,571 | 99.9% | 25,033 | 5 | 3 |
-| solidus__solidus__b2b3f2e | 2,094 | 99.9% | 82,066 | 20 | 12 |
+| solidus__solidus__b2b3f2e | 2,094 | 99.9% | 82,067 | 20 | 11 |
 | splitrb__split__9477336 | 65 | 99.9% | 6,481 | 1 | 1 |
 | standardrb__standard__c886a57 | 107 | 99.9% | 3,180 | 1 | 0 |
 | testdouble__mocktail__9d745ce | 304 | 99.9% | 8,053 | 0 | 3 |
@@ -2776,7 +4122,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | jdjkelly__quant__b3a1d83 | 208 | 99.9% | 4,564 | 0 | 1 |
 | jedi4ever__mccloud__5d1995e | 180 | 99.9% | 9,123 | 0 | 2 |
 | jnunemaker__httparty__a04b653 | 79 | 99.9% | 7,519 | 0 | 2 |
-| jrochkind__bento_search__5e8a90b | 98 | 99.9% | 9,423 | 1 | 1 |
 | julik__geneva_drive__aee37bf | 84 | 99.9% | 4,478 | 0 | 1 |
 | kostyantyn__hydra_attribute__64ba3cc | 63 | 99.9% | 4,870 | 0 | 1 |
 | layervault__psd.rb__d8c1136 | 146 | 99.9% | 3,519 | 0 | 1 |
@@ -2901,6 +4246,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | jamesu__rucksack__2865840 | 175 | 99.9% | 6,017 | 0 | 1 |
 | jicksta__adhearsion__aaa83eb | 109 | 99.9% | 8,984 | 0 | 1 |
 | jpmobile__jpmobile__744da58 | 157 | 99.9% | 7,264 | 1 | 0 |
+| jrochkind__bento_search__5e8a90b | 98 | 99.9% | 9,424 | 1 | 0 |
 | kivanio__brcobranca__325e0ea | 163 | 99.9% | 11,248 | 1 | 1 |
 | lukebayes__project-sprouts__6882d73 | 130 | 99.9% | 5,730 | 1 | 0 |
 | maglevhq__maglev-core__807729a | 514 | 99.9% | 7,516 | 1 | 0 |
@@ -2948,7 +4294,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | sensu__sensu-puppet__0f89eff | 271 | 99.9% | 26,481 | 0 | 4 |
 | sergiobayona__easy_talk__9697541 | 134 | 99.9% | 7,525 | 0 | 1 |
 | seuros__action_mcp__6bd1f69 | 340 | 99.9% | 11,689 | 0 | 2 |
-| shawn42__gamebox__e4eb31e | 264 | 99.9% | 11,261 | 0 | 2 |
 | shrinerb__shrine__2f922c6 | 151 | 99.9% | 11,459 | 0 | 2 |
 | skorks__escort__d0c021b | 101 | 99.9% | 6,319 | 0 | 1 |
 | snusnu__dm-accepts_nested_attributes__4efcf10 | 48 | 99.9% | 5,066 | 1 | 0 |
@@ -3001,6 +4346,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | rcairo__rcairo__1036a45 | 63 | 99.9% | 17,814 | 0 | 1 |
 | rkh__income-tax__0093579 | 699 | 99.9% | 37,947 | 0 | 1 |
 | ruby__lrama__31202e0 | 138 | 99.9% | 11,931 | 0 | 1 |
+| shawn42__gamebox__e4eb31e | 264 | 99.9% | 11,262 | 0 | 1 |
 | simplygenius__atmos__d1e2001 | 109 | 99.9% | 14,544 | 0 | 1 |
 | slack-ruby__slack-ruby-client__dd04a47 | 370 | 99.9% | 12,195 | 1 | 0 |
 | solutious__rudy__52627b6 | 130 | 99.9% | 11,518 | 1 | 0 |
@@ -3558,6 +4904,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | asciidoctor__asciidoctor-confluence__9429b83 | 13 | 100.0% | 435 | 0 | 0 |
 | asciidoctor__asciidoctor-diagram__11462a8 | 182 | 100.0% | 5,702 | 0 | 0 |
 | asciidoctor__asciidoctor-epub3__bf2984b | 31 | 100.0% | 1,595 | 0 | 0 |
+| asciidoctor__jekyll-asciidoc__ad406c5 | 23 | 100.0% | 2,542 | 0 | 0 |
 | aseldawy__rasem__3a76bf9 | 14 | 100.0% | 6,161 | 0 | 0 |
 | asenchi__scrolls__3b598c1 | 13 | 100.0% | 925 | 0 | 0 |
 | aserafin__grape_logging__9f35f74 | 29 | 100.0% | 520 | 0 | 0 |
@@ -4324,6 +5671,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | galetahub__ckeditor__f6f8e2b | 118 | 100.0% | 1,244 | 0 | 0 |
 | galtzo-floss__seed_migration__c0ce410 | 47 | 100.0% | 1,305 | 0 | 0 |
 | gammons__fake_arel__eaec427 | 20 | 100.0% | 1,232 | 0 | 0 |
+| gareth__live_f1-core__405e9bd | 92 | 100.0% | 1,958 | 0 | 0 |
 | garethr__garethr-docker__d8587b2 | 31 | 100.0% | 3,832 | 0 | 0 |
 | garethr__logstash-patterns__3c9e854 | 5 | 100.0% | 145 | 0 | 0 |
 | garethr__packer-serverspec-example__84aacec | 8 | 100.0% | 51 | 0 | 0 |
@@ -6411,6 +7759,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | waterlink__rack-reverse-proxy__a4f28a6 | 15 | 100.0% | 1,044 | 0 | 0 |
 | watir__watir__8a2632b | 231 | 100.0% | 11,870 | 0 | 0 |
 | watir__watirbook__58fcf8b | 8 | 100.0% | 116 | 0 | 0 |
+| watsonbox__pocketsphinx-ruby__12c71c3 | 38 | 100.0% | 1,163 | 0 | 0 |
 | waymondo__turboboost__70a4cb8 | 19 | 100.0% | 426 | 0 | 0 |
 | waynerobinson__xeroizer__5e0cc58 | 180 | 100.0% | 6,051 | 0 | 0 |
 | wayspurrchen__moshy__34b4dfe | 12 | 100.0% | 1,159 | 0 | 0 |
@@ -6561,12 +7910,12 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 | Repo | Status | Error |
 |------|--------|-------|
-| jruby__jruby__0303464 | crashed_rubocop |  |
+| jruby__jruby__0303464 | crashed_rubocop | `An error occurred while Lint/LiteralAsCondition cop was inspecting /home/runner/work/nitrocop/nitrocop/repos/jruby__jruby__0303464/spec/ruby/language/if_spec.rb:108:4.` |
 
 </details>
 
 <details>
-<summary>Perfect cops (848 cops with 100% match rate)</summary>
+<summary>Perfect cops (847 cops with 100% match rate)</summary>
 
 | Cop | Matches |
 |-----|--------:|
@@ -6762,7 +8111,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Lint/AmbiguousBlockAssociation | 10,582 |
 | Rails/DynamicFindBy | 10,529 |
 | Style/LineEndConcatenation | 10,449 |
-| Layout/EmptyLinesAroundAccessModifier | 10,186 |
 | RSpecRails/HaveHttpStatus | 10,136 |
 | Layout/SpaceBeforeComma | 10,063 |
 | Naming/PredicatePrefix | 10,003 |
