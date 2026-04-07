@@ -13,6 +13,26 @@ use crate::parse::source::SourceFile;
 /// files as "Carriage return character missing." on every line, causing 108 false
 /// positives in the corpus.
 ///
+/// ## __END__ and data sections
+///
+/// RuboCop's `last_line` method uses `tokens.last.line` when tokens exist,
+/// falling back to `lines.length` otherwise. For files with `__END__` or data
+/// sections, the tokens only cover the Ruby code portion, so `last_line` is less
+/// than the actual number of raw lines. RuboCop's iteration over `raw_source.each_line`
+/// breaks when `index >= last_line`, skipping content in the data section.
+///
+/// Since the data section after `__END__` contains raw bytes without Ruby tokenization,
+/// if those bytes happen to be valid UTF-8 Ruby code (e.g., "x = 1" without trailing CRLF),
+/// RuboCop will not check them while nitrocop's `source.lines()` iterates over all lines.
+///
+/// Example where RuboCop says "no offense" but nitrocop flags "Carriage return character missing":
+/// - File with `__END__` followed by a data section containing unterminated lines
+/// - RuboCop's token-based `last_line` excludes the data section
+/// - nitrocop's `source.lines()` includes it
+///
+/// This is not a nitrocop bug — both tools correctly replicate their respective designs.
+/// The divergence stems from how each tool determines the effective file end.
+///
 /// @example EnforcedStyle: native (default)
 ///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
 ///   # enforced on Windows, and LF is enforced on other platforms.
