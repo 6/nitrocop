@@ -5,6 +5,14 @@ use crate::parse::source::SourceFile;
 /// Style/MagicCommentFormat enforces separator style plus directive capitalization
 /// on leading magic comments.
 ///
+/// Investigation findings (2026-03-30):
+/// - FN root cause: this cop only checked `_` vs `-` separators, so directives like
+///   `# Encoding: utf-8` were missed under RuboCop's default
+///   `DirectiveCapitalization: lowercase` setting.
+/// - Fix: combine separator and capitalization checks into the directive offense so
+///   `Encoding` now reports `Prefer lower snake case for magic comments.` without
+///   changing the existing separator matches.
+///
 /// Investigation findings (2026-04-06):
 /// - FN root cause (kebab_case variant): files with UTF-8 BOM (`\u{feff}`) prefix
 ///   were not detected as magic comments because the BOM prefix caused the line to
