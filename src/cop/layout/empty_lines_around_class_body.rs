@@ -562,6 +562,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_lines_special_blank_before_def_no_offense() {
+        // When first child is not def/class/module and a blank line EXISTS before
+        // the first def, the deferred check should NOT fire.
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines_special".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"class Foo\n  include Something\n\n  def bar; end\n\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            !diags.iter().any(|d| d.message.contains("first def")),
+            "blank line before def exists — deferred check should not fire, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
     fn empty_lines_special_namespace_no_empty_lines() {
         // Namespace (single direct class/module child) uses no_empty_lines style
         use crate::testutil::run_cop_full_with_config;
