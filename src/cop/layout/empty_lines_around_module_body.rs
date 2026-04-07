@@ -46,7 +46,7 @@ impl Cop for EmptyLinesAroundModuleBody {
         let kw_offset = module_node.module_keyword_loc().start_offset();
         let end_offset = module_node.end_keyword_loc().start_offset();
 
-        match &style[..] {
+        match style {
             "empty_lines" => {
                 diagnostics.extend(
                     util::check_missing_empty_lines_around_body_with_corrections(
@@ -127,9 +127,9 @@ impl EmptyLinesAroundModuleBody {
             // Need to work with the first element - since we have Vec<Node>, we need to handle it
             // For now, check the first element for def/class/module
             let first = &stmts_vec[0];
-            return Self::node_requires_empty_line(first);
+            Self::node_requires_empty_line(first)
         } else {
-            return Self::node_requires_empty_line(body_node);
+            Self::node_requires_empty_line(body_node)
         }
     }
 
