@@ -130,13 +130,24 @@ use crate::parse::source::SourceFile;
 /// visits keys with explicit values. This fixes 1 FN in danbooru under both
 /// non_integer and snake_case.
 ///
-/// **Remaining FP (non_integer):** ~59 from jruby files where
-/// `Prism::Translation::Parser` crashes on non-UTF-8 encodings
-/// (`US-ASCII`, `windows-1252`). Fixed in `src/linter.rs`: files with
-/// invalid UTF-8 bytes + encoding magic comment now skip all cops,
-/// matching RuboCop's "0 files inspected" crash behavior. ~2 remaining
-/// from unsupported pin operators (`^@a`, `^@@var`) — a separate
-/// Translation::Parser syntax limitation.
+/// ## Variant style fix (2026-04-07) — remaining 61 FP in non_integer
+///
+/// All 61 FPs from jruby repo. Two root causes:
+///
+/// **FP fix 1: Non-UTF-8 encoding files (59 FPs).** Files with encoding
+/// magic comments like `# coding: US-ASCII` or `# encoding:windows-1252`
+/// cause `Prism::Translation::Parser` to crash or produce fatal syntax
+/// errors. RuboCop catches the crash and reports 0 offenses for the file.
+/// Nitrocop's native Prism parser handles these files fine, producing
+/// offenses that are FPs relative to RuboCop. Fix: detect non-UTF-8
+/// encoding magic comments in `check_node`/`check_source` and skip the
+/// file entirely. UTF-8 encoding comments are still processed normally.
+///
+/// **FP fix 2: `%s()` empty symbols (2 FPs).** `%s()` creates an empty
+/// symbol `:""`'. Parser gem treats `%s()` as `:dsym` (dynamic symbol),
+/// so RuboCop's `on_sym` never fires. Non-empty `%s(foo)` is `:sym` and
+/// IS checked. Fix: in `visit_symbol_node`, also skip empty symbols whose
+/// opening starts with `%s` (not just `:`-prefixed standalone symbols).
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -150,6 +161,82 @@ const DEFAULT_ALLOWED: &[&str] = &[
     "rfc3339",
     "x86_64",
 ];
+
+/// Check if a file has a non-UTF-8 encoding magic comment (e.g.,
+/// `# encoding: windows-1252`, `# coding: US-ASCII`). When such a comment
+/// is present, RuboCop's `Prism::Translation::Parser` may crash or produce
+/// fatal syntax errors that prevent Naming cops from running, resulting in
+/// 0 offenses. Nitrocop's native Prism parser handles these files fine, so
+/// without this check we'd produce false positives for every offense in
+/// such files.
+fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
+    // Scan up to 3 lines (shebang + possible encoding comment)
+    let mut start = 0;
+    for _ in 0..3 {
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| start + p)
+            .unwrap_or(bytes.len());
+        let line = &bytes[start..end];
+        // Skip leading whitespace
+        let trimmed: Vec<u8> = line.iter().copied().filter(|b| *b != b'\r').collect();
+        if trimmed.starts_with(b"#") {
+            let lower: Vec<u8> = trimmed.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Look for encoding/coding keywords in the comment
+            if let Some(pos) = find_subsequence(&lower, b"encoding")
+                .or_else(|| find_subsequence(&lower, b"coding"))
+            {
+                // Extract the encoding value after the keyword
+                let after = &lower[pos..];
+                // Skip the keyword and any separator (: = etc.)
+                let value_start = after
+                    .iter()
+                    .position(|&b| b == b':' || b == b'=')
+                    .map(|p| p + 1)
+                    .unwrap_or(after.len());
+                let value = &after[value_start..];
+                // Trim whitespace and extract the encoding name
+                let value_trimmed: Vec<u8> =
+                    value.iter().copied().skip_while(|b| *b == b' ').collect();
+                let enc_end = value_trimmed
+                    .iter()
+                    .position(|b| matches!(b, b' ' | b'\t' | b';' | b'-' | b'*'))
+                    .unwrap_or(value_trimmed.len());
+                // Allow hyphenated encoding names like utf-8
+                // Re-parse: take alphanumeric + hyphens + underscores
+                let enc_end = value_trimmed
+                    .iter()
+                    .position(|b| !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_')
+                    .unwrap_or(value_trimmed.len());
+                let enc_name = &value_trimmed[..enc_end];
+                // UTF-8 variants are fine
+                if enc_name == b"utf"
+                    || enc_name == b"utf8"
+                    || enc_name.starts_with(b"utf-8")
+                    || enc_name.starts_with(b"utf_8")
+                {
+                    return false;
+                }
+                // Any other encoding (us-ascii, windows-1252, iso-8859-1, etc.)
+                // may cause Translation::Parser crashes → skip
+                if !enc_name.is_empty() {
+                    return true;
+                }
+            }
+        }
+        start = end + 1;
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Find the position of a subsequence in a byte slice.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
 
 impl Cop for VariableNumber {
     fn name(&self) -> &'static str {
@@ -190,6 +277,13 @@ impl Cop for VariableNumber {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Skip files with non-UTF-8 encoding magic comments. RuboCop's
+        // Translation::Parser crashes or produces fatal syntax errors on
+        // these files, so no Naming cops run → 0 offenses.
+        if has_non_utf8_encoding_comment(source.as_bytes()) {
+            return;
+        }
+
         let enforced_style = config.get_str("EnforcedStyle", "normalcase");
         let check_method_names = config.get_bool("CheckMethodNames", true);
         let allowed = config.get_string_array("AllowedIdentifiers");
@@ -379,6 +473,11 @@ impl Cop for VariableNumber {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Skip files with non-UTF-8 encoding magic comments (see check_node).
+        if has_non_utf8_encoding_comment(source.as_bytes()) {
+            return;
+        }
+
         // This visitor handles two cases that require tree-walking context:
         //
         // 1. Rescue exception variables (`rescue => error_2`): Prism's Visit trait
@@ -457,10 +556,17 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
         // ("": val) become :sym in Parser 4.0. In Prism, standalone
         // symbols have a colon-prefix opening, while hash-key symbols don't.
         if name_str.is_empty() {
+            // Skip standalone empty symbols (:'' and :"") — Parser gem creates
+            // :dsym, so RuboCop's on_sym never fires.
+            // Also skip %s() empty symbols — Parser gem creates :dsym for these
+            // too. Non-empty %s(foo) IS :sym and IS checked.
             let is_standalone = node
                 .opening_loc()
                 .is_some_and(|loc| loc.as_slice().starts_with(b":"));
-            if is_standalone {
+            let is_percent_s = node
+                .opening_loc()
+                .is_some_and(|loc| loc.as_slice().starts_with(b"%s"));
+            if is_standalone || is_percent_s {
                 return;
             }
         }
@@ -997,5 +1103,74 @@ mod tests {
             0,
             "expected bare binding k_1: to NOT be flagged in hash pattern"
         );
+    }
+
+    #[test]
+    fn percent_s_empty_symbol_not_checked() {
+        // %s() creates an empty symbol. Parser gem treats it as :dsym,
+        // so RuboCop's on_sym never fires. Non-empty %s(foo) IS checked.
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"x = %s()\n");
+        assert_eq!(diags.len(), 0, "expected %s() empty symbol NOT flagged");
+
+        // Non-empty %s(foo_1) SHOULD be flagged
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"x = %s(foo_1)\n");
+        assert_eq!(diags.len(), 1, "expected %s(foo_1) to be flagged");
+    }
+
+    #[test]
+    fn non_utf8_encoding_file_skipped() {
+        // Files with non-UTF-8 encoding comments should be skipped entirely.
+        // RuboCop's Translation::Parser crashes on these, resulting in 0 offenses.
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# coding: US-ASCII\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 0, "expected US-ASCII file to be skipped");
+
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# encoding:windows-1252\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 0, "expected windows-1252 file to be skipped");
+
+        // UTF-8 encoding should NOT be skipped
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# encoding: utf-8\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected utf-8 file to NOT be skipped");
+    }
+
+    // --- has_non_utf8_encoding_comment unit tests ---
+
+    #[test]
+    fn encoding_detect_us_ascii() {
+        assert!(has_non_utf8_encoding_comment(b"# coding: US-ASCII\nfoo\n"));
+    }
+
+    #[test]
+    fn encoding_detect_windows_1252() {
+        assert!(has_non_utf8_encoding_comment(
+            b"# encoding:windows-1252\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_detect_after_shebang() {
+        assert!(has_non_utf8_encoding_comment(
+            b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_utf8_not_skipped() {
+        assert!(!has_non_utf8_encoding_comment(b"# encoding: utf-8\nfoo\n"));
+    }
+
+    #[test]
+    fn encoding_no_comment_not_skipped() {
+        assert!(!has_non_utf8_encoding_comment(b"foo_1 = 1\nbar_2 = 2\n"));
+    }
+
+    #[test]
+    fn encoding_frozen_string_not_skipped() {
+        // frozen_string_literal comment should NOT trigger encoding detection
+        assert!(!has_non_utf8_encoding_comment(
+            b"# frozen_string_literal: true\nfoo\n"
+        ));
     }
 }
