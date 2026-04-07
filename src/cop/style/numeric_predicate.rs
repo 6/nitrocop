@@ -6,8 +6,12 @@ use crate::parse::source::SourceFile;
 /// Style/NumericPredicate: checks for comparison operators used to test numbers
 /// as zero, positive, or negative, suggesting predicate methods instead.
 ///
-/// FP fix: safe navigation calls (`&.>`, `&.<`, `&.==`) must be skipped because
-/// RuboCop's NodePattern only matches `send` nodes, not `csend`.
+/// FP fix (predicate style): safe navigation calls (`&.>`, `&.<`, `&.==`) must be
+/// skipped because RuboCop's NodePattern only matches `send` nodes, not `csend`.
+///
+/// FP fix (comparison style): safe navigation calls (`&.zero?`, `&.positive?`,
+/// `&.negative?`) must be skipped for the same reason — RuboCop uses `on_send`
+/// which does not fire for `csend` (safe navigation) nodes.
 ///
 /// FN fix: hex (0x00), binary (0b0000), and octal (0o0) integer literals were not
 /// recognized as zero because the source text was parsed with `str::parse::<i64>()`
@@ -248,6 +252,14 @@ impl Cop for NumericPredicate {
         } else if enforced_style == "comparison" {
             // Check for: x.zero?, x.positive?, x.negative?
             if !matches!(method_bytes, b"zero?" | b"positive?" | b"negative?") {
+                return;
+            }
+            // Skip safe navigation calls (x&.zero?, x&.positive?) — RuboCop only
+            // matches `send` nodes, not `csend` (safe navigation).
+            if call
+                .call_operator_loc()
+                .is_some_and(|loc| loc.as_slice() == b"&.")
+            {
                 return;
             }
             if call.arguments().is_some() {
