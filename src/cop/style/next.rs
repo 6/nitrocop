@@ -369,4 +369,28 @@ impl<'pr> Visit<'pr> for NextVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Next, "cops/style/next");
+
+    #[test]
+    fn always_style_skips_modifier_if_with_exit_body() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("always".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        // Modifier if with exit body (return) should NOT be flagged in always style,
+        // because RuboCop's exit_body_type? check still applies.
+        let source = b"[1, 2, 3].each do |x|\n  return x if x > 2\nend\n";
+        let diags = run_cop_full_with_config(&Next, source, config);
+        assert!(
+            diags.is_empty(),
+            "Modifier if with exit body should not be flagged in always style, got: {:?}",
+            diags
+        );
+    }
 }
