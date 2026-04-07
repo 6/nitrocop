@@ -76,7 +76,7 @@ impl Cop for DotPosition {
             // Use the heredoc end line for accurate distance checks.
             receiver_heredoc_end_line(source, &receiver)
                 .unwrap_or_else(|| source.offset_to_line_col(recv_end_offset).0)
-        } else if let Some(call) = receiver.as_call_node() {
+        } else if let Some(_call) = receiver.as_call_node() {
             // For call chains whose receiver is ALSO a call, we may need to trace
             // through multiple layers to find a nested heredoc receiver.
             call_chain_heredoc_end_line(source, &receiver)
