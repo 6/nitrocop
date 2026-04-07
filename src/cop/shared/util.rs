@@ -815,10 +815,11 @@ pub fn check_missing_empty_lines_around_body_with_corrections(
         if before_end > keyword_line {
             if let Some(line) = line_at(source, before_end) {
                 if !is_blank_line(line) {
+                    // RuboCop reports "missing at body end" on the end/} line itself
                     let mut diag = Diagnostic {
                         path: source.path_str().to_string(),
                         location: Location {
-                            line: before_end,
+                            line: end_line,
                             column: 0,
                         },
                         severity: Severity::Convention,
