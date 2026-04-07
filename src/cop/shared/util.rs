@@ -902,13 +902,16 @@ pub fn begins_its_line(source: &SourceFile, offset: usize) -> bool {
     while pos > 0 && bytes[pos - 1] != b'\n' {
         pos -= 1;
     }
+    // All bytes from pos to offset-1 must be whitespace
     while pos < offset {
         if bytes[pos] != b' ' && bytes[pos] != b'\t' {
             return false;
         }
         pos += 1;
     }
-    true
+    // Additionally, the byte at offset itself must be non-whitespace
+    // (otherwise we'd return true for content that starts with whitespace)
+    bytes[offset] != b' ' && bytes[offset] != b'\t'
 }
 
 /// Check first element indentation relative to an opening delimiter.

@@ -76,6 +76,22 @@ use crate::parse::source::SourceFile;
 /// reported a false positive. Fix: compute the first-argument base column from
 /// the display width of the line prefix, while keeping the rest of the
 /// alignment logic unchanged.
+///
+/// ## Investigation findings (2026-04-07)
+///
+/// **FN+FP root cause — `begins_its_line` bug and `with_fixed_indentation` first-arg check:**
+/// Two issues were affecting `with_fixed_indentation`:
+/// 1. `begins_its_line` returned true when offset pointed to content immediately
+///    after a tab/whitespace run, because the second while loop didn't verify that
+///    bytes[offset] itself was non-whitespace. Fix: added check at end of function.
+/// 2. The expected column calculation used `indentation_of()` which only counts
+///    leading spaces, but RuboCop uses the first non-whitespace position as the
+///    indentation baseline. Fix: use `first_non_whitespace_offset()` instead.
+/// 3. The first argument was always skipped (`.skip(1)`), but RuboCop's
+///    `check_alignment` includes all items including the first. For
+///    `with_fixed_indentation`, the first argument should be checked against
+///    the base line indentation. Added explicit first-arg check when style is
+///    `with_fixed_indentation`.
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -194,7 +210,9 @@ impl Cop for ArgumentAlignment {
         checked_lines.insert(first_line);
 
         // For "with_fixed_indentation", the expected column is the call line's
-        // indentation + indent_width
+        // indentation + indent_width. Unlike with_first_argument where the first
+        // argument defines the baseline, with_fixed_indentation checks ALL args
+        // including the first one.
         let expected_col = match style {
             "with_fixed_indentation" => {
                 // Use the line containing the method selector (or opening paren),
@@ -212,10 +230,38 @@ impl Cop for ArgumentAlignment {
                         .0
                 };
                 let base_line_bytes = source.lines().nth(base_line - 1).unwrap_or(b"");
-                crate::cop::shared::util::indentation_of(base_line_bytes) + indent_width
+                // Use first non-whitespace position as indentation (RuboCop behavior),
+                // not just leading space count.
+                let first_non_ws =
+                    crate::cop::shared::util::first_non_whitespace_offset(base_line_bytes, 0)
+                        .unwrap_or(0);
+                first_non_ws + indent_width
             }
             _ => display_column(source, first_start).unwrap_or(first_col),
         };
+
+        let align_msg = "Align the arguments of a method call if they span more than one line.";
+        let fixed_indent_msg = "Use one level of indentation for arguments following the first line of a multi-line method call.";
+        let message = if style == "with_fixed_indentation" {
+            fixed_indent_msg
+        } else {
+            align_msg
+        };
+
+        // For with_fixed_indentation, check the first argument too.
+        // RuboCop's check_alignment includes all items including the first.
+        if style == "with_fixed_indentation" {
+            if crate::cop::shared::util::begins_its_line(source, first_start) {
+                if first_col != expected_col {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        first_line,
+                        first_col,
+                        message.to_string(),
+                    ));
+                }
+            }
+        }
 
         for arg in effective_args.iter().skip(1) {
             let (arg_line, arg_col) = source.offset_to_line_col(arg.location().start_offset());
@@ -230,15 +276,12 @@ impl Cop for ArgumentAlignment {
                     continue;
                 }
                 if arg_col != expected_col {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            arg_line,
-                            arg_col,
-                            "Align the arguments of a method call if they span more than one line."
-                                .to_string(),
-                        ),
-                    );
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        arg_line,
+                        arg_col,
+                        message.to_string(),
+                    ));
                 }
             }
         }
