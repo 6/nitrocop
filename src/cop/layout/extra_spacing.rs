@@ -1917,6 +1917,29 @@ mod tests {
     }
 
     #[test]
+    fn hash_rocket_not_equals_alignment() {
+        use crate::testutil::run_cop_full;
+        let cop = ExtraSpacing;
+
+        // `=>` (hash rocket) should NOT participate in equals-alignment.
+        // Here the `=` in `=>` on line 1 aligns at the same column as the `=`
+        // assignment on line 2, but that should not suppress the offense on line 2.
+        let src = b"render nothing: true, status: 404 => :not_found\nname    = \"Jill\"\n";
+        let diags = run_cop_full(&cop, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Hash rocket should not suppress extra spacing before `=`, got {}: {:?}",
+            diags.len(),
+            diags
+                .iter()
+                .map(|d| format!("L{}:C{}", d.location.line, d.location.column))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(diags[0].location.line, 2);
+    }
+
+    #[test]
     fn block_trailing_space_before_close() {
         use crate::testutil::run_cop_full;
         let cop = ExtraSpacing;
