@@ -265,6 +265,10 @@ opt = (mailer.default_url_options || {})
 # Multiline chained comparison
 (aa == bb)
   .to_s
+# Assignment in block body — parens disambiguate = from == inside blocks
+loop { (i = 1) }
+[1].each { |x| (i = x) }
+foo { (x = bar) }
 # Non-empty while body — RuboCop only flags the empty-body form
 while (pop_messages(queue_url, 10).length > 0)
   work

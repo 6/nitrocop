@@ -160,6 +160,14 @@ use crate::parse::source::SourceFile;
 ///   like a singular-parent context, but Prism `WhileNode` needed an explicit empty-body check.
 ///   Empty-body `while` nodes now participate in the singular-parent method-call rule, while
 ///   normal loop bodies remain accepted.
+///
+/// ### FP root causes fixed (2026-04-07):
+/// - **Assignment in block body:** `loop { (i = 1) }`, `[1].each { |x| (i = x) }` were incorrectly
+///   flagged as "redundant parentheses around an assignment" because the parent stack showed the
+///   assignment's parent as a `StatementsNode` (kind=Other) rather than recognizing it was inside
+///   a block body. RuboCop doesn't flag these. Fixed by adding `is_parent_statements_block_body`
+///   check: when the grandparent of the assignment's parent statements is a CallNode or BlockNode,
+///   the assignment is inside a block and should not be flagged.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -391,6 +399,7 @@ impl RedundantParensVisitor<'_> {
                         && p.is_statements_node
                         && !p.is_assignment_parent
                         && !self.is_endless_def_body_parent()
+                        && !self.is_parent_statements_block_body()
                 }
             };
             if should_flag {
@@ -574,6 +583,26 @@ impl RedundantParensVisitor<'_> {
 
         let grandparent = &self.parent_stack[self.parent_stack.len() - 3];
         matches!(grandparent.kind, ParentKind::Def) && grandparent.is_endless_def
+    }
+
+    /// Check if the parent (a StatementsNode) is the body of a block whose
+    /// parent is a CallNode. This happens with `loop { }`, `[1].each { }`, etc.
+    /// In these cases, an assignment inside the block body should not be flagged
+    /// as redundant parens because RuboCop doesn't flag them.
+    ///
+    /// Note: visit_block_node changes the CallNode entry's kind to Block when
+    /// visiting the block. So for `loop { }`, the grandparent has kind=Block,
+    /// not kind=Call.
+    fn is_parent_statements_block_body(&self) -> bool {
+        // parent_stack structure for `(assignment)` inside a block:
+        // [..., CallNode/BlockEntry, OuterStatements, ParenthesesNode, InnerStatements]
+        // We need to check if OuterStatements' parent (grandparent) is a CallNode or Block.
+        // grandparent = parent_stack[len - 3]
+        if self.parent_stack.len() < 3 {
+            return false;
+        }
+        let grandparent = &self.parent_stack[self.parent_stack.len() - 3];
+        matches!(grandparent.kind, ParentKind::Call | ParentKind::Block)
     }
 
     /// RuboCop's first_arg_begins_with_hash_literal?: when the inner expression
