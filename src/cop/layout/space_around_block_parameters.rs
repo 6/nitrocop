@@ -53,6 +53,22 @@ use crate::parse::source::SourceFile;
 /// with local variable positions when parameters() is None and locals() is non-empty.
 /// This uses `locals_only_positions()` to populate `first_local_start`/`last_local_end`
 /// in BlockInfo, which are applied as overrides in check_node before the style checks.
+///
+/// ## Space style single-param fix (2026-04-07)
+///
+/// Fixed 4 FPs and 105 FNs for `EnforcedStyleInsidePipes: space` variant.
+///
+/// Root cause: For single-parameter blocks with `space` style (e.g., `|x|`,
+/// `do |double|`), RuboCop only fires "before first" check, not "after last".
+/// Multi-parameter blocks (e.g., `|x, y|`) still fire both checks.
+///
+/// nitrocop was incorrectly firing "after last" for all blocks, including single-param,
+/// causing false positives. Fix: skip the "after last" check when
+/// `info.param_locations.len() == 1` in the `space` style branch.
+///
+/// Note: `super do |...|` blocks create a `ForwardingSuperNode` in Prism (not
+/// BlockNode), so they are not detected by this cop. RuboCop handles this via
+/// its AST which represents `super do` as a BlockNode with zsuper send node.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
@@ -249,7 +265,11 @@ impl Cop for SpaceAroundBlockParameters {
                 }
 
                 let closing_has_newline = contains_line_break(bytes, trailing_start, inner_end);
-                if !closing_has_newline && trailing_start == inner_end {
+                // For single-parameter blocks with `space` style, RuboCop does not fire
+                // "No space after last block parameter detected." (it only fires "before first").
+                // Multi-param blocks still get the "after last" check.
+                let is_single_param = info.param_locations.len() == 1;
+                if !closing_has_newline && trailing_start == inner_end && !is_single_param {
                     let (line, col) = source.offset_to_line_col(inner_end);
                     let mut diag = self.diagnostic(
                         source,

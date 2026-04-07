@@ -14,4 +14,4 @@ items.each do |
 end
 ->(x, y) { puts x }
 ->() { puts "a" }
-->a { puts a }
+->a { putsa }
