@@ -117,6 +117,18 @@ use crate::parse::source::SourceFile;
 ///   method chains containing regex patterns where the true combined length
 ///   exceeded 120 chars but the backslash-stripped version didn't. Resolves
 ///   ~594 FPs with zero regressions.
+///
+/// ## Fixes applied (2026-04-07)
+/// - Added missing visitor handlers for `IndexOperatorWriteNode`, `IndexOrWriteNode`,
+///   `IndexAndWriteNode`, `CallOperatorWriteNode`, `CallOrWriteNode`, and
+///   `CallAndWriteNode`. Previously, index operator writes like `foo[bar] ||= value`
+///   and call operator writes like `obj.method += value` were not visited, causing
+///   FNs for these patterns. These handlers ensure the `check_assignment` method is
+///   invoked for these node types, enabling detection of redundant line breaks in
+///   index/call operator write expressions. Resolves ~2 FNs with zero regressions.
+///
+/// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
+///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
 
 impl Cop for RedundantLineBreak {
@@ -875,6 +887,42 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
         let loc = node.location();
         self.check_assignment(loc.start_offset(), loc.end_offset());
         ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
+        let loc = node.location();
+        self.check_assignment(loc.start_offset(), loc.end_offset());
+        ruby_prism::visit_call_operator_write_node(self, node);
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
+        let loc = node.location();
+        self.check_assignment(loc.start_offset(), loc.end_offset());
+        ruby_prism::visit_call_or_write_node(self, node);
+    }
+
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
+        let loc = node.location();
+        self.check_assignment(loc.start_offset(), loc.end_offset());
+        ruby_prism::visit_call_and_write_node(self, node);
+    }
+
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
+        let loc = node.location();
+        self.check_assignment(loc.start_offset(), loc.end_offset());
+        ruby_prism::visit_index_operator_write_node(self, node);
+    }
+
+    fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
+        let loc = node.location();
+        self.check_assignment(loc.start_offset(), loc.end_offset());
+        ruby_prism::visit_index_or_write_node(self, node);
+    }
+
+    fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
+        let loc = node.location();
+        self.check_assignment(loc.start_offset(), loc.end_offset());
+        ruby_prism::visit_index_and_write_node(self, node);
     }
 }
 

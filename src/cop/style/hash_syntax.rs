@@ -80,7 +80,7 @@ impl Cop for HashSyntax {
         }
 
         match enforced_style {
-            "ruby19" | "ruby19_no_mixed_keys" => {
+            "ruby19" => {
                 // UseHashRocketsWithSymbolValues: if any value is a symbol, don't flag rockets
                 if use_rockets_symbol_vals {
                     let has_symbol_value = elements.iter().any(|elem| {
@@ -132,6 +132,100 @@ impl Cop for HashSyntax {
                     }
                 }
                 diagnostics.extend(diags);
+            }
+            "ruby19_no_mixed_keys" => {
+                // UseHashRocketsWithSymbolValues: if any value is a symbol, don't flag rockets
+                if use_rockets_symbol_vals {
+                    let has_symbol_value = elements.iter().any(|elem| {
+                        if let Some(assoc) = elem.as_assoc_node() {
+                            assoc.value().as_symbol_node().is_some()
+                        } else {
+                            false
+                        }
+                    });
+                    if has_symbol_value {
+                        return;
+                    }
+                }
+
+                // Check if any key is NOT a symbol (non-symbol keys can't use 1.9 at all)
+                let has_non_symbol = elements.iter().any(|elem| {
+                    let assoc = match elem.as_assoc_node() {
+                        Some(a) => a,
+                        None => return false,
+                    };
+                    let key = assoc.key();
+                    !is_symbol_like_key(&key)
+                });
+
+                if has_non_symbol {
+                    // Non-symbol keys make the hash unconvertible to 1.9, return early
+                    return;
+                }
+
+                // Check if all keys are acceptable 1.9 symbols (sym_indices? equivalent)
+                let all_acceptable = elements.iter().all(|elem| {
+                    let assoc = match elem.as_assoc_node() {
+                        Some(a) => a,
+                        None => return false,
+                    };
+                    let key = assoc.key();
+                    is_symbol_like_key(&key)
+                        && is_acceptable_19_key(&key, prefer_rockets_nonalnum, target_ruby_version)
+                });
+
+                if all_acceptable {
+                    // All keys are acceptable 1.9 symbols - flag rockets
+                    let mut diags = Vec::new();
+                    for elem in &elements {
+                        let assoc = match elem.as_assoc_node() {
+                            Some(a) => a,
+                            None => continue,
+                        };
+                        let key = assoc.key();
+                        if is_symbol_like_key(&key) {
+                            if let Some(op_loc) = assoc.operator_loc() {
+                                if op_loc.as_slice() == b"=>" {
+                                    let (line, column) =
+                                        source.offset_to_line_col(key.location().start_offset());
+                                    diags.push(self.diagnostic(
+                                        source,
+                                        line,
+                                        column,
+                                        "Use the new Ruby 1.9 hash syntax.".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    diagnostics.extend(diags);
+                } else {
+                    // Some keys can't use 1.9 - check for mixed styles (colons)
+                    let mut diags = Vec::new();
+                    for elem in &elements {
+                        let assoc = match elem.as_assoc_node() {
+                            Some(a) => a,
+                            None => continue,
+                        };
+                        let key = assoc.key();
+                        if is_symbol_like_key(&key) {
+                            if let Some(op_loc) = assoc.operator_loc() {
+                                if op_loc.as_slice() != b"=>" {
+                                    // Uses colon, which is mixing styles when some keys can't use 1.9
+                                    let (line, column) =
+                                        source.offset_to_line_col(key.location().start_offset());
+                                    diags.push(self.diagnostic(
+                                        source,
+                                        line,
+                                        column,
+                                        "Don't mix styles in the same hash.".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    diagnostics.extend(diags);
+                }
             }
             "hash_rockets" => {
                 let mut diags = Vec::new();
