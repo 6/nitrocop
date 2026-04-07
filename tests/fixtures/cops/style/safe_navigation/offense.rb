@@ -207,8 +207,5 @@ if number_of_hands then number_of_hands.to_i end
 text_field_tag("#{name}[value]", (value ? value.to_d : nil))
                                   ^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
 
-text_field_tag("#{name}[value]", (value ? value.to_d : nil))
-                                  ^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
-
 Packet.from_source(self, (session.event_type if session))
                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
