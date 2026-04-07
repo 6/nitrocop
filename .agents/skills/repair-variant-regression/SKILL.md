@@ -9,22 +9,37 @@ Fix a +FP or +FN regression on a bot cop-fix PR using the CI failure details.
 Works for both default-config and variant (EnforcedStyle) regressions.
 The user provides:
 1. A PR URL (e.g., `https://github.com/6/nitrocop/pull/1553`)
-2. The CI failure line, which contains the cop name, variant, delta, and per-repo locations
+2. The CI failure info — either a detailed line with per-repo file:line locations,
+   or just the PR URL (in which case, fetch failure details from CI logs)
 
-Example CI failure line:
+CI failures come in two forms:
+
+**Location-level** (from `verify_cop_locations` or location-aware gates):
 ```
 Style/EmptyStringInsideInterpolation (ternary)    2    11    3    0    +1    -11    ❌
 Repos: basecamp__kamal__9c6252d(FP:lib/kamal/secrets.rb:44) e621ng__e621ng__cd2b40f(FP:test/unit/tag_query_test.rb:633) edavis10__redmine__2d6f552(FP:app/helpers/issues_helper.rb:68)
 ```
 
+**Count-only** (from `cop-check` sharded gates — the more common case):
+```
+FAIL: FP regression (net +1) in: m4rco-__dorothy2__86e84a0
++   1  m4rco-__dorothy2__86e84a0  (local=13, baseline_nc=9, rubocop=12)
+```
+Count-only failures give repo IDs and FP/FN deltas but no file paths. See Step 3
+for how to handle each form.
+
 ## Workflow
 
 ### Step 1: Parse the CI failure
 
-Extract from the CI line:
+Extract from the CI line or PR comments:
 - **Cop name** and **variant** (e.g., `Style/EmptyStringInsideInterpolation`, `EnforcedStyle=ternary`)
 - **Delta**: which direction regressed (+FP or +FN)
-- **Repo locations**: each entry has `repo_id(FP_or_FN:path:line)`
+- **Regressing repos**: repo IDs with FP/FN info
+
+For location-level failures, you also get `repo_id(FP_or_FN:path:line)`.
+For count-only failures, you get `repo_id (local=N, baseline_nc=M, rubocop=R)` —
+proceed to Step 3 to find the specific files.
 
 ### Step 2: Checkout the PR branch
 
@@ -34,8 +49,9 @@ gh pr checkout <pr-number>
 
 ### Step 3: Fetch the failing source lines
 
-For each repo location from the CI line, fetch the actual source code at the
-exact corpus commit. Do NOT clone the repos.
+Do NOT clone repos. Use `gh api` to fetch specific files.
+
+**If you have location-level info** (file:line from CI):
 
 1. Look up the repo in `bench/corpus/manifest.jsonl` to get the GitHub `repo_url` and `sha`:
    ```bash
@@ -48,10 +64,29 @@ exact corpus commit. Do NOT clone the repos.
    ```
    Fetch ~15 lines of context around the failing line.
 
-3. Record for each location:
-   - The actual Ruby code at that line
-   - Whether it's FP (nitrocop fires but RuboCop doesn't) or FN (RuboCop fires but nitrocop doesn't)
-   - What pattern is triggering the mismatch
+**If you only have count-only info** (repo ID + FP/FN delta, no file paths):
+
+Use `investigate_cop.py --context` to find the specific FP/FN locations. This
+uses cached corpus artifacts (no cloning needed):
+```bash
+python3 scripts/investigate_cop.py Department/CopName --context 2>&1 | grep -A5 '<repo_id>'
+```
+The `--context` output shows the actual source lines for each FP and FN. Extract
+the lines for the regressing repos.
+
+If the regressing repo isn't in the cached results (e.g., the FP is new from the
+PR's changes and not in the baseline), read the PR diff to understand what the
+change does, then use the diff + the cop's RuboCop source (Step 4) to reason
+about what patterns in the repo would be newly matched. You can also search the
+repo's tree via API to find likely files:
+```bash
+gh api "search/code?q=<pattern>+repo:{owner}/{repo}" --jq '.items[].path'
+```
+
+**For each location, record:**
+- The actual Ruby code at that line
+- Whether it's FP (nitrocop fires but RuboCop doesn't) or FN (RuboCop fires but nitrocop doesn't)
+- What pattern is triggering the mismatch
 
 ### Step 4: Understand root cause
 

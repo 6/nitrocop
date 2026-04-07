@@ -337,8 +337,20 @@ def dept_dir_name(dept: str) -> str:
 
 
 def find_rust_source(dept: str, snake: str) -> Path:
-    """Find the cop's Rust source file."""
-    return PROJECT_ROOT / "src" / "cop" / dept_dir_name(dept) / f"{snake}.rs"
+    """Find the cop's Rust source file.
+
+    Some cops use a ``_cop`` suffix because their snake_case name is a Rust
+    keyword (``for``, ``loop``, ``yield``).  Try the plain name first, then
+    fall back to ``{snake}_cop.rs``.
+    """
+    base = PROJECT_ROOT / "src" / "cop" / dept_dir_name(dept)
+    plain = base / f"{snake}.rs"
+    if plain.exists():
+        return plain
+    suffixed = base / f"{snake}_cop.rs"
+    if suffixed.exists():
+        return suffixed
+    return plain  # return expected path for error messaging
 
 
 def find_vendor_ruby_source(dept: str, snake: str) -> Path | None:

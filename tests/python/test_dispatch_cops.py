@@ -131,6 +131,27 @@ def test_detect_prism_pitfalls_none():
     assert len(pitfalls) == 0
 
 
+def test_find_rust_source_plain():
+    """Normal cop resolves to {snake}.rs."""
+    path = gct.find_rust_source("Style", "negated_while")
+    assert path.name == "negated_while.rs"
+
+
+def test_find_rust_source_keyword_suffix():
+    """Cops whose snake name is a Rust keyword resolve to {snake}_cop.rs."""
+    path = gct.find_rust_source("Style", "for")
+    assert path.name == "for_cop.rs"
+    assert path.exists()
+
+    path = gct.find_rust_source("Lint", "loop")
+    assert path.name == "loop_cop.rs"
+    assert path.exists()
+
+    path = gct.find_rust_source("RSpec", "yield")
+    assert path.name == "yield_cop.rs"
+    assert path.exists()
+
+
 def test_format_with_diagnostics_fn_snippet_detects_fullfile_does_not_is_code_bug():
     """When snippet detects an FN but the full-file test does NOT detect it,
     it should be classified as a CODE BUG (context-sensitive detection failure)."""
