@@ -6,8 +6,12 @@ use crate::parse::source::SourceFile;
 /// Style/NumericPredicate: checks for comparison operators used to test numbers
 /// as zero, positive, or negative, suggesting predicate methods instead.
 ///
-/// FP fix: safe navigation calls (`&.>`, `&.<`, `&.==`) must be skipped because
-/// RuboCop's NodePattern only matches `send` nodes, not `csend`.
+/// FP fix (predicate style): safe navigation calls (`&.>`, `&.<`, `&.==`) must be
+/// skipped because RuboCop's NodePattern only matches `send` nodes, not `csend`.
+///
+/// FP fix (comparison style): safe navigation calls (`&.zero?`, `&.positive?`,
+/// `&.negative?`) must be skipped for the same reason — RuboCop uses `on_send`
+/// which does not fire for `csend` (safe navigation) nodes.
 ///
 /// FN fix: hex (0x00), binary (0b0000), and octal (0o0) integer literals were not
 /// recognized as zero because the source text was parsed with `str::parse::<i64>()`
@@ -250,6 +254,14 @@ impl Cop for NumericPredicate {
             if !matches!(method_bytes, b"zero?" | b"positive?" | b"negative?") {
                 return;
             }
+            // Skip safe navigation calls (x&.zero?, x&.positive?) — RuboCop only
+            // matches `send` nodes, not `csend` (safe navigation).
+            if call
+                .call_operator_loc()
+                .is_some_and(|loc| loc.as_slice() == b"&.")
+            {
+                return;
+            }
             if call.arguments().is_some() {
                 return;
             }
@@ -291,4 +303,27 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(NumericPredicate, "cops/style/numeric_predicate");
     crate::cop_autocorrect_fixture_tests!(NumericPredicate, "cops/style/numeric_predicate");
+
+    #[test]
+    fn comparison_style_skips_safe_navigation_predicate() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("comparison".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        // x&.zero? should NOT be flagged — RuboCop's on_send doesn't fire for csend
+        let source = b"x&.zero?\nx&.positive?\nx&.negative?\n";
+        let diags = run_cop_full_with_config(&NumericPredicate, source, config);
+        assert!(
+            diags.is_empty(),
+            "Safe navigation predicate calls should not be flagged in comparison style, got: {:?}",
+            diags
+        );
+    }
 }
