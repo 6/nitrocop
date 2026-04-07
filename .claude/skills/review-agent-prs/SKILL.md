@@ -34,9 +34,19 @@ gh pr list --repo 6/nitrocop --label type:cop-fix,validation-failed --state open
   --json number,title --jq '.[] | "\(.number)\t\(.title)"'
 ```
 
-### 2. Review each PR
+### 2. Check FP/FN impact (required)
 
-For each passing PR, fetch the diff with `gh pr diff <number>` and review:
+Before reviewing code, fetch the PR comments to check actual corpus impact:
+
+```bash
+gh pr view <number> --repo 6/nitrocop --json comments --jq '.comments[] | select(.author.login == "github-actions") | .body' | head -40
+```
+
+The CI workflow posts cop-check results with FP/FN deltas. Look for the table with `FP Δ` and `FN Δ` columns. If the PR has **zero net FP/FN change** (all deltas are 0), **close it** — the code change adds complexity without improving conformance. Do not trust doc comment claims like "resolves ~N FPs" without verifying against the actual CI comment data.
+
+### 3. Review each PR
+
+For each passing PR that has real FP/FN impact, fetch the diff with `gh pr diff <number>` and review:
 
 **Code correctness:**
 - Does the logic match the cop's intended behavior?
@@ -52,7 +62,7 @@ For each passing PR, fetch the diff with `gh pr diff <number>` and review:
 - Are offense and no_offense fixtures adequate?
 - Does corrected.rb exist if autocorrect was added?
 
-### 3. Take action on each PR
+### 4. Take action on each PR
 
 For each PR, do exactly one of:
 
@@ -76,7 +86,7 @@ gh pr review <number> --approve --body "Reviewed: fixed [description of nits]. L
 gh pr close <number> --comment "Closing: [reason]. [Specific issues found.]" --delete-branch
 ```
 
-### 4. Present summary
+### 5. Present summary
 
 Show a table of actions taken:
 ```

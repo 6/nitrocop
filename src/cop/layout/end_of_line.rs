@@ -2,6 +2,41 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Checks for Windows-style line endings in the source code.
+///
+/// ## Variant behavior
+///
+/// For `EnforcedStyle: crlf`, RuboCop's `unimportant_missing_cr?` skips reporting
+/// when the last line has no LF at all (i.e., a file with no trailing newline).
+/// This is because the "missing CR" on the last line is considered unimportant
+/// when there is no line break to attach it to. nitrocop previously flagged such
+/// files as "Carriage return character missing." on every line, causing 108 false
+/// positives in the corpus.
+///
+/// @example EnforcedStyle: native (default)
+///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
+///   # enforced on Windows, and LF is enforced on other platforms.
+///   # bad
+///   puts 'Hello' # Return character is LF on Windows.
+///   puts 'Hello' # Return character is CR+LF on other than Windows.
+///   # good
+///   puts 'Hello' # Return character is CR+LF on Windows.
+///   puts 'Hello' # Return character is LF on other than Windows.
+///
+/// @example EnforcedStyle: lf
+///   # The `lf` style means that LF (Line Feed) is enforced on all platforms.
+///   # bad
+///   puts 'Hello' # Return character is CR+LF on all platforms.
+///   # good
+///   puts 'Hello' # Return character is LF on all platforms.
+///
+/// @example EnforcedStyle: crlf
+///   # The `crlf` style means that CR+LF (Carriage Return + Line Feed) is
+///   # enforced on all platforms.
+///   # bad
+///   puts 'Hello' # Return character is LF on all platforms.
+///   # good
+///   puts 'Hello' # Return character is CR+LF on all platforms.
 pub struct EndOfLine;
 
 impl Cop for EndOfLine {
@@ -56,10 +91,19 @@ impl Cop for EndOfLine {
             "crlf" => {
                 // Flag lines that do NOT end with \r (i.e., bare LF) — insert \r before \n
                 let lines: Vec<&[u8]> = source.lines().collect();
+                // If the last line has no \n at all, RuboCop considers CRLF requirement
+                // satisfied (unimportant_missing_cr? returns true). We replicate this.
+                let last_line_has_newline = if let Some(last) = lines.last() {
+                    last.ends_with(b"\n")
+                } else {
+                    true // empty file, no offense
+                };
                 let mut byte_offset: usize = 0;
                 for (i, line) in lines.iter().enumerate() {
-                    if i == lines.len() - 1 && line.is_empty() {
-                        break;
+                    if i == lines.len() - 1 {
+                        if line.is_empty() || !last_line_has_newline {
+                            break;
+                        }
                     }
                     if !line.ends_with(b"\r") {
                         let newline_offset = byte_offset + line.len(); // position of \n
