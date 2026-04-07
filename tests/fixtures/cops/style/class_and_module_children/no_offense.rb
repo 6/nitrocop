@@ -62,3 +62,13 @@ end
 @memory_class = class Testing::MyMemory < Puppet::Indirector::Memory
   self
 end
+
+# nitrocop-config: EnforcedStyle: compact,compact
+# Compact-style module at offset 0 with no final newline — RuboCop crashes
+# on autocorrect due to AlignmentCorrector range calculation bug, producing
+# 0 offenses. We skip to match observable behavior.
+module Redcar
+  class EditView
+    def check; end
+  end
+end

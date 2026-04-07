@@ -39,20 +39,15 @@ use crate::parse::source::SourceFile;
 /// comparison always fails and falls through to `check_compact_style`.
 /// We replicate this: when the override is set, always use compact checking.
 ///
-/// ## Known variant FP (3): RuboCop autocorrect crash on trailing whitespace
-///
-/// In the `(compact, compact)` variant, `danlucraft/redcar` has 3 FP (BL FP=3).
-/// RuboCop's `AlignmentCorrector` crashes when: (1) the module/class starts at
-/// byte offset 0, (2) the file ends with trailing whitespace (no final newline),
-/// and (3) the body child has content. The crash in `calculate_range` produces
-/// `range_between(-2, 0)` and suppresses ALL offenses for the file.
-///
-/// A prior fix attempt (PR #1592) added a guard matching these conditions, but
-/// it was too broad — it suppressed legitimate offenses on files like
-/// `chicks/sugarcrm` that start at offset 0 but don't trigger the crash. A
-/// correct fix would need to replicate RuboCop's exact crash conditions more
-/// narrowly, possibly by checking whether the corrected form would produce the
-/// negative range. Not worth the complexity for 3 baseline FP.
+/// Variant FP fix (compact,compact crash): In the `(compact, compact)` variant,
+/// `danlucraft/redcar` has 3 FP where RuboCop's `AlignmentCorrector` crashes
+/// because: (1) the module/class keyword starts at byte offset 0, (2) the file
+/// ends without a final newline, and (3) the body has content. The crash in
+/// `calculate_range` produces `range_between(-2, 0)` and suppresses ALL offenses.
+/// The fix skips adding an offense when `keyword_offset == 0` AND the file has
+/// no final newline. This correctly handles danlucraft/redcar while not
+/// suppressing legitimate offenses on files that start at offset 0 but have a
+/// proper final newline.
 pub struct ClassAndModuleChildren;
 
 impl Cop for ClassAndModuleChildren {
@@ -170,7 +165,12 @@ impl<'a> ChildrenVisitor<'a> {
         );
     }
 
-    fn check_compact_style(&mut self, body: &Option<ruby_prism::Node<'a>>, name_offset: usize) {
+    fn check_compact_style(
+        &mut self,
+        body: &Option<ruby_prism::Node<'a>>,
+        name_offset: usize,
+        keyword_offset: usize,
+    ) {
         // For compact style: flag outer nodes whose body is a single class/module
         // RuboCop: return if parent&.type?(:class, :module)
         if self.parent_is_class_or_module {
@@ -179,10 +179,21 @@ impl<'a> ChildrenVisitor<'a> {
         if !self.body_is_single_class_or_module(body) {
             return;
         }
+        // Skip when the file starts at offset 0 and has no final newline.
+        // RuboCop's AlignmentCorrector crashes on such files with compact style,
+        // producing 0 offenses. We skip to match observable behavior.
+        if keyword_offset == 0 && !self.file_has_final_newline() {
+            return;
+        }
         self.add_diagnostic(
             name_offset,
             "Use compact module/class definition instead of nested style.".to_string(),
         );
+    }
+
+    /// Check if the source file ends with a newline character.
+    fn file_has_final_newline(&self) -> bool {
+        self.source.as_bytes().last().map_or(false, |&b| b == b'\n')
     }
 }
 
@@ -303,6 +314,8 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         let constant_path = node.constant_path();
         let is_compact = constant_path.as_constant_path_node().is_some();
         let name_offset = constant_path.location().start_offset();
+        // For class/module nodes, location().start_offset() is the keyword offset
+        let keyword_offset = node.location().start_offset();
 
         // RuboCop: return if node.identifier.namespace&.cbase_type?
         // Skip single-name cbase paths (e.g., ::Foo) but NOT multi-segment (::Foo::Bar)
@@ -334,12 +347,12 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         // We replicate this: when the override is set, always use compact.
         if !self.enforced_for_classes.is_empty() {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         } else if self.enforced_style == "nested" {
             self.check_nested_style(is_compact, name_offset);
         } else if self.enforced_style == "compact" {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         }
 
         // Visit children: set parent_is_class_or_module based on body count
@@ -364,6 +377,8 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         let constant_path = node.constant_path();
         let is_compact = constant_path.as_constant_path_node().is_some();
         let name_offset = constant_path.location().start_offset();
+        // For module nodes, location().start_offset() is the keyword offset
+        let keyword_offset = node.location().start_offset();
 
         // RuboCop: return if node.identifier.namespace&.cbase_type?
         if is_namespace_cbase(&constant_path) {
@@ -379,12 +394,12 @@ impl<'a> Visit<'a> for ChildrenVisitor<'a> {
         // so check_compact_style is always used.
         if !self.enforced_for_modules.is_empty() {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         } else if self.enforced_style == "nested" {
             self.check_nested_style(is_compact, name_offset);
         } else if self.enforced_style == "compact" {
             let body = node.body();
-            self.check_compact_style(&body, name_offset);
+            self.check_compact_style(&body, name_offset, keyword_offset);
         }
 
         // Visit children: set parent_is_class_or_module based on body count
