@@ -1,3 +1,4 @@
+use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{CLASS_NODE, SINGLETON_CLASS_NODE};
 use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
@@ -17,6 +18,16 @@ use crate::parse::source::SourceFile;
 /// using `superclass.location().end_offset()` as the keyword offset when
 /// a superclass is present, so the utility correctly identifies the first
 /// body line after the superclass.
+///
+/// Investigation: The `empty_lines_except_namespace` and `empty_lines_special`
+/// styles were not implemented - they fell through to `no_empty_lines` behavior,
+/// causing massive FP/FN divergence. Fixed by implementing proper branching:
+/// - `empty_lines_except_namespace`: uses `no_empty_lines` for namespace bodies
+///   (single class/module child), `empty_lines` otherwise
+/// - `empty_lines_special`: uses `no_empty_lines` for namespace bodies;
+///   at beginning, uses `empty_lines` only if first child requires it
+///   (def/class/module/public/private/protected), else `no_empty_lines`;
+///   always uses `empty_lines` at end
 pub struct EmptyLinesAroundClassBody;
 
 impl Cop for EmptyLinesAroundClassBody {
@@ -42,7 +53,7 @@ impl Cop for EmptyLinesAroundClassBody {
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
-        let (kw_offset, end_offset) = if let Some(class_node) = node.as_class_node() {
+        let (kw_offset, end_offset, body) = if let Some(class_node) = node.as_class_node() {
             // For multiline class declarations (class Foo <\n  Bar), use the
             // superclass end line so the utility correctly identifies the body start.
             let kw = if let Some(superclass) = class_node.superclass() {
@@ -50,11 +61,16 @@ impl Cop for EmptyLinesAroundClassBody {
             } else {
                 class_node.class_keyword_loc().start_offset()
             };
-            (kw, class_node.end_keyword_loc().start_offset())
+            (
+                kw,
+                class_node.end_keyword_loc().start_offset(),
+                class_node.body(),
+            )
         } else if let Some(sclass_node) = node.as_singleton_class_node() {
             (
                 sclass_node.class_keyword_loc().start_offset(),
                 sclass_node.end_keyword_loc().start_offset(),
+                sclass_node.body(),
             )
         } else {
             return;
@@ -121,6 +137,71 @@ impl Cop for EmptyLinesAroundClassBody {
                 );
                 diagnostics.extend(diags);
             }
+            "empty_lines_except_namespace" => {
+                // Namespace (single class/module child) -> no_empty_lines
+                // Otherwise -> empty_lines
+                if is_namespace_body(&body) {
+                    diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
+                        self.name(),
+                        source,
+                        kw_offset,
+                        end_offset,
+                        "class",
+                        corrections,
+                    ));
+                } else {
+                    diagnostics.extend(
+                        util::check_missing_empty_lines_around_body_with_corrections(
+                            self.name(),
+                            source,
+                            kw_offset,
+                            end_offset,
+                            "class",
+                            corrections,
+                        ),
+                    );
+                }
+            }
+            "empty_lines_special" => {
+                // Namespace (single class/module child) -> no_empty_lines
+                // Otherwise:
+                //   - At beginning: empty_lines if first child requires it, else no_empty_lines
+                //   - At end: always empty_lines
+                if is_namespace_body(&body) {
+                    diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
+                        self.name(),
+                        source,
+                        kw_offset,
+                        end_offset,
+                        "class",
+                        corrections,
+                    ));
+                } else {
+                    // At beginning: check if first child requires empty line
+                    if first_child_requires_empty_line(&body) {
+                        // empty_lines at beginning
+                        let mut diags = util::check_missing_empty_lines_around_body(
+                            self.name(),
+                            source,
+                            kw_offset,
+                            end_offset,
+                            "class",
+                        );
+                        diags.retain(|d| d.message.contains("beginning"));
+                        diagnostics.extend(diags);
+                    }
+                    // At end: always empty_lines
+                    let mut end_diags = util::check_missing_empty_lines_around_body(
+                        self.name(),
+                        source,
+                        kw_offset,
+                        end_offset,
+                        "class",
+                    );
+                    end_diags.retain(|d| d.message.contains("end"));
+                    diagnostics.extend(end_diags);
+                }
+            }
             _ => {
                 // "no_empty_lines" (default)
                 diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
@@ -131,6 +212,89 @@ impl Cop for EmptyLinesAroundClassBody {
                     "class",
                     corrections,
                 ));
+            }
+        }
+    }
+}
+
+/// Check if the body is a "namespace" for `empty_lines_except_namespace` purposes.
+/// A namespace is a body that is:
+/// - A single class or module node, OR
+/// - A begin/statements node with exactly one child that is a class or module
+fn is_namespace_body(body: &Option<ruby_prism::Node<'_>>) -> bool {
+    match body {
+        None => false,
+        Some(node) => {
+            // Direct class or module child
+            if node.as_class_node().is_some() || node.as_module_node().is_some() {
+                return true;
+            }
+            // StatementsNode or BeginNode with single class/module child
+            let children: Vec<_> = if let Some(stmts) = node.as_statements_node() {
+                stmts.body().iter().collect()
+            } else if let Some(begin) = node.as_begin_node() {
+                if let Some(stmts) = begin.statements() {
+                    stmts.body().iter().collect()
+                } else {
+                    vec![]
+                }
+            } else {
+                return false;
+            };
+            children.len() == 1
+                && (children[0].as_class_node().is_some() || children[0].as_module_node().is_some())
+        }
+    }
+}
+
+/// Check if the first child of the body requires an empty line before it.
+/// Per RuboCop: `{any_def class module (send nil? {:private :protected :public})}`
+fn first_child_requires_empty_line(body: &Option<ruby_prism::Node<'_>>) -> bool {
+    // Helper to check if a node is a bare access modifier (private/protected/public)
+    fn is_bare_access_modifier(node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(call_node) = node.as_call_node() {
+            call_node.receiver().is_none()
+                && call_node.arguments().is_none()
+                && call_node.block().is_none()
+                && access_modifier_predicates::is_access_modifier_name(call_node.name().as_slice())
+        } else {
+            false
+        }
+    }
+
+    match body {
+        None => false,
+        Some(node) => {
+            if let Some(stmts) = node.as_statements_node() {
+                let children: Vec<_> = stmts.body().iter().collect();
+                if children.is_empty() {
+                    return false;
+                }
+                let first = &children[0];
+                first.as_class_node().is_some()
+                    || first.as_module_node().is_some()
+                    || first.as_def_node().is_some()
+                    || is_bare_access_modifier(first)
+            } else if let Some(begin) = node.as_begin_node() {
+                if let Some(stmts) = begin.statements() {
+                    let children: Vec<_> = stmts.body().iter().collect();
+                    if children.is_empty() {
+                        return false;
+                    }
+                    let first = &children[0];
+                    first.as_class_node().is_some()
+                        || first.as_module_node().is_some()
+                        || first.as_def_node().is_some()
+                        || is_bare_access_modifier(first)
+                } else {
+                    false
+                }
+            } else {
+                // Single node body
+                node.as_class_node().is_some()
+                    || node.as_module_node().is_some()
+                    || node.as_def_node().is_some()
+                    || is_bare_access_modifier(node)
             }
         }
     }

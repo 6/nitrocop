@@ -58,6 +58,18 @@ use ruby_prism::Visit;
 /// 2. **super with block (FN=1)** — `super { [_1.name, _1] }` creates a
 ///    `ForwardingSuperNode` in Prism, not a `CallNode`. The cop wasn't checking
 ///    ForwardingSuperNode or SuperNode. Fix: add both to interested_node_types.
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// Variant `always` style FP (1,611 total): `block { |n| n }` where the body is a
+/// bare reference to the named parameter. RuboCop's `on_block` with `always` style uses
+/// `find_block_variables(node, 'n')` which calls `node.body.each_descendant(:lvar)`.
+/// When the body IS the bare `n` node (not wrapped in a larger expression),
+/// `each_descendant` returns nothing, so RuboCop does NOT flag it.
+///
+/// Fix: add `is_body_bare_named_param()` to skip when body is a bare named parameter
+/// reference. This matches RuboCop's `each_descendant` semantics for both
+/// `check_named_block` (CallNode blocks) and `check_lambda` (lambda blocks).
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -339,6 +351,11 @@ impl ItBlockParameter {
                 Some(b) => b,
                 None => return,
             };
+            // RuboCop's find_block_variables uses each_descendant which doesn't include body
+            // itself when it's a bare lvar. Match that behavior.
+            if Self::is_body_bare_named_param(&body, param_name.as_slice()) {
+                return;
+            }
             let mut finder = NamedParamFinder {
                 name: param_name.as_slice(),
                 locations: Vec::new(),
@@ -430,6 +447,23 @@ impl ItBlockParameter {
         false
     }
 
+    /// Check if the body is a bare named parameter read (single statement, no wrapping).
+    /// RuboCop's `node.body.each_descendant(:lvar)` doesn't find the body node itself
+    /// when it's a leaf `lvar` node. This matches that behavior.
+    fn is_body_bare_named_param(body: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
+        if let Some(stmts) = body.as_statements_node() {
+            let body_nodes = stmts.body();
+            if body_nodes.len() == 1 {
+                if let Some(first) = body_nodes.iter().next() {
+                    if let Some(lvar) = first.as_local_variable_read_node() {
+                        return lvar.name().as_slice() == param_name;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Check regular blocks with named parameters (only for `always` style).
     /// Flags single-arg blocks where `it` could be used instead.
     fn check_named_block(
@@ -481,6 +515,12 @@ impl ItBlockParameter {
             Some(b) => b,
             None => return,
         };
+
+        // RuboCop's find_block_variables uses each_descendant which doesn't include body
+        // itself when it's a bare lvar. Match that behavior.
+        if Self::is_body_bare_named_param(&body, param_name.as_slice()) {
+            return;
+        }
 
         // Find all references to this parameter name in the body
         let mut finder = NamedParamFinder {
@@ -571,6 +611,19 @@ mod tests {
         config
     }
 
+    fn always_style_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_yml::Value::Number(3.4.into()),
+        );
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("always".to_string()),
+        );
+        config
+    }
+
     #[test]
     fn offense_with_ruby34() {
         crate::testutil::assert_cop_offenses_full_with_config(
@@ -595,6 +648,20 @@ mod tests {
         crate::testutil::assert_cop_no_offenses_full(
             &ItBlockParameter,
             include_bytes!("../../../tests/fixtures/cops/style/it_block_parameter/offense.rb"),
+        );
+    }
+
+    #[test]
+    fn no_offense_always_style_bare_named_param() {
+        // Bare named param as entire body should NOT be flagged (FP fix).
+        // RuboCop's find_block_variables uses each_descendant which doesn't include
+        // the body node itself when it's a bare lvar.
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ItBlockParameter,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/it_block_parameter/no_offense_always.rb"
+            ),
+            always_style_config(),
         );
     }
 }

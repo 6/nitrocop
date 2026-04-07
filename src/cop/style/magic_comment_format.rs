@@ -12,6 +12,14 @@ use crate::parse::source::SourceFile;
 /// - Fix: combine separator and capitalization checks into the directive offense so
 ///   `Encoding` now reports `Prefer lower snake case for magic comments.` without
 ///   changing the existing separator matches.
+///
+/// Investigation findings (2026-04-06):
+/// - FN root cause (kebab_case variant): files with UTF-8 BOM (`\u{feff}`) prefix
+///   were not detected as magic comments because the BOM prefix caused the line to
+///   not start with `#`. This caused FNs for files like `# frozen_string_literal: true`
+///   with `EnforcedStyle: kebab_case`.
+/// - Fix: strip UTF-8 BOM from each line before checking if it starts with `#`.
+///   The BOM is now removed before processing the line content.
 pub struct MagicCommentFormat;
 
 const MAGIC_COMMENT_DIRECTIVES: &[&str] = &[
@@ -26,6 +34,13 @@ const MAGIC_COMMENT_DIRECTIVES: &[&str] = &[
 ];
 
 impl MagicCommentFormat {
+    /// UTF-8 BOM character that may precede magic comments in some files.
+    const UTF8_BOM: &str = "\u{feff}";
+
+    fn strip_bom(s: &str) -> &str {
+        s.strip_prefix(Self::UTF8_BOM).unwrap_or(s)
+    }
+
     fn directive_capitalization(config: &CopConfig) -> Option<&str> {
         match config.options.get("DirectiveCapitalization") {
             Some(value) => value.as_str(),
@@ -97,6 +112,7 @@ impl Cop for MagicCommentFormat {
 
         // Only check lines before the first code statement
         for (i, line) in lines.iter().enumerate() {
+            let line = Self::strip_bom(line);
             let trimmed = line.trim();
 
             // Stop at first non-comment, non-blank line
@@ -194,4 +210,42 @@ impl MagicCommentFormat {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MagicCommentFormat, "cops/style/magic_comment_format");
+
+    fn kebab_case_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("kebab_case".to_string()),
+        );
+        options.insert(
+            "DirectiveCapitalization".to_string(),
+            serde_yml::Value::String("lowercase".to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_kebab_case() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MagicCommentFormat,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/magic_comment_format/kebab_case_offense.rb"
+            ),
+            kebab_case_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_kebab_case() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MagicCommentFormat,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/magic_comment_format/kebab_case_no_offense.rb"
+            ),
+            kebab_case_config(),
+        );
+    }
 }
