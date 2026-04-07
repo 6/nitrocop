@@ -924,10 +924,14 @@ def run_variant_checks(
                 sampled_bl_fp += repo_bl.get("fp", 0)
                 sampled_bl_fn += repo_bl.get("fn", 0)
         else:
+            # TODO(variant-per-repo-compat): remove after first corpus-oracle
+            # run with by_repo_cop data lands (check style-variant-results.json
+            # for the by_repo_cop key, then delete this else branch).
             # Fallback for old artifacts without per-repo data:
             # use global baseline (lossy but not worse than before)
             sampled_bl_fp = baseline.get("fp", 0)
             sampled_bl_fn = baseline.get("fn", 0)
+            # END TODO(variant-per-repo-compat)
         results.append({
             "style_label": label,
             "batch_config": config,
