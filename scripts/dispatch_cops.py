@@ -2154,6 +2154,14 @@ def detect_cops(base: str, head: str) -> list[str]:
             # all cops; changes validated by cargo test, skip dispatch.
             pass
         else:
+            # Some cops use a _cop suffix because their snake name is a
+            # Rust keyword (for, loop, yield). Strip it before converting
+            # to PascalCase so we get Style/For, not Style/ForCop.
+            if name.endswith("_cop"):
+                unsuffixed = name.removesuffix("_cop")
+                plain = PROJECT_ROOT / "src" / "cop" / dept / f"{unsuffixed}.rs"
+                if not plain.exists():
+                    name = unsuffixed
             cops.add(f"{dept_snake_to_pascal(dept)}/{snake_to_pascal(name)}")
         continue
 
