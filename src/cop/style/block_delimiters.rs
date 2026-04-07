@@ -25,6 +25,14 @@ use std::collections::HashSet;
 ///   and allows braces on chained multi-line blocks while requiring do-end on non-chained
 /// - `semantic`: detects return-value usage via parent context (assignment, chaining,
 ///   argument position, last-in-scope) to distinguish functional vs procedural blocks
+///
+/// ## Fix (2026-04-06): recursive hash/array traversal in rv marking
+///
+/// `mark_rv_used_on_call` and `mark_rv_of_scope_on_node` now recursively traverse
+/// hash and array nodes to mark nested calls. Previously, a block inside a hash value
+/// argument (e.g., `foo(a: items.map { ... })`) had its inner calls not marked as
+/// having return values used, causing false positives in semantic style where functional
+/// blocks with braces were incorrectly flagged as procedural.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -815,6 +823,33 @@ fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize
                 }
             }
         }
+    } else if let Some(hash) = node.as_hash_node() {
+        // Recursively mark calls in hash values: `{ k: map { ... } }` → rv_used
+        for element in hash.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_used_on_call(&assoc.value(), rv_used);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_used_on_call(&value, rv_used);
+                }
+            }
+        }
+    } else if let Some(arr) = node.as_array_node() {
+        // Recursively mark calls in array elements
+        for element in arr.elements().iter() {
+            mark_rv_used_on_call(&element, rv_used);
+        }
+    } else if let Some(kwh) = node.as_keyword_hash_node() {
+        // Recursively mark calls in keyword hash values
+        for element in kwh.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_used_on_call(&assoc.value(), rv_used);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_used_on_call(&value, rv_used);
+                }
+            }
+        }
     }
 }
 
@@ -826,6 +861,33 @@ fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashS
         rv_of_scope.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_of_scope.insert(fwd_super.location().start_offset());
+    } else if let Some(hash) = node.as_hash_node() {
+        // Recursively mark calls in hash values
+        for element in hash.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_of_scope_on_node(&assoc.value(), rv_of_scope);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_of_scope_on_node(&value, rv_of_scope);
+                }
+            }
+        }
+    } else if let Some(arr) = node.as_array_node() {
+        // Recursively mark calls in array elements
+        for element in arr.elements().iter() {
+            mark_rv_of_scope_on_node(&element, rv_of_scope);
+        }
+    } else if let Some(kwh) = node.as_keyword_hash_node() {
+        // Recursively mark calls in keyword hash values
+        for element in kwh.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_of_scope_on_node(&assoc.value(), rv_of_scope);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_of_scope_on_node(&value, rv_of_scope);
+                }
+            }
+        }
     }
 }
 
@@ -1622,6 +1684,17 @@ mod tests {
     fn semantic_no_offense_braces_in_array() {
         // Block used in array element — rv_of_scope
         let source = b"[detect { true }, other]\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_hash_value_arg() {
+        // Block inside hash value argument: `foo(a: items.map { ... })`
+        // The inner block's return value flows through the hash to the method arg.
+        // This was a false positive where nitrocop incorrectly flagged it.
+        let source = b"where(id: items.map { |x| x.id })\n";
         let config = config_with_style("semantic");
         let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
         assert!(diags.is_empty(), "got: {:?}", diags);

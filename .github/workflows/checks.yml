@@ -295,6 +295,7 @@ jobs:
   # (large, catches scale regressions). Logs timing to step summary.
   # Never fails — just records data for bisecting when the nightly catches an issue.
   perf-smoke:
+    if: github.ref == 'refs/heads/main'
     needs: build-linux
     runs-on: ubuntu-24.04
     timeout-minutes: 10
