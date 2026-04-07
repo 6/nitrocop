@@ -113,21 +113,21 @@ impl Cop for ImplicitExpect {
     }
 }
 
-fn should_style_config() -> crate::cop::CopConfig {
-    use std::collections::HashMap;
-    crate::cop::CopConfig {
-        options: HashMap::from([(
-            "EnforcedStyle".into(),
-            serde_yml::Value::String("should".into()),
-        )]),
-        ..crate::cop::CopConfig::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ImplicitExpect, "cops/rspec/implicit_expect");
+
+    fn should_style_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("should".into()),
+            )]),
+            ..crate::cop::CopConfig::default()
+        }
+    }
 
     #[test]
     fn should_style_offense_fixture() {
