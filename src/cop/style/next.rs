@@ -35,6 +35,13 @@ use crate::parse::source::SourceFile;
 /// - Removed `any?`/`none?` (not in RuboCop's ENUMERATOR_METHODS, caused FP).
 /// - Removed `filter` (not in RuboCop's ENUMERATOR_METHODS, caused FP in
 ///   bluepotion `filter do` blocks).
+/// - Fixed variant style divergence for `EnforcedStyle: always`: RuboCop's
+///   `exit_body_type?` check (whether if_branch is break/return) is now
+///   correctly applied based on style. In `skip_modifier_ifs`, modifier forms
+///   are skipped via `allowed_modifier_if?` without consulting `exit_body_type?`.
+///   In `always`, `exit_body_type?` is consulted for all forms - modifier forms
+///   with exit bodies are not flagged, non-modifier forms with exit bodies are
+///   not flagged (matching RuboCop behavior).
 pub struct Next;
 
 /// Check if a method name is an iteration method for Style/Next.
@@ -213,12 +220,17 @@ impl NextVisitor<'_> {
                 return;
             };
             let if_statements = if_node.statements();
+            let is_modifier = self.is_modifier_form(&kw_loc, if_statements);
 
-            if self.style == "skip_modifier_ifs" && self.is_modifier_form(&kw_loc, if_statements) {
+            if self.style == "skip_modifier_ifs" && is_modifier {
                 return;
             }
 
-            if self.is_exit_body(if_node.statements()) {
+            // RuboCop's exit_body_type? check is applied after allowed_modifier_if?
+            // returns false. In always style, allowed_modifier_if? returns false
+            // for modifier forms, so exit_body_type? IS consulted. We should check
+            // is_exit_body for: always style (any form), or non-modifier forms.
+            if (self.style == "always" || !is_modifier) && self.is_exit_body(if_node.statements()) {
                 return;
             }
 
@@ -245,13 +257,18 @@ impl NextVisitor<'_> {
 
             // Skip modifier unless if style is skip_modifier_ifs
             let kw_loc = unless_node.keyword_loc();
-            if self.style == "skip_modifier_ifs"
-                && self.is_modifier_form(&kw_loc, unless_node.statements())
-            {
+            let is_modifier = self.is_modifier_form(&kw_loc, unless_node.statements());
+            if self.style == "skip_modifier_ifs" && is_modifier {
                 return;
             }
 
-            if self.is_exit_body(unless_node.statements()) {
+            // RuboCop's exit_body_type? check is applied after allowed_modifier_if?
+            // returns false. In always style, allowed_modifier_if? returns false
+            // for modifier forms, so exit_body_type? IS consulted. We should check
+            // is_exit_body for: always style (any form), or non-modifier forms.
+            if (self.style == "always" || !is_modifier)
+                && self.is_exit_body(unless_node.statements())
+            {
                 return;
             }
 
