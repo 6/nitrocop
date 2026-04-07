@@ -726,4 +726,28 @@ impl<'pr> Visit<'pr> for FormatStringTokenVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(FormatStringToken, "cops/style/format_string_token");
+
+    #[test]
+    fn template_style_does_not_flag_non_s_unannotated_tokens() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("template".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        // %d and %f are not correctable to template style, so they should not
+        // be counted or flagged even though MaxUnannotatedPlaceholdersAllowed is 2.
+        let source = b"format('%d %f %02x', a, b, c)\n";
+        let diags = run_cop_full_with_config(&FormatStringToken, source, config);
+        assert!(
+            diags.is_empty(),
+            "Non-%s unannotated tokens should not be flagged in template style, got: {:?}",
+            diags
+        );
+    }
 }
