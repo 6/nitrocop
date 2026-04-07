@@ -10,13 +10,29 @@ def bar
   42
 end
 
-# Single-line args with parens: OK
-def baz(x, y)
-  x + y
-end
-
 # Multiline args with parens: OK (parens required for multiline)
 def qux(x,
         y)
   x + y
+end
+
+# Endless method with parens: OK (forced parens)
+def baz(x) = x + 1
+
+# Forwarding parameter: OK (forced parens)
+def fwd(...)
+  other(...)
+end
+
+# Anonymous rest: OK (forced parens)
+def anon_rest(*)
+end
+
+# Anonymous kwrest: OK (forced parens)
+def anon_kwrest(**)
+end
+
+# Anonymous block: OK (forced parens)
+def anon_block(&)
+  yield
 end
