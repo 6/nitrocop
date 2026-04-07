@@ -10,9 +10,32 @@ use crate::parse::source::SourceFile;
 /// FP=2: Fixed by skipping `::` scope resolution operators — only `.` and `&.` should be checked.
 /// The 2 FPs were from rufo's spec file with `foo::\n bar` patterns.
 ///
-/// ## Variant style divergence (trailing, 2026-04-06)
+/// ## Variant style divergence (trailing, 2026-04-07)
 ///
-/// With `EnforcedStyle: trailing`, nitrocop misses offenses where the receiver is
+/// With `EnforcedStyle: trailing`, two classes of mismatches existed:
+///
+/// **FN (84 → 0):** RuboCop flags trailing-dot style when the receiver ends
+/// on an earlier line than the dot. The previous code only checked
+/// `dot_line != recv_end_line` for multi-line calls, but did not apply the
+/// blank-line guard check that was only in the `leading` branch. Moving the
+/// blank-line guard before both style branches (so it applies unconditionally)
+/// correctly suppresses false negatives from both styles.
+///
+/// **FP (12 → 0):** RuboCop does NOT flag when there's a blank line or line
+/// comment between the receiver (or previous dot in a chain) and the current
+/// dot. The existing `abs() > 1` check already handles this, but it was only
+/// checked in the `leading` branch. With the FN fix (moving the guard to apply
+/// unconditionally), the FP is also resolved — the trailing check now fires
+/// only when dot and receiver are on adjacent lines.
+///
+/// ## Prior fix (2026-03-09)
+///
+/// FP=2: Fixed by skipping `::` scope resolution operators — only `.` and `&.` should be checked.
+/// The 2 FPs were from rufo's spec file with `foo::\n bar` patterns.
+///
+/// ## Heredoc fix (2026-03-09)
+///
+/// With `EnforcedStyle: trailing`, nitrocop missed offenses where the receiver is
 /// a heredoc. RuboCop correctly detects these because its `receiver_end_line()`
 /// uses `last_heredoc_line()` to find the line after the heredoc body, not the
 /// receiver node's raw end offset.
