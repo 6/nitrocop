@@ -1,4 +1,4 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, LAMBDA_NODE};
+use crate::cop::shared::node_type::{BLOCK_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -14,6 +14,11 @@ use crate::parse::source::SourceFile;
 ///   `LambdaNode`. In Prism, `-> { }` parses as a `LambdaNode`, not a `BlockNode`.
 ///   RuboCop's `on_block` also handles lambdas via `on_numblock`/`on_itblock` aliases,
 ///   since in Parser AST lambdas are block nodes. Fixed by also handling `LambdaNode`.
+/// - **ForwardingSuperNode FNs:** The cop's interested_node_types only included
+///   `BlockNode` and `LambdaNode`, but `super { }` (without parentheses) parses as
+///   `ForwardingSuperNode` in Prism. The AST walker was not visiting its child
+///   `BlockNode`, so the cop was never invoked for these nodes. Fixed by adding
+///   `FORWARDING_SUPER_NODE` to interested_node_types and handling it in check_node.
 pub struct SpaceBeforeBlockBraces;
 
 impl Cop for SpaceBeforeBlockBraces {
@@ -22,7 +27,7 @@ impl Cop for SpaceBeforeBlockBraces {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, LAMBDA_NODE]
+        &[BLOCK_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -41,11 +46,17 @@ impl Cop for SpaceBeforeBlockBraces {
         let style = config.get_str("EnforcedStyle", "space");
         let empty_style = config.get_str("EnforcedStyleForEmptyBraces", "space");
 
-        // Extract opening/closing from either BlockNode or LambdaNode
+        // Extract opening/closing from BlockNode, LambdaNode, or ForwardingSuperNode
         let (opening, closing) = if let Some(block) = node.as_block_node() {
             (block.opening_loc(), block.closing_loc())
         } else if let Some(lambda) = node.as_lambda_node() {
             (lambda.opening_loc(), lambda.closing_loc())
+        } else if let Some(forwarding_super) = node.as_forwarding_super_node() {
+            let block = match forwarding_super.block() {
+                Some(block) => block,
+                None => return,
+            };
+            (block.opening_loc(), block.closing_loc())
         } else {
             return;
         };
@@ -165,6 +176,29 @@ mod tests {
         };
         let src = b"items.each{ |x| puts x }\n";
         assert_cop_no_offenses_full_with_config(&SpaceBeforeBlockBraces, src, config);
+    }
+
+    #[test]
+    fn no_space_style_flags_super_block() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("no_space".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // super { } (without parentheses) parses as ForwardingSuperNode in Prism
+        let src = b"def call; super { |args| puts args }; end\n";
+        let diags = run_cop_full_with_config(&SpaceBeforeBlockBraces, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "no_space style should flag space before brace in super blocks"
+        );
+        assert!(diags[0].message.contains("detected"));
     }
 
     #[test]
