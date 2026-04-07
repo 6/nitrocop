@@ -39,6 +39,19 @@ use crate::parse::source::SourceFile;
 /// `empty_lines_special` variant covering: def-first-child (requires blanks
 /// at both ends), include-first-child (deferred check + end check), and
 /// namespace (no_empty_lines).
+///
+/// Investigation: The deferred empty line check in `empty_lines_special` had
+/// a bug where it incorrectly reported "Empty line missing before first def"
+/// when a blank line DID exist before the def. The issue was in
+/// `check_deferred_empty_line`: it was checking `line_at(source, prev_line)`
+/// where `prev_line` is the previous non-blank content line, NOT the line
+/// immediately before the child. When there's a blank line between the previous
+/// content and the child (e.g., content at line 5, blank at line 6, def at line 7),
+/// `prev_line = 5` and `line_at(source, 5)` returns content (not blank), so an
+/// offense was incorrectly reported at line 6. The fix checks the line
+/// IMMEDIATELY before the child (`child_line - 1`) instead of `prev_line`.
+/// Also changed `is_blank_line` to `is_blank_or_whitespace_line` for proper
+/// whitespace-only line handling.
 pub struct EmptyLinesAroundClassBody;
 
 impl Cop for EmptyLinesAroundClassBody {
@@ -331,19 +344,19 @@ fn check_deferred_empty_line(
 ) -> Option<Vec<Diagnostic>> {
     let (child_line, type_name) = first_empty_line_required_child_line(source, body)?;
 
-    // Go back to find the previous non-blank, non-comment line
-    let prev_line = previous_line_ignoring_comments(source, child_line);
-
-    // Check if previous line is blank
-    if let Some(line_content) = util::line_at(source, prev_line) {
-        if util::is_blank_line(line_content) {
-            return None; // Blank line exists, no offense
+    // Check if the line immediately before the child is blank
+    let check_line = child_line.saturating_sub(1);
+    if check_line > 0 {
+        if let Some(line_content) = util::line_at(source, check_line) {
+            if util::is_blank_or_whitespace_line(line_content) {
+                return None; // Blank line exists before child, no offense
+            }
         }
     }
 
     // No blank line before the first def/class/module - report offense
     // Report at the line before the child (where the blank should be inserted)
-    let report_line = prev_line + 1; // +1 because we want to insert before this line
+    let report_line = check_line; // Report at the line that should be blank
     Some(vec![Diagnostic {
         path: source.path_str().to_string(),
         location: crate::diagnostic::Location {
@@ -355,36 +368,6 @@ fn check_deferred_empty_line(
         message: format!("Empty line missing before first {} definition.", type_name),
         corrected: false,
     }])
-}
-
-/// Find the previous line that is not a blank or comment line.
-fn previous_line_ignoring_comments(source: &SourceFile, from_line: usize) -> usize {
-    let lines: Vec<&[u8]> = source.lines().collect();
-    let mut line_num = from_line.saturating_sub(1);
-
-    while line_num > 0 {
-        line_num -= 1; // Convert to 0-indexed
-        if line_num >= lines.len() {
-            continue;
-        }
-        let line = lines[line_num];
-        // Inline trim - check if line is blank or starts with #
-        let is_blank =
-            line.is_empty() || line.iter().all(|&b| b == b' ' || b == b'\t' || b == b'\r');
-        if is_blank {
-            continue; // Skip blank lines
-        }
-        let trimmed_start = line
-            .iter()
-            .skip_while(|&&b| b == b' ' || b == b'\t')
-            .collect::<Vec<_>>();
-        if trimmed_start.first().copied() == Some(&b'#') {
-            continue; // Skip comment lines
-        }
-        // Found a non-blank, non-comment line
-        return line_num + 1; // Convert back to 1-indexed
-    }
-    1 // Return line 1 if no previous non-blank/comment line found
 }
 
 /// Check if the first child of the body requires an empty line before it.
