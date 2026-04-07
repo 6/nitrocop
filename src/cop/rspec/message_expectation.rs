@@ -5,24 +5,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// ## Variant style fix (2026-04-06)
-///
-/// FN=1 with `EnforcedStyle=expect`: The check at line 120
-/// `if recv_call.receiver().is_some() { return; }` was too broad. It returned
-/// early for ANY receiver on the `expect`/`allow` call, but `allow(foo)` has
-/// `foo` as an ARGUMENT not a receiver. The correct check is whether
-/// `expect`/`allow` is called as a COMMAND (no receiver), not whether it has
-/// an argument. Fixed by using `method_dispatch_predicates::is_command()`
-/// which correctly checks `receiver.is_none()` instead of conflating
-/// arguments with receivers.
-///
-/// ## Previous fixes
+/// ## Corpus investigation (2026-03-14)
 ///
 /// FP=1 (rpush/rpush): `expect(fake_http2_request).to receive(:on).with(:close), &on_close`
 /// was flagged. RuboCop's NodePattern `(send ... :to #receive_message?)` only matches
 /// when `.to` has exactly one argument (no block_pass). When `&proc` is passed as a
 /// block argument, the Parser AST adds it as a `block_pass` child of the send node,
 /// making the pattern not match. Fixed by checking if `.to` has a BlockArgumentNode.
+///
+/// ## Corpus investigation (2026-03-15)
 ///
 /// FN=43: Missed `expect(...).to all(receive(...))` and similar patterns where
 /// `receive` is nested inside matcher arguments (e.g., `all`, compound matchers)
@@ -31,6 +22,8 @@ use crate::parse::source::SourceFile;
 /// nitrocop only walked the receiver chain. Fixed by replacing
 /// `call_chain_includes_receive` with `subtree_includes_receive` that recursively
 /// searches receiver, arguments, and nested call nodes.
+///
+/// ## Corpus investigation (2026-03-24)
 ///
 /// FP=1 (nats-io/nats-pure.rb): `expect { ... }.to receive(:stop)` was flagged.
 /// RuboCop's NodePattern `$(send nil? {:expect :allow} ...)` requires a plain `send`
@@ -124,17 +117,7 @@ impl Cop for MessageExpectation {
         };
 
         let recv_name = recv_call.name().as_slice();
-
-        // Check that the receiver of `.to` is `expect(...)` (not `allow(...)`
-        // and not a chained form like obj.expect(...) or obj.allow(...).
-        // RuboCop's NodePattern `$(send nil? {:expect :allow} ...)` requires the
-        // expect/allow to be called with NO receiver (i.e., as a bare command,
-        // not as a method on an object). For `allow(foo)`, `foo` is an argument,
-        // not a receiver — `recv_call.receiver()` is None and we proceed.
-        // For `obj.allow(foo)`, `obj` IS the receiver and we must skip.
-        // Use `is_command` to distinguish: receiver must be nil for the pattern
-        // to match RuboCop's behavior.
-        if !method_dispatch_predicates::is_command(&recv_call, recv_name) {
+        if recv_call.receiver().is_some() {
             return;
         }
 
