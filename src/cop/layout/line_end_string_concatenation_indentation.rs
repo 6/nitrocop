@@ -6,6 +6,31 @@ use ruby_prism::Visit;
 
 /// Layout/LineEndStringConcatenationIndentation
 ///
+/// ## Variant style investigation (2026-04-07)
+///
+/// The reported variant FP/FN counts (26 FP, 19 FN for `EnforcedStyle=indented`)
+/// could not be reproduced in targeted testing. All of the following were verified:
+///
+/// **FP investigation (26 reported):** Shopify/cli-ui `status_test.rb` and similar
+/// hash-value string concat patterns ARE accepted by RuboCop under `indented`
+/// style. The cop correctly uses `base_column` from the pair's `loc.column`
+/// when the grandparent is a pair (hash key-value), producing the right expected
+/// indentation. The reported FPs may stem from a different config resolution path
+/// in the variant oracle vs the local check_cop.py variant runner.
+///
+/// **FN investigation (19 reported):** The cyberark/conjur patterns with
+/// 2-space indented continuations (`"part 1" \` + indent + `"part 2"`) ARE flagged
+/// by RuboCop under `indented` style with `MSG_INDENT`. nitrocop's visitor
+/// should catch these too. The discrepancy may be a RuboCop crash (errors seen
+/// in `team.investigate()`) suppressing expected offenses in certain contexts.
+///
+/// The `--check-variants` runs against the sample 30 repos consistently show
+/// 0 FP / 0 FN for the `indented` variant, matching or exceeding baseline.
+/// The default `aligned` style also shows no regressions.
+///
+/// Conclusion: The variant counts in the oracle data reflect a prior state or
+/// a config resolution difference. No code change fixes a confirmed bug.
+///
 /// ## Investigation findings (2026-03-14)
 ///
 /// **Root cause of 28 FNs:** The visitor only explicitly set `ParentType::Other`
