@@ -1239,19 +1239,29 @@ def test_load_variant_data_includes_examples():
         variant_cache.unlink(missing_ok=True)
 
 
-def test_infer_variant_config_key_finds_enforced_style():
-    """_infer_variant_config_key finds the right param from batch YAMLs."""
-    # This test uses the real batch files in the repo
+def test_infer_variant_style_params_single():
+    """Single-param variant returns one (key, value) tuple."""
     variant = {"style_label": "require_single_line"}
-    result = gct._infer_variant_config_key(variant)
-    assert result == "EnforcedStyle"
+    result = gct._infer_variant_style_params(variant)
+    assert len(result) == 1
+    assert result[0] == ("EnforcedStyle", "require_single_line")
 
 
-def test_infer_variant_config_key_fallback():
-    """_infer_variant_config_key falls back to EnforcedStyle for unknown labels."""
+def test_infer_variant_style_params_multi():
+    """Multi-param variant (e.g., ClassAndModuleChildren) returns all pairs."""
+    # batch_2 has: EnforcedStyleForClasses: compact, EnforcedStyleForModules: compact
+    variant = {"style_label": "compact, compact"}
+    result = gct._infer_variant_style_params(variant)
+    assert len(result) == 2
+    assert ("EnforcedStyleForClasses", "compact") in result
+    assert ("EnforcedStyleForModules", "compact") in result
+
+
+def test_infer_variant_style_params_fallback():
+    """Unknown style label falls back to [("EnforcedStyle", label)]."""
     variant = {"style_label": "nonexistent_style_value_xyz"}
-    result = gct._infer_variant_config_key(variant)
-    assert result == "EnforcedStyle"
+    result = gct._infer_variant_style_params(variant)
+    assert result == [("EnforcedStyle", "nonexistent_style_value_xyz")]
 
 
 if __name__ == "__main__":
@@ -1292,6 +1302,7 @@ if __name__ == "__main__":
     test_load_variant_data_for_cop_no_data()
     test_load_variant_only_candidates_finds_variant_diverging()
     test_load_variant_data_includes_examples()
-    test_infer_variant_config_key_finds_enforced_style()
-    test_infer_variant_config_key_fallback()
+    test_infer_variant_style_params_single()
+    test_infer_variant_style_params_multi()
+    test_infer_variant_style_params_fallback()
     print("All tests passed.")

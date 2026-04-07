@@ -542,10 +542,14 @@ def load_variant_data_for_cop(cop: str, run_id: int | str | None = None) -> list
     return variants
 
 
-def _infer_variant_config_key(variant: dict) -> str:
-    """Infer the Enforced* config key for a variant from batch YAML files.
+def _infer_variant_style_params(variant: dict) -> list[tuple[str, str]]:
+    """Infer the Enforced* config key-value pairs for a variant from batch YAML files.
 
-    Falls back to 'EnforcedStyle' which covers the vast majority of cops.
+    Returns a list of (param, value) tuples. Most cops have a single param
+    (e.g., [("EnforcedStyle", "comma")]), but some have multiple
+    (e.g., [("EnforcedStyleForClasses", "compact"), ("EnforcedStyleForModules", "compact")]).
+
+    Falls back to [("EnforcedStyle", style_label)] which covers the vast majority.
     """
     batches_dir = PROJECT_ROOT / "bench" / "corpus" / "variant_batches"
     style_label = variant.get("style_label", "")
@@ -556,12 +560,21 @@ def _infer_variant_config_key(variant: dict) -> str:
             for cop_name, cop_config in data.items():
                 if cop_name == "inherit_from" or not isinstance(cop_config, dict):
                     continue
-                for param, val in cop_config.items():
-                    if param.startswith("Enforced") and str(val) == style_label:
-                        return param
+                enforced = [
+                    (param, str(val))
+                    for param, val in sorted(cop_config.items())
+                    if param.startswith("Enforced")
+                ]
+                # Match by checking if the joined values equal the style label
+                joined = ", ".join(v for _, v in enforced)
+                if joined == style_label and enforced:
+                    return enforced
+                # Also match single-value labels
+                if len(enforced) == 1 and enforced[0][1] == style_label:
+                    return enforced
     except Exception:
         pass
-    return "EnforcedStyle"
+    return [("EnforcedStyle", style_label)]
 
 
 def load_variant_only_candidates(
@@ -1690,9 +1703,14 @@ def generate_task(
     if variant_only:
         # Primary variant style for commands (highest divergence)
         primary_variant = max(diverging_variants, key=lambda v: v["fp"] + v["fn"])
-        primary_style = primary_variant["style_label"]
-        # Detect the config key (e.g., "EnforcedStyle") from variant data
-        variant_config_key = _infer_variant_config_key(primary_variant)
+        # Detect the config key(s) (e.g., "EnforcedStyle") from variant data
+        style_params = _infer_variant_style_params(primary_variant)
+        if len(style_params) == 1:
+            style_flag = f"--style {style_params[0][0]}={style_params[0][1]}"
+        else:
+            # Multi-param cops can't use --style (only takes one PARAM=VALUE).
+            # Tell the agent to use --check-variants instead.
+            style_flag = "--check-variants"
         step1_text = (
             "1. Read the **Variant FP/FN Examples** section below — it contains actual "
             "Ruby code from the corpus that diverges under the non-default style"
@@ -1701,7 +1719,7 @@ def generate_task(
             f"7. **Validate against corpus** (REQUIRED before finishing):\n"
             f"   ```bash\n"
             f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
-            f"--style {variant_config_key}={primary_style}\n"
+            f"{style_flag}\n"
             f"   ```\n"
             f"   Also validate the default config is not regressed:\n"
             f"   ```bash\n"
