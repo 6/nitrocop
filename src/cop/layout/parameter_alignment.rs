@@ -100,11 +100,9 @@ impl Cop for ParameterAlignment {
         // For with_fixed_indentation, also check the first parameter if it's on
         // a different line from the def keyword. The first param on a
         // continuation line should also be at base_col.
-        if style == "with_fixed_indentation" && first_line != def_line {
-            if first_col != base_col {
-                let msg = "Use one level of indentation for parameters following the first line of a multi-line method definition.";
-                diagnostics.push(self.diagnostic(source, first_line, first_col, msg.to_string()));
-            }
+        if style == "with_fixed_indentation" && first_line != def_line && first_col != base_col {
+            let msg = "Use one level of indentation for parameters following the first line of a multi-line method definition.";
+            diagnostics.push(self.diagnostic(source, first_line, first_col, msg.to_string()));
         }
 
         // Only check the FIRST parameter on each new line. Multiple parameters
