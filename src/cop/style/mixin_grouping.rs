@@ -34,6 +34,16 @@ use ruby_prism::Visit;
 ///
 /// Fix: Added `check_grouped_style` method that collects sibling mixins by method
 /// name and flags all mixins in any group with more than one entry.
+///
+/// Note: sclass (`class << self`) bodies are NOT checked for mixin grouping because
+/// RuboCop does not define `on_sclass` for this cop. The implementation correctly
+/// handles this because `check_body_statements` is only called for class/module bodies
+/// (via `visit_class_node` / `visit_module_node`), not for sclass bodies. When
+/// `ruby_prism::visit_class_node` recurses into sclass children, the sclass body's
+/// statements are visited but `check_body_statements` is not called for them.
+///
+/// Added test fixture `grouped_sclass_no_offense.rb` to verify that mixins inside
+/// `class << self` bodies are not incorrectly grouped with class-level mixins.
 pub struct MixinGrouping;
 
 const MIXIN_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -231,6 +241,17 @@ mod tests {
             &MixinGrouping,
             include_bytes!(
                 "../../../tests/fixtures/cops/style/mixin_grouping/grouped_no_offense.rb"
+            ),
+            grouped_style_config(),
+        );
+    }
+
+    #[test]
+    fn grouped_sclass_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MixinGrouping,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/mixin_grouping/grouped_sclass_no_offense.rb"
             ),
             grouped_style_config(),
         );
