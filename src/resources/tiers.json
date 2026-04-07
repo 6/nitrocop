@@ -75,6 +75,7 @@
     "Layout/HeredocIndentation": "stable",
     "Layout/IndentationConsistency": "stable",
     "Layout/IndentationStyle": "stable",
+    "Layout/IndentationWidth": "stable",
     "Layout/InitialIndentation": "stable",
     "Layout/LeadingCommentSpace": "stable",
     "Layout/LeadingEmptyLines": "stable",

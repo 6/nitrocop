@@ -17,7 +17,7 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
 - Tested on [**5,590 open-source repos**](docs/corpus.md):
   - **848 of 915** cops match RuboCop exactly with default config
-  - **781 of 915** match across all `EnforcedStyle` variants
+  - **788 of 915** match across all `EnforcedStyle` variants
   - Across **28.39M** offenses compared, **28.34M** (99.83%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
@@ -65,14 +65,14 @@ Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Rub
 |------------|-----:|----------------------:|---------------------------:|
 | Layout | 100 | 91 | 60 |
 | Lint | 148 | 145 | 144 |
-| Style | 287 | 277 | 236 |
+| Style | 287 | 277 | 240 |
 | Metrics | 10 | **10 ✓** | **10 ✓** |
 | Naming | 19 | **19 ✓** | 18 |
 | Security | 6 | **6 ✓** | **6 ✓** |
 | Bundler | 7 | **7 ✓** | **7 ✓** |
 | Gemspec | 10 | **10 ✓** | **10 ✓** |
 | Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **566 (96.2%)** | **492 (83.6%)** |
+| **Total** | **588** | **566 (96.2%)** | **496 (84.3%)** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
@@ -90,7 +90,7 @@ Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Rub
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| RSpec | 113 | **113 ✓** | 101 |
+| RSpec | 113 | **113 ✓** | 103 |
 
 **[rubocop-rspec_rails](https://github.com/rubocop/rubocop-rspec_rails)** `2.32.0` (8 cops)
 
@@ -102,7 +102,7 @@ Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Rub
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| FactoryBot | 11 | **11 ✓** | 10 |
+| FactoryBot | 11 | **11 ✓** | **11 ✓** |
 
 **[rubocop-rake](https://github.com/rubocop/rubocop-rake)** `0.7.1` (5 cops)
 
