@@ -206,3 +206,12 @@ response = foo(
 while (pop_messages(queue_url, 10).length > 0);
       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
 end
+
+# Block argument with redundant parens around a variable
+bar = 1
+foo(&(bar))
+     ^^^ Style/RedundantParentheses: Don't use parentheses around a variable.
+
+# Block argument with redundant parens around a literal
+m(&(:symbol))
+   ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
