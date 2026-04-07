@@ -156,5 +156,53 @@ impl Cop for LambdaCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     crate::cop_fixture_tests!(LambdaCall, "cops/style/lambda_call");
+
+    fn braces_config() -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("braces".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn braces_offense_call_or_write() {
+        // x.call ||= build(y) should be flagged under braces style
+        // (CallOrWriteNode in Prism)
+        let source = b"x.call ||= build(y)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&LambdaCall, source, braces_config());
+        assert_eq!(diags.len(), 1, "expected 1 offense, got: {:?}", diags);
+    }
+
+    #[test]
+    fn braces_offense_call_and_write() {
+        // x.call &&= build(y) should be flagged under braces style
+        // (CallAndWriteNode in Prism)
+        let source = b"x.call &&= build(y)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&LambdaCall, source, braces_config());
+        assert_eq!(diags.len(), 1, "expected 1 offense, got: {:?}", diags);
+    }
+
+    #[test]
+    fn braces_no_offense_non_call_or_write() {
+        // x.foo ||= ... should NOT be flagged (method name is not "call")
+        let source = b"x.foo ||= build(y)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&LambdaCall, source, braces_config());
+        assert!(diags.is_empty(), "expected no offenses, got: {:?}", diags);
+    }
+
+    #[test]
+    fn call_style_no_offense_call_or_write() {
+        // Under default "call" style, compound assignments should NOT be flagged
+        let source = b"x.call ||= build(y)\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&LambdaCall, source, CopConfig::default());
+        assert!(diags.is_empty(), "expected no offenses, got: {:?}", diags);
+    }
 }
