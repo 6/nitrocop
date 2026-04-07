@@ -100,10 +100,8 @@ impl Cop for EndOfLine {
                 };
                 let mut byte_offset: usize = 0;
                 for (i, line) in lines.iter().enumerate() {
-                    if i == lines.len() - 1 {
-                        if line.is_empty() || !last_line_has_newline {
-                            break;
-                        }
+                    if i == lines.len() - 1 && (line.is_empty() || !last_line_has_newline) {
+                        break;
                     }
                     if !line.ends_with(b"\r") {
                         let newline_offset = byte_offset + line.len(); // position of \n
