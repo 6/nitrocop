@@ -130,6 +130,17 @@ use crate::parse::source::SourceFile;
 /// 2. Offense fixture corrections — removed 3 test cases with incorrect
 ///    line content (lines too short to trigger offenses), and fixed `^`
 ///    marker positions and length annotations on remaining cases.
+///
+/// ## Fix (2026-04-07)
+///
+/// RuboCop uses token boundaries to decide which lines to check.
+/// When `__END__` appears on line 2+, the last parser token is before
+/// `__END__`, so RuboCop skips all subsequent data lines. When `__END__`
+/// is on line 1, there are no tokens at all, so RuboCop falls back to
+/// checking ALL lines (including the data section). The original nitrocop
+/// code skipped all lines after `__END__` regardless of position, causing
+/// FNs for files with `__END__` on line 1 that had long data-section lines.
+/// Fixed by gating the skip on `i > 0`.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -204,7 +215,9 @@ fn check_line_lengths(
             continue;
         }
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        if line == b"__END__" {
+        // RuboCop skips data lines after __END__ only when it appears on
+        // line 2+. When __END__ is on line 1 (no tokens), all lines are checked.
+        if line == b"__END__" && i > 0 {
             after_end_marker = true;
             continue;
         }
