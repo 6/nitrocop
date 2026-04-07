@@ -1171,12 +1171,43 @@ mod tests {
 
         // Bracket not aligned with opening bracket should be flagged
         let src3 = b"x = [\n      1\n]\n";
-        let diags3 = run_cop_full_with_config(&FirstArrayElementIndentation, src3, config);
+        let diags3 = run_cop_full_with_config(&FirstArrayElementIndentation, src3, config.clone());
         assert_eq!(
             diags3.len(),
             1,
             "align_brackets should flag bracket not at opening bracket column: {:?}",
             diags3
+        );
+
+        // align_brackets inside method call: bracket-relative, not paren-relative
+        // func([ at column 5 (0-indexed), element should be at column 7 (bracket_col + 2)
+        // 7 spaces before 1 = column 7 (0-indexed), 5 spaces before ] = column 5 (0-indexed)
+        let src4 = b"func([\n       1\n     ])\n";
+        let diags4 = run_cop_full_with_config(&FirstArrayElementIndentation, src4, config.clone());
+        assert!(
+            diags4.is_empty(),
+            "align_brackets inside method call should use bracket-relative: {:?}",
+            diags4
+        );
+
+        // align_brackets with first element on same line - both elem and close check skipped
+        let src5 = b"func([1,\n     2])\n";
+        let diags5 = run_cop_full_with_config(&FirstArrayElementIndentation, src5, config.clone());
+        assert!(
+            diags5.is_empty(),
+            "align_brackets with first elem on same line should not flag: {:?}",
+            diags5
+        );
+
+        // align_brackets empty array - closing bracket must be at same column as opening bracket
+        // x = [ at column 4 (0-indexed), closing ] should also be at column 4
+        // So we need 4 spaces before ]
+        let src6 = b"x = [\n    ]\n";
+        let diags6 = run_cop_full_with_config(&FirstArrayElementIndentation, src6, config);
+        assert!(
+            diags6.is_empty(),
+            "align_brackets empty array with bracket at same column should not flag: {:?}",
+            diags6
         );
     }
 
