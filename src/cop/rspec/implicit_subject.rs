@@ -178,8 +178,8 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
             if is_implicit {
                 let enclosing = self.enclosing_example();
 
-                if let Some((method, _)) = enclosing {
-                    if method == b"its" {
+                if let Some((method, _)) = &enclosing {
+                    if *method == b"its" {
                         ruby_prism::visit_call_node(self, node);
                         return;
                     }
@@ -187,6 +187,14 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
 
                 if self.enforced_style == "disallow" {
                     self.add_offense(node, "Don't use implicit subject.");
+                    ruby_prism::visit_call_node(self, node);
+                    return;
+                }
+
+                // For single_line_only and single_statement_only, only flag
+                // inside actual example blocks. is_expected in before/let/def
+                // contexts is not the cop's concern.
+                if enclosing.is_none() {
                     ruby_prism::visit_call_node(self, node);
                     return;
                 }
@@ -323,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn single_statement_only_flags_non_example_contexts() {
+    fn single_statement_only_skips_non_example_contexts() {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
 
@@ -334,12 +342,13 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
+        // describe is not an example method — is_expected here should not be flagged
         let source = b"describe 'something' do\n  is_expected.to be_valid\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&ImplicitSubject, source, config);
         assert_eq!(
             diags.len(),
-            1,
-            "non-example contexts should still be flagged"
+            0,
+            "non-example contexts should NOT be flagged for single_statement_only"
         );
     }
 
@@ -382,6 +391,39 @@ mod tests {
                 "../../../tests/fixtures/cops/rspec/implicit_subject/require_implicit_no_offense.rb"
             ),
             config,
+        );
+    }
+
+    fn single_statement_only_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("single_statement_only".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn single_statement_only_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ImplicitSubject,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/implicit_subject/single_statement_only_offense.rb"
+            ),
+            single_statement_only_config(),
+        );
+    }
+
+    #[test]
+    fn single_statement_only_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ImplicitSubject,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/implicit_subject/single_statement_only_no_offense.rb"
+            ),
+            single_statement_only_config(),
         );
     }
 }
