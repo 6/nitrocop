@@ -58,10 +58,12 @@ impl Cop for MethodDefParentheses {
 
         // For require_no_parentheses_except_multiline: only require parens if args span multiple lines
         if enforced_style == "require_no_parentheses_except_multiline" && !has_parens {
-            let params = def_node.parameters().unwrap();
-            let loc = params.location();
             let is_multiline = source
-                .byte_slice(loc.start_offset(), loc.end_offset(), "")
+                .byte_slice(
+                    params.location().start_offset(),
+                    params.location().end_offset(),
+                    "",
+                )
                 .contains('\n');
             if !is_multiline {
                 return;
@@ -102,4 +104,60 @@ impl Cop for MethodDefParentheses {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MethodDefParentheses, "cops/style/method_def_parentheses");
+
+    fn style_config(style: &str) -> CopConfig {
+        let mut opts = std::collections::HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn require_no_parentheses_except_multiline_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MethodDefParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/method_def_parentheses/require_no_parentheses_except_multiline_offense.rb"
+            ),
+            style_config("require_no_parentheses_except_multiline"),
+        );
+    }
+
+    #[test]
+    fn require_no_parentheses_except_multiline_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MethodDefParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/method_def_parentheses/require_no_parentheses_except_multiline_no_offense.rb"
+            ),
+            style_config("require_no_parentheses_except_multiline"),
+        );
+    }
+
+    #[test]
+    fn require_no_parentheses_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MethodDefParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/method_def_parentheses/require_no_parentheses_offense.rb"
+            ),
+            style_config("require_no_parentheses"),
+        );
+    }
+
+    #[test]
+    fn require_no_parentheses_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MethodDefParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/method_def_parentheses/require_no_parentheses_no_offense.rb"
+            ),
+            style_config("require_no_parentheses"),
+        );
+    }
 }
