@@ -51,6 +51,18 @@ use ruby_prism::Visit;
 ///   fails. Previously, nitrocop would unwrap the right side and recursively compare,
 ///   causing false positives like `obj.bar if (obj)` where RuboCop correctly skips
 ///   the parenthesized condition.
+///
+/// - Added `in_dotless_call_arguments` tracking to distinguish modifier-if/unless
+///   suppression inside dotless vs dot call arguments. RuboCop suppresses modifier-if
+///   only inside dotless call arguments (e.g., `scope`, `install_win`), not inside dot
+///   call arguments (e.g., `foo.bar(if x then x.y end)`). Previously, nitrocop used
+///   `in_call_arguments > 0` which blanket-suppressed all modifier-if in any call
+///   arguments, causing false negatives for modifier-if inside dot call arguments
+///   (e.g., `Match.start_match(..., if opponent_names then opponent_names.split(...) end)`).
+///   The fix tracks dotless calls separately via `call_operator_loc().is_none()` and
+///   uses `in_dotless_call_arguments` in modifier-if/unless skip checks. Also saved/restored
+///   `in_dotless_call_arguments` in `visit_block_node` and `visit_lambda_node` to prevent
+///   the flag from leaking into nested block bodies.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -600,6 +612,7 @@ impl Cop for SafeNavigation {
             in_assignment_or_operator_parent: 0,
             dotted_assignment_parent_starts: Vec::new(),
             in_call_arguments: 0,
+            in_dotless_call_arguments: 0,
             in_block_argument: 0,
             in_block: 0,
             direct_receiver_block_bodies: Vec::new(),
@@ -629,6 +642,7 @@ struct SafeNavVisitor<'a> {
     in_assignment_or_operator_parent: usize,
     dotted_assignment_parent_starts: Vec<usize>,
     in_call_arguments: usize,
+    in_dotless_call_arguments: usize,
     in_block_argument: usize,
     in_block: usize,
     direct_receiver_block_bodies: Vec<(usize, usize)>,
@@ -931,6 +945,8 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             // unsafe parent actually suppresses the offense.
             let saved_in_call_arguments = self.in_call_arguments;
             self.in_call_arguments = 0;
+            let saved_in_dotless_call_arguments = self.in_dotless_call_arguments;
+            self.in_dotless_call_arguments = 0;
             let saved_in_ternary_operator_parent = self.in_ternary_operator_parent;
             let saved_in_assignment_or_operator_parent = self.in_assignment_or_operator_parent;
             let saved_dotted = std::mem::take(&mut self.dotted_assignment_parent_starts);
@@ -943,6 +959,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             self.in_ternary_operator_parent = saved_in_ternary_operator_parent;
             self.dotted_assignment_parent_starts = saved_dotted;
             self.in_call_arguments = saved_in_call_arguments;
+            self.in_dotless_call_arguments = saved_in_dotless_call_arguments;
         } else {
             ruby_prism::visit_block_node(self, node);
         }
@@ -976,11 +993,14 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         if self.in_call_arguments > 0 {
             let saved_call_args = self.in_call_arguments;
             let saved_nil_method = self.in_nil_method_call_arguments;
+            let saved_dotless = self.in_dotless_call_arguments;
             self.in_call_arguments = 0;
             self.in_nil_method_call_arguments = 0;
+            self.in_dotless_call_arguments = 0;
             ruby_prism::visit_lambda_node(self, node);
             self.in_call_arguments = saved_call_args;
             self.in_nil_method_call_arguments = saved_nil_method;
+            self.in_dotless_call_arguments = saved_dotless;
         } else {
             ruby_prism::visit_lambda_node(self, node);
         }
@@ -1065,6 +1085,11 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
 
         if let Some(arguments) = node.arguments() {
             self.in_call_arguments += 1;
+            let saved_in_dotless_call_arguments = self.in_dotless_call_arguments;
+            // Only track dotless calls (no . or &. operator)
+            if node.call_operator_loc().is_none() {
+                self.in_dotless_call_arguments = self.in_call_arguments;
+            }
             let is_dynamic_send = Self::is_dynamic_send_call(node);
             let is_double_colon = SafeNavigation::is_double_colon_call(node);
             let is_nil_method_args = is_nil_safe_call_ancestor;
@@ -1088,6 +1113,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 self.in_double_colon_call_arguments -= 1;
             }
             self.in_call_arguments -= 1;
+            self.in_dotless_call_arguments = saved_in_dotless_call_arguments;
         }
 
         if let Some(block) = node.block() {
@@ -1256,7 +1282,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
 
         if (self.in_block_argument > 0 && self.in_block == 0)
             || self.in_nil_safe_call_ancestor > 0
-            || self.in_call_arguments > 0
+            || self.in_dotless_call_arguments > 0
             || self.in_dynamic_send_args > 0
         {
             ruby_prism::visit_if_node(self, node);
@@ -1296,7 +1322,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
 
         if (self.in_block_argument > 0 && self.in_block == 0)
             || self.in_nil_safe_call_ancestor > 0
-            || self.in_call_arguments > 0
+            || self.in_dotless_call_arguments > 0
             || self.in_dynamic_send_args > 0
         {
             ruby_prism::visit_unless_node(self, node);
