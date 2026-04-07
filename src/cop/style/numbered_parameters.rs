@@ -1,4 +1,6 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, CALL_NODE, LAMBDA_NODE, NUMBERED_PARAMETERS_NODE};
+use crate::cop::shared::node_type::{
+    BLOCK_NODE, CALL_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE, NUMBERED_PARAMETERS_NODE, SUPER_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -6,6 +8,14 @@ use crate::parse::source::SourceFile;
 /// Also handles `LambdaNode` (`-> do ... end` / `-> { ... }`) with numbered
 /// parameters, not just method-call blocks. RuboCop's `on_numblock` fires for
 /// both block types.
+///
+/// ## Variant Fix (2026-04-07)
+///
+/// The `disallow` style had a false negative: `super { [_1.name, _1] }`
+/// was not flagged because `SuperNode` and `ForwardingSuperNode` were not
+/// handled. Added `SUPER_NODE` and `FORWARDING_SUPER_NODE` to
+/// `interested_node_types` and corresponding handling in `check_node` to detect
+/// numbered parameters in `super { }` blocks, matching RuboCop's `on_numblock`.
 pub struct NumberedParameters;
 
 impl Cop for NumberedParameters {
@@ -14,7 +24,14 @@ impl Cop for NumberedParameters {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, CALL_NODE, LAMBDA_NODE, NUMBERED_PARAMETERS_NODE]
+        &[
+            BLOCK_NODE,
+            CALL_NODE,
+            FORWARDING_SUPER_NODE,
+            LAMBDA_NODE,
+            NUMBERED_PARAMETERS_NODE,
+            SUPER_NODE,
+        ]
     }
 
     fn check_node(
@@ -39,6 +56,82 @@ impl Cop for NumberedParameters {
             }
 
             let loc = lambda.location();
+            let (start_line, column) = source.offset_to_line_col(loc.start_offset());
+
+            if style == "disallow" {
+                diagnostics.push(self.diagnostic(
+                    source,
+                    start_line,
+                    column,
+                    "Avoid using numbered parameters.".to_string(),
+                ));
+            } else if style == "allow_single_line" {
+                let (end_line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+                if start_line != end_line {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        start_line,
+                        column,
+                        "Avoid using numbered parameters for multi-line blocks.".to_string(),
+                    ));
+                }
+            }
+            return;
+        }
+
+        // Handle SuperNode (super { ... }) with numbered parameters.
+        if let Some(super_node) = node.as_super_node() {
+            let block = match super_node.block().and_then(|block| block.as_block_node()) {
+                Some(b) => b,
+                None => return,
+            };
+            let params = match block.parameters() {
+                Some(p) => p,
+                None => return,
+            };
+            if params.as_numbered_parameters_node().is_none() {
+                return;
+            }
+
+            let loc = super_node.location();
+            let (start_line, column) = source.offset_to_line_col(loc.start_offset());
+
+            if style == "disallow" {
+                diagnostics.push(self.diagnostic(
+                    source,
+                    start_line,
+                    column,
+                    "Avoid using numbered parameters.".to_string(),
+                ));
+            } else if style == "allow_single_line" {
+                let (end_line, _) = source.offset_to_line_col(loc.end_offset().saturating_sub(1));
+                if start_line != end_line {
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        start_line,
+                        column,
+                        "Avoid using numbered parameters for multi-line blocks.".to_string(),
+                    ));
+                }
+            }
+            return;
+        }
+
+        // Handle ForwardingSuperNode (super without args) with numbered parameters.
+        if let Some(forwarding_super) = node.as_forwarding_super_node() {
+            let block = match forwarding_super.block() {
+                Some(b) => b,
+                None => return,
+            };
+            let params = match block.parameters() {
+                Some(p) => p,
+                None => return,
+            };
+            if params.as_numbered_parameters_node().is_none() {
+                return;
+            }
+
+            let loc = forwarding_super.location();
             let (start_line, column) = source.offset_to_line_col(loc.start_offset());
 
             if style == "disallow" {
