@@ -206,7 +206,7 @@ impl Lambda {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::run_cop_full;
+    use crate::testutil::{run_cop_full, run_cop_full_with_config};
 
     crate::cop_fixture_tests!(Lambda, "cops/style/lambda");
 
@@ -215,5 +215,21 @@ mod tests {
         let source = b"obj.lambda { |x| x }\n";
         let diags = run_cop_full(&Lambda, source);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn literal_no_offense_bare_lambda() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("literal".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"b = lambda\n";
+        let diags = run_cop_full_with_config(&Lambda, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
     }
 }
