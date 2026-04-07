@@ -31,6 +31,14 @@ use crate::parse::source::SourceFile;
 /// represents it as a `block` node (not a `send`), so the pattern never matches.
 /// In Prism, `expect { ... }` is a `CallNode` with a `block` field set. Fixed by
 /// returning early when `recv_call.block().is_some()`.
+///
+/// ## Variant investigation (2026-04-07)
+///
+/// FN=1 with EnforcedStyle=expect: Missed `allow(...).to receive_messages(hash_with_blocks)`
+/// where the hash values contain `tap` blocks with nested `allow().to receive()` calls.
+/// RuboCop's `receive_message?` subtree search finds the nested `receive` inside block
+/// bodies and hash values. Fixed by adding recursion into HashNode values and
+/// CallNode block bodies in `subtree_includes_receive`.
 pub struct MessageExpectation;
 
 /// Default style is `allow` — flags `expect(...).to receive` in favor of `allow`.
@@ -180,6 +188,26 @@ fn subtree_includes_receive(node: &ruby_prism::Node<'_>) -> bool {
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
                 if subtree_includes_receive(&arg) {
+                    return true;
+                }
+            }
+        }
+        // Recurse into block body (handles `instance_double(...).tap { |x| receive(:foo) }` etc.)
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                if let Some(body) = block_node.body() {
+                    if subtree_includes_receive(&body) {
+                        return true;
+                    }
+                }
+            }
+        }
+    } else if let Some(hash) = node.as_hash_node() {
+        // Recurse into hash values (handles `receive_messages(service: tap { ... })` etc.)
+        for element in hash.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                let value = assoc.value();
+                if subtree_includes_receive(&value) {
                     return true;
                 }
             }
