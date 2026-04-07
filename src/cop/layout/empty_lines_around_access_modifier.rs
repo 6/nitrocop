@@ -126,6 +126,24 @@ use crate::parse::source::SourceFile;
 ///     `module_function` or `public`. Fix: added `has_blank_after` check to the
 ///     `only_before` branch for special_modifiers only, reporting "Remove a blank
 ///     line after `{modifier}`." when a blank line follows (2026-04-06).
+///
+/// 14. Blocks inside class bodies (e.g. `setup do...end`, `included do...end`)
+///     were incorrectly calling `note_nested_class_like()`, which disabled the
+///     `body_end_boundary` exemption. This caused 6 default-style FPs where a
+///     modifier right before `end` (with a blank before) was flagged as missing
+///     a blank after. Fix: removed the `note_nested_class_like()` call from the
+///     block handler in `visit_call_node` — only actual class/module/sclass
+///     definitions should disable body_end_boundary (2026-04-07).
+///
+/// 15. The `only_before` style used `has_blank_after` (which includes the
+///     body-end exemption) to decide whether to flag "Remove blank line after."
+///     This caused 78 FPs where a special modifier before `end` (no actual
+///     blank line) was incorrectly flagged. Fix: rewrote the `only_before`
+///     branch to match RuboCop's `allowed_only_before_style?` exactly:
+///     (a) exempt when the next line is literal `end` (no indentation),
+///     (b) use `next_line_empty_and_exists?` (body_end OR actual blank, AND
+///     not at EOF) for the "Remove after" check, and (c) fire at most one
+///     offense per modifier (2026-04-07).
 pub struct EmptyLinesAroundAccessModifier;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -509,10 +527,6 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
 
             // Blocks in macro scope inherit it (wrapper); otherwise non-macro.
             if self.in_access_modifier_scope() {
-                // Any nested block inside a class body marks it as having seen
-                // nested content, so a modifier at the class body end is not
-                // treated as a "body end" modifier.
-                self.note_nested_class_like();
                 self.push_wrapper_scope(opening, closing);
             } else {
                 self.push_non_class_scope();
@@ -783,6 +797,54 @@ impl Cop for EmptyLinesAroundAccessModifier {
                     }
                 }
                 "only_before" => {
+                    // Match RuboCop's allowed_only_before_style? logic:
+                    // 1. Special modifier + next line is bare 'end' → no offense
+                    // 2. Special modifier + next_line_empty_and_exists → "Remove after"
+                    // 3. No blank before → "Keep before"
+                    // RuboCop fires at most ONE offense per modifier.
+                    let is_special = access_modifier_predicates::is_special_modifier_name(
+                        modifier_str.as_bytes(),
+                    );
+
+                    if is_special {
+                        // RuboCop: return true if processed_source[node.last_line] == 'end'
+                        let next_line_is_bare_end = line < lines.len() && lines[line] == b"end";
+                        if next_line_is_bare_end {
+                            // No offense for this modifier
+                            continue;
+                        }
+
+                        // RuboCop: return false if next_line_empty_and_exists?
+                        // next_line_empty = body_end? || next_line.blank?
+                        let next_empty = is_at_body_end
+                            || (line < lines.len() && is_blank_or_whitespace_line(lines[line]));
+                        // exists = modifier is not on the second-to-last line
+                        let exists = line + 1 != lines.len();
+
+                        if next_empty && exists {
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                col,
+                                format!("Remove a blank line after `{modifier_str}`."),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                if let Some(off) = source.line_col_to_offset(line + 1, 0) {
+                                    corr.push(crate::correction::Correction {
+                                        start: off,
+                                        end: off,
+                                        replacement: String::new(),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diag);
+                            continue;
+                        }
+                    }
+
                     if !has_blank_before {
                         let mut diag = self.diagnostic(
                             source,
@@ -796,34 +858,6 @@ impl Cop for EmptyLinesAroundAccessModifier {
                                     start: off,
                                     end: off,
                                     replacement: "\n".to_string(),
-                                    cop_name: self.name(),
-                                    cop_index: 0,
-                                });
-                                diag.corrected = true;
-                            }
-                        }
-                        diagnostics.push(diag);
-                    }
-                    // only_before style: blank line after is an offense for
-                    // private/protected (special_modifiers), not for
-                    // module_function/public (RuboCop doesn't check these)
-                    if has_blank_after
-                        && access_modifier_predicates::is_special_modifier_name(
-                            modifier_str.as_bytes(),
-                        )
-                    {
-                        let mut diag = self.diagnostic(
-                            source,
-                            line,
-                            col,
-                            format!("Remove a blank line after `{modifier_str}`."),
-                        );
-                        if let Some(ref mut corr) = corrections {
-                            if let Some(off) = source.line_col_to_offset(line + 1, 0) {
-                                corr.push(crate::correction::Correction {
-                                    start: off,
-                                    end: off,
-                                    replacement: String::new(),
                                     cop_name: self.name(),
                                     cop_index: 0,
                                 });
@@ -1014,5 +1048,77 @@ mod tests {
         );
 
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn no_offense_modifier_at_body_end_after_block() {
+        // Bug 1 regression: blocks in class scope (like `included do...end`,
+        // `setup do...end`) should NOT disable body_end_boundary. A modifier
+        // right before `end` with a blank line before it is valid.
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"module Loggable\n  included do\n    has_many :outputs\n  end\n\n  def info(line)\n  end\n\n  private\nend\n",
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for modifier at body end after block, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_modifier_at_body_end_after_setup_block() {
+        // Regression test: `setup do...end` block should not disable body_end
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"class AppTest < ActionDispatch::IntegrationTest\n  setup do\n    do_something\n  end\n\n  protected\nend\n",
+        );
+        assert!(diags.is_empty(), "Expected no offense, got: {:?}", diags);
+    }
+
+    #[test]
+    fn only_before_no_offense_modifier_before_bare_end() {
+        // Bug 2 regression: only_before style should not flag "Remove blank
+        // after" when the next line is bare `end` (no indentation).
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Foo\n  def run; end\n\n  private\nend\n",
+            config,
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for only_before with bare end, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn only_before_no_offense_modifier_at_body_end_after_block() {
+        // Combines Bug 1 + Bug 2: block in class + only_before style +
+        // modifier before bare `end` should be no offense.
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"module Loggable\n  included do\n    has_many :outputs\n  end\n\n  private\nend\n",
+            config,
+        );
+        assert!(diags.is_empty(), "Expected no offense, got: {:?}", diags);
     }
 }
