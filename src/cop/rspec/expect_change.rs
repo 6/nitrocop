@@ -21,7 +21,8 @@ use crate::parse::source::SourceFile;
 /// `change { obj.attr }`. RuboCop's pattern accepts ANY first argument type
 /// (not just constants/variables), so the Rust implementation was too
 /// restrictive — it was missing global variables (`$token`) and chained
-/// method calls (e.g., `users.green`).
+/// method calls (e.g., `users.green`). The second argument can be a symbol
+/// or string (RuboCop's pattern is `({sym str} $_)`).
 ///
 /// This cop is visited by the corpus oracle for both style variants.
 pub struct ExpectChange;
@@ -89,9 +90,11 @@ impl Cop for ExpectChange {
             if arg_list.len() != 2 {
                 return;
             }
-            // RuboCop's pattern `$_` accepts ANY first argument type.
-            // The second argument must be a symbol or string.
-            if arg_list[1].as_symbol_node().is_none() {
+            // RuboCop's pattern `({sym str} $_)` accepts symbol or string.
+            // Accept BOTH symbol and string as the second argument.
+            let is_sym_or_str =
+                arg_list[1].as_symbol_node().is_some() || arg_list[1].as_string_node().is_some();
+            if !is_sym_or_str {
                 return;
             }
             let loc = call.location();
