@@ -124,6 +124,9 @@ impl Cop for FirstArgumentIndentation {
             diagnostics: Vec::new(),
             // Stack of parent call info: (is_parenthesized, call_start_offset)
             parent_call_stack: Vec::new(),
+            splat_offsets: Vec::new(),
+            splat_expr_depth: 0,
+            call_depth: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -140,6 +143,19 @@ struct FirstArgVisitor<'a> {
     /// call_node_start_col is the column of the start of the entire call expression
     /// (including receiver), matching RuboCop's node.source_range.begin_pos
     parent_call_stack: Vec<ParentCallInfo>,
+    /// Stack of splat node start offsets. When non-empty, we're inside a splat.
+    /// Used by consistent_relative_to_receiver to match RuboCop's behavior.
+    splat_offsets: Vec<usize>,
+    /// Depth of CallNode nesting inside splat expressions.
+    /// Incremented when we manually visit a CallNode as the expression of a splat.
+    /// Decremented after visiting that CallNode's children.
+    /// This is different from call_depth because call_depth tracks ALL CallNode visits,
+    /// while this tracks only splat expression visits.
+    splat_expr_depth: usize,
+    /// Depth of CallNode nesting. Incremented when entering a CallNode and
+    /// decremented when exiting. When > 0 and splat_offsets is non-empty,
+    /// we're inside a call that is the direct child of a splat.
+    call_depth: usize,
 }
 
 struct ParentCallInfo {
@@ -243,9 +259,25 @@ impl FirstArgVisitor<'_> {
         }
 
         if self.style == "consistent_relative_to_receiver" {
-            // Use the column of the call node start (includes receiver) + width
-            let (_, call_col) = self.source.offset_to_line_col(call_start_offset);
-            return call_col + self.width;
+            // Use the column of the call node start (includes receiver) + width.
+            // But if inside a splat context (e.g., *Dir.glob(...)), RuboCop uses
+            // the splat's column as the base, not the call's column.
+            // splat_expr_depth > 0 means we're the direct expression of a splat,
+            // so we use the splat's offset for expected indentation.
+            let base_offset = if self.splat_expr_depth > 0
+                && self.call_depth == 2
+                && !self.splat_offsets.is_empty()
+            {
+                // Direct expression of a splat - use the splat's offset
+                self.splat_offsets
+                    .last()
+                    .copied()
+                    .unwrap_or(call_start_offset)
+            } else {
+                call_start_offset
+            };
+            let (_, base_col) = self.source.offset_to_line_col(base_offset);
+            return base_col + self.width;
         }
 
         // special_for_inner_method_call or special_for_inner_method_call_in_parentheses
@@ -458,6 +490,8 @@ fn is_setter_method(name: &str) -> bool {
 
 impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        // Track call depth to know if we're the direct child of a splat
+        self.call_depth += 1;
         let call_start_offset = node.location().start_offset();
         let name_bytes = node.name().as_slice();
         let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
@@ -505,6 +539,7 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
         self.parent_call_stack.push(parent_info);
         ruby_prism::visit_call_node(self, node);
         self.parent_call_stack.pop();
+        self.call_depth -= 1;
     }
 
     fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
@@ -548,6 +583,26 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
         self.parent_call_stack.push(parent_info);
         ruby_prism::visit_super_node(self, node);
         self.parent_call_stack.pop();
+    }
+
+    fn visit_splat_node(&mut self, node: &ruby_prism::SplatNode<'pr>) {
+        // Push splat offset when entering a splat (*args)
+        self.splat_offsets.push(node.location().start_offset());
+        // Manually visit the expression (the CallNode being splatted)
+        // Increment splat_expr_depth so we know we're at depth 1 inside the splat
+        self.splat_expr_depth += 1;
+        if let Some(expr) = node.expression() {
+            self.visit(&expr);
+        }
+        self.splat_expr_depth -= 1;
+        self.splat_offsets.pop();
+    }
+
+    fn visit_assoc_splat_node(&mut self, node: &ruby_prism::AssocSplatNode<'pr>) {
+        // Push assoc splat offset when entering an assoc splat (**kwargs)
+        self.splat_offsets.push(node.location().start_offset());
+        ruby_prism::visit_assoc_splat_node(self, node);
+        self.splat_offsets.pop();
     }
 }
 
