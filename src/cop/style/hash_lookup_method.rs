@@ -30,6 +30,25 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: added the index-write node types to `interested_node_types` and handle
 /// them in the `fetch` style branch by treating them as implicit `[]` reads.
+///
+/// ## Variant style divergence (2026-04-07) - fetch style FP/FN
+///
+/// `EnforcedStyle: fetch` had two bugs related to block argument handling:
+///
+/// 1. FN: `hash[&block]` and `hash[&-> {...}]` were not flagged because
+///    `call.arguments()` returns `None` in Prism when only a block argument
+///    is present. The `if let Some(args) = call.arguments()` pattern skipped
+///    entirely in this case. RuboCop's `node.arguments.one?` counts block_pass
+///    as an argument, so these should be flagged.
+///
+/// 2. FP: `hash[key, &block]` was incorrectly flagged because `call.arguments()`
+///    doesn't include `BlockArgumentNode` - it only counts regular arguments.
+///    So `arg_list.len() == 1` was true (only `key`), but RuboCop counts
+///    both `key` and `&block` as arguments, so `arguments.one?` is false.
+///
+/// Fix: Use `.map_or(0, ...)` to handle `None` from `call.arguments()`, and
+/// add `call.block_argument_node().is_some()` to the effective argument count
+/// so block-only and block-plus-arg cases are correctly distinguished.
 pub struct HashLookupMethod;
 
 impl Cop for HashLookupMethod {
@@ -156,18 +175,26 @@ impl Cop for HashLookupMethod {
             "fetch" => {
                 // Flag [] calls, suggest fetch
                 if method_bytes == b"[]" {
-                    if let Some(args) = call.arguments() {
-                        let arg_list: Vec<_> = args.arguments().iter().collect();
-                        if arg_list.len() == 1 && call.receiver().is_some() {
-                            let loc = call.location();
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                "Use `fetch` instead of `[]`.".to_string(),
-                            ));
-                        }
+                    // RuboCop's `arguments.one?` counts block_pass as an argument.
+                    // Prism's `call.arguments()` does NOT include block_pass,
+                    // and may return None entirely when only a block arg is present.
+                    // Use map_or to safely handle None (count = 0).
+                    let arg_count = call
+                        .arguments()
+                        .map_or(0, |args| args.arguments().iter().count());
+                    let has_block_arg = call
+                        .block()
+                        .is_some_and(|b| b.as_block_argument_node().is_some());
+                    let effective_arg_count = arg_count + usize::from(has_block_arg);
+                    if effective_arg_count == 1 && call.receiver().is_some() {
+                        let loc = call.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use `fetch` instead of `[]`.".to_string(),
+                        ));
                     }
                 }
             }
@@ -180,4 +207,40 @@ impl Cop for HashLookupMethod {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HashLookupMethod, "cops/style/hash_lookup_method");
+
+    fn fetch_style_config() -> CopConfig {
+        let mut opts = std::collections::HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("fetch".to_string()),
+        );
+        CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn fetch_style_offense() {
+        // FN cases: block-only arguments should be flagged
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashLookupMethod,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/hash_lookup_method/fetch_style_offense.rb"
+            ),
+            fetch_style_config(),
+        );
+    }
+
+    #[test]
+    fn fetch_style_no_offense() {
+        // Cases with multiple args should not be flagged
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashLookupMethod,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/hash_lookup_method/fetch_style_no_offense.rb"
+            ),
+            fetch_style_config(),
+        );
+    }
 }
