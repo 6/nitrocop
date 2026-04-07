@@ -19,9 +19,11 @@ end
 context 'after an its sibling' do
   its(:count) { is_expected.to eq 2 }
   its_map(['title']) { is_expected.to eq %w[Argentina Ukraine] }
+                       ^^^^^^^^^^^ RSpec/ImplicitSubject: Don't use implicit subject.
 end
 
 context 'with a symbol accessor after an its sibling' do
   its(:count) { is_expected.to be > 40 }
   its_map(:title) { is_expected.to include('Ukrainian hryvnia') }
+                    ^^^^^^^^^^^ RSpec/ImplicitSubject: Don't use implicit subject.
 end

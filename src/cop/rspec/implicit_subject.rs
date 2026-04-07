@@ -191,14 +191,6 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                     return;
                 }
 
-                // For single_line_only and single_statement_only, only flag
-                // inside actual example blocks. is_expected in before/let/def
-                // contexts is not the cop's concern.
-                if enclosing.is_none() {
-                    ruby_prism::visit_call_node(self, node);
-                    return;
-                }
-
                 let is_single_line = enclosing
                     .as_ref()
                     .is_some_and(|(_, block)| is_single_line_block(block));
@@ -331,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn single_statement_only_skips_non_example_contexts() {
+    fn single_statement_only_flags_non_example_contexts() {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
 
@@ -342,13 +334,15 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        // describe is not an example method — is_expected here should not be flagged
+        // RuboCop flags is_expected even outside example blocks: when
+        // enclosing example is nil, single_line? returns nil, and !nil is
+        // truthy in Ruby, so the offense fires.
         let source = b"describe 'something' do\n  is_expected.to be_valid\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&ImplicitSubject, source, config);
         assert_eq!(
             diags.len(),
-            0,
-            "non-example contexts should NOT be flagged for single_statement_only"
+            1,
+            "non-example contexts should be flagged (matches RuboCop behavior)"
         );
     }
 

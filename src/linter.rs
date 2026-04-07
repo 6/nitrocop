@@ -427,19 +427,11 @@ fn lint_file(
 
     // Files with invalid UTF-8 that lack an encoding magic comment are
     // treated by RuboCop as a fatal Lint/Syntax error ("Invalid byte
-    // sequence in utf-8.") and no other cops run.
-    //
-    // Files with invalid UTF-8 that HAVE an encoding magic comment (e.g.,
-    // `# coding: US-ASCII`, `# coding: windows-1252`) cause RuboCop's
-    // `Prism::Translation::Parser` to crash ("0 files inspected"), producing
-    // 0 offenses. Skip all cops on these files to match that behavior.
-    // Without this, nitrocop (using Prism directly) parses them successfully
-    // and reports offenses that RuboCop never would → false positives.
-    if std::str::from_utf8(source.as_bytes()).is_err() {
-        if has_encoding_magic_comment(source.as_bytes()) {
-            // Translation::Parser crash → 0 offenses. Return empty.
-            return Vec::new();
-        }
+    // sequence in utf-8.") and no other cops run. Files WITH an encoding
+    // magic comment (e.g., `# encoding: iso-8859-1`) are processed normally.
+    if std::str::from_utf8(source.as_bytes()).is_err()
+        && !has_encoding_magic_comment(source.as_bytes())
+    {
         let result = emit_invalid_utf8_diagnostic(
             &source,
             config,
