@@ -56,7 +56,9 @@ fn is_explicit_unnamed_subject(node: &ruby_prism::CallNode<'_>) -> bool {
             args.arguments().len() == 1
                 && args.arguments().first().is_some_and(|arg| {
                     arg.as_call_node().is_some_and(|inner| {
-                        inner.name().as_slice() == b"subject" && inner.receiver().is_none()
+                        crate::cop::shared::method_dispatch_predicates::is_command(
+                            &inner, b"subject",
+                        )
                     })
                 })
         })
