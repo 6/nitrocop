@@ -34,13 +34,14 @@ use std::collections::HashSet;
 /// having return values used, causing false positives in semantic style where functional
 /// blocks with braces were incorrectly flagged as procedural.
 ///
-/// ## Fix (2026-04-07): splat argument block handling
+/// ## Fix (2026-04-07): reverted splat argument block handling
 ///
-/// `collect_ignored_blocks` now handles `SplatNode` (`*items.map { ... }`) by recursing
-/// into the splat's expression. Previously, blocks inside splat arguments were not
-/// suppressed, causing false positives across all EnforcedStyle values. RuboCop does
-/// not flag blocks inside splat arguments because changing delimiters would change
-/// semantics (the splat binds to the outer method call, not the block).
+/// The SplatNode handling in `collect_ignored_blocks` was reverted because it caused
+/// false negatives in `braces_for_chaining` and `always_braces` styles. RuboCop does
+/// not have special splat handling in those styles — blocks inside splat arguments
+/// are checked normally. The splat handler's rationale ("changing delimiters would
+/// change semantics") was incorrect; block delimiters inside splat arguments do not
+/// affect how the splat binds.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -1007,15 +1008,6 @@ fn collect_ignored_blocks(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usi
     if let Some(splat) = node.as_assoc_splat_node() {
         if let Some(value) = splat.value() {
             collect_ignored_blocks(&value, ignored);
-        }
-        return;
-    }
-
-    // SplatNode (*items.map { ... }) — block inside splat argument.
-    // Changing delimiters would change semantics (splat binds to the method call).
-    if let Some(splat) = node.as_splat_node() {
-        if let Some(expr) = splat.expression() {
-            collect_ignored_blocks(&expr, ignored);
         }
         return;
     }
