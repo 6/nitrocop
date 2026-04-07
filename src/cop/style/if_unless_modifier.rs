@@ -1143,4 +1143,17 @@ mod tests {
             "Should fire when LineLengthEnabled is false regardless of line length"
         );
     }
+
+    #[test]
+    fn semicolon_before_closing_brace_not_another_statement() {
+        use crate::testutil::run_cop_full;
+        // `return ret if ret; }` — the `;` before `}` is not a sibling statement,
+        // so the if should be flaggable as modifier form.
+        let source = b"items.each { |x| if x\n  return x\nend; }\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Semicolon before closing brace should not suppress modifier suggestion"
+        );
+    }
 }
