@@ -195,7 +195,9 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          if git diff --quiet bench/quick_results_ci.md 2>/dev/null; then
+          # Stage first so diff detects both new (untracked) and modified files
+          git add bench/quick_results_ci.md 2>/dev/null || true
+          if git diff --cached --quiet -- bench/quick_results_ci.md; then
             echo "No changes to bench/quick_results_ci.md"
             exit 0
           fi
