@@ -122,6 +122,15 @@ def test_merge_variant_results_with_style_labels(tmp_path):
             {"cop": "Style/Foo", "matches": 50, "fp": 2, "fn": 1},
             {"cop": "Style/Other", "matches": 100, "fp": 0, "fn": 0},
         ],
+        "by_repo_cop": {
+            "repo_a__abc": {
+                "Style/Foo": {"fp": 2, "fn": 1, "matches": 50},
+                "Style/Other": {"fp": 0, "fn": 0, "matches": 100},
+            },
+            "repo_b__def": {
+                "Style/Other": {"fp": 0, "fn": 0, "matches": 30},
+            },
+        },
     }))
 
     result = run_variant_batches.merge_variant_results([f1], batches_dir=batches_dir)
@@ -131,6 +140,13 @@ def test_merge_variant_results_with_style_labels(tmp_path):
     assert len(batch["by_cop"]) == 1
     assert batch["by_cop"][0]["cop"] == "Style/Foo"
     assert batch["by_cop"][0]["style_label"] == "bar"
+    # by_repo_cop should be filtered to only Style/Foo
+    assert "by_repo_cop" in batch
+    assert "repo_a__abc" in batch["by_repo_cop"]
+    assert "Style/Foo" in batch["by_repo_cop"]["repo_a__abc"]
+    assert "Style/Other" not in batch["by_repo_cop"]["repo_a__abc"]
+    # repo_b only has Style/Other, so it should be excluded entirely
+    assert "repo_b__def" not in batch["by_repo_cop"]
 
 
 def test_merge_variant_results_without_batches_dir(tmp_path):
