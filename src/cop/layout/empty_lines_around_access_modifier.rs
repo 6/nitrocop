@@ -121,10 +121,11 @@ use crate::parse::source::SourceFile;
 ///
 /// 13. The `only_before` variant was only checking `has_blank_before` and never
 ///     checked `has_blank_after`. RuboCop's `only_before` style flags a blank
-///     line AFTER the modifier (telling users to remove it), not just the one
-///     before. Fix: added `has_blank_after` check to the `only_before` branch,
-///     reporting "Remove a blank line after `{modifier}`." when a blank line
-///     follows the modifier (2026-04-06).
+///     line AFTER the modifier for `private`/`protected` (special_modifiers),
+///     telling users to remove it. It does not check blank lines after
+///     `module_function` or `public`. Fix: added `has_blank_after` check to the
+///     `only_before` branch for special_modifiers only, reporting "Remove a blank
+///     line after `{modifier}`." when a blank line follows (2026-04-06).
 pub struct EmptyLinesAroundAccessModifier;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -799,7 +800,14 @@ impl Cop for EmptyLinesAroundAccessModifier {
                         }
                         diagnostics.push(diag);
                     }
-                    if has_blank_after {
+                    // only_before style: blank line after is an offense for
+                    // private/protected (special_modifiers), not for
+                    // module_function/public (RuboCop doesn't check these)
+                    if has_blank_after
+                        && access_modifier_predicates::is_special_modifier_name(
+                            modifier_str.as_bytes(),
+                        )
+                    {
                         let mut diag = self.diagnostic(
                             source,
                             line,
@@ -884,6 +892,29 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].location.line, 3);
         assert!(diags[0].message.contains("Keep a blank line before"));
+    }
+
+    #[test]
+    fn only_before_style_allows_blank_line_after_module_function() {
+        // module_function is NOT a special_modifier (only private/protected are),
+        // so only_before style should NOT flag blank line after module_function.
+        // This is a regression test for FP in module_function repos.
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"module Test\n  module_function\n\n  def foo; end\nend\n",
+            config,
+        );
+        // no offense - only_before doesn't check blank line after module_function
+        assert_eq!(diags.len(), 0);
     }
 
     #[test]
