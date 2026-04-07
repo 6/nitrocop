@@ -47,6 +47,20 @@ use crate::parse::source::SourceFile;
 /// - `rescue => self.foo` references are detected via `visit_rescue_node`. Prism
 ///   calls `visit_rescue_node` directly from `visit_begin_node`, bypassing the
 ///   normal branch dispatch, so a dedicated visitor is needed to catch these.
+///
+/// KNOWN LIMITATIONS (investigated but not fixed due to RuboCop scope tracking bugs):
+/// - RuboCop has incorrect scope tracking where keyword args of enclosing methods
+///   are treated as in scope inside nested methods (e.g., `def self.of(klass, length: nil)`
+///   followed by `Class.new(self) do def do_type_check; if length and self.length ...`).
+///   Our cop correctly does NOT inherit keyword args into nested methods, but this
+///   causes 12 FP cases where RuboCop doesn't flag but we do.
+/// - RuboCop's block scope tracking incorrectly treats variables assigned in blocks
+///   as affecting subsequent `def file.method` scope when `file` is the lvar receiver,
+///   causing `self.path` inside `def file.local_path` to not be flagged. Our cop
+///   correctly flags these, resulting in 3 additional FPs in monde__mms2r media.rb.
+/// - The FN case (noosfero__noosfero) involves `self.actor` inside a rescue conditional
+///   that is detected in snippet but not in full file - likely due to some interaction
+///   with the enclosing begin/rescue context that our cop doesn't handle.
 pub struct RedundantSelf;
 
 /// Methods where self. is always required (Ruby keywords).
