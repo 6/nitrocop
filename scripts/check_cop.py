@@ -371,15 +371,62 @@ def relevant_repos_for_cop(
     return relevant
 
 
+def variant_only_repos_for_cop(
+    cop_name: str,
+    run_id: int | None,
+    *,
+    exclude: set[str],
+    cap: int = 10,
+) -> set[str]:
+    """Return repos that diverge ONLY in variant styles, not in default.
+
+    Extracts repo IDs from ``load_variant_baselines()``'s per-repo data,
+    filters out repos already in *exclude* (the default-style set), and
+    returns up to *cap* repos ranked by highest total variant FP+FN.
+    """
+    if run_id is None:
+        return set()
+    baselines = load_variant_baselines(cop_name, run_id)
+    if not baselines:
+        return set()
+
+    # Aggregate FP+FN across all variant styles per repo
+    repo_scores: dict[str, int] = {}
+    for _style_label, style_data in baselines.items():
+        for repo_id, repo_data in style_data.get("by_repo", {}).items():
+            if repo_id in exclude:
+                continue
+            fp = repo_data.get("fp", 0)
+            fn = repo_data.get("fn", 0)
+            if fp > 0 or fn > 0:
+                repo_scores[repo_id] = repo_scores.get(repo_id, 0) + fp + fn
+
+    if not repo_scores:
+        return set()
+
+    # Rank by total divergence, take top `cap`
+    ranked = sorted(repo_scores, key=lambda r: repo_scores[r], reverse=True)
+    selected = set(ranked[:cap])
+    print(f"  variant-only repos: {len(selected)} additional "
+          f"(from {len(repo_scores)} with variant divergence, cap={cap})",
+          file=sys.stderr)
+    return selected
+
+
 def clone_repos_for_cop(
     cop_name: str, data: dict,
     shard_index: int | None = None, total_shards: int | None = None,
     sample: int | None = None,
     include_gated: bool = False,
+    check_variants: bool = False,
+    variant_run_id: int | None = None,
 ) -> Path:
     """Clone repos needed for a cop into a temp dir matching the oracle's structure.
 
     When sharding, only clones repos in this shard's slice.
+    When *check_variants* is True, also includes repos that diverge only
+    in variant styles (up to 10 extra), so variant CI is not trivially 0/0
+    for cops with no default-style divergence.
     Returns the temp dir path. Repos are at <tmpdir>/repos/REPO_ID/.
     """
     import tempfile
@@ -393,6 +440,16 @@ def clone_repos_for_cop(
                                     include_gated=include_gated)
     if not needed:
         print(f"  No baseline activity or divergence for {cop_name}", file=sys.stderr)
+
+    # When variant checks are enabled, also clone repos that ONLY diverge
+    # in variant styles.  These are invisible to the default-style selection.
+    if check_variants and variant_run_id is not None:
+        variant_extra = variant_only_repos_for_cop(
+            cop_name, variant_run_id, exclude=needed, cap=10,
+        )
+        variant_extra &= set(manifest.keys())
+        if variant_extra:
+            needed = needed | variant_extra
 
     # When sharding, only clone this shard's repos
     if shard_index is not None and total_shards is not None and needed:
@@ -1139,6 +1196,8 @@ def main():
                 shard_index=args.shard_index, total_shards=args.total_shards,
                 sample=args.sample,
                 include_gated=include_gated and zero_baseline,
+                check_variants=args.check_variants,
+                variant_run_id=corpus_run_id,
             )
             _CLONE_DIR = tmpdir / "repos"
         else:
@@ -1623,6 +1682,10 @@ def main():
             # the spread catches NEW regressions the oracle hasn't seen.
             oracle_repos = load_variant_example_repos(args.cop, corpus_run_id)
             oracle_set = set(oracle_repos) if oracle_repos else set()
+            # Also prioritize repos with known variant divergence from baselines
+            for style_data in vb.values():
+                for repo_id in style_data.get("by_repo", {}):
+                    oracle_set.add(repo_id)
             priority = [d for d in all_repo_dirs if Path(d).name in oracle_set]
             rest = [d for d in all_repo_dirs if Path(d).name not in oracle_set]
             # Take up to half the sample from oracle, fill the rest with spread
