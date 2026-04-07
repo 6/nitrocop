@@ -152,6 +152,62 @@ mod tests {
         "cops/layout/multiline_method_call_brace_layout"
     );
 
+    fn style_config(style: &str) -> CopConfig {
+        let mut opts = std::collections::HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn same_line_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MultilineMethodCallBraceLayout,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/multiline_method_call_brace_layout/same_line_offense.rb"
+            ),
+            style_config("same_line"),
+        );
+    }
+
+    #[test]
+    fn same_line_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MultilineMethodCallBraceLayout,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/multiline_method_call_brace_layout/same_line_no_offense.rb"
+            ),
+            style_config("same_line"),
+        );
+    }
+
+    #[test]
+    fn new_line_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MultilineMethodCallBraceLayout,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/multiline_method_call_brace_layout/new_line_offense.rb"
+            ),
+            style_config("new_line"),
+        );
+    }
+
+    #[test]
+    fn new_line_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MultilineMethodCallBraceLayout,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/multiline_method_call_brace_layout/new_line_no_offense.rb"
+            ),
+            style_config("new_line"),
+        );
+    }
+
     #[test]
     fn heredoc_only_in_earlier_argument_still_checks_brace_layout() {
         let source = br#"foo(<<~EOS, arg
