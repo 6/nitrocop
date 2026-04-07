@@ -295,4 +295,37 @@ mod tests {
             "Lambda with single-line params should flag blank line after do"
         );
     }
+
+    #[test]
+    fn empty_lines_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &EmptyLinesAroundBlockBody,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/empty_lines_around_block_body/empty_lines_offense.rb"
+            ),
+            empty_lines_config(),
+        );
+    }
+
+    #[test]
+    fn empty_lines_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EmptyLinesAroundBlockBody,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/empty_lines_around_block_body/empty_lines_no_offense.rb"
+            ),
+            empty_lines_config(),
+        );
+    }
+
+    fn empty_lines_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
 }

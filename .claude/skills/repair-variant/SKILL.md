@@ -63,8 +63,9 @@ Do NOT clone repos. Use `gh api` to fetch specific files.
 
 2. Fetch the file content at the pinned commit via GitHub API:
    ```bash
-   gh api repos/{owner}/{repo}/contents/{path}?ref={sha} --jq '.content' | base64 -d | sed -n '{start},{end}p'
+   gh api "repos/{owner}/{repo}/contents/{path}?ref={sha}" --jq '.content' | base64 -d | sed -n '{start},{end}p'
    ```
+   **Note:** Always double-quote the `gh api` URL argument — zsh interprets bare `?` as a glob.
    Fetch ~15 lines of context around the failing line.
 
 **For CI count-only failures** (repo ID + FP/FN delta, no file paths):
