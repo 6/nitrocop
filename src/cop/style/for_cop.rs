@@ -1,4 +1,4 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, CALL_NODE, FOR_NODE};
+use crate::cop::shared::node_type::{CALL_NODE, FOR_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
