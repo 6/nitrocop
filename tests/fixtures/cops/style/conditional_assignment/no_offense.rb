@@ -93,3 +93,6 @@ if condition
 else
   other.should == false
 end
+
+# ternary with assignment whose correction would exceed line length should not be flagged
+(t.empty? || t == "y" || t == "yes" || t == "yeah") ? conf["env"]["testmode_enabled"] = true : conf["env"]["testmode_enabled"] = false
