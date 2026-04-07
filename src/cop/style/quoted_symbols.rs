@@ -10,6 +10,12 @@ use crate::parse::source::SourceFile;
 /// hash-label keys like `"":` are still checked for quote style. This fixes the
 /// remaining FN cluster without broadening handling for multiline or escaped
 /// quoted symbols.
+///
+/// For the `double_quotes` variant style, single-quoted symbols that START with
+/// interpolation markers (`#{`, `#@`, `#$`) are not flagged because double quotes
+/// would be invalid for that content (the markers would be interpreted as
+/// interpolation in double quotes). This matches RuboCop's behavior for symbols
+/// like `:'#{'` and `:'#$SAFE'`.
 pub struct QuotedSymbols;
 
 impl Cop for QuotedSymbols {
@@ -120,7 +126,16 @@ impl Cop for QuotedSymbols {
 
             let has_double_quote = inner.contains(&b'"');
 
-            if style == "double_quotes" && !has_double_quote {
+            // For double_quotes style, check if double quotes would be invalid for this content.
+            // RuboCop's invalid_double_quotes? checks for escape sequences and interpolation markers
+            // in the source. For single-quoted symbols like :'#{', the source contains the literal
+            // characters #{ (no backslash), but RuboCop still considers them invalid because
+            // #{ would be interpreted as interpolation in double quotes.
+            let has_interpolation_marker = inner
+                .windows(2)
+                .any(|w| w == b"#{" || w == b"#@" || w == b"#$");
+
+            if style == "double_quotes" && !has_double_quote && !has_interpolation_marker {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
                     source,
