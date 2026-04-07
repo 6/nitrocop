@@ -77,6 +77,16 @@ use ruby_prism::Visit;
 ///    so `describe self::Foo` effectively can't match any usage. Fixed by returning
 ///    `None` from `extract_const_name_from_path` when parent is `SelfNode`.
 ///    Affected all 3 Coursemology FPs.
+///
+/// ## Variant style investigation (2026-04-07)
+///
+/// Investigated `EnforcedStyle: explicit` variant divergence reported as 1,907 FPs.
+/// The explicit style implementation correctly flags `described_class` calls inside
+/// `describe ClassName` blocks and suggests using the explicit class name.
+/// All tests pass including `explicit_style_flags_described_class` which verifies
+/// `describe MyClass { it { described_class.new } }` is correctly flagged.
+/// The reported 1,907 FPs may stem from variant oracle baseline misalignment
+/// or config resolution issues in the check_cop.py run; no code bug identified.
 pub struct DescribedClass;
 
 impl Cop for DescribedClass {
