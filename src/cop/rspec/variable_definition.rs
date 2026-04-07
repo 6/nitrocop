@@ -36,6 +36,23 @@ use ruby_prism::Visit;
 /// Only flags `let`/`subject` calls when `in_example_group` is true.
 /// The Mail.new-inside-example-group case still fires correctly because `in_example_group`
 /// is inherited by all nested blocks within the example group.
+///
+/// ## Variant style investigation (2026-04-07)
+///
+/// The `strings` style variant reports 978 FP in the oracle variant run. Investigation could
+/// not reproduce the issue:
+///
+/// 1. RuboCop verification was inconclusive due to gem dependency issues preventing standalone
+///    RuboCop execution with rubocop-rspec cops.
+/// 2. The `check_cop.py --style` output shows "Expected (RuboCop): 142" which appears to be
+///    the default config baseline, not the strings-style RuboCop count.
+/// 3. Implementation review shows `strings` style checks `as_symbol_node()` and
+///    `as_interpolated_symbol_node()` which matches RuboCop's `any_sym_type?` behavior.
+/// 4. All unit tests pass including `strings_style_flags_symbol_names` which verifies that
+///    `let(:foo)` is flagged with `strings` style.
+///
+/// The variant FP issue could not be identified in the code. The implementation appears correct
+/// based on the RuboCop spec and existing tests.
 pub struct VariableDefinition;
 
 impl Cop for VariableDefinition {
