@@ -1213,8 +1213,11 @@ fn check_equals_alignment(
         // coincidentally aligns with a real `=` on an adjacent line).
         // Also exclude `=~` (match operator) which is not an assignment operator —
         // RuboCop's `equal_sign?` does not include `tMATCH`.
+        // Also exclude `=>` (hash rocket) which should not participate in equals alignment —
+        // it ends with `>` not `~`, so the `=~` check above doesn't catch it.
         let is_valid_equals = is_assignment_equals(current_line, eq_col)
-            && !(eq_col + 1 < current_line.len() && current_line[eq_col + 1] == b'~');
+            && !(eq_col + 1 < current_line.len() && current_line[eq_col + 1] == b'~')
+            && !(eq_col + 1 < current_line.len() && current_line[eq_col + 1] == b'>');
 
         if is_valid_equals {
             // Convert the byte position of the last '=' to a character column,
@@ -1226,10 +1229,13 @@ fn check_equals_alignment(
             };
             // Check if the adjacent line has '=' at the same character column,
             // and that it is the LAST '=' of its operator (not an interior '=' of '==').
+            // Also exclude `=>` (hash rocket) — it passes is_assignment_equals but should
+            // not participate in equals alignment.
             if adj_eq_col < adj_line.len()
                 && adj_line[adj_eq_col] == b'='
                 && is_assignment_equals(adj_line, adj_eq_col)
                 && (adj_eq_col + 1 >= adj_line.len() || adj_line[adj_eq_col + 1] != b'=')
+                && !(adj_eq_col + 1 < adj_line.len() && adj_line[adj_eq_col + 1] == b'>')
             {
                 return true;
             }
