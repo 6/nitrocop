@@ -42,6 +42,28 @@ use ruby_prism::Visit;
 /// RuboCop only skips arrays whose immediate parent is the masgn. Fixed by
 /// manually visiting MultiWriteNode children and only setting `in_multi_write`
 /// when the direct value is an ArrayNode, not for non-array values like IfNode.
+///
+/// ## Variant divergence fix (2026-04-07)
+///
+/// **Issue:** For `with_fixed_indentation` style, nitrocop was using the wrong
+/// message (`ALIGN_ELEMENTS_MSG` instead of `FIXED_INDENT_MSG`) and was skipping
+/// the first element check.
+///
+/// **Fix:** Changed the message to use `FIXED_INDENT_MSG` when style is
+/// `with_fixed_indentation`, and changed `last_checked_line` initialization from
+/// `first_line` to `0` so the first element is checked (matching RuboCop's
+/// `prev_line = -1` behavior).
+///
+/// **Note:** For rescue exceptions with backslash continuation (`rescue \\`),
+/// RuboCop uses `rescue_node.location().start_offset()` (the rescue keyword's line)
+/// for base column calculation, not the first exception's line. Fixed by using
+/// `rescue_node.location().start_offset()` in `check_rescue_exceptions`.
+///
+/// **Remaining issue:** For implicit bracketless arrays in assignments
+/// (e.g., `config.cache_store = :memory_store, {...}`), RuboCop uses the
+/// parent assignment's line for base column calculation, but nitrocop uses
+/// the first element's line because parent context is not available in the
+/// visitor. This causes some FPs for `with_fixed_indentation` style.
 pub struct ArrayAlignment;
 
 impl Cop for ArrayAlignment {
@@ -172,7 +194,18 @@ impl ArrayAlignment {
             _ => first_col, // "with_first_element" (default)
         };
 
-        self.check_element_alignment(source, &elements, first_line, expected_col, diagnostics);
+        let message = match style {
+            "with_fixed_indentation" => "Use one level of indentation for elements following the first line of a multi-line array.".to_string(),
+            _ => "Align the elements of an array literal if they span more than one line.".to_string(),
+        };
+        self.check_element_alignment(
+            source,
+            &elements,
+            first_line,
+            expected_col,
+            message,
+            diagnostics,
+        );
     }
 
     fn check_rescue_exceptions(
@@ -197,14 +230,28 @@ impl ArrayAlignment {
 
         let expected_col = match style {
             "with_fixed_indentation" => {
-                // Use the rescue keyword line's indentation + indent_width
-                let rescue_line_bytes = source.lines().nth(first_line - 1).unwrap_or(b"");
+                // Use the rescue keyword line's indentation + indent_width,
+                // not the first exception's line (they may differ with backslash continuation).
+                let rescue_loc_line = rescue_node.location().start_offset();
+                let (rescue_line, _) = source.offset_to_line_col(rescue_loc_line);
+                let rescue_line_bytes = source.lines().nth(rescue_line - 1).unwrap_or(b"");
                 crate::cop::shared::util::indentation_of(rescue_line_bytes) + indent_width
             }
             _ => first_col, // "with_first_element" (default)
         };
 
-        self.check_element_alignment(source, &exceptions, first_line, expected_col, diagnostics);
+        let message = match style {
+            "with_fixed_indentation" => "Use one level of indentation for elements following the first line of a multi-line array.".to_string(),
+            _ => "Align the elements of an array literal if they span more than one line.".to_string(),
+        };
+        self.check_element_alignment(
+            source,
+            &exceptions,
+            first_line,
+            expected_col,
+            message,
+            diagnostics,
+        );
     }
 
     fn check_element_alignment(
@@ -213,11 +260,12 @@ impl ArrayAlignment {
         elements: &ruby_prism::NodeList<'_>,
         first_line: usize,
         expected_col: usize,
+        message: String,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let mut last_checked_line = first_line;
+        let mut last_checked_line = 0; // Start at 0 so first element (line >= 1) is always checked
 
-        for elem in elements.iter().skip(1) {
+        for elem in elements.iter() {
             let start_offset = elem.location().start_offset();
             let (elem_line, elem_col) = source.offset_to_line_col(start_offset);
             // Only check the first element on each new line; subsequent elements
@@ -232,15 +280,7 @@ impl ArrayAlignment {
                 continue;
             }
             if elem_col != expected_col {
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        elem_line,
-                        elem_col,
-                        "Align the elements of an array literal if they span more than one line."
-                            .to_string(),
-                    ),
-                );
+                diagnostics.push(self.diagnostic(source, elem_line, elem_col, message.clone()));
             }
         }
     }
