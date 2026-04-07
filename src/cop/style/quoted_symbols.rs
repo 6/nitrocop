@@ -131,8 +131,9 @@ impl Cop for QuotedSymbols {
             // in the source. For single-quoted symbols like :'#{', the source contains the literal
             // characters #{ (no backslash), but RuboCop still considers them invalid because
             // #{ would be interpreted as interpolation in double quotes.
-            let has_interpolation_marker =
-                inner.starts_with(b"#{") || inner.starts_with(b"#@") || inner.starts_with(b"#$");
+            let has_interpolation_marker = inner
+                .windows(2)
+                .any(|w| w == b"#{" || w == b"#@" || w == b"#$");
 
             if style == "double_quotes" && !has_double_quote && !has_interpolation_marker {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
