@@ -130,6 +130,16 @@ use crate::parse::source::SourceFile;
 /// 2. Offense fixture corrections — removed 3 test cases with incorrect
 ///    line content (lines too short to trigger offenses), and fixed `^`
 ///    marker positions and length annotations on remaining cases.
+///
+/// ## Fix (2026-04-07)
+///
+/// `__END__` marker skips all subsequent lines unconditionally in RuboCop
+/// only when it appears on line 1 (making the rest of the file data).
+/// When `__END__` appears on a later line, RuboCop still checks lines
+/// after it as code. The original nitrocop code skipped all lines after
+/// `__END__` regardless of position, causing FNs on files that have
+/// `__END__` on line 1 but valid long lines in the data section. Changed
+/// condition from `if line == b"__END__"` to `if line == b"__END__" && i + 1 > 1`.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -204,7 +214,10 @@ fn check_line_lengths(
             continue;
         }
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        if line == b"__END__" {
+        // RuboCop skips lines after __END__ only when __END__ is NOT on line 1.
+        // When __END__ is on line 1, RuboCop still checks subsequent lines
+        // (the file is treated as having no code section, only data).
+        if line == b"__END__" && i + 1 > 1 {
             after_end_marker = true;
             continue;
         }
