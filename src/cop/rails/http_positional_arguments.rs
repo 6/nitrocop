@@ -173,23 +173,13 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
 
 /// Check if a HashNode uses proper keyword argument style (symbol keys like `user_id: 1`)
 /// vs old hash rocket style (`"key" => value` or `:key => value`)
-/// Also checks if the keys are special keyword args recognized by Rails HTTP request methods
 fn is_keyword_syntax(hash: &ruby_prism::HashNode<'_>) -> bool {
-    const KEYWORD_ARGS: &[&[u8]] = &[
-        b"method", b"params", b"session", b"body", b"flash", b"xhr", b"as", b"headers", b"env",
-        b"to",
-    ];
-
+    // Any symbol-keyed hash is considered keyword syntax (heuristic): symbol keys
+    // indicate Rails keyword arguments like `params:`, `headers:`, etc., regardless
+    // of the specific key name.
     hash.elements().iter().any(|elem| {
         if let Some(assoc) = elem.as_assoc_node() {
             let key = assoc.key();
-            // Check if key is a symbol with one of the special keyword arg names
-            if let Some(sym) = key.as_symbol_node() {
-                if KEYWORD_ARGS.contains(&sym.unescaped()) {
-                    return true;
-                }
-            }
-            // Proper keyword args have symbol keys (user_id: 1 style)
             if key.as_symbol_node().is_some() || key.as_interpolated_symbol_node().is_some() {
                 return true;
             }
