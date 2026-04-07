@@ -21,6 +21,19 @@ use ruby_prism::Visit;
 ///
 /// Previous attempts that also landed at actual=181 likely had a different bug
 /// (e.g., breaking the recursive visit into singleton class children).
+///
+/// ## Variant style fix (2026-04-07)
+///
+/// The cop only handled `separated` style (multiple args in one statement is bad).
+/// It did not handle `grouped` style (separate statements of the same mixin that
+/// could be grouped into one).
+///
+/// With `EnforcedStyle=grouped`, RuboCop flags when mixins of the same type are
+/// in separate statements and could be combined (e.g., `include Bar` followed by
+/// `include Qux` should be `include Bar, Qux`).
+///
+/// Fix: Added `check_grouped_style` method that collects sibling mixins by method
+/// name and flags all mixins in any group with more than one entry.
 pub struct MixinGrouping;
 
 const MIXIN_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -60,6 +73,14 @@ struct MixinGroupingVisitor<'a> {
 
 impl MixinGroupingVisitor<'_> {
     fn check_body_statements(&mut self, stmts: &ruby_prism::StatementsNode<'_>) {
+        if self.style == "separated" {
+            self.check_separated_style(stmts);
+        } else {
+            self.check_grouped_style(stmts);
+        }
+    }
+
+    fn check_separated_style(&mut self, stmts: &ruby_prism::StatementsNode<'_>) {
         for stmt in stmts.body().iter() {
             let call = match stmt.as_call_node() {
                 Some(c) => c,
@@ -84,7 +105,7 @@ impl MixinGroupingVisitor<'_> {
 
             let arg_list: Vec<_> = args.arguments().iter().collect();
 
-            if self.style == "separated" && arg_list.len() > 1 {
+            if arg_list.len() > 1 {
                 let method_str = std::str::from_utf8(method_bytes).unwrap_or("include");
                 let loc = call.location();
                 let (line, column) = self.source.offset_to_line_col(loc.start_offset());
@@ -94,6 +115,63 @@ impl MixinGroupingVisitor<'_> {
                     column,
                     format!("Put `{method_str}` mixins in separate statements."),
                 ));
+            }
+        }
+    }
+
+    fn check_grouped_style(&mut self, stmts: &ruby_prism::StatementsNode<'_>) {
+        use std::collections::HashMap;
+        let mut mixins_by_method: HashMap<&[u8], Vec<_>> = HashMap::new();
+
+        for stmt in stmts.body().iter() {
+            let call = match stmt.as_call_node() {
+                Some(c) => c,
+                None => continue,
+            };
+
+            let method_bytes = call.name().as_slice();
+
+            if !MIXIN_METHODS.contains(&method_bytes) {
+                continue;
+            }
+
+            // Must not have a receiver (bare include/extend/prepend)
+            if call.receiver().is_some() {
+                continue;
+            }
+
+            // For grouped style, only consider single-argument calls
+            let args = match call.arguments() {
+                Some(a) => a,
+                None => continue,
+            };
+
+            let arg_list: Vec<_> = args.arguments().iter().collect();
+            if arg_list.len() != 1 {
+                continue;
+            }
+
+            mixins_by_method
+                .entry(method_bytes)
+                .or_insert_with(Vec::new)
+                .push(call);
+        }
+
+        // Flag all mixins in any group with more than one entry
+        for calls in mixins_by_method.values() {
+            if calls.len() > 1 {
+                let method_str =
+                    std::str::from_utf8(calls[0].name().as_slice()).unwrap_or("include");
+                for call in calls {
+                    let loc = call.location();
+                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                    self.diagnostics.push(self.cop.diagnostic(
+                        self.source,
+                        line,
+                        column,
+                        format!("Put `{method_str}` mixins in a single statement."),
+                    ));
+                }
             }
         }
     }
@@ -128,4 +206,33 @@ impl<'pr> Visit<'pr> for MixinGroupingVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MixinGrouping, "cops/style/mixin_grouping");
+
+    fn grouped_style_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("grouped".to_string()),
+        );
+        config
+    }
+
+    #[test]
+    fn grouped_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MixinGrouping,
+            include_bytes!("../../../tests/fixtures/cops/style/mixin_grouping/grouped_offense.rb"),
+            grouped_style_config(),
+        );
+    }
+
+    #[test]
+    fn grouped_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MixinGrouping,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/mixin_grouping/grouped_no_offense.rb"
+            ),
+            grouped_style_config(),
+        );
+    }
 }

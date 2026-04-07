@@ -59,6 +59,14 @@ type NodeRange = (usize, usize);
 /// by start offset leaked format context onto the first child and falsely flagged `%d/%s`
 /// in the first segment of a concatenated format string. Fix: track exact node spans
 /// instead of start offsets.
+///
+/// Variant style divergence (2026-04): For `EnforcedStyle: template`, nitrocop was flagging
+/// ALL annotated tokens (regardless of format type), but RuboCop only flags annotated tokens
+/// with type 's' (matching the documentation example `%<foo>s`). RuboCop's
+/// `correctable_sequence?` returns true only for type 's' when style is template, because
+/// only `%s` annotated tokens can be autocorrected to template style. Other annotated types
+/// like `%<foo>d` cannot be directly converted. Fix: track format type in `FormatToken`
+/// and only flag annotated tokens with `format_type == 's'` in template style.
 pub struct FormatStringToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +80,9 @@ struct FormatToken {
     style: TokenStyle,
     /// Byte offset within the content string where this token starts
     offset: usize,
+    /// The format type character (e.g., 's', 'd', 'f') for annotated and unannotated tokens.
+    /// Template tokens don't have a type character (stored as None).
+    format_type: Option<u8>,
 }
 
 impl FormatStringToken {
@@ -158,12 +169,17 @@ impl FormatStringToken {
                     if has_word_char && k < s.len() && s[k] == b'>' {
                         k += 1;
                         // Optional trailing type after >
-                        if k < s.len() && is_format_type(s[k]) {
+                        let format_type = if k < s.len() && is_format_type(s[k]) {
+                            let t = s[k];
                             k += 1;
-                        }
+                            Some(t)
+                        } else {
+                            None
+                        };
                         tokens.push(FormatToken {
                             style: TokenStyle::Annotated,
                             offset: start,
+                            format_type,
                         });
                         i = k;
                         continue;
@@ -187,15 +203,18 @@ impl FormatStringToken {
                         tokens.push(FormatToken {
                             style: TokenStyle::Template,
                             offset: start,
+                            format_type: None,
                         });
                         i = k + 1;
                         continue;
                     }
                 } else if j < s.len() && is_format_type(s[j]) {
                     // Unannotated: %[N$][flags][width][.prec]type
+                    let format_type = s[j];
                     tokens.push(FormatToken {
                         style: TokenStyle::Unannotated,
                         offset: start,
+                        format_type: Some(format_type),
                     });
                     i = j + 1;
                     continue;
@@ -550,7 +569,11 @@ impl FormatStringTokenVisitor<'_> {
             "template" => {
                 if check_named {
                     for tok in &named {
-                        if tok.style == TokenStyle::Annotated {
+                        // For template style, only flag annotated tokens with type 's'.
+                        // RuboCop's correctable_sequence? returns true only for type 's'
+                        // when style is template, matching the documentation example
+                        // which only shows %<foo>s (not %<foo>d or other types) as bad.
+                        if tok.style == TokenStyle::Annotated && tok.format_type == Some(b's') {
                             let (line, column) = self
                                 .source
                                 .offset_to_line_col(content_start_offset + tok.offset);

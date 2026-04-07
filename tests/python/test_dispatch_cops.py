@@ -152,6 +152,34 @@ def test_find_rust_source_keyword_suffix():
     assert path.exists()
 
 
+def test_detect_cops_strips_keyword_cop_suffix():
+    """detect_cops maps _cop.rs files (Rust keywords) to correct cop names."""
+    from types import SimpleNamespace
+
+    original_run = gct.subprocess.run
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(
+            stdout="src/cop/style/for_cop.rs\nsrc/cop/lint/loop_cop.rs\nsrc/cop/rspec/yield_cop.rs\n",
+            stderr="",
+            returncode=0,
+        )
+
+    gct.subprocess.run = fake_run
+    try:
+        cops = gct.detect_cops("base", "head")
+    finally:
+        gct.subprocess.run = original_run
+
+    assert "Style/For" in cops, f"Expected Style/For, got {cops}"
+    assert "Lint/Loop" in cops, f"Expected Lint/Loop, got {cops}"
+    assert "RSpec/Yield" in cops, f"Expected RSpec/Yield, got {cops}"
+    # Should NOT contain the suffixed versions
+    assert "Style/ForCop" not in cops
+    assert "Lint/LoopCop" not in cops
+    assert "RSpec/YieldCop" not in cops
+
+
 def test_format_with_diagnostics_fn_snippet_detects_fullfile_does_not_is_code_bug():
     """When snippet detects an FN but the full-file test does NOT detect it,
     it should be classified as a CODE BUG (context-sensitive detection failure)."""

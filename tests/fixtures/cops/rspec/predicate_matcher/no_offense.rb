@@ -16,3 +16,19 @@ expect(something?).to be_falsey
 # Safe navigation (&.) should not be flagged — can't rewrite to predicate matcher
 expect(element&.visible?).to be_falsey
 expect(record&.active?).to be_truthy
+
+# Explicit style: built-in matchers should NOT be flagged
+# nitrocop-config: EnforcedStyle: explicit
+expect(foo).to be_truthy
+expect(foo).to be_falsey
+expect(foo).to be_falsy
+expect(foo).to have_received(:bar)
+expect(foo).to have_attributes(name: 'foo')
+expect(foo).to be_between(1, 10)
+expect(foo).to be_within(0.1).of(10)
+expect(foo).to exist
+
+# Explicit style: be(true)/be(false) with non-predicate should not be flagged
+# nitrocop-config: EnforcedStyle: explicit
+expect(foo).to be(true)
+expect(foo).to be(false)
