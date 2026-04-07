@@ -212,6 +212,16 @@ fn subtree_includes_receive(node: &ruby_prism::Node<'_>) -> bool {
                 }
             }
         }
+    } else if let Some(kw_hash) = node.as_keyword_hash_node() {
+        // Recurse into keyword hash values (handles `receive_messages(key: receive(:foo))` etc.)
+        for element in kw_hash.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                let value = assoc.value();
+                if subtree_includes_receive(&value) {
+                    return true;
+                }
+            }
+        }
     }
     false
 }
