@@ -202,19 +202,19 @@ impl<'pr> Visit<'pr> for MixinGroupingVisitor<'_> {
     // inside class << self are still checked.
 }
 
-fn grouped_style_config() -> CopConfig {
-    let mut config = CopConfig::default();
-    config.options.insert(
-        "EnforcedStyle".to_string(),
-        serde_yml::Value::String("grouped".to_string()),
-    );
-    config
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(MixinGrouping, "cops/style/mixin_grouping");
+
+    fn grouped_style_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("grouped".to_string()),
+        );
+        config
+    }
 
     #[test]
     fn grouped_offense() {
