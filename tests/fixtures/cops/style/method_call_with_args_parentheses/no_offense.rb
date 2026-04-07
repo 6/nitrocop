@@ -137,3 +137,12 @@ end
 def run
   yield
 end
+
+# omit_parentheses: calls inside when clauses are allowed (not flagged)
+# nitrocop-config: EnforcedStyle: omit_parentheses
+case type
+when :comment
+  comments_path(group_by: "comment", search: { ip_addr: ip_addr })
+when :blip
+  blips_path(search: { ip_addr: ip_addr })
+end
