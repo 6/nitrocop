@@ -13,6 +13,9 @@ use std::sync::OnceLock;
 /// RuboCop accepts and which appear in rswag request-spec parameter helpers.
 /// Fixed false positives for lowercase-starting camelCase names (e.g., `userName`)
 /// which RuboCop's camelCase regex accepts but the old is_camel_case() rejected.
+/// Fixed false positives for names with trailing sigils (e.g., `number?`) which
+/// RuboCop's camelCase regex allows via the [!?=]? suffix but the old is_camel_case()
+/// rejected by treating the trailing ? as a mid-string non-alphanumeric character.
 pub struct VariableName;
 
 impl Cop for VariableName {

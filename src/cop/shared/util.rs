@@ -393,10 +393,19 @@ pub fn is_screaming_snake_case(name: &[u8]) -> bool {
 /// Check if a name is CamelCase (starts with letter, no underscores in body).
 /// RuboCop's camelCase regex allows lowercase-starting names (e.g., `userName`),
 /// so we accept both lowercase and uppercase first characters.
+/// Trailing `?`, `!`, `=` are allowed by the [!?=]? suffix.
 pub fn is_camel_case(name: &[u8]) -> bool {
     if name.is_empty() {
         return false;
     }
+    // Handle trailing sigil: RuboCop's regex [!?=]? allows trailing ?!=
+    let has_trailing_sigil = name.len() > 1 && matches!(name[name.len() - 1], b'?' | b'!' | b'=');
+    let main_len = if has_trailing_sigil {
+        name.len() - 1
+    } else {
+        name.len()
+    };
+
     // RuboCop's camelCase regex: /^@{0,2}(?:_|_?[[:lower:]][\d[:lower:][:upper:]]*)[!?=]?$/
     // After optional @/@@ prefix, it allows:
     //   - Just underscore: _
@@ -405,7 +414,7 @@ pub fn is_camel_case(name: &[u8]) -> bool {
     if name[0].is_ascii() && !name[0].is_ascii_alphabetic() && name[0] != b'_' {
         return false;
     }
-    for &b in &name[1..] {
+    for &b in &name[1..main_len] {
         if b == b'_' {
             return false;
         }
