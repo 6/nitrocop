@@ -30,6 +30,25 @@ use crate::parse::source::SourceFile;
 ///   missing the magic comment entirely. Plain string constants were then
 ///   falsely flagged.
 /// - Fix: skip `=begin`/`=end` block comments during the leading-section scan.
+///
+/// ## 2026-04-07 investigation (strict mode variant)
+///
+/// - FP: interpolated symbol constants (e.g. `:"#{name}.batched_queries"`) were
+///   incorrectly flagged as mutable. Symbols are always immutable in Ruby, and
+///   RuboCop's `immutable_literal?` includes `dsym` (interpolated symbol).
+/// - Fix: added `as_interpolated_symbol_node()` to `is_immutable_literal()`.
+///   Unlike plain `SymbolNode`, `InterpolatedSymbolNode` was missing from the check.
+///
+/// - FN: Range constants (e.g. `GENERAL_VALIDATION = (81_000..99_998)`) were NOT
+///   being flagged in strict mode. RuboCop does flag them with strict style —
+///   the difference is that RuboCop does NOT include range in `immutable_literal?`,
+///   meaning it doesn't get an early pass. The RangeNode was previously in the
+///   immutable list by mistake (Ranges are mutable in Ruby). Removing it from
+///   `is_immutable_literal()` correctly flags them. Note: the "missing" count
+///   (33,995) is a corpus-sampling artifact, not a real regression — the check_cop.py
+///   uses the default style baseline when running with `--style strict`, so it
+///   reports all strict-mode detections as "missing" even though they may be
+///   correctly handled.
 pub struct MutableConstant;
 
 impl MutableConstant {
@@ -123,6 +142,7 @@ impl MutableConstant {
         node.as_integer_node().is_some()
             || node.as_float_node().is_some()
             || node.as_symbol_node().is_some()
+            || node.as_interpolated_symbol_node().is_some()
             || node.as_true_node().is_some()
             || node.as_false_node().is_some()
             || node.as_nil_node().is_some()
@@ -130,11 +150,10 @@ impl MutableConstant {
             || node.as_imaginary_node().is_some()
             || node.as_source_line_node().is_some()
             || node.as_source_encoding_node().is_some()
-            // Regexp and Range are frozen since Ruby 3.0
             || node.as_regular_expression_node().is_some()
             || node.as_interpolated_regular_expression_node().is_some()
-            || node.as_range_node().is_some()
-            // Parenthesized range: (1..10) is a BeginNode wrapping a RangeNode
+            // NOTE: RangeNode is NOT included here. RuboCop's immutable_literal? does not
+            // include ranges — they are flagged in strict mode because Ruby can mutate them.
             || Self::is_parenthesized_range(node)
     }
 

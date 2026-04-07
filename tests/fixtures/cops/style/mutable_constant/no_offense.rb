@@ -43,3 +43,8 @@ CONST18 = `uname`.freeze
 CONST19 = "/"
 CONST20 = "✓"
 CONST21 = "\e[31m"
+
+# Interpolated symbols with .freeze are immutable (strict mode)
+# These were FP: nitrocop flagged them but RuboCop doesn't
+THREAD_KEY = :"#{name}.batched_queries".freeze
+ATTRIBUTE_NAMESPACE = :"job.#{base}".freeze
