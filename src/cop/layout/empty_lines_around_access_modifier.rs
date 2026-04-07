@@ -509,6 +509,10 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
 
             // Blocks in macro scope inherit it (wrapper); otherwise non-macro.
             if self.in_access_modifier_scope() {
+                // Any nested block inside a class body marks it as having seen
+                // nested content, so a modifier at the class body end is not
+                // treated as a "body end" modifier.
+                self.note_nested_class_like();
                 self.push_wrapper_scope(opening, closing);
             } else {
                 self.push_non_class_scope();
