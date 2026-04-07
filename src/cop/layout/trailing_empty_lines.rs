@@ -192,14 +192,20 @@ impl Cop for TrailingEmptyLines {
         // trailing whitespace is empty), which is the first byte after the
         // last non-whitespace content.
         let begin_pos = bytes.len() - ws_len;
-        let report_pos = if blank_lines > 0 {
-            first_trailing_blank_line_offset(bytes, begin_pos)
+        let (report_line, report_col) = if blank_lines == 0 {
+            // "Trailing blank line missing." — report on the phantom line after
+            // the final newline, matching RuboCop which uses range_between(len, len).
+            // offset_to_line_col can't represent this position because
+            // compute_line_starts omits the phantom line, so compute directly.
+            let (last_line, _) = source.offset_to_line_col(begin_pos);
+            (last_line + 1, 0)
+        } else if blank_lines > 0 {
+            source.offset_to_line_col(first_trailing_blank_line_offset(bytes, begin_pos))
         } else if ws_len > 0 {
-            begin_pos + 1
+            source.offset_to_line_col(begin_pos + 1)
         } else {
-            begin_pos
+            source.offset_to_line_col(begin_pos)
         };
-        let (report_line, report_col) = source.offset_to_line_col(report_pos);
 
         let mut diag = self.diagnostic(source, report_line, report_col, message);
 
@@ -370,6 +376,72 @@ mod tests {
         TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "Trailing blank line missing.");
+        // RuboCop reports on the phantom line after the final newline
+        assert_eq!(diags[0].location.line, 2);
+        assert_eq!(diags[0].location.column, 0);
+    }
+
+    #[test]
+    fn final_blank_line_style_flags_missing_blank_multiline() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // 5-line file ending with \n — should report at line 6
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"source 'http://rubygems.org'\nruby \">= 2.7\"\ngem 'sinatra'\ngem 'githubchart'\ngem 'webrick'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Trailing blank line missing.");
+        assert_eq!(diags[0].location.line, 6);
+        assert_eq!(diags[0].location.column, 0);
+    }
+
+    #[test]
+    fn final_blank_line_style_no_offense_with_blank() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // File ends with blank line — no offense
+        let source = SourceFile::from_bytes("test.rb", b"x = 1\ny = 2\n\n".to_vec());
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "final_blank_line style should accept trailing blank line"
+        );
+    }
+
+    #[test]
+    fn final_blank_line_style_too_many_blanks() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes("test.rb", b"x = 1\n\n\n".to_vec());
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "2 trailing blank lines instead of 1 detected."
+        );
     }
 
     #[test]
