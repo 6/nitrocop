@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Render cop-check PR comment from shard summary files.
 
-Aggregates variant rows across shards before rendering, since variant
-baselines are global but each shard only runs a subset of repos.
+Aggregates variant rows across shards before rendering.  Per-shard
+failures are propagated so that per-repo regressions are not masked
+by net improvements in other shards.
 
 Usage:
     python3 scripts/workflows/render_cop_check_comment.py \
@@ -81,9 +82,11 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
             agg["local_fn"] += row["local_fn"]
             if row.get("detail"):
                 agg["details"].append(row["detail"])
-            # If any shard errored, mark as error
+            # If any shard failed or errored, propagate that status
             if row["result"] == "error":
                 agg["result"] = "error"
+            elif row["result"] == "fail" and agg["result"] != "error":
+                agg["result"] = "fail"
         else:
             default_rows.append(row)
 
@@ -94,6 +97,9 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
         fp_delta = agg["local_fp"] - agg["bl_fp"]
         fn_delta = agg["local_fn"] - agg["bl_fn"]
         if fp_delta > 0 or fn_delta > 0:
+            agg["result"] = "regression"
+        elif agg["result"] == "fail":
+            # Per-shard regression detected even though aggregate improved
             agg["result"] = "regression"
         elif agg["result"] != "error":
             agg["result"] = "pass"
