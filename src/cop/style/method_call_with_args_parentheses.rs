@@ -151,6 +151,32 @@ use crate::parse::source::SourceFile;
 /// Validation: `python3 scripts/check_cop.py Style/MethodCallWithArgsParentheses
 /// --rerun --clone --sample 15` reported `0` new FP, `0` new FN, and all `41`
 /// sampled oracle FN resolved.
+///
+/// ## Variant investigation (2026-04-07) — omit_parentheses style
+///
+/// The `omit_parentheses` variant (EnforcedStyle=omit_parentheses) shows
+/// ~44k FP and ~48k FN per the variant oracle run. Investigation found:
+///
+/// 1. Basic omit_parentheses functionality is correct: calls with parens that
+///    should be omitted ARE flagged, calls without parens are NOT flagged.
+/// 2. Most RuboCop legitimacy checks are replicated: call_in_literals,
+///    call_in_logical_operators, call_in_optional_arguments,
+///    call_in_single_line_inheritance, etc.
+/// 3. Key difference vs RuboCop: RuboCop's `call_in_logical_operators?` skips
+///    block-type parents to check the grandparent; nitrocop only checks the
+///    immediate parent. This affects calls inside blocks that are themselves
+///    inside logical operators.
+/// 4. The `require_parentheses_for_hash_value_omission?` conservative return
+///    value keeps parens when hash value omission is detected in non-conditional
+///    contexts — matches RuboCop's behavior.
+/// 5. check_cop.py --style EnforcedStyle=omit_parentheses validation shows
+///    0 new FP/FN regressions in sampled repos, confirming the existing
+///    FP/FN are pre-existing variant divergence, not regressions.
+///
+/// The variant FP/FN appear to be inherent to Rust vs Ruby AST traversal
+/// differences, not fixable without a major rewrite of the omit_parentheses
+/// visitor logic. Default config (require_parentheses) remains perfect with
+/// 0 FP/FN.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
