@@ -80,13 +80,30 @@ impl Cop for MethodDefParentheses {
                 ));
             }
             "require_no_parentheses_except_multiline" => {
-                let is_multiline = source
-                    .byte_slice(
-                        params.location().start_offset(),
-                        params.location().end_offset(),
-                        "",
-                    )
-                    .contains('\n');
+                // RuboCop's `args.multiline?` checks the arguments node which
+                // includes parentheses. In Prism, ParametersNode excludes parens,
+                // so when parens are present we must check the lparen..rparen span.
+                // Without this, defs like `def foo(\n  x:\n)` where ParametersNode
+                // covers only `x:` (one line) would be falsely considered single-line.
+                let is_multiline = if has_parens {
+                    let start = def_node
+                        .lparen_loc()
+                        .map(|lp| lp.start_offset())
+                        .unwrap_or_else(|| params.location().start_offset());
+                    let end = def_node
+                        .rparen_loc()
+                        .map(|rp| rp.end_offset())
+                        .unwrap_or_else(|| params.location().end_offset());
+                    source.byte_slice(start, end, "").contains('\n')
+                } else {
+                    source
+                        .byte_slice(
+                            params.location().start_offset(),
+                            params.location().end_offset(),
+                            "",
+                        )
+                        .contains('\n')
+                };
 
                 if is_multiline && !has_parens {
                     // Multiline args need parentheses
