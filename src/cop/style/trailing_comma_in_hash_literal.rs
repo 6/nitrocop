@@ -69,9 +69,20 @@ impl Cop for TrailingCommaInHashLiteral {
             trailing_comma::detect_trailing_comma(bytes, last_end, closing_start, has_heredoc);
 
         let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
-        let last_line = source.offset_to_line_col(last_end).0;
+
+        // Multiline check: the hash node spans multiple lines. For single-element
+        // hashes, use the allowed_multiline_argument exception (closing bracket on
+        // the same line as element end means not multiline).
+        let open_line = source
+            .offset_to_line_col(hash_node.opening_loc().start_offset())
+            .0;
         let close_line = source.offset_to_line_col(closing_start).0;
-        let is_multiline = close_line > last_line;
+        let is_multiline = if elements.len() == 1 {
+            let last_line = source.offset_to_line_col(last_end).0;
+            close_line > last_line
+        } else {
+            close_line > open_line
+        };
 
         // Helper: find the absolute offset of the trailing comma for diagnostics.
         let find_comma_offset = || {
@@ -79,7 +90,35 @@ impl Cop for TrailingCommaInHashLiteral {
         };
 
         match style {
-            "comma" | "consistent_comma" => {
+            "comma" => {
+                let elem_locs: Vec<(usize, usize)> = elements
+                    .iter()
+                    .map(|e| (e.location().start_offset(), e.location().end_offset()))
+                    .collect();
+                let each_on_own_line =
+                    trailing_comma::no_elements_on_same_line(source, &elem_locs, closing_start);
+                let should_have = is_multiline && each_on_own_line;
+                if has_comma && !should_have {
+                    if let Some(abs_offset) = find_comma_offset() {
+                        let (line, column) = source.offset_to_line_col(abs_offset);
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid comma after the last item of a hash, unless each item is on its own line.".to_string(),
+                        ));
+                    }
+                } else if !has_comma && should_have {
+                    let (line, column) = source.offset_to_line_col(last_end);
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Put a comma after the last item of a multiline hash.".to_string(),
+                    ));
+                }
+            }
+            "consistent_comma" => {
                 // Require trailing comma in multiline; no opinion on single-line
                 if is_multiline && !has_comma {
                     let (line, column) = source.offset_to_line_col(last_end);
