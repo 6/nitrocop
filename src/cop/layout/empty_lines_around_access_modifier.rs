@@ -142,7 +142,7 @@ use crate::parse::source::SourceFile;
 ///     branch to match RuboCop's `allowed_only_before_style?` exactly:
 ///     (a) exempt when the next line is literal `end` (no indentation),
 ///     (b) use `next_line_empty_and_exists?` (body_end OR actual blank, AND
-///         not at EOF) for the "Remove after" check, and (c) fire at most one
+///     not at EOF) for the "Remove after" check, and (c) fire at most one
 ///     offense per modifier (2026-04-07).
 pub struct EmptyLinesAroundAccessModifier;
 
