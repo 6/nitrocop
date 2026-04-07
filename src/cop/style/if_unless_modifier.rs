@@ -83,6 +83,15 @@ use ruby_prism::Visit;
 /// expression. RuboCop's AST-based `another_statement_on_same_line?` correctly
 /// handles this by not treating `;` as a chained operator. Fixed by removing
 /// `;` from the disallowed characters list in `code_after_end_is_disallowed`.
+///
+/// FN root cause (2026-04-07): `has_another_statement_on_same_line` (RuboCop's
+/// `another_statement_on_same_line?`) incorrectly returned `true` for modifier
+/// forms like `return ret if ret` inside blocks, where the line ends with `; }`.
+/// The function found `;` after the if node and returned `true`, but RuboCop's
+/// AST check would find no sibling statement (no `end` keyword or next sibling
+/// on the same line). The `;` was actually a statement separator, not indicating
+/// a sibling. Fixed by checking if the semicolon is followed by actual code
+/// vs. just closing delimiters (`}` or `]`).
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -628,7 +637,24 @@ fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::No
         .skip_while(|&b| b == b' ' || b == b'\t')
         .collect::<Vec<_>>();
 
-    trimmed.first() == Some(&b';')
+    // Check for semicolon followed by actual code (not just closing delimiters)
+    if trimmed.first() == Some(&b';') {
+        // Make sure there's actual code after the semicolon, not just } or ]
+        let remaining: Vec<_> = trimmed[1..]
+            .iter()
+            .copied()
+            .skip_while(|&b| b == b' ' || b == b'\t')
+            .collect();
+        if remaining.is_empty()
+            || remaining.first() == Some(&b'}')
+            || remaining.first() == Some(&b']')
+        {
+            return false;
+        }
+        return true;
+    }
+
+    false
 }
 
 /// Check if an IfNode or UnlessNode is a pattern matching guard (e.g., `in "a" if cond`).
