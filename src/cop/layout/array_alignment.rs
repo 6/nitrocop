@@ -198,12 +198,27 @@ impl ArrayAlignment {
             "with_fixed_indentation" => "Use one level of indentation for elements following the first line of a multi-line array.".to_string(),
             _ => "Align the elements of an array literal if they span more than one line.".to_string(),
         };
+
+        // For with_fixed_indentation, RuboCop checks all elements on subsequent lines,
+        // but does NOT flag the first element when it's on the opening bracket's line.
+        // We replicate this by tracking whether to skip the first element.
+        let is_fixed_indent = style == "with_fixed_indentation";
+        let opening_line = if is_bracketed {
+            let open_loc = array_node.opening_loc().unwrap();
+            source.offset_to_line_col(open_loc.start_offset()).0
+        } else {
+            first_line
+        };
+        // Skip first element for with_fixed_indentation only when it's on the opening line
+        let skip_first_for_fixed_indent = is_fixed_indent && first_line == opening_line;
+
         self.check_element_alignment(
             source,
             &elements,
             first_line,
             expected_col,
             message,
+            skip_first_for_fixed_indent,
             diagnostics,
         );
     }
@@ -244,12 +259,23 @@ impl ArrayAlignment {
             "with_fixed_indentation" => "Use one level of indentation for elements following the first line of a multi-line array.".to_string(),
             _ => "Align the elements of an array literal if they span more than one line.".to_string(),
         };
+
+        // For with_fixed_indentation, RuboCop checks all elements on subsequent lines,
+        // but does NOT flag the first element when it's on the rescue keyword's line.
+        // We replicate this by tracking whether to skip the first element.
+        let is_fixed_indent = style == "with_fixed_indentation";
+        let rescue_loc_line = rescue_node.location().start_offset();
+        let (rescue_line, _) = source.offset_to_line_col(rescue_loc_line);
+        // Skip first element for with_fixed_indentation only when it's on the rescue line
+        let skip_first_for_fixed_indent = is_fixed_indent && first_line == rescue_line;
+
         self.check_element_alignment(
             source,
             &exceptions,
             first_line,
             expected_col,
             message,
+            skip_first_for_fixed_indent,
             diagnostics,
         );
     }
@@ -261,9 +287,11 @@ impl ArrayAlignment {
         _first_line: usize,
         expected_col: usize,
         message: String,
+        skip_first_for_fixed_indent: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
         let mut last_checked_line = 0; // Start at 0 so first element (line >= 1) is always checked
+        let mut is_first = true;
 
         for elem in elements.iter() {
             let start_offset = elem.location().start_offset();
@@ -274,6 +302,13 @@ impl ArrayAlignment {
                 continue;
             }
             last_checked_line = elem_line;
+            // For with_fixed_indentation, RuboCop does NOT flag the first element
+            // when it's on the opening line. Skip it to match this behavior.
+            if is_first && skip_first_for_fixed_indent {
+                is_first = false;
+                continue;
+            }
+            is_first = false;
             // Skip elements that are not the first non-whitespace token on their line.
             // E.g. in `}, {` the `{` follows a `}` and should not be checked.
             if !begins_its_line(source, start_offset) {
