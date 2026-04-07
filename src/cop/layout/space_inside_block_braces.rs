@@ -35,6 +35,12 @@ use crate::parse::source::SourceFile;
 ///    whitespace. RuboCop accepts tabs here, so the trailing-whitespace scan
 ///    now recognizes any ASCII whitespace before `}` and removes the full run
 ///    when `EnforcedStyle: no_space`.
+/// 7. Multiline blocks with `EnforcedStyle: no_space` were not checking the right
+///    brace for trailing space. The cop only checked single-line blocks for right
+///    brace spacing. RuboCop checks multiline blocks but has an "alignment
+///    exception" for properly aligned closing braces. Fixed by implementing the
+///    alignment check: opening brace column must match either closing brace column
+///    OR trailing space count on the last line of inner content.
 pub struct SpaceInsideBlockBraces;
 
 impl Cop for SpaceInsideBlockBraces {
@@ -298,40 +304,67 @@ impl Cop for SpaceInsideBlockBraces {
             }
         }
 
-        // Check right brace (only for single-line blocks)
-        if !is_multiline {
-            let enforced = config.get_str("EnforcedStyle", "space");
-            let trailing_whitespace_len = bytes[..close_start]
-                .iter()
-                .rev()
-                .take_while(|b| b.is_ascii_whitespace())
-                .count();
+        // Check right brace spacing
+        let trailing_whitespace_len = bytes[..close_start]
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_whitespace())
+            .count();
 
-            match enforced {
-                "space" => {
-                    if trailing_whitespace_len == 0 {
-                        let (line, column) = source.offset_to_line_col(closing.start_offset());
-                        let mut diag = self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Space missing inside }.".to_string(),
-                        );
-                        if let Some(ref mut corr) = corrections {
-                            corr.push(crate::correction::Correction {
-                                start: close_start,
-                                end: close_start,
-                                replacement: " ".to_string(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                        diagnostics.push(diag);
+        let enforced = config.get_str("EnforcedStyle", "space");
+
+        // For multiline blocks, check alignment before applying style rules
+        let is_aligned = if is_multiline {
+            let (_open_line, open_col) = source.offset_to_line_col(opening.start_offset());
+            let (_, close_col) = source.offset_to_line_col(closing.start_offset());
+            let inner = &bytes[open_end..close_start];
+
+            // Count trailing spaces on the last line of inner content
+            let inner_last_space_count =
+                if let Some(last_newline_pos) = inner.iter().rposition(|&b| b == b'\n') {
+                    let last_line = &inner[last_newline_pos + 1..];
+                    last_line.iter().rev().take_while(|&&b| b == b' ').count()
+                } else {
+                    // Single-line inner content
+                    inner.iter().rev().take_while(|&&b| b == b' ').count()
+                };
+
+            open_col == close_col || open_col == inner_last_space_count
+        } else {
+            false
+        };
+
+        match enforced {
+            "space" => {
+                // Only check single-line blocks for missing space
+                if !is_multiline && trailing_whitespace_len == 0 {
+                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Space missing inside }.".to_string(),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: close_start,
+                            end: close_start,
+                            replacement: " ".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
                     }
+                    diagnostics.push(diag);
                 }
-                "no_space" => {
-                    if trailing_whitespace_len > 0 {
+            }
+            "no_space" => {
+                if trailing_whitespace_len > 0 {
+                    // For multiline blocks, only flag if NOT aligned
+                    // (aligned multiline blocks are allowed to have trailing space)
+                    if is_multiline && is_aligned {
+                        // Aligned multiline - allow trailing space
+                    } else {
                         let whitespace_start = close_start - trailing_whitespace_len;
                         let (line, column) = source.offset_to_line_col(whitespace_start);
                         let mut diag = self.diagnostic(
@@ -353,8 +386,8 @@ impl Cop for SpaceInsideBlockBraces {
                         diagnostics.push(diag);
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 }
