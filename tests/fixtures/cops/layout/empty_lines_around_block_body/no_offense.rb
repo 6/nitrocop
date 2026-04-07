@@ -43,3 +43,9 @@ transformer = -> (first:,
 
   [first, second, third].compact
 }
+
+# nitrocop-config: EnforcedStyle: empty_lines
+# Comment-only block body — empty bodies should not trigger empty_lines check
+bar do
+  # only a comment
+end

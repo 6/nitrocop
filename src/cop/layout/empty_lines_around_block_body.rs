@@ -41,6 +41,21 @@ use crate::parse::source::SourceFile;
 /// `->` is a param continuation (not blank), and RuboCop does not flag it.
 /// Fix: for `LambdaNode`, when `->` is on a different line than `do`/`{`, use
 /// the `->` operator offset as the effective opening reference.
+///
+/// ## Variant investigation (empty_lines style, 2026-04-07)
+///
+/// FP for `empty_lines` style: blocks with nil/empty bodies were being flagged
+/// even though RuboCop skips them. For `empty_lines` style, RuboCop's
+/// `valid_body_style?(body)` returns early when `body.nil?`, skipping the check.
+/// Example: `bar do\n  # only comment\nend` has a nil body in RuboCop's AST,
+/// so no offense is detected. Nitrocop was incorrectly flagging these.
+/// Fix: check `body.is_none()` before calling `check_missing_empty_lines_*`
+/// for `empty_lines` style, and return early if the body is nil.
+///
+/// Note: The `empty_lines` style also has line-number reporting differences.
+/// RuboCop reports "Empty line missing at block body end" at the `end` keyword
+/// line, while nitrocop reports at `end_line - 1` (the last content line).
+/// Both detect the same violations; only the reported line differs.
 pub struct EmptyLinesAroundBlockBody;
 
 /// Compute the effective opening offset for empty-line checks.
@@ -126,18 +141,20 @@ impl Cop for EmptyLinesAroundBlockBody {
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
-        let (opening_offset, closing_offset, lambda_operator_offset) =
+        let (opening_offset, closing_offset, lambda_operator_offset, body) =
             if let Some(b) = node.as_block_node() {
                 (
                     b.opening_loc().start_offset(),
                     b.closing_loc().start_offset(),
                     None,
+                    b.body(),
                 )
             } else if let Some(l) = node.as_lambda_node() {
                 (
                     l.opening_loc().start_offset(),
                     l.closing_loc().start_offset(),
                     Some(l.operator_loc().start_offset()),
+                    l.body(),
                 )
             } else {
                 return;
@@ -172,6 +189,11 @@ impl Cop for EmptyLinesAroundBlockBody {
 
         match style {
             "empty_lines" => {
+                // For empty_lines style, RuboCop skips blocks with nil/empty bodies.
+                // (When body is nil, we don't enforce presence OR absence of empty lines.)
+                if body.is_none() {
+                    return;
+                }
                 diagnostics.extend(
                     util::check_missing_empty_lines_around_body_with_corrections(
                         self.name(),
