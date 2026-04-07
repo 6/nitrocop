@@ -47,6 +47,21 @@ def _format_example_md(ex) -> str:
     return _sanitize_for_md(ex)
 
 
+def _emit_examples(md: list[str], fp_list: list, fn_list: list, limit: int) -> None:
+    """Append FP/FN example bullets to *md*."""
+    if fp_list:
+        for ex in fp_list[:limit]:
+            md.append(f"- FP: `{_format_example_md(ex)}`")
+        if len(fp_list) > limit:
+            md.append(f"- ... and {len(fp_list) - limit:,} more FP")
+    if fn_list:
+        for ex in fn_list[:limit]:
+            md.append(f"- FN: `{_format_example_md(ex)}`")
+        if len(fn_list) > limit:
+            md.append(f"- ... and {len(fn_list) - limit:,} more FN")
+    md.append("")
+
+
 def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     """Generate corpus markdown from pre-computed JSON data."""
     summary = data["summary"]
@@ -293,34 +308,39 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
                         md.append(f"| ↳ {c['cop']} ({v['style_label']}) | {v['matches']:,} | {v['fp']:,} | {v['fn']:,} | {v_pct} |")
         md.append("")
 
-        # Detail sections
+        # Detail sections — emit <details> for every cop (default + variant-only)
+        # that has FP/FN examples, including per-variant examples.
         MD_EXAMPLE_LIMIT = 3
-        for c in diverging:
-            fp_list = c.get("fp_examples", [])
-            fn_list = c.get("fn_examples", [])
-            if not fp_list and not fn_list:
+        for c in all_diverging:
+            cop_name = c["cop"]
+            default_fp = c.get("fp_examples", [])
+            default_fn = c.get("fn_examples", [])
+            variants = variant_by_cop.get(cop_name, [])
+            variant_fp = [ex for v in variants for ex in v.get("fp_examples", [])]
+            variant_fn = [ex for v in variants for ex in v.get("fn_examples", [])]
+            if not default_fp and not default_fn and not variant_fp and not variant_fn:
                 continue
             total = c["matches"] + c["fp"] + c["fn"]
             pct = fmt_pct(c['match_rate']) if total > 0 else "N/A"
+            # Aggregate FP/FN across default + variants for the summary line
+            all_fp = c["fp"] + sum(v["fp"] for v in variants)
+            all_fn = c["fn"] + sum(v["fn"] for v in variants)
             md.append("<details>")
-            md.append(f"<summary><strong>{c['cop']}</strong> — {c['matches']:,} matches, {c['fp']:,} FP, {c['fn']:,} FN ({pct})</summary>")
+            md.append(f"<summary><strong>{cop_name}</strong> — {c['matches']:,} matches, {all_fp:,} FP, {all_fn:,} FN ({pct})</summary>")
             md.append("")
-            if fp_list:
-                md.append("**False positives** (nitrocop reports, RuboCop does not):")
+            if default_fp or default_fn:
+                if c["fp"] + c["fn"] > 0:
+                    md.append(f"**Default config** ({c['fp']:,} FP, {c['fn']:,} FN):")
+                    md.append("")
+                    _emit_examples(md, default_fp, default_fn, MD_EXAMPLE_LIMIT)
+            for v in variants:
+                v_fp = v.get("fp_examples", [])
+                v_fn = v.get("fn_examples", [])
+                if not v_fp and not v_fn:
+                    continue
+                md.append(f"**{v['style_label']}** ({v['fp']:,} FP, {v['fn']:,} FN):")
                 md.append("")
-                for ex in fp_list[:MD_EXAMPLE_LIMIT]:
-                    md.append(f"- `{_format_example_md(ex)}`")
-                if len(fp_list) > MD_EXAMPLE_LIMIT:
-                    md.append(f"- ... and {len(fp_list) - MD_EXAMPLE_LIMIT:,} more (see corpus-results.json for full list)")
-                md.append("")
-            if fn_list:
-                md.append("**False negatives** (RuboCop reports, nitrocop does not):")
-                md.append("")
-                for ex in fn_list[:MD_EXAMPLE_LIMIT]:
-                    md.append(f"- `{_format_example_md(ex)}`")
-                if len(fn_list) > MD_EXAMPLE_LIMIT:
-                    md.append(f"- ... and {len(fn_list) - MD_EXAMPLE_LIMIT:,} more (see corpus-results.json for full list)")
-                md.append("")
+                _emit_examples(md, v_fp, v_fn, MD_EXAMPLE_LIMIT)
             md.append("</details>")
             md.append("")
 
@@ -385,6 +405,8 @@ def load_variant_by_cop(path: Path) -> dict[str, list[dict]]:
                     "matches": cop_entry.get("matches", 0),
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
+                    "fp_examples": cop_entry.get("fp_examples", []),
+                    "fn_examples": cop_entry.get("fn_examples", []),
                 })
     return result
 
