@@ -67,6 +67,13 @@ type NodeRange = (usize, usize);
 /// only `%s` annotated tokens can be autocorrected to template style. Other annotated types
 /// like `%<foo>d` cannot be directly converted. Fix: track format type in `FormatToken`
 /// and only flag annotated tokens with `format_type == 's'` in template style.
+///
+/// Additionally, for `EnforcedStyle: template`, nitrocop was flagging ALL unannotated tokens
+/// (via `MaxUnannotatedPlaceholdersAllowed` check), but RuboCop only flags unannotated tokens
+/// with type 's' in template style. Tokens like `%02x`, `%d`, `%f` are not correctable to
+/// template style and are not flagged. Fix: filter unannotated tokens to only those with
+/// `format_type == 's'` before checking against `MaxUnannotatedPlaceholdersAllowed` in
+/// template style.
 pub struct FormatStringToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,8 +601,16 @@ impl FormatStringTokenVisitor<'_> {
                         }
                     }
                 }
-                if check_unannotated && unannotated.len() > self.max_unannotated {
-                    for tok in &unannotated {
+                // In template style, only flag unannotated tokens with type 's'.
+                // RuboCop's correctable_sequence? returns true only for type 's'
+                // when style is template, because only %s can be autocorrected to %{foo}.
+                let unannotated_s: Vec<&FormatToken> = unannotated
+                    .iter()
+                    .filter(|t| t.format_type == Some(b's'))
+                    .copied()
+                    .collect();
+                if check_unannotated && unannotated_s.len() > self.max_unannotated {
+                    for tok in unannotated_s {
                         let (line, column) = self
                             .source
                             .offset_to_line_col(content_start_offset + tok.offset);
