@@ -12,6 +12,16 @@ use crate::parse::source::SourceFile;
 ///   checking because Prism stores them separately via `params.block()` rather
 ///   than in the regular parameter lists. Fixed by collecting all parameter
 ///   offsets including block params. Also added `keyword_rest` params.
+///
+/// Variant investigation (2026-04-07):
+/// - FN: with_fixed_indentation style missed cases where ALL parameters are on
+///   the same continuation line. The `skip(1)` logic combined with line-skip
+///   caused ALL parameters to be skipped (since they're on the same line as
+///   the first param, and skip(1) skips the first). For with_fixed_indentation,
+///   the first parameter on a continuation line must also be at base_col
+///   (def_indent + 2), not just subsequent params on new lines. Fixed by
+///   checking the first parameter separately before the loop when using
+///   with_fixed_indentation and it's on a different line from the def keyword.
 pub struct ParameterAlignment;
 
 impl Cop for ParameterAlignment {
@@ -74,15 +84,28 @@ impl Cop for ParameterAlignment {
 
         let (first_line, first_col) = source.offset_to_line_col(param_offsets[0]);
 
+        let (def_line, _) = {
+            let def_keyword_loc = def_node.def_keyword_loc();
+            source.offset_to_line_col(def_keyword_loc.start_offset())
+        };
+
         let base_col = match style {
             "with_fixed_indentation" => {
-                let def_keyword_loc = def_node.def_keyword_loc();
-                let (def_line, _) = source.offset_to_line_col(def_keyword_loc.start_offset());
                 let def_line_bytes = util::line_at(source, def_line).unwrap_or(b"");
                 util::indentation_of(def_line_bytes) + 2
             }
             _ => first_col, // with_first_parameter
         };
+
+        // For with_fixed_indentation, also check the first parameter if it's on
+        // a different line from the def keyword. The first param on a
+        // continuation line should also be at base_col.
+        if style == "with_fixed_indentation" && first_line != def_line {
+            if first_col != base_col {
+                let msg = "Use one level of indentation for parameters following the first line of a multi-line method definition.";
+                diagnostics.push(self.diagnostic(source, first_line, first_col, msg.to_string()));
+            }
+        }
 
         // Only check the FIRST parameter on each new line. Multiple parameters
         // on the same continuation line should not be checked individually.
@@ -113,6 +136,27 @@ impl Cop for ParameterAlignment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_yml::Value;
 
     crate::cop_fixture_tests!(ParameterAlignment, "cops/layout/parameter_alignment");
+
+    fn with_fixed_indentation_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            Value::String("with_fixed_indentation".to_string()),
+        );
+        config
+    }
+
+    #[test]
+    fn with_fixed_indentation_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ParameterAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/parameter_alignment/with_fixed_indentation_offense.rb"
+            ),
+            with_fixed_indentation_config(),
+        );
+    }
 }
