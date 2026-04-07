@@ -202,9 +202,12 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                         }
                     }
                     "single_statement_only" => {
+                        // RuboCop: `!example_of(node)&.body&.begin_type?`
+                        // When example_of is nil: !nil&.body&.begin_type? = !nil = true
+                        // So "no enclosing example" counts as single-statement (no offense).
                         let is_single_statement = enclosing
                             .as_ref()
-                            .is_some_and(|(_, block)| is_single_statement_block(block));
+                            .is_none_or(|(_, block)| is_single_statement_block(block));
                         if !is_single_line && !is_single_statement {
                             self.add_offense(node, "Don't use implicit subject.");
                         }
@@ -213,14 +216,11 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                 }
             }
 
-            // Handle require_implicit style: flag expect(subject) in examples
+            // Handle require_implicit style: flag expect(subject) anywhere.
+            // RuboCop checks only explicit_unnamed_subject?(node) with no
+            // ancestor/example-block requirement.
             if self.enforced_style == "require_implicit" && is_explicit_unnamed_subject(node) {
-                let enclosing = self.enclosing_example();
-                if let Some((method, _)) = enclosing {
-                    if method != b"its" {
-                        self.add_offense(node, "Don't use explicit subject.");
-                    }
-                }
+                self.add_offense(node, "Don't use explicit subject.");
             }
         }
 
@@ -323,7 +323,21 @@ mod tests {
     }
 
     #[test]
-    fn single_statement_only_flags_non_example_contexts() {
+    fn single_line_only_flags_non_example_contexts() {
+        // RuboCop: single_line? = example_of(node)&.single_line?
+        // When no enclosing example: nil&.single_line? = nil (falsy)
+        // → not single-line → offense fires.
+        let source = b"before { is_expected.to be_ok }\n";
+        let diags = crate::testutil::run_cop_full(&ImplicitSubject, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "non-example contexts should be flagged for single_line_only (default)"
+        );
+    }
+
+    #[test]
+    fn single_statement_only_skips_non_example_contexts() {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
 
@@ -334,15 +348,15 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        // RuboCop flags is_expected even outside example blocks: when
-        // enclosing example is nil, single_line? returns nil, and !nil is
-        // truthy in Ruby, so the offense fires.
+        // RuboCop: single_statement? = !example_of(node)&.body&.begin_type?
+        // When no enclosing example: !nil&.body&.begin_type? = !nil = true
+        // → counts as single-statement → valid usage → no offense.
         let source = b"describe 'something' do\n  is_expected.to be_valid\nend\n";
         let diags = crate::testutil::run_cop_full_with_config(&ImplicitSubject, source, config);
         assert_eq!(
             diags.len(),
-            1,
-            "non-example contexts should be flagged (matches RuboCop behavior)"
+            0,
+            "non-example contexts should NOT be flagged for single_statement_only"
         );
     }
 
