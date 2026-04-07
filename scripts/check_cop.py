@@ -1569,12 +1569,18 @@ def main():
             # Generate variant batch configs if not provided
             variant_batches = args.variant_batches_dir
             if not variant_batches:
-                # Generate into the repo's variant_batches dir so that
+                # Use the repo's committed variant_batches dir so that
                 # inherit_from: ../baseline_rubocop.yml resolves correctly.
                 variant_batches = str(PROJECT_ROOT / "bench" / "corpus" / "variant_batches")
-                sys.path.insert(0, str(PROJECT_ROOT / "bench" / "corpus"))
-                from gen_variant_batches import generate_batches
-                generate_batches(Path(variant_batches))
+                # Only regenerate if the committed batch files are missing
+                # (e.g. fresh clone without submodules). If committed files
+                # exist, use them directly — regeneration requires vendor
+                # submodule configs which may not be present in CI shards.
+                batch_files = list(Path(variant_batches).glob("variant_batch_*.yml"))
+                if not batch_files:
+                    sys.path.insert(0, str(PROJECT_ROOT / "bench" / "corpus"))
+                    from gen_variant_batches import generate_batches
+                    generate_batches(Path(variant_batches))
 
             # Load variant baselines from the oracle for delta computation
             vb = load_variant_baselines(args.cop, corpus_run_id)
