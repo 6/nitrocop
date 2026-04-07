@@ -258,7 +258,7 @@ impl ArrayAlignment {
         &self,
         source: &SourceFile,
         elements: &ruby_prism::NodeList<'_>,
-        first_line: usize,
+        _first_line: usize,
         expected_col: usize,
         message: String,
         diagnostics: &mut Vec<Diagnostic>,
