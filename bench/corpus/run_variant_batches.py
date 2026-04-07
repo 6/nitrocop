@@ -302,6 +302,23 @@ def merge_variant_results(
                 entry["by_cop"] = filtered
             else:
                 entry["by_cop"] = data["by_cop"]
+        # Preserve per-repo divergence data for per-repo variant baselines.
+        # Only repos with FP+FN > 0 are included (filtered by diff_results.py).
+        if "by_repo_cop" in data:
+            batch_cops = style_map.get(batch_name, {})
+            if batch_cops:
+                # Filter to only repos/cops with overrides in this batch
+                filtered_repo_cop: dict = {}
+                for repo_id, cop_data in data["by_repo_cop"].items():
+                    filtered_cops = {
+                        cop: stats for cop, stats in cop_data.items()
+                        if cop in batch_cops
+                    }
+                    if filtered_cops:
+                        filtered_repo_cop[repo_id] = filtered_cops
+                entry["by_repo_cop"] = filtered_repo_cop
+            else:
+                entry["by_repo_cop"] = data["by_repo_cop"]
         merged["batches"].append(entry)
     return merged
 

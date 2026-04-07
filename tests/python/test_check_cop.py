@@ -689,6 +689,89 @@ def test_run_variant_checks_returns_per_variant_results(tmp_path):
     assert results[0]["fn"] == 0
 
 
+def test_run_variant_checks_uses_per_repo_baselines(tmp_path):
+    """Variant baselines are summed only for sampled repos, not global."""
+    batches = tmp_path / "batches"
+    batches.mkdir()
+    (batches / "variant_batch_1.yml").write_text(
+        "inherit_from: ../baseline.yml\n"
+        "Style/Foo:\n"
+        "  EnforcedStyle: bar\n"
+    )
+
+    def fake_nc(repo_dir, *, cop=None, binary=None, timeout=120, cwd=None, config_override=None):
+        return {"count": 5, "offenses": [], "error": None}
+
+    def fake_rc(repo_dir, *, cop=None, config=None, timeout=120):
+        return {"count": 3}
+
+    # Global baseline: fp=50, fn=20 (across all repos)
+    # Per-repo baseline: repo_a has fp=3, fn=1; repo_b not in baseline
+    variant_baselines = {
+        "bar": {
+            "fp": 50, "fn": 20, "matches": 100,
+            "by_repo": {
+                "repo_a": {"fp": 3, "fn": 1},
+                "repo_c": {"fp": 10, "fn": 5},  # not sampled
+            },
+        },
+    }
+
+    results = check_cop.run_variant_checks(
+        cop_name="Style/Foo",
+        repo_dirs=[str(tmp_path / "repo_a"), str(tmp_path / "repo_b")],
+        batches_dir=str(batches),
+        run_nitrocop_fn=fake_nc,
+        run_rubocop_fn=fake_rc,
+        variant_baselines=variant_baselines,
+    )
+
+    assert len(results) == 1
+    # Local: 2 repos × (5-3) = 4 FP, 0 FN
+    assert results[0]["fp"] == 4
+    assert results[0]["fn"] == 0
+    # Baseline should be per-repo sum: repo_a(fp=3) + repo_b(fp=0) = 3
+    # NOT the global 50
+    assert results[0]["baseline_fp"] == 3
+    assert results[0]["baseline_fn"] == 1
+
+
+def test_run_variant_checks_falls_back_to_global_baseline(tmp_path):
+    """Without per-repo data (old artifacts), falls back to global baseline."""
+    batches = tmp_path / "batches"
+    batches.mkdir()
+    (batches / "variant_batch_1.yml").write_text(
+        "inherit_from: ../baseline.yml\n"
+        "Style/Foo:\n"
+        "  EnforcedStyle: bar\n"
+    )
+
+    def fake_nc(repo_dir, *, cop=None, binary=None, timeout=120, cwd=None, config_override=None):
+        return {"count": 5, "offenses": [], "error": None}
+
+    def fake_rc(repo_dir, *, cop=None, config=None, timeout=120):
+        return {"count": 5}
+
+    # Old-style baseline: no by_repo key
+    variant_baselines = {
+        "bar": {"fp": 50, "fn": 20, "matches": 100},
+    }
+
+    results = check_cop.run_variant_checks(
+        cop_name="Style/Foo",
+        repo_dirs=[str(tmp_path / "repo_a")],
+        batches_dir=str(batches),
+        run_nitrocop_fn=fake_nc,
+        run_rubocop_fn=fake_rc,
+        variant_baselines=variant_baselines,
+    )
+
+    assert len(results) == 1
+    # Falls back to global baseline
+    assert results[0]["baseline_fp"] == 50
+    assert results[0]["baseline_fn"] == 20
+
+
 def test_run_variant_checks_skips_cops_not_in_batch(tmp_path):
     """Cops not overridden in any batch get empty results."""
     batches = tmp_path / "batches"
@@ -724,6 +807,11 @@ def test_load_variant_baselines_from_file(tmp_path):
                     {"cop": "Style/Foo", "style_label": "bar", "matches": 80, "fp": 5, "fn": 3},
                     {"cop": "Style/Other", "style_label": "x", "matches": 10, "fp": 0, "fn": 0},
                 ],
+                "by_repo_cop": {
+                    "repo_a__abc": {"Style/Foo": {"fp": 3, "fn": 1, "matches": 40}},
+                    "repo_b__def": {"Style/Foo": {"fp": 2, "fn": 2, "matches": 40}},
+                    "repo_c__ghi": {"Style/Other": {"fp": 0, "fn": 0, "matches": 10}},
+                },
             },
             {
                 "name": "variant_batch_2",
@@ -741,6 +829,16 @@ def test_load_variant_baselines_from_file(tmp_path):
         assert "baz" in result
         assert result["baz"]["fp"] == 10
         assert "x" not in result  # Style/Other, not Style/Foo
+        # Per-repo data should be populated for batch 1
+        assert "by_repo" in result["bar"]
+        assert "repo_a__abc" in result["bar"]["by_repo"]
+        assert result["bar"]["by_repo"]["repo_a__abc"]["fp"] == 3
+        assert result["bar"]["by_repo"]["repo_a__abc"]["fn"] == 1
+        assert "repo_b__def" in result["bar"]["by_repo"]
+        # repo_c only has Style/Other, not Style/Foo
+        assert "repo_c__ghi" not in result["bar"]["by_repo"]
+        # Batch 2 has no by_repo_cop — by_repo should be empty
+        assert result["baz"]["by_repo"] == {}
     finally:
         cache_file.unlink(missing_ok=True)
 

@@ -23,10 +23,10 @@ def test_aggregate_rows_sums_variant_across_shards():
         # Default rows — kept as-is
         {"cop": "Style/Foo", "bl_fp": 3, "bl_fn": 0, "local_fp": 2, "local_fn": 0, "result": "pass"},
         {"cop": "Style/Foo", "bl_fp": 3, "bl_fn": 0, "local_fp": 1, "local_fn": 0, "result": "pass"},
-        # Variant rows — should be aggregated
-        {"cop": "Style/Foo (comma)", "bl_fp": 10, "bl_fn": 5, "local_fp": 100, "local_fn": 20, "result": "pass"},
-        {"cop": "Style/Foo (comma)", "bl_fp": 10, "bl_fn": 5, "local_fp": 200, "local_fn": 30, "result": "pass"},
-        {"cop": "Style/Foo (comma)", "bl_fp": 10, "bl_fn": 5, "local_fp": 50, "local_fn": 10, "result": "pass"},
+        # Variant rows — both baselines and locals should be summed
+        {"cop": "Style/Foo (comma)", "bl_fp": 2, "bl_fn": 1, "local_fp": 100, "local_fn": 20, "result": "pass"},
+        {"cop": "Style/Foo (comma)", "bl_fp": 3, "bl_fn": 2, "local_fp": 200, "local_fn": 30, "result": "pass"},
+        {"cop": "Style/Foo (comma)", "bl_fp": 0, "bl_fn": 0, "local_fp": 50, "local_fn": 10, "result": "pass"},
     ]
     result = mod.aggregate_rows(rows)
 
@@ -39,7 +39,8 @@ def test_aggregate_rows_sums_variant_across_shards():
     assert len(variant) == 1
     assert variant[0]["local_fp"] == 350  # 100 + 200 + 50
     assert variant[0]["local_fn"] == 60   # 20 + 30 + 10
-    assert variant[0]["bl_fp"] == 10      # baseline stays as-is (global)
+    assert variant[0]["bl_fp"] == 5       # 2 + 3 + 0 (summed across shards)
+    assert variant[0]["bl_fn"] == 3       # 1 + 2 + 0
 
 
 def test_aggregate_rows_variant_regression_detected():

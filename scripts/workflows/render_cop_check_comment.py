@@ -52,8 +52,9 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
     Default cop rows (no parentheses) are kept individually per shard —
     the default gate already handles per-repo regression correctly.
 
-    Variant rows are summed across shards since the baseline is a global
-    number and per-shard local FP/FN must be aggregated before comparing.
+    Variant rows are summed across shards — both baselines and local
+    FP/FN are per-repo scoped, so summing across shards gives the
+    correct totals for the sampled repos.
     """
     default_rows = []
     variant_agg: dict[str, dict] = {}  # cop name -> aggregated data
@@ -64,8 +65,8 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
             if key not in variant_agg:
                 variant_agg[key] = {
                     "cop": key,
-                    "bl_fp": row["bl_fp"],
-                    "bl_fn": row["bl_fn"],
+                    "bl_fp": 0,
+                    "bl_fn": 0,
                     "local_fp": 0,
                     "local_fn": 0,
                     "result": "pass",
@@ -74,6 +75,8 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
                     "details": [],
                 }
             agg = variant_agg[key]
+            agg["bl_fp"] += row["bl_fp"]
+            agg["bl_fn"] += row["bl_fn"]
             agg["local_fp"] += row["local_fp"]
             agg["local_fn"] += row["local_fn"]
             if row.get("detail"):

@@ -748,7 +748,10 @@ def load_variant_baselines(
 ) -> dict[str, dict]:
     """Load per-style baseline FP/FN from the oracle's style-variant-results.json.
 
-    Returns {style_label: {fp, fn, matches}} or empty dict if unavailable.
+    Returns {style_label: {fp, fn, matches, by_repo: {repo_id: {fp, fn}}}}
+    or empty dict if unavailable.  ``by_repo`` is populated when the oracle
+    artifact contains per-repo divergence data (``by_repo_cop``); older
+    artifacts without this field will have an empty ``by_repo`` dict.
     """
     if run_id is None:
         return {}
@@ -765,10 +768,20 @@ def load_variant_baselines(
         for cop_entry in batch.get("by_cop", []):
             if cop_entry.get("cop") == cop_name:
                 label = cop_entry.get("style_label", batch.get("name", ""))
+                # Build per-repo baseline from by_repo_cop if available
+                by_repo: dict[str, dict] = {}
+                for repo_id, cop_data in batch.get("by_repo_cop", {}).items():
+                    if cop_name in cop_data:
+                        stats = cop_data[cop_name]
+                        by_repo[repo_id] = {
+                            "fp": stats.get("fp", 0),
+                            "fn": stats.get("fn", 0),
+                        }
                 baselines[label] = {
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
                     "matches": cop_entry.get("matches", 0),
+                    "by_repo": by_repo,
                 }
     return baselines
 
@@ -900,6 +913,25 @@ def run_variant_checks(
                 })
 
         baseline = variant_baselines.get(label, {})
+        by_repo_baseline = baseline.get("by_repo", {})
+        if by_repo_baseline:
+            # Per-repo baseline: sum only repos we actually sampled
+            sampled_bl_fp = 0
+            sampled_bl_fn = 0
+            for repo_dir in repo_dirs:
+                repo_id = Path(repo_dir).name
+                repo_bl = by_repo_baseline.get(repo_id, {})
+                sampled_bl_fp += repo_bl.get("fp", 0)
+                sampled_bl_fn += repo_bl.get("fn", 0)
+        else:
+            # TODO(variant-per-repo-compat): remove after first corpus-oracle
+            # run with by_repo_cop data lands (check style-variant-results.json
+            # for the by_repo_cop key, then delete this else branch).
+            # Fallback for old artifacts without per-repo data:
+            # use global baseline (lossy but not worse than before)
+            sampled_bl_fp = baseline.get("fp", 0)
+            sampled_bl_fn = baseline.get("fn", 0)
+            # END TODO(variant-per-repo-compat)
         results.append({
             "style_label": label,
             "batch_config": config,
@@ -908,8 +940,8 @@ def run_variant_checks(
             "fp": max(0, nc_total - rc_total),
             "fn": max(0, rc_total - nc_total),
             "rubocop_errors": rc_errors,
-            "baseline_fp": baseline.get("fp", 0),
-            "baseline_fn": baseline.get("fn", 0),
+            "baseline_fp": sampled_bl_fp,
+            "baseline_fn": sampled_bl_fn,
             "diverging_repos": repo_counts,
         })
 
@@ -1622,13 +1654,10 @@ def main():
                     print(f"  {'Style':<30} {'NC':>8} {'RC':>8} {'FP':>6} {'FN':>6}  {'BL FP':>6} {'BL FN':>6}")
                     print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*6} {'-'*6}  {'-'*6} {'-'*6}")
                     for vr in variant_results:
-                        # Regression: local FP/FN on this shard's repos exceeds
-                        # what's expected. Since baseline is global (all repos) and
-                        # the shard is a subset, we can't compare directly. Instead,
-                        # flag when baseline was 0 but local has FP/FN (new regression),
-                        # or when local FP/FN exceeds the global baseline (definitely worse).
-                        fp_regressed = (vr['fp'] > 0 and vr['baseline_fp'] == 0) or vr['fp'] > vr['baseline_fp']
-                        fn_regressed = (vr['fn'] > 0 and vr['baseline_fn'] == 0) or vr['fn'] > vr['baseline_fn']
+                        # Regression: local FP/FN exceeds baseline for the
+                        # same set of sampled repos (apples-to-apples).
+                        fp_regressed = vr['fp'] > vr['baseline_fp']
+                        fn_regressed = vr['fn'] > vr['baseline_fn']
                         v_result = "fail" if fp_regressed or fn_regressed else "pass"
                         marker = " ← REGRESSION" if v_result == "fail" else ""
                         print(
