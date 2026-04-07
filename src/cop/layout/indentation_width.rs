@@ -103,6 +103,13 @@ use crate::parse::source::SourceFile;
 ///   column as base instead of `line_start_column`. Modifier-decorated defs
 ///   (`private def foo`) still use line_start_column. Resolved ~3 FP
 ///   (elasticgraph `__skip__ = def`).
+///
+/// 2026-04-06 (continued):
+/// - Fixed begin/rescue/end inline FP. When `end` is not the first non-whitespace
+///   character on its line (e.g., `begin ... rescue NameError; end` where the `end`
+///   is on the same line as `rescue NameError;`), RuboCop's `on_kwbegin` skips the
+///   indentation check entirely. Added `end_begins_its_line` helper and the check
+///   to the BeginNode handler. Resolved 8+ FP (neo4jrb, foodsoft, activescaffold).
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -160,14 +167,18 @@ fn line_start_column(source: &SourceFile, offset: usize) -> usize {
 }
 
 /// Check if the `def` keyword at `kw_offset` is preceded by a modifier identifier
-/// (e.g., `private def foo`, `memoized private def foo`). Returns true if the
-/// non-whitespace byte immediately before `def` is alphanumeric/underscore.
-/// This distinguishes modifier decorators (where `line_start_column` is the correct
-/// base) from assignment contexts like `x = def foo` (where the `def` keyword column
-/// should be used as base, matching RuboCop's `on_def` behavior).
-fn def_preceded_by_modifier(source: &SourceFile, kw_offset: usize) -> bool {
+/// (e.g., `private def foo`, `helper_method \` on the previous line). Returns
+/// `Some(base_col)` with the correct base column for indentation when a modifier is
+/// found, or `None` for non-modifier contexts like `x = def foo` or `(def bar`.
+///
+/// Handles two cases:
+/// 1. Same-line modifier: `private def foo` — returns line_start_column of the def line.
+/// 2. Backslash continuation: `helper_method \` / `  def foo` — returns
+///    line_start_column of the previous (modifier) line, matching RuboCop's
+///    `on_send` + `leftmost_modifier_of` behavior.
+fn def_modifier_base_col(source: &SourceFile, kw_offset: usize) -> Option<usize> {
     if kw_offset == 0 {
-        return false;
+        return None;
     }
     let bytes = source.as_bytes();
     // Walk back to find start of line
@@ -175,7 +186,7 @@ fn def_preceded_by_modifier(source: &SourceFile, kw_offset: usize) -> bool {
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
         line_start -= 1;
     }
-    // If def is at the start of the line (after indentation), there's no modifier
+    // If def is at the start of the line (after indentation), there's no same-line modifier
     let first_non_ws = {
         let mut p = line_start;
         while p < bytes.len() && (bytes[p] == b' ' || bytes[p] == b'\t') {
@@ -184,7 +195,24 @@ fn def_preceded_by_modifier(source: &SourceFile, kw_offset: usize) -> bool {
         p
     };
     if first_non_ws == kw_offset {
-        return false;
+        // def is the first token on its line — check if the previous line ends with
+        // backslash (line continuation), indicating a modifier on the previous line.
+        if line_start > 0 {
+            // line_start points to the first byte of this line; line_start-1 is '\n'.
+            let prev_line_end = line_start - 1;
+            if prev_line_end > 0 {
+                // Find the last non-whitespace char before the newline
+                let mut p = prev_line_end;
+                while p > 0 && (bytes[p - 1] == b' ' || bytes[p - 1] == b'\t') {
+                    p -= 1;
+                }
+                if p > 0 && bytes[p - 1] == b'\\' {
+                    // Previous line ends with backslash — use its start column
+                    return Some(line_start_column(source, p - 1));
+                }
+            }
+        }
+        return None;
     }
     // Skip whitespace before `def`
     let mut pos = kw_offset;
@@ -192,11 +220,15 @@ fn def_preceded_by_modifier(source: &SourceFile, kw_offset: usize) -> bool {
         pos -= 1;
     }
     if pos == line_start {
-        return false;
+        return None;
     }
     // Check if the character immediately before is alphanumeric/underscore
     let prev_byte = bytes[pos - 1];
-    prev_byte.is_ascii_alphanumeric() || prev_byte == b'_'
+    if prev_byte.is_ascii_alphanumeric() || prev_byte == b'_' {
+        Some(line_start_column(source, kw_offset))
+    } else {
+        None
+    }
 }
 
 fn body_members(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
@@ -244,6 +276,30 @@ fn line_uses_tab_indentation(source: &SourceFile, body_offset: usize) -> bool {
         pos += 1;
     }
     false
+}
+
+/// Check if the `end` keyword is the first non-whitespace character on its line.
+/// RuboCop's `on_kwbegin` skips indentation check when the `end` keyword is
+/// inline with other code (e.g., `begin ... rescue NameError; end`).
+/// This matches RuboCop's `begins_its_line?(node.loc.end)` check.
+fn end_begins_its_line(source: &SourceFile, end_offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    // Find the start of the line containing the end keyword
+    let mut line_start = end_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    // Find the first non-whitespace character on this line
+    let mut first_non_ws = line_start;
+    while first_non_ws < bytes.len()
+        && (bytes[first_non_ws] == b' ' || bytes[first_non_ws] == b'\t')
+    {
+        first_non_ws += 1;
+    }
+    // Find the end keyword's column
+    let end_col = end_offset - line_start;
+    // Check if the first non-whitespace is at the same column as end
+    first_non_ws - line_start == end_col
 }
 
 /// Check if the body node is not the first non-whitespace character on its line.
@@ -808,16 +864,34 @@ impl Cop for IndentationWidth {
         //   x = begin
         //     body       # indented from `end`, not from `begin`
         //   end
+        //
+        // RuboCop's `on_kwbegin` also checks `begins_its_line?(node.loc.end)` —
+        // if the `end` keyword is NOT the first non-whitespace on its line
+        // (e.g., `begin ... rescue NameError; end` where end is inline with code),
+        // indentation is NOT checked. This avoids false positives for inline
+        // begin/rescue/end constructs.
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(begin_kw_loc) = begin_node.begin_keyword_loc() {
                 // Explicit `begin...end` block
                 let kw_offset = begin_kw_loc.start_offset();
                 let (_, kw_col) = source.offset_to_line_col(kw_offset);
-                let base_col = if let Some(end_loc) = begin_node.end_keyword_loc() {
-                    source.offset_to_line_col(end_loc.start_offset()).1
+                let (base_col, end_offset) = if let Some(end_loc) = begin_node.end_keyword_loc() {
+                    (
+                        source.offset_to_line_col(end_loc.start_offset()).1,
+                        Some(end_loc.start_offset()),
+                    )
                 } else {
-                    kw_col
+                    (kw_col, None)
                 };
+                // Skip indentation check if `end` is not on its own line
+                // (RuboCop's `begins_its_line?` check)
+                if let Some(eo) = end_offset {
+                    if !end_begins_its_line(source, eo) {
+                        // Still check rescue/ensure/else clauses (these bypass the walker)
+                        self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        return;
+                    }
+                }
                 let alt_base = if base_col != kw_col {
                     Some(kw_col)
                 } else {
@@ -904,8 +978,8 @@ impl Cop for IndentationWidth {
                 // matches on_send using leftmost_modifier_of). For non-modifier
                 // contexts like `x = def foo` or `(def bar`, use the def
                 // keyword column to match RuboCop's on_def behavior.
-                if def_preceded_by_modifier(source, kw_offset) {
-                    line_start_column(source, kw_offset)
+                if let Some(modifier_col) = def_modifier_base_col(source, kw_offset) {
+                    modifier_col
                 } else {
                     source.offset_to_line_col(kw_offset).1
                 }
