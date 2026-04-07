@@ -7,6 +7,17 @@ use crate::parse::source::SourceFile;
 
 /// Enforces either `fetch` or `[]` for hash-style lookups.
 ///
+/// ## Corpus investigation (2026-03-30)
+///
+/// Prism stores `&block` as `call.block()` with a `BlockArgumentNode`, while
+/// RuboCop's Parser-backed `node.arguments.one?` counts that block-pass as an
+/// argument. The original implementation only looked at `call.arguments()` and
+/// rejected every call with `call.block()`, so it missed `receiver.fetch(&block)`.
+///
+/// Fix: count `BlockArgumentNode` in the effective argument count for
+/// `EnforcedStyle: brackets`, but continue excluding literal blocks (`{}` /
+/// `do...end`) so `fetch(key) { default }` remains allowed.
+///
 /// ## Variant style divergence (2026-04-06)
 ///
 /// The default `EnforcedStyle: brackets` is correct.
