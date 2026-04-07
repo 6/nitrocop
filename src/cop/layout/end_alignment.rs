@@ -101,7 +101,13 @@ impl Cop for EndAlignment {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let style = config.get_str("EnforcedStyleAlignWith", "keyword");
+        // Accept both EnforcedStyleAlignWith (RuboCop's standard alignment config key)
+        // and EnforcedStyle (used by --style override) for compatibility.
+        let style = if config.options.contains_key("EnforcedStyleAlignWith") {
+            config.get_str("EnforcedStyleAlignWith", "keyword")
+        } else {
+            config.get_str("EnforcedStyle", "keyword")
+        };
         if let Some(class_node) = node.as_class_node() {
             diagnostics.extend(self.check_keyword_end(
                 source,
