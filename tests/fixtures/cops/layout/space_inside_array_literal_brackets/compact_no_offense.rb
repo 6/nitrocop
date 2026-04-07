@@ -26,3 +26,17 @@ end
 case value
 in ADT[ *head, ADT[ *headhead, tail ]]
 end
+# Multiline with %w[] elements (NOT multi-dimensional -- %w is not a bracket array)
+[
+  %w[foo bar],
+  %w[baz qux]
+]
+# Single-line with %w[] elements
+[ %w[foo bar], %w[baz qux] ]
+# Multiline with %i[] elements
+[
+  %i[foo bar],
+  %i[baz qux]
+]
+# Mixed %w[] and regular arrays
+[ %w[a b], [ 1, 2 ]]
