@@ -141,7 +141,8 @@ use crate::parse::source::SourceFile;
 /// Nitrocop's native Prism parser handles these files fine, producing
 /// offenses that are FPs relative to RuboCop. Fix: detect non-UTF-8
 /// encoding magic comments in `check_node`/`check_source` and skip the
-/// file entirely. UTF-8 encoding comments are still processed normally.
+/// file entirely. UTF-8 and binary/ASCII-8BIT encodings are still
+/// processed normally (RuboCop handles those without crashing).
 ///
 /// **FP fix 2: `%s()` empty symbols (2 FPs).** `%s()` creates an empty
 /// symbol `:""`'. Parser gem treats `%s()` as `:dsym` (dynamic symbol),
@@ -199,12 +200,7 @@ fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
                 // Trim whitespace and extract the encoding name
                 let value_trimmed: Vec<u8> =
                     value.iter().copied().skip_while(|b| *b == b' ').collect();
-                let enc_end = value_trimmed
-                    .iter()
-                    .position(|b| matches!(b, b' ' | b'\t' | b';' | b'-' | b'*'))
-                    .unwrap_or(value_trimmed.len());
-                // Allow hyphenated encoding names like utf-8
-                // Re-parse: take alphanumeric + hyphens + underscores
+                // Take alphanumeric + hyphens + underscores (for names like utf-8)
                 let enc_end = value_trimmed
                     .iter()
                     .position(|b| !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_')
@@ -218,8 +214,17 @@ fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
                 {
                     return false;
                 }
-                // Any other encoding (us-ascii, windows-1252, iso-8859-1, etc.)
-                // may cause Translation::Parser crashes → skip
+                // binary / ASCII-8BIT are fine — RuboCop's Translation::Parser
+                // handles them without crashing. Common in files dealing with
+                // binary data (packetfu, puppetlabs, etc.).
+                if enc_name == b"binary"
+                    || enc_name.starts_with(b"ascii-8bit")
+                    || enc_name.starts_with(b"ascii_8bit")
+                {
+                    return false;
+                }
+                // Other non-UTF-8 encodings (us-ascii, windows-1252,
+                // iso-8859-1, etc.) cause Translation::Parser crashes → skip
                 if !enc_name.is_empty() {
                     return true;
                 }
@@ -1133,6 +1138,17 @@ mod tests {
         let diags =
             crate::testutil::run_cop_full(&VariableNumber, b"# encoding: utf-8\nfoo_1 = 1\n");
         assert_eq!(diags.len(), 1, "expected utf-8 file to NOT be skipped");
+
+        // binary / ASCII-8BIT should NOT be skipped — RuboCop handles them fine
+        let diags = crate::testutil::run_cop_full(
+            &VariableNumber,
+            b"# -*- coding: binary -*-\nfoo_1 = 1\n",
+        );
+        assert_eq!(diags.len(), 1, "expected binary file to NOT be skipped");
+
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# encoding: ASCII-8BIT\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected ASCII-8BIT file to NOT be skipped");
     }
 
     // --- has_non_utf8_encoding_comment unit tests ---
@@ -1171,6 +1187,20 @@ mod tests {
         // frozen_string_literal comment should NOT trigger encoding detection
         assert!(!has_non_utf8_encoding_comment(
             b"# frozen_string_literal: true\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_binary_not_skipped() {
+        // binary / ASCII-8BIT encodings are handled fine by RuboCop
+        assert!(!has_non_utf8_encoding_comment(
+            b"# -*- coding: binary -*-\nfoo\n"
+        ));
+        assert!(!has_non_utf8_encoding_comment(
+            b"# encoding: ASCII-8BIT\nfoo\n"
+        ));
+        assert!(!has_non_utf8_encoding_comment(
+            b"# -*- encoding : ascii-8bit -*-\nfoo\n"
         ));
     }
 }
