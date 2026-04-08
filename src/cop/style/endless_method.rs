@@ -246,26 +246,6 @@ impl EndlessMethod {
         stmt.as_begin_node().is_none() && stmt.as_parentheses_node().is_none()
     }
 
-    fn arguments_source(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> String {
-        let Some(params) = def_node.parameters() else {
-            return String::new();
-        };
-
-        if let (Some(lparen), Some(rparen)) = (def_node.lparen_loc(), def_node.rparen_loc()) {
-            return source
-                .byte_slice(lparen.start_offset(), rparen.end_offset(), "")
-                .to_string();
-        }
-
-        let params_loc = params.location();
-        let params_src = source.byte_slice(params_loc.start_offset(), params_loc.end_offset(), "");
-        if params_src.is_empty() {
-            String::new()
-        } else {
-            format!(" {params_src}")
-        }
-    }
-
     /// Compute the replacement length matching RuboCop's
     /// `endless_replacement(node).length + offset`.
     ///
