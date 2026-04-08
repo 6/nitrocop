@@ -43,7 +43,9 @@ use ruby_prism::Visit;
 ///   assignment-aligned and missed real operator/send contexts like `model == if ... end`
 ///   and `raise Informative, if ... end`. Fixed by matching RuboCop's narrower context:
 ///   only align to an outer assignment/send when the conditional is the extracted RHS /
-///   last-argument target after peeling call chains and grouping wrappers.
+///   last-argument target after peeling call chains and grouping wrappers. Other same-line
+///   parents like `return case`, hash pairs, `when ... then case`, and `foo || case`
+///   still fall back to keyword alignment.
 pub struct EndAlignment;
 
 fn alignment_column(source: &SourceFile, offset: usize) -> usize {
@@ -246,6 +248,14 @@ struct AncestorContext {
     rhs_span: Option<(usize, usize)>,
 }
 
+#[derive(Clone, Copy)]
+struct KeywordEndContext<'a> {
+    kw_offset: usize,
+    end_offset: usize,
+    keyword: &'a str,
+    style: &'a str,
+}
+
 struct AncestorFinder {
     target_span: (usize, usize),
     stack: Vec<AncestorContext>,
@@ -317,17 +327,6 @@ fn variable_context_start_offset(
     None
 }
 
-fn case_parent_start_offset(
-    source: &SourceFile,
-    ancestors: &[AncestorContext],
-    kw_offset: usize,
-) -> Option<usize> {
-    let parent = ancestors.last()?;
-    let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
-    let (kw_line, _) = source.offset_to_line_col(kw_offset);
-    (parent_line == kw_line).then_some(parent.start_offset)
-}
-
 impl Cop for EndAlignment {
     fn name(&self) -> &'static str {
         "Layout/EndAlignment"
@@ -362,10 +361,12 @@ impl Cop for EndAlignment {
                 source,
                 node,
                 parse_result,
-                class_node.class_keyword_loc().start_offset(),
-                class_node.end_keyword_loc().start_offset(),
-                "class",
-                style,
+                KeywordEndContext {
+                    kw_offset: class_node.class_keyword_loc().start_offset(),
+                    end_offset: class_node.end_keyword_loc().start_offset(),
+                    keyword: "class",
+                    style,
+                },
             ));
             return;
         }
@@ -375,10 +376,12 @@ impl Cop for EndAlignment {
                 source,
                 node,
                 parse_result,
-                module_node.module_keyword_loc().start_offset(),
-                module_node.end_keyword_loc().start_offset(),
-                "module",
-                style,
+                KeywordEndContext {
+                    kw_offset: module_node.module_keyword_loc().start_offset(),
+                    end_offset: module_node.end_keyword_loc().start_offset(),
+                    keyword: "module",
+                    style,
+                },
             ));
             return;
         }
@@ -402,10 +405,12 @@ impl Cop for EndAlignment {
                 source,
                 node,
                 parse_result,
-                kw_loc.start_offset(),
-                end_kw_loc.start_offset(),
-                keyword,
-                style,
+                KeywordEndContext {
+                    kw_offset: kw_loc.start_offset(),
+                    end_offset: end_kw_loc.start_offset(),
+                    keyword,
+                    style,
+                },
             ));
             return;
         }
@@ -417,10 +422,12 @@ impl Cop for EndAlignment {
                     source,
                     node,
                     parse_result,
-                    kw_loc.start_offset(),
-                    end_loc.start_offset(),
-                    "while",
-                    style,
+                    KeywordEndContext {
+                        kw_offset: kw_loc.start_offset(),
+                        end_offset: end_loc.start_offset(),
+                        keyword: "while",
+                        style,
+                    },
                 ));
                 return;
             }
@@ -433,10 +440,12 @@ impl Cop for EndAlignment {
                     source,
                     node,
                     parse_result,
-                    kw_loc.start_offset(),
-                    end_loc.start_offset(),
-                    "until",
-                    style,
+                    KeywordEndContext {
+                        kw_offset: kw_loc.start_offset(),
+                        end_offset: end_loc.start_offset(),
+                        keyword: "until",
+                        style,
+                    },
                 ));
                 return;
             }
@@ -449,10 +458,12 @@ impl Cop for EndAlignment {
                 source,
                 node,
                 parse_result,
-                kw_loc.start_offset(),
-                end_loc.start_offset(),
-                "case",
-                style,
+                KeywordEndContext {
+                    kw_offset: kw_loc.start_offset(),
+                    end_offset: end_loc.start_offset(),
+                    keyword: "case",
+                    style,
+                },
             ));
             return;
         }
@@ -464,10 +475,12 @@ impl Cop for EndAlignment {
                 source,
                 node,
                 parse_result,
-                kw_loc.start_offset(),
-                end_loc.start_offset(),
-                "case",
-                style,
+                KeywordEndContext {
+                    kw_offset: kw_loc.start_offset(),
+                    end_offset: end_loc.start_offset(),
+                    keyword: "case",
+                    style,
+                },
             ));
             return;
         }
@@ -480,10 +493,12 @@ impl Cop for EndAlignment {
                     source,
                     node,
                     parse_result,
-                    kw_loc.start_offset(),
-                    end_loc.start_offset(),
-                    "unless",
-                    style,
+                    KeywordEndContext {
+                        kw_offset: kw_loc.start_offset(),
+                        end_offset: end_loc.start_offset(),
+                        keyword: "unless",
+                        style,
+                    },
                 ));
             }
             return;
@@ -494,10 +509,12 @@ impl Cop for EndAlignment {
                 source,
                 node,
                 parse_result,
-                sclass_node.class_keyword_loc().start_offset(),
-                sclass_node.end_keyword_loc().start_offset(),
-                "class",
-                style,
+                KeywordEndContext {
+                    kw_offset: sclass_node.class_keyword_loc().start_offset(),
+                    end_offset: sclass_node.end_keyword_loc().start_offset(),
+                    keyword: "class",
+                    style,
+                },
             ));
         }
 
@@ -512,11 +529,14 @@ impl EndAlignment {
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
         parse_result: &ruby_prism::ParseResult<'_>,
-        kw_offset: usize,
-        end_offset: usize,
-        keyword: &str,
-        style: &str,
+        context: KeywordEndContext<'_>,
     ) -> Vec<Diagnostic> {
+        let KeywordEndContext {
+            kw_offset,
+            end_offset,
+            keyword,
+            style,
+        } = context;
         let (kw_line, _) = source.offset_to_line_col(kw_offset);
         let (end_line, end_col) = source.offset_to_line_col(end_offset);
 
@@ -528,11 +548,6 @@ impl EndAlignment {
         let ancestors = ancestors_for_node(parse_result, node);
         let expected_offset = match style {
             "variable" => variable_context_start_offset(source, &ancestors, node, kw_offset)
-                .or_else(|| {
-                    (node.as_case_node().is_some() || node.as_case_match_node().is_some())
-                        .then(|| case_parent_start_offset(source, &ancestors, kw_offset))
-                        .flatten()
-                })
                 .unwrap_or(kw_offset),
             "start_of_line" => start_of_line_alignment_offset(source, kw_offset),
             _ => kw_offset,
@@ -880,6 +895,48 @@ mod tests {
             &EndAlignment,
             include_bytes!("../../../tests/fixtures/cops/layout/end_alignment/variable_offense.rb"),
             config_with_align_style("variable"),
+        );
+    }
+
+    #[test]
+    fn variable_style_return_case_falls_back_to_keyword() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"def lookup(controller)\n  return case controller\n         when 'resources'\n           :resource\n         else\n           :other\n         end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should keep keyword alignment for return case: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_hash_value_case_falls_back_to_keyword() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"mapping = {\n  'type' => case kind\n            when :a\n              1\n            else\n              2\n            end\n}\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should not align case with a hash pair: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_case_under_boolean_parent_flags_parent_aligned_end() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"def to_s\n  @string || case\n    when @object.nan?\n      'NaN'\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`case`")),
+            "variable style should fall back to case keyword under ||: {:?}",
+            diags
         );
     }
 }
