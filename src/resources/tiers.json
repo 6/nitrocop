@@ -51,6 +51,7 @@
     "Layout/EmptyLineBetweenDefs": "stable",
     "Layout/EmptyLines": "stable",
     "Layout/EmptyLinesAfterModuleInclusion": "stable",
+    "Layout/EmptyLinesAroundAccessModifier": "stable",
     "Layout/EmptyLinesAroundArguments": "stable",
     "Layout/EmptyLinesAroundAttributeAccessor": "stable",
     "Layout/EmptyLinesAroundBeginBody": "stable",
