@@ -344,3 +344,19 @@ Runner.singleton_class.prepend Module.new {
     def list_tests
     end
 }
+
+# Constant assignment wrappers do not propagate macro scope into root
+# receiverful blocks, so `private` inside this DSL block is not checked.
+module Authentication
+  Authenticate = CommandClass.new(
+    inputs: %i[a]
+  ) do
+    def call
+    end
+
+    private
+
+    def authenticator
+    end
+  end
+end
