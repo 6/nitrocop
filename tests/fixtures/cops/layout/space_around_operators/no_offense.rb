@@ -228,3 +228,15 @@ BFIND = -2
 return { "json_class" => Float, "raw" => "Infinity" }  if self.infinite? ==  1
 return { "json_class" => Float, "raw" => "-Infinity" } if self.infinite? == -1
 return { "json_class" => Float, "raw" => "NaN" }       if self.nan?
+
+# Endless method definitions — the `=` is def syntax, not an assignment operator
+def key?(key)       = @attributes.key?(key)
+alias include? key?
+def size            = @attributes.size
+alias length size
+def empty?          = @attributes.empty?
+
+# Extra leading space before = aligned with PRECEDING assignment (non-assignment lines between)
+options   = foo
+quux()
+new_line  = true

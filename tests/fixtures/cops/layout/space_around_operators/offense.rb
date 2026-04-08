@@ -128,3 +128,13 @@ lend = @rl_end > 0 ? @rl_end - ((@rl_editing_mode == @vi_mode)?1:0) : @rl_end
 target_url = target_url + (target_url.include?("?")?"&":"?") + params
                                                    ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `?`.
                                                        ^ Layout/SpaceAroundOperators: Surrounding space missing for operator `:`.
+
+# Extra leading space before = when subsequent assignment exists but is NOT aligned
+# (non-assignment lines between them don't break the search)
+workload  = []
+          ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+foo(bar)
+tag    = Tag.create name: 'tag 1'
+       ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+baz(qux)
+options = nil
