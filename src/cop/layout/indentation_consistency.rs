@@ -132,9 +132,16 @@ fn is_class_constructor_call(node: &ruby_prism::Node<'_>) -> bool {
         Some(r) => r,
         None => return false,
     };
-    let const_name = match receiver.as_constant_read_node() {
-        Some(c) => c.name().as_slice(),
-        None => return false,
+    let const_name = if let Some(c) = receiver.as_constant_read_node() {
+        c.name().as_slice()
+    } else if let Some(cp) = receiver.as_constant_path_node() {
+        // Handle ::Class.new, ::Struct.new, etc. (ConstantPathNode)
+        match cp.name() {
+            Some(n) => n.as_slice(),
+            None => return false,
+        }
+    } else {
+        return false;
     };
     let method = call.name().as_slice();
     matches!(
