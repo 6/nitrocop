@@ -295,6 +295,18 @@ jobs:
 
               if [ "$rc" -eq 124 ]; then
                 echo "::error::rubocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
+              elif [ "$rc" -ne 0 ]; then
+                # TODO(corpus): Rubocop exits non-zero on jruby__jruby__0303464 every
+                # cold-cache run, producing empty JSON (0 bytes). Suspected OOM on
+                # 7,445 .rb files. The empty JSON then fails validate_rubocop_result.py,
+                # which misleadingly warns "out-of-repo paths — not caching".
+                # Need to confirm whether this is OOM (rc=137), a specific file crashing
+                # the formatter, or something else. Once diagnosed: either shard jruby
+                # into smaller file-list halves, increase runner memory, or exclude the
+                # offending files.
+                # See: https://github.com/6/nitrocop/actions/runs/24136648300
+                echo "::warning::rubocop exited with code ${rc} for ${REPO_ID}"
+                cat "$WORKSPACE/results/rubocop/${REPO_ID}.err" 2>/dev/null || true
               fi
             fi
 
@@ -323,7 +335,9 @@ jobs:
             # Save rubocop result to cache dir (will be persisted after the batch).
             # Validate file paths are within the repo to prevent cache poisoning.
             if [ "$RUBOCOP_CACHED" = false ] && [ -f "results/rubocop/${REPO_ID}.json" ]; then
-              if python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
+              if [ ! -s "results/rubocop/${REPO_ID}.json" ]; then
+                echo "::warning::Rubocop result for ${REPO_ID} is empty (rubocop likely crashed) — not caching"
+              elif python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
                 cp "results/rubocop/${REPO_ID}.json" "rubocop-cache/${REPO_ID}_${REPO_SHA}.json"
               else
                 echo "::warning::Rubocop result for ${REPO_ID} contains out-of-repo paths — not caching"
