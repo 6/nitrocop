@@ -169,9 +169,9 @@ use crate::parse::source::SourceFile;
 /// `omit_parentheses` still diverged in two Prism-specific edge cases:
 ///
 /// 1. Parenthesized ambiguous descendants such as `Array(foo((bar || [])))`
-///    were flagged because ambiguity checks and nested-hash scans stopped at
-///    `ParenthesesNode` and ignored send receivers. RuboCop still sees the
-///    inner grouped `||` / nested hash literal and allows the outer parens.
+///    were flagged because ambiguity checks stopped at `ParenthesesNode`.
+///    RuboCop still sees the inner grouped `||` descendant and allows the
+///    outer parens.
 ///
 /// 2. Assigned values under assignment-like parent sends such as
 ///    `session[:x] = foo(bar)` and `self.value = foo(bar)` were skipped because
@@ -181,6 +181,11 @@ use crate::parse::source::SourceFile;
 ///    Fixed by treating call children that start after `equal_loc` as
 ///    `ParentKind::Assignment`, while leaving receiver/index children before `=`
 ///    in ordinary call context.
+///
+/// Hash-literal allowances stay gated like RuboCop: only a direct braced hash
+/// argument, or a direct send argument that contains a braced hash descendant,
+/// may keep outer parentheses. Grouping or container wrappers around the direct
+/// argument do not qualify.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -691,7 +696,16 @@ impl ParenVisitor<'_> {
     fn hash_literal_in_arguments(&self, call: &ruby_prism::CallNode<'_>) -> bool {
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
-                if has_hash_literal(&arg) {
+                if arg
+                    .as_hash_node()
+                    .is_some_and(|hash| hash.opening_loc().as_slice() == b"{")
+                {
+                    return true;
+                }
+
+                // Match RuboCop's direct-argument gate: only send args get the
+                // descendant hash-literal allowance.
+                if arg.as_call_node().is_some() && has_hash_literal(&arg) {
                     return true;
                 }
             }
@@ -2364,6 +2378,81 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should allow parens when ambiguity is hidden behind grouping parentheses"
+        );
+    }
+
+    #[test]
+    fn omit_accepts_hash_descendant_inside_direct_send_argument() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"foo(bar(({a: 1})))\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when a direct send argument contains a grouped hash descendant"
+        );
+    }
+
+    #[test]
+    fn omit_flags_parenthesized_direct_send_with_hash_descendant() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"foo((bar({a: 1})))\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should still flag grouped direct arguments even when they wrap a send with a hash descendant"
+        );
+    }
+
+    #[test]
+    fn omit_flags_nested_hash_inside_array_argument() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"foo([{a: 1}])\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag grouped container arguments with nested hash literals"
+        );
+    }
+
+    #[test]
+    fn omit_flags_nested_hash_inside_keyword_hash_argument() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"foo(k: {a: 1})\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag keyword-hash wrappers with nested hash literals"
         );
     }
 
