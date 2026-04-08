@@ -1,7 +1,7 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, LAMBDA_NODE};
+use crate::cop::shared::node_type::{BLOCK_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE, SUPER_NODE};
 use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
 
 /// ## Corpus investigation (2026-03-14)
@@ -41,6 +41,21 @@ use crate::parse::source::SourceFile;
 /// `->` is a param continuation (not blank), and RuboCop does not flag it.
 /// Fix: for `LambdaNode`, when `->` is on a different line than `do`/`{`, use
 /// the `->` operator offset as the effective opening reference.
+///
+/// ## Corpus investigation (2026-04-08)
+///
+/// Variant-only divergence with `EnforcedStyle: empty_lines` came from two
+/// narrow mismatches with RuboCop:
+/// 1. Comment-only blocks (`do # comment end`) are treated as empty because
+///    Prism reports `body: nil`, and RuboCop skips empty bodies for
+///    `empty_lines`. nitrocop was still requiring blank lines at beginning/end.
+/// 2. `super do ... end` blocks were missed because Prism exposes them through
+///    `SuperNode` / `ForwardingSuperNode`, not plain `BlockNode`.
+/// 3. Two-line brace blocks whose body starts on the opening line
+///    (`it { foo.\n  bar }`) were incorrectly skipped as "single-line" by the
+///    shared helper. RuboCop still requires the blank line at block body
+///    beginning here, but not at block body end because there is no standalone
+///    line before `}`.
 pub struct EmptyLinesAroundBlockBody;
 
 /// Compute the effective opening offset for empty-line checks.
@@ -103,13 +118,100 @@ fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize 
     }
 }
 
+fn missing_beginning_empty_line_diagnostic(
+    cop_name: &'static str,
+    source: &SourceFile,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    let line_bytes = util::line_at(source, line)?;
+    if util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Empty line missing at block body beginning.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let Some(offset) = source.line_col_to_offset(line, 0) {
+            corr.push(crate::correction::Correction {
+                start: offset,
+                end: offset,
+                replacement: "\n".to_string(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn check_empty_lines_style_with_rubocop_edge_cases(
+    cop_name: &'static str,
+    source: &SourceFile,
+    effective_opening: usize,
+    opening_offset: usize,
+    closing_offset: usize,
+    body_start_offset: Option<usize>,
+    corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Vec<Diagnostic> {
+    if body_start_offset.is_none() {
+        return Vec::new();
+    }
+
+    let (keyword_line, _) = source.offset_to_line_col(effective_opening);
+    let (opening_line, _) = source.offset_to_line_col(opening_offset);
+    let (closing_line, _) = source.offset_to_line_col(closing_offset);
+
+    if keyword_line == closing_line {
+        return Vec::new();
+    }
+
+    let Some(body_start_offset) = body_start_offset else {
+        return Vec::new();
+    };
+    let (body_start_line, _) = source.offset_to_line_col(body_start_offset);
+
+    // RuboCop still flags the "beginning" offense for multiline brace/do blocks
+    // whose body starts on the opening line and the closing delimiter is alone
+    // on the next line, e.g. `it { foo.\n  bar }`. The shared helper skips these
+    // because `end_line == keyword_line + 1`, so handle only this narrow shape
+    // locally and let the shared helper cover all other cases.
+    if body_start_line == opening_line && closing_line == opening_line + 1 {
+        let mut diagnostics = Vec::new();
+        if let Some(diag) =
+            missing_beginning_empty_line_diagnostic(cop_name, source, keyword_line + 1, corrections)
+        {
+            diagnostics.push(diag);
+        }
+        return diagnostics;
+    }
+
+    util::check_missing_empty_lines_around_body_with_corrections(
+        cop_name,
+        source,
+        effective_opening,
+        closing_offset,
+        "block",
+        corrections,
+    )
+}
+
 impl Cop for EmptyLinesAroundBlockBody {
     fn name(&self) -> &'static str {
         "Layout/EmptyLinesAroundBlockBody"
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, LAMBDA_NODE]
+        &[BLOCK_NODE, LAMBDA_NODE, SUPER_NODE, FORWARDING_SUPER_NODE]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -126,18 +228,40 @@ impl Cop for EmptyLinesAroundBlockBody {
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
-        let (opening_offset, closing_offset, lambda_operator_offset) =
+        let (opening_offset, closing_offset, lambda_operator_offset, body_start_offset) =
             if let Some(b) = node.as_block_node() {
                 (
                     b.opening_loc().start_offset(),
                     b.closing_loc().start_offset(),
                     None,
+                    b.body().map(|body| body.location().start_offset()),
                 )
             } else if let Some(l) = node.as_lambda_node() {
                 (
                     l.opening_loc().start_offset(),
                     l.closing_loc().start_offset(),
                     Some(l.operator_loc().start_offset()),
+                    l.body().map(|body| body.location().start_offset()),
+                )
+            } else if let Some(s) = node.as_super_node() {
+                let Some(block) = s.block().and_then(|block| block.as_block_node()) else {
+                    return;
+                };
+                (
+                    block.opening_loc().start_offset(),
+                    block.closing_loc().start_offset(),
+                    None,
+                    block.body().map(|body| body.location().start_offset()),
+                )
+            } else if let Some(s) = node.as_forwarding_super_node() {
+                let Some(block) = s.block() else {
+                    return;
+                };
+                (
+                    block.opening_loc().start_offset(),
+                    block.closing_loc().start_offset(),
+                    None,
+                    block.body().map(|body| body.location().start_offset()),
                 )
             } else {
                 return;
@@ -172,16 +296,15 @@ impl Cop for EmptyLinesAroundBlockBody {
 
         match style {
             "empty_lines" => {
-                diagnostics.extend(
-                    util::check_missing_empty_lines_around_body_with_corrections(
-                        self.name(),
-                        source,
-                        effective_opening,
-                        closing_offset,
-                        "block",
-                        corrections,
-                    ),
-                );
+                diagnostics.extend(check_empty_lines_style_with_rubocop_edge_cases(
+                    self.name(),
+                    source,
+                    effective_opening,
+                    opening_offset,
+                    closing_offset,
+                    body_start_offset,
+                    corrections,
+                ));
             }
             _ => {
                 diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
