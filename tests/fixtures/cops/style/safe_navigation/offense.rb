@@ -256,3 +256,20 @@ outer.wrap do
     end if items
   end
 end
+
+options && options.each do |option, value|
+^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  option
+end
+
+new(
+  input_attributes: {
+    error: (errors.to_sentence.capitalize if errors),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  }
+)
+
+component("ui/forms/select").new(
+  error: (errors.to_sentence.capitalize if errors),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+)
