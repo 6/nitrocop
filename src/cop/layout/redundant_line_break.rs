@@ -438,11 +438,9 @@ impl SingleLineBlockCollector<'_, '_> {
             // The first CallNode we encounter (nearest) is the "owning" call
             // (e.g., `proc` for `proc { ... }`, or `.map` for `.map { ... }`).
             // Skip it to find the containing context.
-            if !skipped_owning_call {
-                if ancestor.as_call_node().is_some() {
-                    skipped_owning_call = true;
-                    continue;
-                }
+            if !skipped_owning_call && ancestor.as_call_node().is_some() {
+                skipped_owning_call = true;
+                continue;
             }
             // ArgumentsNode is a Prism wrapper with no Parser AST equivalent.
             if ancestor.as_arguments_node().is_some() {
@@ -751,7 +749,7 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
             if !is_index_chain
                 && self.suitable_as_single_line(start_offset, check_end)
                 && !self.configured_to_not_be_inspected(start_offset, check_end)
-                && !(has_convertible_block && !self.inspect_blocks)
+                && (!has_convertible_block || self.inspect_blocks)
             {
                 self.register_offense(start_offset, check_end);
             }
