@@ -910,14 +910,10 @@ fn first_line_comment_text(
     // RuboCop's `first_line_comment(node)` uses `processed_source.comments`
     // which finds any comment on the same line regardless of intervening tokens.
     // Skip `#{` which is string interpolation, not a comment.
-    let hash_pos = match after_predicate
+    let hash_pos = after_predicate
         .iter()
         .enumerate()
-        .position(|(i, &b)| b == b'#' && after_predicate.get(i + 1) != Some(&b'{'))
-    {
-        Some(pos) => pos,
-        None => return None,
-    };
+        .position(|(i, &b)| b == b'#' && after_predicate.get(i + 1) != Some(&b'{'))?;
     let comment_bytes = &after_predicate[hash_pos..];
 
     let comment = match std::str::from_utf8(comment_bytes) {
@@ -1159,9 +1155,7 @@ impl Cop for IfUnlessModifier {
                     .end_offset()
                     .saturating_sub(body_line_start);
                 // Search for `#` anywhere after the body end on the same line
-                if body_end_byte < body_line.len()
-                    && body_line[body_end_byte..].iter().any(|&b| b == b'#')
-                {
+                if body_end_byte < body_line.len() && body_line[body_end_byte..].contains(&b'#') {
                     return;
                 }
             }
