@@ -171,20 +171,18 @@ impl Cop for ReturnFromStub {
 
         // "block" style: flag `.and_return(value)` — prefer block form
         if enforced_style == "block" {
-            if method_name == b"and_return" {
-                if contains_receive_matcher(node) {
-                    if let Some(args) = call.arguments() {
-                        let arg_list: Vec<_> = args.arguments().iter().collect();
-                        if arg_list.len() == 1 && is_static_value(&arg_list[0]) {
-                            let loc = call.message_loc().unwrap_or(call.location());
-                            let (line, column) = source.offset_to_line_col(loc.start_offset());
-                            diagnostics.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                "Use block for static values.".to_string(),
-                            ));
-                        }
+            if method_name == b"and_return" && contains_receive_matcher(node) {
+                if let Some(args) = call.arguments() {
+                    let arg_list: Vec<_> = args.arguments().iter().collect();
+                    if arg_list.len() == 1 && is_static_value(&arg_list[0]) {
+                        let loc = call.message_loc().unwrap_or(call.location());
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use block for static values.".to_string(),
+                        ));
                     }
                 }
             }
@@ -395,8 +393,6 @@ fn is_static_value(node: &ruby_prism::Node<'_>) -> bool {
         return arr.elements().iter().all(|e| is_static_value(&e));
     }
 
-    // Note: keyword_hash_node (keyword args) intentionally not handled —
-    // only hash literals can appear as static return values in stubs.
     if let Some(hash) = node.as_hash_node() {
         return hash.elements().iter().all(|e| {
             if let Some(assoc) = e.as_assoc_node() {
@@ -485,6 +481,26 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].location.line, 3);
         assert_eq!(diags[0].location.column, 3);
+    }
+
+    #[test]
+    fn block_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ReturnFromStub,
+            include_bytes!("../../../tests/fixtures/cops/rspec/return_from_stub/block_offense.rb"),
+            block_style_config(),
+        );
+    }
+
+    #[test]
+    fn block_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ReturnFromStub,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/return_from_stub/block_no_offense.rb"
+            ),
+            block_style_config(),
+        );
     }
 
     #[test]
