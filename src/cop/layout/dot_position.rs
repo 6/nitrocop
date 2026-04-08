@@ -17,14 +17,27 @@ use crate::parse::source::SourceFile;
 /// uses `last_heredoc_line()` to find the line after the heredoc body, not the
 /// receiver node's raw end offset.
 ///
-/// Example that was missed (FN):
-///   foo = <<-SQL
-///     SELECT * FROM foo
-///   SQL
-///     .squish   # dot should be on previous line (with SQL), not indented
-///
 /// The fix: when the receiver is a heredoc (any string type with heredoc flag),
 /// use the heredoc end line as the receiver end line for blank-line distance checks.
+///
+/// ## Variant FN fix: blank-line skip logic + .() calls (2026-04-08)
+///
+/// Two FN sources with `EnforcedStyle: trailing`:
+///
+/// 1. **Blank-line skip logic**: nitrocop checked `(dot_line - recv_end_line).abs() > 1`
+///    separately, which skips cases where a comment or gap exists between receiver
+///    and dot—even when dot and selector are on the same line. RuboCop uses
+///    `(selector_line - max(receiver_line, dot_line)) > 1`, which only skips when
+///    the selector is far from both the receiver and dot. Fixed to match RuboCop.
+///
+/// 2. **`.()` call syntax**: nitrocop returned early when `message_loc()` was None,
+///    missing `.()` calls (implicit `call` method). RuboCop falls back to
+///    `node.loc.begin` (opening paren) as the selector. Fixed to use `opening_loc()`
+///    when `message_loc()` is absent.
+///
+/// Remaining FP (12): caused by `# rubocop:disable Layout:LineLength` using colon
+/// syntax, which RuboCop interprets as a department-level disable (all Layout cops).
+/// This is a disable-comment handling issue, not a DotPosition detection bug.
 pub struct DotPosition;
 
 impl Cop for DotPosition {
@@ -69,8 +82,9 @@ impl Cop for DotPosition {
             None => return,
         };
 
-        // Must have a method name (message)
-        let msg_loc = match call.message_loc() {
+        // Must have a method name (message) or an opening paren for `.()` calls.
+        // RuboCop uses `node.loc.selector || node.loc.begin` as the selector range.
+        let msg_loc = match call.message_loc().or_else(|| call.opening_loc()) {
             Some(loc) => loc,
             None => return,
         };
@@ -98,10 +112,12 @@ impl Cop for DotPosition {
             return;
         }
 
-        // If there's a blank line between dot and selector, skip (could be reformatted oddly)
-        if (msg_line as i64 - dot_line as i64).abs() > 1
-            || (dot_line as i64 - recv_end_line as i64).abs() > 1
-        {
+        // Skip if there's a blank line between the selector and the highest of
+        // (receiver end, dot position). Matches RuboCop's `line_between?` check:
+        //   return true if line_between?(selector_line, [receiver_line, dot_line].max)
+        // where line_between?(a, b) = (a - b) > 1
+        let max_line = recv_end_line.max(dot_line);
+        if (msg_line as i64 - max_line as i64) > 1 {
             return;
         }
 
