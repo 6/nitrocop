@@ -1,4 +1,4 @@
-use crate::cop::{Cop, CopConfig};
+use crate::cop::{Cop, CopConfig, EnabledState};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -25,15 +25,16 @@ use crate::parse::source::SourceFile;
 /// it still reported files where RuboCop emitted only `Lint/Syntax`. The `never` branch now scans
 /// the full leading comment section once, flags only the first matching magic comment, and skips
 /// parse-error files for that style.
+///
+/// ActiveAdmin `.arb` templates have another RuboCop quirk: the vendor default config excludes
+/// them for this cop, but ANY explicit cop config entry drops that default exclusion. nitrocop
+/// mirrors that inside `check_lines()` instead of via `default_exclude()` so variant style
+/// overrides still inspect `.arb` files.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
     fn name(&self) -> &'static str {
         "Style/FrozenStringLiteralComment"
-    }
-
-    fn default_exclude(&self) -> &'static [&'static str] {
-        &["**/*.arb"]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -48,6 +49,10 @@ impl Cop for FrozenStringLiteralComment {
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "always");
+
+        if should_skip_default_active_admin_template(source, config) {
+            return;
+        }
 
         let lines: Vec<&[u8]> = source.lines().collect();
         let has_null_bytes = source.as_bytes().contains(&0x00);
@@ -335,6 +340,17 @@ fn has_parse_errors(source: &SourceFile) -> bool {
         .is_some()
 }
 
+fn should_skip_default_active_admin_template(source: &SourceFile, config: &CopConfig) -> bool {
+    source.path.extension().is_some_and(|ext| ext == "arb") && !has_explicit_cop_config(config)
+}
+
+fn has_explicit_cop_config(config: &CopConfig) -> bool {
+    config.enabled != EnabledState::Unset
+        || !config.include.is_empty()
+        || !config.exclude.is_empty()
+        || !config.options.is_empty()
+}
+
 fn leading_comment_section_end(lines: &[&[u8]], mut idx: usize) -> usize {
     while idx < lines.len() {
         if is_blank_line(lines[idx]) {
@@ -559,6 +575,53 @@ mod tests {
         let mut diags = Vec::new();
         FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn default_config_skips_active_admin_arb_templates() {
+        let source =
+            SourceFile::from_bytes("admin/history.html.arb", b"panel 'History'\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "default config should skip ActiveAdmin .arb files"
+        );
+    }
+
+    #[test]
+    fn explicit_config_checks_active_admin_arb_templates() {
+        let source =
+            SourceFile::from_bytes("admin/history.html.arb", b"panel 'History'\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_enforced_style("always_true"),
+            &mut diags,
+            None,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "Missing magic comment `# frozen_string_literal: true`."
+        );
+    }
+
+    #[test]
+    fn enabled_override_checks_active_admin_arb_templates() {
+        let source =
+            SourceFile::from_bytes("admin/history.html.arb", b"panel 'History'\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &CopConfig {
+                enabled: EnabledState::True,
+                ..CopConfig::default()
+            },
+            &mut diags,
+            None,
+        );
+        assert_eq!(diags.len(), 1);
     }
 
     #[test]
