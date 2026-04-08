@@ -592,8 +592,8 @@ fn line_length_disabled_at_line(source: &SourceFile, line_num: usize) -> bool {
     // Check block: scan preceding lines for standalone `# rubocop:disable` that
     // covers Layout/LineLength without a matching `# rubocop:enable` before us
     let mut block_disabled = false;
-    for i in 0..line_num.saturating_sub(1) {
-        let line_str = String::from_utf8_lossy(lines[i]);
+    for line_bytes in lines.iter().take(line_num.saturating_sub(1)) {
+        let line_str = String::from_utf8_lossy(line_bytes);
         let trimmed = line_str.trim();
         // Block directives are standalone comments (no code before the `#`)
         if !trimmed.starts_with('#') {
