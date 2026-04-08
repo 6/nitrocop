@@ -64,3 +64,12 @@ method(key: value.foo.bar
 where("first_condition")
 .where("second_condition")
 ^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+
+# Block continuation: .map has block, aligned with receiver's continuation dot
+# RuboCop accepts .map because find_continuation_node returns .select's dot
+def foo
+  MyClass.all
+    .select("name")
+    ^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.all` on line 58.
+    .map { |e| e.name }
+end

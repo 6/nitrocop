@@ -107,6 +107,21 @@ use crate::parse::source::SourceFile;
 ///
 /// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
 /// -431 FP resolved, -4,416 FN resolved.
+///
+/// ## Corpus fix (2026-04-08)
+///
+/// Baseline: 38,410 matches, 4,625 FP, 2,231 FN.
+///
+/// Added `find_current_node_block_continuation` — RuboCop's
+/// `find_continuation_node` logic. When the current call has a block
+/// (do..end or { }) and the receiver has a continuation dot (dot on a
+/// line after the receiver's receiver's end), use the receiver's dot
+/// column as the alignment base. This prevents flagging block-bearing
+/// calls like `.map { }`, `.collect { }`, `.each do...end` at the end
+/// of misaligned chains.
+///
+/// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
+/// -1,092 FP resolved, -329 FN resolved.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -276,6 +291,18 @@ impl ChainVisitor<'_> {
         // single-line block, align with the block-bearing call's dot.
         if let Some(col) = find_block_chain_alignment(self.source, call_node, rhs_line) {
             return Some(col);
+        }
+
+        // When the CURRENT node has a block (do..end or { }), check if the
+        // receiver has a continuation dot. RuboCop's find_continuation_node:
+        // if the receiver's dot is on a line after the receiver's receiver's
+        // end, use the receiver's dot column as alignment base.
+        if !is_trailing_dot {
+            if let Some(col) =
+                find_current_node_block_continuation(self.source, call_node, receiver)
+            {
+                return Some(col);
+            }
         }
 
         if !is_trailing_dot {
@@ -487,6 +514,61 @@ fn find_block_chain_alignment(
                 }
             }
         }
+    }
+
+    None
+}
+
+/// RuboCop's `find_continuation_node`: when the CURRENT call has a block
+/// (do..end or { }), check whether the receiver has a continuation dot
+/// (its dot is on a line after the receiver's receiver's last line).
+/// If so, use the receiver's dot column as the alignment base.
+///
+/// This handles patterns like:
+/// ```ruby
+/// Foo.all
+///   .select("name")    # continuation dot (line > receiver end)
+///   .map { |e| ... }   # has block → aligns with .select's dot
+/// ```
+fn find_current_node_block_continuation(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'_>,
+    receiver: &ruby_prism::Node<'_>,
+) -> Option<usize> {
+    // Current node must have a real block (do..end or { }), not a block argument (&:foo)
+    let block = call_node.block()?;
+    if block.as_block_node().is_none() {
+        return None;
+    }
+
+    let recv_call = receiver.as_call_node()?;
+
+    // Case 1: receiver is itself a single-line block call — use its inner call's dot
+    if let Some(recv_block) = recv_call.block() {
+        if recv_block.as_block_node().is_some() {
+            let loc = recv_call.location();
+            let (start_line, _) = source.offset_to_line_col(loc.start_offset());
+            let (end_line, _) = source.offset_to_line_col(loc.end_offset());
+            if start_line == end_line {
+                if let Some(dot_loc) = recv_call.call_operator_loc() {
+                    let (_, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+                    return Some(dot_col);
+                }
+            }
+        }
+    }
+
+    // Case 2: receiver has a continuation dot (dot is on a line after
+    // the receiver's receiver's end line)
+    let dot_loc = recv_call.call_operator_loc()?;
+    let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+
+    let inner_recv = recv_call.receiver()?;
+    let inner_loc = inner_recv.location();
+    let (inner_end_line, _) = source.offset_to_line_col(inner_loc.end_offset());
+
+    if dot_line > inner_end_line {
+        return Some(dot_col);
     }
 
     None
