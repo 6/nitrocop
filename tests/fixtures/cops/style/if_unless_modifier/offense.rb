@@ -178,3 +178,35 @@ def ensure_writes_are_allowed(sql) # :nodoc:
     raise ActiveRecord::ReadOnlyError, "Write query attempted while in readonly mode: #{sql}"
   end
 end
+
+        (environment['DD_TRACE_AGENT_URL'] = "#{trace_agent_url_protocol}://agent_hostname:1234") if with_trace_agent_url
+        ^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+(request_http_basic_authentication(realm_name_by_controller) and (session[:http_authentication_used] = true) and return) if (request.authorization.nil? || session[:http_authentication_used].nil?)
+^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+if account.balance != account.available_balance
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  say "Available: #{account.available_balance.format}", :yellow
+end
+
+if @study.study_shares.any?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  SingleCellMailer.share_update_notification(@study, changes, current_user).deliver_now
+end
+
+if @study.study_shares.any?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  SingleCellMailer.share_update_notification(@study, changes, current_user).deliver_now
+end
+
+if default_org.in_summary? and default_org.parent_id.present?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  ret_orgs = default_org.parent.children - [default_org]
+end
+
+(raise SugarCRM::MultipleSessions, "There are multiple active sessions: use the session namespace instead of SugarCRM") if @@sessions.size > 1
+^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+(raise SugarCRM::NoActiveSession, "No session is active. Create a new session with 'SugarCRM.connect(...)'") if @@sessions.size < 1
+^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
