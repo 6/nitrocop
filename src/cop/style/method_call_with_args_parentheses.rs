@@ -163,6 +163,24 @@ use crate::parse::source::SourceFile;
 /// Validation: `python3 scripts/check_cop.py Style/MethodCallWithArgsParentheses
 /// --rerun --clone --sample 15` reported `0` new FP, `0` new FN, and all `41`
 /// sampled oracle FN resolved.
+///
+/// ## Variant fix (2026-04-08)
+///
+/// `omit_parentheses` still diverged in two Prism-specific edge cases:
+///
+/// 1. Parenthesized ambiguous descendants such as `Array(foo((bar || [])))`
+///    were flagged because ambiguity checks and nested-hash scans stopped at
+///    `ParenthesesNode` and ignored send receivers. RuboCop still sees the
+///    inner grouped `||` / nested hash literal and allows the outer parens.
+///
+/// 2. Assigned values under assignment-like parent sends such as
+///    `session[:x] = foo(bar)` and `self.value = foo(bar)` were skipped because
+///    Prism models `[]=` and setters as `CallNode`s. RuboCop's
+///    `call_as_argument_or_chain?` only exempts children that appear before the
+///    parent's assignment operator; the RHS call after `=` remains an offense.
+///    Fixed by treating call children that start after `equal_loc` as
+///    `ParentKind::Assignment`, while leaving receiver/index children before `=`
+///    in ordinary call context.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -893,14 +911,40 @@ fn has_keyword_hash_value_omission(kw_hash: &ruby_prism::KeywordHashNode<'_>) ->
     false
 }
 
+fn unwrap_parenthesized_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    let mut current = node.as_parentheses_node()?.body()?;
+
+    loop {
+        if let Some(stmts) = current.as_statements_node() {
+            let stmts_body = stmts.body();
+            if stmts_body.len() != 1 {
+                return None;
+            }
+            current = stmts_body.iter().next().unwrap();
+            continue;
+        }
+
+        if let Some(paren) = current.as_parentheses_node() {
+            current = paren.body()?;
+            continue;
+        }
+
+        return Some(current);
+    }
+}
+
 /// Check if a node contains a hash literal with braces (not keyword hash)
 fn has_hash_literal(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(unwrapped) = unwrap_parenthesized_node(node) {
+        return has_hash_literal(&unwrapped);
+    }
+
     if let Some(hash) = node.as_hash_node() {
         if hash.opening_loc().as_slice() == b"{" {
             return true;
         }
     }
-    // Recurse into call descendants
+    // Recurse into descendants
     if let Some(call) = node.as_call_node() {
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
@@ -908,6 +952,30 @@ fn has_hash_literal(node: &ruby_prism::Node<'_>) -> bool {
                     return true;
                 }
             }
+        }
+        if let Some(recv) = call.receiver() {
+            if has_hash_literal(&recv) {
+                return true;
+            }
+        }
+    }
+    if let Some(array) = node.as_array_node() {
+        for elem in array.elements().iter() {
+            if has_hash_literal(&elem) {
+                return true;
+            }
+        }
+    }
+    if let Some(kw_hash) = node.as_keyword_hash_node() {
+        for elem in kw_hash.elements().iter() {
+            if has_hash_literal(&elem) {
+                return true;
+            }
+        }
+    }
+    if let Some(assoc) = node.as_assoc_node() {
+        if has_hash_literal(&assoc.value()) {
+            return true;
         }
     }
     false
@@ -929,9 +997,27 @@ fn has_parenthesized_ancestor_call(call: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
+fn call_child_parent_kind(
+    call: &ruby_prism::CallNode<'_>,
+    default_parent: ParentKind,
+    child_start_offset: usize,
+) -> ParentKind {
+    if let Some(equal_loc) = call.equal_loc() {
+        if child_start_offset > equal_loc.start_offset() {
+            return ParentKind::Assignment;
+        }
+    }
+
+    default_parent
+}
+
 /// Recursively check if a node or its descendants are ambiguous in omit_parentheses style.
 /// This covers: splats, ternary, regex, unary, forwarded args, logical operators, blocks.
 fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
+    if let Some(unwrapped) = unwrap_parenthesized_node(node) {
+        return is_ambiguous_descendant(&unwrapped, source);
+    }
+
     // Direct checks on this node
     if node.as_splat_node().is_some()
         || node.as_assoc_splat_node().is_some()
@@ -1075,11 +1161,15 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.parent_stack.pop();
         }
         if let Some(args) = node.arguments() {
-            self.parent_stack.push(child_parent);
             for arg in args.arguments().iter() {
+                self.parent_stack.push(call_child_parent_kind(
+                    node,
+                    child_parent,
+                    arg.location().start_offset(),
+                ));
                 self.visit(&arg);
+                self.parent_stack.pop();
             }
-            self.parent_stack.pop();
         }
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
@@ -1102,7 +1192,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                 }
             } else {
                 // BlockArgumentNode (&block) — this IS a call argument
-                self.parent_stack.push(child_parent);
+                self.parent_stack.push(call_child_parent_kind(
+                    node,
+                    child_parent,
+                    block.location().start_offset(),
+                ));
                 self.visit(&block);
                 self.parent_stack.pop();
             }
@@ -2256,6 +2350,24 @@ mod tests {
     }
 
     #[test]
+    fn omit_accepts_parenthesized_ambiguous_descendant() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"def languages\n  Array(foo((bar || [])))\nend\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when ambiguity is hidden behind grouping parentheses"
+        );
+    }
+
+    #[test]
     fn omit_accepts_parens_in_match_pattern() {
         use std::collections::HashMap;
         let config = CopConfig {
@@ -2268,6 +2380,44 @@ mod tests {
         let source = b"execute(query) in {elapsed:, sql_count:}\n";
         let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
         assert!(diags.is_empty(), "Should allow parens in match pattern");
+    }
+
+    #[test]
+    fn omit_flags_index_assignment_value_calls() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"session[:x] = foo(bar)\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag assigned values under []= parent calls"
+        );
+    }
+
+    #[test]
+    fn omit_flags_setter_assignment_value_calls() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"self.value = foo(bar)\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag assigned values under setter parent calls"
+        );
     }
 
     #[test]
