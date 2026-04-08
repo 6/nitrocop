@@ -10,3 +10,8 @@ c = 6
 # rubocop:disable Metrics/LineLength
 this_is_a_very_long_line_that_should_trigger_line_length_cop_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1
 # rubocop:enable Metrics/LineLength
+
+# FP fix: malformed cop name (/BlockLength) — not a valid cop name, ignore silently
+# rubocop:disable /BlockLength, Metrics/
+x = 1
+# rubocop:enable /BlockLength, Metrics/

@@ -103,6 +103,21 @@ use crate::diagnostic::Severity;
 /// as redundant even though nitrocop keeps the cop as a compatibility stub.
 /// Standalone block disables remain conservative to match RuboCop.
 ///
+/// ## Corpus investigation (2026-04-08)
+///
+/// FP=14: Cops with 100% match on their own corpus stats still caused FP
+/// here because their detection gaps are masked by disable directives.
+/// Added 9 to `REDUNDANT_DISABLE_SKIP_COPS`: `FactoryBot/CreateList`,
+/// `Layout/SpaceAroundKeyword`, `Lint/RedundantCopEnableDirective`,
+/// `Lint/ShadowedException`, `Lint/UnmodifiedReduceAccumulator`,
+/// `Performance/Size`, `Style/GlobalStdStream`, `Style/HashLikeCase`,
+/// `Style/RedundantInitialize`. Also added a guard for malformed cop
+/// names (e.g. `/BlockLength`) that RuboCop ignores. `Style/DoubleNegation`
+/// was NOT added — its gap is only on `!!` in hash values, while the
+/// directive-redundancy pattern is `!!` in predicate methods (which
+/// RuboCop correctly skips). Adding it caused 2 FN regressions
+/// (inspec, thredded) vs 1 FP fix (openSUSE). Remaining FP=1.
+///
 /// ## Reverted (twice): Layout/LineLength self-suppression compensation
 ///
 /// `compensate_line_length_self_suppression` re-checks unused Layout/LineLength

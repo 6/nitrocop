@@ -536,16 +536,20 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 /// Name of the redundant cop disable directive cop.
 const REDUNDANT_DISABLE_COP: &str = "Lint/RedundantCopDisableDirective";
 
-/// Cops with known detection gaps (FN > 0 in corpus) that cause false
-/// positives when flagging unused disable directives. When `all_cops_ran`
-/// is true, unused directives for these cops are NOT flagged — the cop may
-/// have missed an offense that the directive legitimately suppresses.
+/// Cops with known detection gaps that cause false positives when flagging
+/// unused disable directives. When `all_cops_ran` is true, unused directives
+/// for these cops are NOT flagged — the cop may have missed an offense that
+/// the directive legitimately suppresses.
 ///
-/// Generated from corpus oracle data. A cop belongs here if and only if it
-/// has FN > 0 in the corpus baseline. As cop detection improves, entries
-/// should be removed. Cops not in the registry (plugin-only) are handled
-/// separately via the "unknown cop" path.
+/// Generated from corpus oracle data. A cop belongs here if it has FN > 0 in
+/// the corpus baseline, OR if its detection gap is masked by disable
+/// directives (the gap only manifests as FP on RedundantCopDisableDirective,
+/// not as FN on the cop itself). As cop detection improves, entries should be
+/// removed. Cops not in the registry (plugin-only) are handled separately
+/// via the "unknown cop" path.
 const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
+    // FactoryBot
+    "FactoryBot/CreateList", // gap masked by disable directives
     // Layout
     "Layout/ExtraSpacing",                   // FN=20
     "Layout/IndentationConsistency",         // FN=47
@@ -554,12 +558,18 @@ const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
     "Layout/MultilineMethodCallIndentation", // FN=7992
     "Layout/MultilineOperationIndentation",  // FN=5590
     "Layout/RedundantLineBreak",             // FN=22466
+    "Layout/SpaceAroundKeyword",             // gap masked by disable directives
     "Layout/SpaceAroundOperators",           // FN=2280
     // Lint
+    "Lint/RedundantCopEnableDirective", // gap masked by disable directives
+    "Lint/ShadowedException",           // gap masked by disable directives
     "Lint/ShadowingOuterLocalVariable", // FN=3
     "Lint/Syntax",                      // FN=4
+    "Lint/UnmodifiedReduceAccumulator", // gap masked by disable directives
     "Lint/UnusedMethodArgument",        // FN=8
     "Lint/UselessAssignment",           // FN=523
+    // Performance
+    "Performance/Size", // gap masked by disable directives
     // Rails
     "Rails/AddColumnIndex",                      // FN=4
     "Rails/BulkChangeTable",                     // FN=2469
@@ -585,9 +595,12 @@ const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
     "Style/Documentation",                // FN=22
     "Style/DocumentationMethod",          // FN=63
     "Style/FrozenStringLiteralComment",   // FN=13
+    "Style/GlobalStdStream",              // gap masked by disable directives
+    "Style/HashLikeCase",                 // gap masked by disable directives
     "Style/IdenticalConditionalBranches", // FN=9
     "Style/IfUnlessModifier",             // FN=1216
     "Style/NonNilCheck",                  // FN=2
+    "Style/RedundantInitialize",          // gap masked by disable directives
     "Style/RedundantLineContinuation",    // FN=87
     "Style/RedundantParentheses",         // FN=811
     "Style/RedundantSelf",                // FN=228
@@ -641,6 +654,13 @@ fn is_directive_redundant(
 
     // Department-only name (no '/') — never flag (too broad to check)
     if !cop_name.contains('/') {
+        return None;
+    }
+
+    // Malformed cop name (e.g. "/BlockLength") — the first character must be
+    // an ASCII uppercase letter to form a valid Department/CopName.  RuboCop
+    // silently ignores these, so we should too.
+    if !cop_name.starts_with(|c: char| c.is_ascii_uppercase()) {
         return None;
     }
 
