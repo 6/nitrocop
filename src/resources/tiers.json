@@ -827,6 +827,7 @@
     "Style/RedundantRegexpConstructor": "stable",
     "Style/RedundantRegexpEscape": "stable",
     "Style/RedundantReturn": "stable",
+    "Style/RedundantSelf": "stable",
     "Style/RedundantSelfAssignment": "stable",
     "Style/RedundantSelfAssignmentBranch": "stable",
     "Style/RedundantSort": "stable",
