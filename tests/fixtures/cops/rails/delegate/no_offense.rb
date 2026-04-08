@@ -285,6 +285,40 @@ class ChargeProcessor
     end
 end
 
+# private inside a block body under a constant assignment should suppress
+# nested delegations in that same block body.
+Factory = Class.new do
+  private
+
+  def value
+    @source.value
+  end
+end
+
+# private inside a class_exec block should suppress nested delegations there too.
+class Container
+  def self.build
+    class_exec do
+      private
+
+      def resource_class
+        self.class.resource_class
+      end
+    end
+  end
+end
+
+# private inside a class nested under an if-body should still suppress the def.
+if tracker_class
+  class ERBTracker < tracker_class
+    private
+
+    def source
+      template.source
+    end
+  end
+end
+
 # Heredoc text containing `do not` should not look like a Ruby `do` block opener
 # and cancel the enclosing private section for later methods.
 class InteractiveIgnorer
