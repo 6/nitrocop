@@ -84,7 +84,7 @@ impl Cop for EmptyLinesAroundClassBody {
                     BodyBoundaryStyle::EmptyLines,
                     BodyBoundaryStyle::EmptyLines,
                     diagnostics,
-                    corrections.as_mut().map(|c| &mut **c),
+                    corrections.as_deref_mut(),
                 );
             }
             "beginning_only" => {
@@ -97,7 +97,7 @@ impl Cop for EmptyLinesAroundClassBody {
                     BodyBoundaryStyle::EmptyLines,
                     BodyBoundaryStyle::NoEmptyLines,
                     diagnostics,
-                    corrections.as_mut().map(|c| &mut **c),
+                    corrections.as_deref_mut(),
                 );
             }
             "ending_only" => {
@@ -110,7 +110,7 @@ impl Cop for EmptyLinesAroundClassBody {
                     BodyBoundaryStyle::NoEmptyLines,
                     BodyBoundaryStyle::EmptyLines,
                     diagnostics,
-                    corrections.as_mut().map(|c| &mut **c),
+                    corrections.as_deref_mut(),
                 );
             }
             "empty_lines_except_namespace" => {
@@ -124,7 +124,7 @@ impl Cop for EmptyLinesAroundClassBody {
                         BodyBoundaryStyle::NoEmptyLines,
                         BodyBoundaryStyle::NoEmptyLines,
                         diagnostics,
-                        corrections.as_mut().map(|c| &mut **c),
+                        corrections.as_deref_mut(),
                     );
                 } else {
                     check_boundary_styles(
@@ -136,7 +136,7 @@ impl Cop for EmptyLinesAroundClassBody {
                         BodyBoundaryStyle::EmptyLines,
                         BodyBoundaryStyle::EmptyLines,
                         diagnostics,
-                        corrections.as_mut().map(|c| &mut **c),
+                        corrections.as_deref_mut(),
                     );
                 }
             }
@@ -151,7 +151,7 @@ impl Cop for EmptyLinesAroundClassBody {
                         BodyBoundaryStyle::NoEmptyLines,
                         BodyBoundaryStyle::NoEmptyLines,
                         diagnostics,
-                        corrections.as_mut().map(|c| &mut **c),
+                        corrections.as_deref_mut(),
                     );
                 } else {
                     let mut emitted_locations = std::collections::HashSet::new();
@@ -163,7 +163,7 @@ impl Cop for EmptyLinesAroundClassBody {
                             "class",
                             BodyBoundaryStyle::EmptyLines,
                             diagnostics,
-                            corrections.as_mut().map(|c| &mut **c),
+                            corrections.as_deref_mut(),
                             &mut emitted_locations,
                         );
                     } else {
@@ -174,7 +174,7 @@ impl Cop for EmptyLinesAroundClassBody {
                             "class",
                             BodyBoundaryStyle::NoEmptyLines,
                             diagnostics,
-                            corrections.as_mut().map(|c| &mut **c),
+                            corrections.as_deref_mut(),
                             &mut emitted_locations,
                         );
                         check_deferred_empty_line(
@@ -182,7 +182,7 @@ impl Cop for EmptyLinesAroundClassBody {
                             source,
                             body.as_ref(),
                             diagnostics,
-                            corrections.as_mut().map(|c| &mut **c),
+                            corrections.as_deref_mut(),
                             &mut emitted_locations,
                         );
                     }
@@ -193,7 +193,7 @@ impl Cop for EmptyLinesAroundClassBody {
                         "class",
                         BodyBoundaryStyle::EmptyLines,
                         diagnostics,
-                        corrections.as_mut().map(|c| &mut **c),
+                        corrections.as_deref_mut(),
                         &mut emitted_locations,
                     );
                 }
@@ -219,6 +219,7 @@ enum BodyBoundaryStyle {
     EmptyLines,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_boundary_styles(
     cop_name: &'static str,
     source: &SourceFile,
@@ -238,7 +239,7 @@ fn check_boundary_styles(
         body_kind,
         beginning_style,
         diagnostics,
-        corrections.as_mut().map(|c| &mut **c),
+        corrections.as_deref_mut(),
         &mut emitted_locations,
     );
     check_ending_boundary_style(
@@ -248,11 +249,12 @@ fn check_boundary_styles(
         body_kind,
         ending_style,
         diagnostics,
-        corrections.as_mut().map(|c| &mut **c),
+        corrections,
         &mut emitted_locations,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_beginning_boundary_style(
     cop_name: &'static str,
     source: &SourceFile,
@@ -286,6 +288,7 @@ fn check_beginning_boundary_style(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_ending_boundary_style(
     cop_name: &'static str,
     source: &SourceFile,
@@ -325,6 +328,7 @@ fn check_ending_boundary_style(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_boundary_line(
     cop_name: &'static str,
     source: &SourceFile,
