@@ -74,6 +74,16 @@ type NodeRange = (usize, usize);
 /// template style and are not flagged. Fix: filter unannotated tokens to only those with
 /// `format_type == 's'` before checking against `MaxUnannotatedPlaceholdersAllowed` in
 /// template style.
+///
+/// Remaining variant divergence (2026-04): the parser still treated `%<name>` without a
+/// conversion type as an annotated token, which created `EnforcedStyle: unannotated` false
+/// positives for literal strings like `Using the %<WRONG_VARIABLE_NAME>`. It also missed
+/// annotated tokens whose width/flags/precision appear after the name, such as
+/// `%<path>-35s`, causing `EnforcedStyle: template` false negatives. Finally, template style
+/// should suppress all `%s` offenses when a string is composed only of unannotated tokens and
+/// at least one of them is non-correctable to template style (for example `%s %3d %s`).
+/// Fix: require a real conversion type for annotated tokens, accept RuboCop's post-name
+/// formatting syntax, and mirror `allowed_unannotated?` for template style.
 pub struct FormatStringToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,131 +115,205 @@ impl FormatStringToken {
                     i += 2;
                     continue;
                 }
-                let start = i;
-                let mut j = i + 1;
 
-                // Skip positional specifier: N$ (digits followed by $)
-                let pos_start = j;
-                while j < s.len() && s[j].is_ascii_digit() {
-                    j += 1;
-                }
-                if j > pos_start && j < s.len() && s[j] == b'$' {
-                    j += 1; // skip $
-                } else {
-                    j = pos_start; // reset if no $
-                }
-
-                // Skip flags: -, +, space, 0, #
-                while j < s.len() && matches!(s[j], b'-' | b'+' | b' ' | b'0' | b'#') {
-                    j += 1;
-                }
-
-                // Skip width: digits or * (with optional N$)
-                if j < s.len() && s[j] == b'*' {
-                    j += 1;
-                    // Width from positional arg: *N$
-                    let w_start = j;
-                    while j < s.len() && s[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                    if j > w_start && j < s.len() && s[j] == b'$' {
-                        j += 1;
-                    } else {
-                        j = w_start; // no N$ after *, that's fine
-                    }
-                } else {
-                    while j < s.len() && s[j].is_ascii_digit() {
-                        j += 1;
-                    }
-                }
-
-                // Skip precision: .digits or .* (with optional N$)
-                if j < s.len() && s[j] == b'.' {
-                    j += 1;
-                    if j < s.len() && s[j] == b'*' {
-                        j += 1;
-                        let p_start = j;
-                        while j < s.len() && s[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                        if j > p_start && j < s.len() && s[j] == b'$' {
-                            j += 1;
-                        } else {
-                            j = p_start; // no N$ after .*, fine
-                        }
-                    } else {
-                        while j < s.len() && s[j].is_ascii_digit() {
-                            j += 1;
-                        }
-                    }
-                }
-
-                // Now check what follows: type letter, {name}, or <name>
-                if j < s.len() && s[j] == b'<' {
-                    // Annotated: %[N$][flags][width][.prec]<name>type
-                    let mut k = j + 1;
-                    let mut has_word_char = false;
-                    while k < s.len() && (s[k].is_ascii_alphanumeric() || s[k] == b'_') {
-                        has_word_char = true;
-                        k += 1;
-                    }
-                    if has_word_char && k < s.len() && s[k] == b'>' {
-                        k += 1;
-                        // Optional trailing type after >
-                        let format_type = if k < s.len() && is_format_type(s[k]) {
-                            let t = s[k];
-                            k += 1;
-                            Some(t)
-                        } else {
-                            None
-                        };
-                        tokens.push(FormatToken {
-                            style: TokenStyle::Annotated,
-                            offset: start,
-                            format_type,
-                        });
-                        i = k;
-                        continue;
-                    }
-                } else if j < s.len() && s[j] == b'{' {
-                    // Template: %[flags][width][.prec]{name}
-                    // But NOT if preceded by '#' — that's Ruby interpolation #{...}
-                    // matching RuboCop's (?<!#) negative lookbehind in TEMPLATE_NAME regex
-                    if j > 0 && s[j - 1] == b'#' {
-                        // Skip: this is %#{ which is Ruby interpolation, not a format template
-                        i += 1;
-                        continue;
-                    }
-                    let mut k = j + 1;
-                    let mut has_word_char = false;
-                    while k < s.len() && (s[k].is_ascii_alphanumeric() || s[k] == b'_') {
-                        has_word_char = true;
-                        k += 1;
-                    }
-                    if has_word_char && k < s.len() && s[k] == b'}' {
-                        tokens.push(FormatToken {
-                            style: TokenStyle::Template,
-                            offset: start,
-                            format_type: None,
-                        });
-                        i = k + 1;
-                        continue;
-                    }
-                } else if j < s.len() && is_format_type(s[j]) {
-                    // Unannotated: %[N$][flags][width][.prec]type
-                    let format_type = s[j];
-                    tokens.push(FormatToken {
-                        style: TokenStyle::Unannotated,
-                        offset: start,
-                        format_type: Some(format_type),
-                    });
-                    i = j + 1;
+                if let Some((token, next)) = Self::parse_token(s, i) {
+                    tokens.push(token);
+                    i = next;
                     continue;
                 }
             }
             i += 1;
         }
         tokens
+    }
+
+    fn parse_token(s: &[u8], start: usize) -> Option<(FormatToken, usize)> {
+        let j = consume_flags(s, start + 1);
+
+        let mut template_pos = consume_width(s, j);
+        template_pos = consume_precision(s, template_pos);
+        if let Some(end) = consume_template_name(s, template_pos) {
+            return Some((
+                FormatToken {
+                    style: TokenStyle::Template,
+                    offset: start,
+                    format_type: None,
+                },
+                end,
+            ));
+        }
+
+        let mut branch = consume_width(s, j);
+        branch = consume_precision(s, branch);
+        if let Some(end) = consume_format_type(s, branch) {
+            return Some((
+                FormatToken {
+                    style: TokenStyle::Unannotated,
+                    offset: start,
+                    format_type: Some(s[branch]),
+                },
+                end,
+            ));
+        }
+        if let Some(name_end) = consume_annotated_name(s, branch) {
+            if let Some(type_end) = consume_format_type(s, name_end) {
+                return Some((
+                    FormatToken {
+                        style: TokenStyle::Annotated,
+                        offset: start,
+                        format_type: Some(s[name_end]),
+                    },
+                    type_end,
+                ));
+            }
+        }
+
+        let mut branch = consume_width(s, j);
+        if let Some(name_end) = consume_annotated_name(s, branch) {
+            branch = consume_precision(s, name_end);
+            if let Some(type_end) = consume_format_type(s, branch) {
+                return Some((
+                    FormatToken {
+                        style: TokenStyle::Annotated,
+                        offset: start,
+                        format_type: Some(s[branch]),
+                    },
+                    type_end,
+                ));
+            }
+        }
+
+        if let Some(name_end) = consume_annotated_name(s, j) {
+            let mut branch = consume_flags(s, name_end);
+            branch = consume_width(s, branch);
+            branch = consume_precision(s, branch);
+            if let Some(type_end) = consume_format_type(s, branch) {
+                return Some((
+                    FormatToken {
+                        style: TokenStyle::Annotated,
+                        offset: start,
+                        format_type: Some(s[branch]),
+                    },
+                    type_end,
+                ));
+            }
+        }
+
+        None
+    }
+}
+
+fn consume_digit_dollar(s: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > start && i < s.len() && s[i] == b'$' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+fn consume_flags(s: &[u8], start: usize) -> usize {
+    let mut i = start;
+    loop {
+        if i < s.len() && matches!(s[i], b'-' | b'+' | b' ' | b'0' | b'#') {
+            i += 1;
+            continue;
+        }
+        if let Some(next) = consume_digit_dollar(s, i) {
+            i = next;
+            continue;
+        }
+        break;
+    }
+    i
+}
+
+fn consume_width(s: &[u8], start: usize) -> usize {
+    if start >= s.len() {
+        return start;
+    }
+
+    if s[start] == b'*' {
+        let mut i = start + 1;
+        if let Some(next) = consume_digit_dollar(s, i) {
+            i = next;
+        }
+        return i;
+    }
+
+    let mut i = start;
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    i
+}
+
+fn consume_precision(s: &[u8], start: usize) -> usize {
+    if start >= s.len() || s[start] != b'.' {
+        return start;
+    }
+
+    let mut i = start + 1;
+    if i < s.len() && s[i] == b'*' {
+        i += 1;
+        if let Some(next) = consume_digit_dollar(s, i) {
+            i = next;
+        }
+        return i;
+    }
+
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    i
+}
+
+fn consume_annotated_name(s: &[u8], start: usize) -> Option<usize> {
+    if start >= s.len() || s[start] != b'<' {
+        return None;
+    }
+
+    let mut i = start + 1;
+    let mut has_word_char = false;
+    while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'_') {
+        has_word_char = true;
+        i += 1;
+    }
+
+    if has_word_char && i < s.len() && s[i] == b'>' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+fn consume_template_name(s: &[u8], start: usize) -> Option<usize> {
+    if start >= s.len() || s[start] != b'{' || (start > 0 && s[start - 1] == b'#') {
+        return None;
+    }
+
+    let mut i = start + 1;
+    let mut has_word_char = false;
+    while i < s.len() && (s[i].is_ascii_alphanumeric() || s[i] == b'_') {
+        has_word_char = true;
+        i += 1;
+    }
+
+    if has_word_char && i < s.len() && s[i] == b'}' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+fn consume_format_type(s: &[u8], start: usize) -> Option<usize> {
+    if start < s.len() && is_format_type(s[start]) {
+        Some(start + 1)
+    } else {
+        None
     }
 }
 
@@ -601,16 +685,14 @@ impl FormatStringTokenVisitor<'_> {
                         }
                     }
                 }
-                // In template style, only flag unannotated tokens with type 's'.
-                // RuboCop's correctable_sequence? returns true only for type 's'
-                // when style is template, because only %s can be autocorrected to %{foo}.
-                let unannotated_s: Vec<&FormatToken> = unannotated
-                    .iter()
-                    .filter(|t| t.format_type == Some(b's'))
-                    .copied()
-                    .collect();
-                if check_unannotated && unannotated_s.len() > self.max_unannotated {
-                    for tok in unannotated_s {
+                // RuboCop's `allowed_unannotated?` only suppresses offenses when the
+                // string contains unannotated tokens exclusively and at least one of
+                // them is not correctable to template style (non-%s).
+                let allow_unannotated = named.is_empty()
+                    && (unannotated.len() <= self.max_unannotated
+                        || unannotated.iter().any(|t| t.format_type != Some(b's')));
+                if check_unannotated && !allow_unannotated {
+                    for tok in unannotated.iter().filter(|t| t.format_type == Some(b's')) {
                         let (line, column) = self
                             .source
                             .offset_to_line_col(content_start_offset + tok.offset);
@@ -725,25 +807,62 @@ impl<'pr> Visit<'pr> for FormatStringTokenVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_fixture_tests!(FormatStringToken, "cops/style/format_string_token");
+
+    fn style_config(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String(style.to_string()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn template_style_mixed_correctable_and_noncorrectable_unannotated_is_allowed() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FormatStringToken,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/format_string_token/template_no_offense.rb"
+            ),
+            style_config("template"),
+        );
+    }
+
+    #[test]
+    fn template_style_flags_annotated_tokens_with_width_after_name() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FormatStringToken,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/format_string_token/template_offense.rb"
+            ),
+            style_config("template"),
+        );
+    }
+
+    #[test]
+    fn unannotated_style_ignores_incomplete_annotated_tokens() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FormatStringToken,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/format_string_token/unannotated_no_offense.rb"
+            ),
+            style_config("unannotated"),
+        );
+    }
 
     #[test]
     fn template_style_does_not_flag_non_s_unannotated_tokens() {
-        use crate::cop::CopConfig;
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".to_string(),
-                serde_yml::Value::String("template".to_string()),
-            )]),
-            ..CopConfig::default()
-        };
         // %d and %f are not correctable to template style, so they should not
         // be counted or flagged even though MaxUnannotatedPlaceholdersAllowed is 2.
         let source = b"format('%d %f %02x', a, b, c)\n";
-        let diags = run_cop_full_with_config(&FormatStringToken, source, config);
+        let diags = run_cop_full_with_config(&FormatStringToken, source, style_config("template"));
         assert!(
             diags.is_empty(),
             "Non-%s unannotated tokens should not be flagged in template style, got: {:?}",
