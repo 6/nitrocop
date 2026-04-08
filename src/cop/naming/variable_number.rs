@@ -160,23 +160,16 @@ use crate::parse::source::SourceFile;
 /// reports offenses normally. Fix: add US-ASCII to the allow-list alongside
 /// UTF-8 and binary/ASCII-8BIT.
 ///
-/// ## Variant fix (2026-04-08) — US-ASCII files with `\u` in regex (FP)
-///
-/// The US-ASCII allow introduced 31 FP (snake_case) and 52 FP (non_integer)
-/// on jruby's `test/mri/ruby/test_regexp.rb`. Root cause: US-ASCII files
-/// containing `\u` Unicode escape sequences inside **regex literals** (e.g.
-/// `/\u3042/`) crash RuboCop's `Prism::Translation::Parser` with
-/// `RegexpError` — the expanded multibyte bytes are incompatible with the
-/// declared US-ASCII encoding. The corpus `rescue_parser_crashes.rb`
-/// monkey-patch catches these crashes and returns 0 offenses. `\u` escapes
-/// in string literals (`"\u3042"`) are fine — they don't trigger regex
-/// compilation. Fix: allow US-ASCII files through only if they don't
-/// contain `\u` escapes inside regex literals. Uses a backward-scan
-/// heuristic: if `\u` is preceded by `/` (before any `"`, `'`, or newline),
-/// it's in a regex context → skip. This preserves FN improvements for
-/// clean US-ASCII files (like `lib/ruby/stdlib/date.rb`) and files with
-/// `\u` only in strings (like `test_http.rb`) while skipping crash-prone
-/// regex files (like `test_regexp.rb`).
+/// **Known residual FP (31 snake_case, 52 non_integer):** jruby's
+/// `test/mri/ruby/test_regexp.rb` is a US-ASCII file containing `\u`
+/// Unicode escapes inside regex literals (e.g. `/\u3042/`). RuboCop's
+/// `Prism::Translation::Parser` crashes with `RegexpError` on this file
+/// (multibyte bytes incompatible with US-ASCII encoding), and the corpus
+/// `rescue_parser_crashes.rb` monkey-patch catches the crash → 0 offenses.
+/// Nitrocop's native Prism handles it fine → FP. This is the only known
+/// crash file in ~5,500 corpus repos. A correct fix would use Prism's AST
+/// to detect `RegularExpressionNode` with `\u` escapes in US-ASCII files,
+/// rather than raw-byte heuristics which are fragile around `/` ambiguity.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -191,14 +184,13 @@ const DEFAULT_ALLOWED: &[&str] = &[
     "x86_64",
 ];
 
-/// Check if a file has an encoding that causes RuboCop's
-/// `Prism::Translation::Parser` to crash or produce fatal syntax errors,
-/// resulting in 0 offenses. Non-UTF-8 encodings (windows-1252, ISO-8859-1,
-/// etc.) always crash. US-ASCII files only crash when they contain `\u`
-/// Unicode escape sequences inside **regex literals** (e.g. `/\u3042/`),
-/// which trigger regex compilation that fails because the expanded multibyte
-/// bytes are incompatible with US-ASCII encoding. `\u` in string literals
-/// is fine. US-ASCII files without `\u`-in-regex are processed normally.
+/// Check if a file has a non-UTF-8 encoding magic comment (e.g.,
+/// `# encoding: windows-1252`, `# coding: US-ASCII`). When such a comment
+/// is present, RuboCop's `Prism::Translation::Parser` may crash or produce
+/// fatal syntax errors that prevent Naming cops from running, resulting in
+/// 0 offenses. Nitrocop's native Prism parser handles these files fine, so
+/// without this check we'd produce false positives for every offense in
+/// such files.
 fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
     // Scan up to 3 lines (shebang + possible encoding comment)
     let mut start = 0;
@@ -252,17 +244,13 @@ fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
                 {
                     return false;
                 }
-                // US-ASCII is a strict subset of UTF-8, so Translation::Parser
-                // handles it fine for most files. However, US-ASCII files that
-                // contain `\u` Unicode escape sequences in regex/string literals
-                // crash Translation::Parser with RegexpError (the escape produces
-                // multibyte bytes incompatible with US-ASCII encoding). RuboCop
-                // rescues the crash and reports 0 offenses for those files.
-                // See bench/corpus/rescue_parser_crashes.rb for details.
+                // US-ASCII is fine — it's a strict subset of UTF-8, so
+                // Translation::Parser handles it without crashing. RuboCop
+                // reports offenses normally for US-ASCII files.
                 if enc_name == b"us-ascii" || enc_name == b"ascii" {
-                    return has_unicode_escape_in_regex(bytes);
+                    return false;
                 }
-                // Other non-UTF-8 encodings (windows-1252,
+                // Other non-UTF-8 encodings (us-ascii, windows-1252,
                 // iso-8859-1, etc.) cause Translation::Parser crashes → skip
                 if !enc_name.is_empty() {
                     return true;
@@ -272,41 +260,6 @@ fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
         start = end + 1;
         if start >= bytes.len() {
             break;
-        }
-    }
-    false
-}
-
-/// Check if file bytes contain `\u` Unicode escape sequences inside regex
-/// literals (e.g. `/\u3042/`). In US-ASCII files, these cause
-/// `Prism::Translation::Parser` to crash with `RegexpError` because the
-/// expanded multibyte bytes are incompatible with the declared US-ASCII
-/// encoding. `\u` escapes in string literals (`"\u3042"`) are fine — the
-/// crash is specific to regex compilation.
-///
-/// Heuristic: for each `\u` escape found, scan backwards on the same line.
-/// If we hit `/` before `"` or `'`, it's likely inside a regex literal.
-fn has_unicode_escape_in_regex(bytes: &[u8]) -> bool {
-    let len = bytes.len();
-    if len < 3 {
-        return false;
-    }
-    for i in 0..len - 2 {
-        if bytes[i] == b'\\'
-            && bytes[i + 1] == b'u'
-            && (bytes[i + 2].is_ascii_hexdigit() || bytes[i + 2] == b'{')
-        {
-            // Found \u escape. Scan backwards to determine context.
-            // If we hit `/` before `"`, `'`, or newline, it's in a regex.
-            let mut j = i;
-            while j > 0 {
-                j -= 1;
-                match bytes[j] {
-                    b'\n' | b'"' | b'\'' => break,
-                    b'/' => return true,
-                    _ => {}
-                }
-            }
         }
     }
     false
@@ -1220,7 +1173,8 @@ mod tests {
             crate::testutil::run_cop_full(&VariableNumber, b"# encoding: ASCII-8BIT\nfoo_1 = 1\n");
         assert_eq!(diags.len(), 1, "expected ASCII-8BIT file to NOT be skipped");
 
-        // US-ASCII without \u escapes should NOT be skipped — RuboCop handles fine
+        // US-ASCII should NOT be skipped — it's a strict subset of UTF-8,
+        // RuboCop's Parser handles it without crashing.
         let diags =
             crate::testutil::run_cop_full(&VariableNumber, b"# coding: US-ASCII\nfoo_1 = 1\n");
         assert_eq!(diags.len(), 1, "expected US-ASCII file to NOT be skipped");
@@ -1230,62 +1184,16 @@ mod tests {
             b"# -*- coding: us-ascii -*-\nfoo_1 = 1\n",
         );
         assert_eq!(diags.len(), 1, "expected us-ascii file to NOT be skipped");
-
-        // US-ASCII with \u in REGEX literals SHOULD be skipped — Translation::Parser
-        // crashes with RegexpError on multibyte bytes in US-ASCII encoding.
-        let diags = crate::testutil::run_cop_full(
-            &VariableNumber,
-            b"# coding: US-ASCII\nassert_match(/\\u3042/, s)\nfoo_1 = 1\n",
-        );
-        assert_eq!(
-            diags.len(),
-            0,
-            "expected US-ASCII file with \\u in regex to be skipped"
-        );
-
-        // US-ASCII with \u in STRING literals should NOT be skipped — strings
-        // don't trigger regex compilation, so no crash.
-        let diags = crate::testutil::run_cop_full(
-            &VariableNumber,
-            b"# coding: US-ASCII\nstr = \"\\u3042\"\nfoo_1 = 1\n",
-        );
-        assert_eq!(
-            diags.len(),
-            1,
-            "expected US-ASCII file with \\u in string to NOT be skipped"
-        );
     }
 
     // --- has_non_utf8_encoding_comment unit tests ---
 
     #[test]
-    fn encoding_us_ascii_without_unicode_escapes_not_skipped() {
-        // US-ASCII without \u escapes is safe — RuboCop handles it fine
+    fn encoding_us_ascii_not_skipped() {
+        // US-ASCII is a subset of UTF-8 — RuboCop handles it fine
         assert!(!has_non_utf8_encoding_comment(b"# coding: US-ASCII\nfoo\n"));
         assert!(!has_non_utf8_encoding_comment(
             b"# -*- coding: us-ascii -*-\nfoo\n"
-        ));
-    }
-
-    #[test]
-    fn encoding_us_ascii_with_unicode_in_regex_skipped() {
-        // US-ASCII with \u in regex literals crashes Translation::Parser
-        assert!(has_non_utf8_encoding_comment(
-            b"# coding: US-ASCII\nassert_match(/\\u3042/, s)\n"
-        ));
-        assert!(has_non_utf8_encoding_comment(
-            b"# -*- coding: us-ascii -*-\n/(?<=\\u3042).*b/\n"
-        ));
-    }
-
-    #[test]
-    fn encoding_us_ascii_with_unicode_in_string_not_skipped() {
-        // US-ASCII with \u only in string literals — safe, no regex crash
-        assert!(!has_non_utf8_encoding_comment(
-            b"# coding: US-ASCII\nstr = \"\\u3042\"\n"
-        ));
-        assert!(!has_non_utf8_encoding_comment(
-            b"# -*- coding: us-ascii -*-\nfoo = \"\\u{1F600}\"\n"
         ));
     }
 
@@ -1302,17 +1210,9 @@ mod tests {
         assert!(has_non_utf8_encoding_comment(
             b"#!/usr/bin/env ruby\n# coding: ISO-8859-1\nfoo\n"
         ));
-        // US-ASCII after shebang without \u in regex — safe
+        // US-ASCII after shebang should NOT be detected (it's UTF-8 compatible)
         assert!(!has_non_utf8_encoding_comment(
             b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo\n"
-        ));
-        // US-ASCII after shebang with \u in regex — crash-prone, skip
-        assert!(has_non_utf8_encoding_comment(
-            b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo = /\\u3042/\n"
-        ));
-        // US-ASCII after shebang with \u only in string — safe
-        assert!(!has_non_utf8_encoding_comment(
-            b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo = \"\\u3042\"\n"
         ));
     }
 
@@ -1346,31 +1246,5 @@ mod tests {
         assert!(!has_non_utf8_encoding_comment(
             b"# -*- encoding : ascii-8bit -*-\nfoo\n"
         ));
-    }
-
-    // --- has_unicode_escape_in_regex unit tests ---
-
-    #[test]
-    fn unicode_escape_in_regex_detected() {
-        // \u after / on same line → regex context
-        assert!(has_unicode_escape_in_regex(b"/\\u3042/"));
-        assert!(has_unicode_escape_in_regex(
-            b"assert_match(/(?<=\\u3042).*b/, s)"
-        ));
-        assert!(has_unicode_escape_in_regex(b"/(?#\\u1000)/x.encoding"));
-    }
-
-    #[test]
-    fn unicode_escape_in_string_not_detected() {
-        // \u after " on same line → string context, not regex
-        assert!(!has_unicode_escape_in_regex(b"\"\\u3042\""));
-        assert!(!has_unicode_escape_in_regex(b"str = \"\\u{1F600}\""));
-        assert!(!has_unicode_escape_in_regex(b"file << \"\\u{30c7}\""));
-    }
-
-    #[test]
-    fn unicode_escape_absent() {
-        assert!(!has_unicode_escape_in_regex(b"foo = 1\nbar = 2\n"));
-        assert!(!has_unicode_escape_in_regex(b"puts 'no \\usage here'\n"));
     }
 }
