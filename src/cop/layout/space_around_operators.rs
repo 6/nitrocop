@@ -164,6 +164,28 @@ use ruby_prism::Visit;
 /// skip behavior.
 ///
 /// Sample check (15 repos): resolved 29 FP and 29 FN with 0 regressions.
+///
+/// ## Corpus fix (2026-04-08)
+///
+/// Two fixes applied:
+///
+/// 1. **Endless method `=` exclusion** (FP fix): The `=` in endless method
+///    definitions (`def foo = expr`) was being flagged by the text scanner as
+///    an assignment with extra leading space. RuboCop excludes these via
+///    `remove_equals_in_def` in `PrecedingFollowingAlignment`. Fixed by
+///    collecting `DefNode.equal_loc()` offsets in `ExclusionCollector` and
+///    skipping them in the text scanner. This resolves ~99 FP from the
+///    syntax_tree repo and others.
+///
+/// 2. **Assignment neighbor search skips non-assignment lines** (FN fix):
+///    `has_subsequent_assignment_neighbor` was stopping at the first same-indent
+///    non-assignment line (e.g., `foo(bar)` between two assignments). RuboCop's
+///    `relevant_assignment_lines` continues past non-assignment lines to find
+///    the next assignment. Replaced with `should_flag_assignment_extra_leading_space`
+///    which also checks the preceding assignment for alignment and handles the
+///    blank-line termination logic from RuboCop's `relevant_line_indent_at_level`.
+///
+/// Sample check (15 repos): resolved 16 FP and 63 FN with 0 regressions.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -177,6 +199,9 @@ struct ExclusionCollector {
     /// Byte ranges (start..end) of operator method names in `def` statements.
     /// e.g., `def ==(other)` — the `==` is a method name, not an operator.
     def_method_name_ranges: Vec<std::ops::Range<usize>>,
+    /// Byte offsets of `=` in endless method definitions (e.g., `def foo = expr`).
+    /// RuboCop excludes these from `assignment_tokens` via `remove_equals_in_def`.
+    endless_def_equal_offsets: HashSet<usize>,
 }
 
 impl<'pr> Visit<'pr> for ExclusionCollector {
@@ -212,6 +237,12 @@ impl<'pr> Visit<'pr> for ExclusionCollector {
             let loc = node.name_loc();
             self.def_method_name_ranges
                 .push(loc.start_offset()..loc.end_offset());
+        }
+        // Collect `=` offsets from endless method definitions (def foo = expr).
+        // RuboCop excludes these from assignment_tokens via remove_equals_in_def.
+        if let Some(equal_loc) = node.equal_loc() {
+            self.endless_def_equal_offsets
+                .insert(equal_loc.start_offset());
         }
         // Recurse into the body to find nested defs and default params
         ruby_prism::visit_def_node(self, node);
@@ -295,10 +326,12 @@ impl Cop for SpaceAroundOperators {
             default_param_offsets: HashSet::new(),
             plain_assignment_offsets: HashSet::new(),
             def_method_name_ranges: Vec::new(),
+            endless_def_equal_offsets: HashSet::new(),
         };
         collector.visit(&parse_result.node());
         let default_param_offsets = collector.default_param_offsets;
         let plain_assignment_offsets = collector.plain_assignment_offsets;
+        let endless_def_equal_offsets = collector.endless_def_equal_offsets;
         let def_name_ranges = collector.def_method_name_ranges;
 
         let exponent_no_space = enforced_style_exponent == "no_space";
@@ -480,6 +513,13 @@ impl Cop for SpaceAroundOperators {
                     continue;
                 }
 
+                // Skip `=` in endless method definitions (def foo = expr).
+                // RuboCop excludes these from assignment_tokens via remove_equals_in_def.
+                if endless_def_equal_offsets.contains(&i) {
+                    i += 1;
+                    continue;
+                }
+
                 // Skip `=` that is part of an operator method name: `def []=`, `def ===`
                 if in_def_name(i) {
                     i += 1;
@@ -595,14 +635,12 @@ fn check_text_scanner_extra_space(
     }
 
     // RuboCop-compatible: for plain assignments (=), only flag extra leading space
-    // if there IS a subsequent assignment neighbor at the same indentation that is
-    // NOT aligned. If there's no subsequent assignment, it's standalone or end-of-group
-    // and should not be flagged.
-    if multi_before
-        && is_plain_assignment
-        && !has_subsequent_assignment_neighbor(source, op_start, code_map)
-    {
-        multi_before = false;
+    // when there is a subsequent assignment at the same indentation that is NOT
+    // aligned with the current operator. Mirrors RuboCop's excess_leading_space?
+    // logic for :assignment type.
+    if multi_before && is_plain_assignment {
+        multi_before =
+            should_flag_assignment_extra_leading_space(source, op_start, op_bytes, code_map);
     }
 
     if multi_after {
@@ -915,14 +953,19 @@ fn line_has_operator_ending_at_col(line: &[u8], target_end_col: usize) -> bool {
     false
 }
 
-/// Check if there is a subsequent (below) assignment-like line at the same
-/// indentation level. This mirrors RuboCop's `aligned_with_subsequent_equals_operator`
-/// which returns `:none` (suppressing the offense) when no subsequent assignment exists.
+/// RuboCop-compatible check for plain assignment extra leading space.
 ///
-/// Uses code_map to avoid matching `=` inside strings or comments.
-fn has_subsequent_assignment_neighbor(
+/// Returns `true` if the offense should be flagged, `false` if suppressed.
+///
+/// Mirrors RuboCop's `excess_leading_space?` for `:assignment` type:
+/// 1. If preceding assignment at same indent is aligned → suppress
+/// 2. If no subsequent assignment at same indent → suppress (`:none`)
+/// 3. If subsequent assignment is aligned → suppress (`:yes`)
+/// 4. If subsequent assignment is NOT aligned → flag (`:no`)
+fn should_flag_assignment_extra_leading_space(
     source: &SourceFile,
     op_start: usize,
+    op_bytes: &[u8],
     code_map: &CodeMap,
 ) -> bool {
     let bytes = source.as_bytes();
@@ -930,16 +973,80 @@ fn has_subsequent_assignment_neighbor(
     let (line, _) = source.offset_to_line_col(op_start);
     let line_idx = line - 1;
 
+    // Compute the character end column of the operator (for cross-operator alignment)
+    let mut ls = op_start;
+    while ls > 0 && bytes[ls - 1] != b'\n' {
+        ls -= 1;
+    }
+    let byte_col = op_start - ls;
+    let char_end_col = bytes_to_char_col(lines[line_idx], byte_col) + op_bytes.len();
+
     let my_indent = lines[line_idx]
         .iter()
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(0);
 
-    // Compute line start offsets for absolute position mapping
     let line_starts = compute_line_starts(bytes);
 
-    // Scan downward from the line after current
-    let mut check_idx = line_idx + 1;
+    // Check preceding: if the nearest preceding assignment is aligned, suppress
+    if find_assignment_aligned_in_direction(
+        &lines,
+        &line_starts,
+        line_idx,
+        my_indent,
+        char_end_col,
+        code_map,
+        true,
+    ) == Some(true)
+    {
+        return false;
+    }
+
+    // Check subsequent: None → suppress, Aligned → suppress, NotAligned → flag
+    match find_assignment_aligned_in_direction(
+        &lines,
+        &line_starts,
+        line_idx,
+        my_indent,
+        char_end_col,
+        code_map,
+        false,
+    ) {
+        None => false,       // no subsequent assignment
+        Some(true) => false, // subsequent is aligned
+        Some(false) => true, // subsequent is NOT aligned → flag
+    }
+}
+
+/// Search for the nearest assignment line at the same indentation in the given
+/// direction (up or down), skipping non-assignment same-indent lines.
+///
+/// Returns `None` if no assignment found, `Some(true)` if found and aligned
+/// (operator end column matches), `Some(false)` if found and not aligned.
+///
+/// Mirrors RuboCop's `relevant_assignment_lines` + `aligned_equals_operator?`.
+fn find_assignment_aligned_in_direction(
+    lines: &[&[u8]],
+    line_starts: &[usize],
+    line_idx: usize,
+    my_indent: usize,
+    char_end_col: usize,
+    code_map: &CodeMap,
+    search_up: bool,
+) -> Option<bool> {
+    let mut check_idx = if search_up {
+        if line_idx == 0 {
+            return None;
+        }
+        line_idx - 1
+    } else {
+        line_idx + 1
+    };
+
+    // Track whether the last non-blank line was at the target indent,
+    // used for blank-line termination (mirrors RuboCop's relevant_line_indent_at_level).
+    let mut relevant_indent_at_level = true;
+
     loop {
         if check_idx >= lines.len() {
             break;
@@ -948,37 +1055,44 @@ fn has_subsequent_assignment_neighbor(
         let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
         match first_non_ws {
             None => {
-                // Blank line: in RuboCop, a blank line after a relevant-indent line
-                // terminates the search
-                break;
-            }
-            Some(fs) if line_bytes[fs] == b'#' => {
-                // Comment line — skip
-                check_idx += 1;
-                continue;
-            }
-            Some(fs) if line_bytes[fs] == b'^' => {
-                // Annotation line — skip
-                check_idx += 1;
-                continue;
-            }
-            Some(indent) => {
-                if indent < my_indent {
-                    // Dedented line — stop search
+                // Blank line: terminates search if last non-blank was at same indent
+                if relevant_indent_at_level {
                     break;
                 }
-                if indent == my_indent {
-                    // Same indent — check if this line has an assignment operator in code
-                    let abs_start = line_starts[check_idx];
-                    return line_has_equals_sign_in_code(line_bytes, abs_start, code_map);
+            }
+            Some(fs) if line_bytes[fs] == b'#' => {} // Comment line — skip
+            Some(fs) if line_bytes[fs] == b'^' => {} // Annotation line — skip
+            Some(indent) => {
+                if indent < my_indent {
+                    break; // Dedented — stop
                 }
-                // Different indent (more indented) — skip (e.g., continuation)
-                check_idx += 1;
-                continue;
+                if indent == my_indent {
+                    relevant_indent_at_level = true;
+                    // Check if this line has an assignment `=` in code
+                    let abs_start = line_starts[check_idx];
+                    if line_has_equals_sign_in_code(line_bytes, abs_start, code_map) {
+                        // Found assignment — check alignment via end column
+                        let aligned =
+                            line_has_operator_ending_at_char_col(line_bytes, char_end_col);
+                        return Some(aligned);
+                    }
+                    // Same-indent non-assignment line — continue searching
+                } else {
+                    // More indented — continuation, don't terminate
+                    relevant_indent_at_level = false;
+                }
             }
         }
+        if search_up {
+            if check_idx == 0 {
+                break;
+            }
+            check_idx -= 1;
+        } else {
+            check_idx += 1;
+        }
     }
-    false
+    None
 }
 
 /// Compute the byte offset of each line's start within the source.
