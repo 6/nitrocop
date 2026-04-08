@@ -45,6 +45,34 @@ use ruby_prism::Visit;
 /// Fix: collect non-heredoc `InterpolatedStringNode` expression ranges in this
 /// cop and skip indentation checks when the leading whitespace falls entirely
 /// inside one of those ranges.
+///
+/// ## Corpus investigation (2026-04-08, tabs variant: FP=1165, FN=15918)
+///
+/// Three root causes for the tabs variant divergence:
+///
+/// 1. **FP on squiggly heredoc interpolation content**: For `<<~` heredocs with
+///    `#{}` interpolation, Prism strips common indent from parts, so the
+///    CodeMap's heredoc body range starts AFTER the leading whitespace. The cop
+///    incorrectly flagged the whitespace as "space in indentation" because
+///    `is_not_string(line_start)` returned true.
+///    Fix: after the existing skip logic, check if the first non-whitespace byte
+///    is inside a heredoc body (via `code_map.is_heredoc(line_start + indent_end)`).
+///
+/// 2. **FN on xstring (backtick) content**: RuboCop's `string_literal_ranges`
+///    only collects `:str`/`:dstr`, NOT `:xstr`. But nitrocop's CodeMap included
+///    `XStringNode`/`InterpolatedXStringNode` in `string_ranges`, causing the cop
+///    to skip xstring content.
+///    Fix: added `CodeMap::is_xstring()` and `xstring_ranges` field, then added
+///    `!code_map.is_xstring()` overrides in the skip logic (same pattern as
+///    `is_regex`).
+///
+/// 3. **FN on stacked heredoc closing delimiters**: When two heredocs are opened
+///    on the same line (`method(<<-A, <<-B)`), their ranges are adjacent and
+///    `merge_ranges` combines them. `heredoc_range_end()` then returns the END
+///    of the merged range, so the first closing delimiter's `next_line_start >=
+///    range_end` check fails.
+///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
+///    switched `heredoc_range_end()` to use it.
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {
@@ -96,9 +124,26 @@ impl Cop for IndentationStyle {
             // outside the string_literal_range, so RuboCop checks its indentation.
             // Exception 2: regex literals are NOT skipped. RuboCop's
             // string_literal_ranges only covers :str/:dstr nodes, not :regexp.
+            // Exception 3: xstring (backtick) literals are NOT skipped. RuboCop's
+            // string_literal_ranges only covers :str/:dstr, not :xstr.
             if (!code_map.is_not_string(line_start) || in_interpolated_string)
                 && !code_map.is_regex(line_start)
+                && !code_map.is_xstring(line_start)
                 && !is_heredoc_closing
+            {
+                continue;
+            }
+
+            // For <<~ (squiggly) heredocs with interpolation, Prism strips
+            // common indent from parts, so the CodeMap's heredoc body range may
+            // start AFTER the leading whitespace. Check if the first non-whitespace
+            // byte is inside a str/dstr heredoc body (not regex or xstring).
+            if indent_end > 0
+                && indent_end < line.len()
+                && !is_heredoc_closing
+                && code_map.is_heredoc(line_start + indent_end)
+                && !code_map.is_regex(line_start + indent_end)
+                && !code_map.is_xstring(line_start + indent_end)
             {
                 continue;
             }
@@ -110,10 +155,12 @@ impl Cop for IndentationStyle {
                     let tab_col = indent.iter().position(|&b| b == b'\t').unwrap_or(0);
                     let tab_offset = line_start + tab_col;
                     // Double-check the specific tab character is not in a string literal.
-                    // Exceptions: heredoc closing delimiters and regex literals are
-                    // checked even though they're inside ranges in the CodeMap.
+                    // Exceptions: heredoc closing delimiters, regex, and xstring
+                    // literals are checked even though they're inside ranges in
+                    // the CodeMap.
                     if code_map.is_not_string(tab_offset)
                         || code_map.is_regex(tab_offset)
+                        || code_map.is_xstring(tab_offset)
                         || is_heredoc_closing
                     {
                         let mut diag = self.diagnostic(
@@ -151,6 +198,7 @@ impl Cop for IndentationStyle {
                     let space_offset = line_start + space_col;
                     if code_map.is_not_string(space_offset)
                         || code_map.is_regex(space_offset)
+                        || code_map.is_xstring(space_offset)
                         || is_heredoc_closing
                     {
                         let mut diag = self.diagnostic(
@@ -245,6 +293,131 @@ mod tests {
 
     crate::cop_fixture_tests!(IndentationStyle, "cops/layout/indentation_style");
     crate::cop_autocorrect_fixture_tests!(IndentationStyle, "cops/layout/indentation_style");
+
+    #[test]
+    fn tabs_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &IndentationStyle,
+            include_bytes!("../../../tests/fixtures/cops/layout/indentation_style/tabs_offense.rb"),
+            tabs_config(),
+        );
+    }
+
+    #[test]
+    fn tabs_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &IndentationStyle,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/indentation_style/tabs_no_offense.rb"
+            ),
+            tabs_config(),
+        );
+    }
+
+    fn tabs_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("tabs".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn tabs_variant_squiggly_heredoc_interpolation_not_flagged() {
+        // FP fix: <<~ heredoc with interpolation — leading whitespace is outside
+        // the CodeMap body range because Prism strips common indent from parts
+        let source = b"expect(x).to eq(y), <<~SPEC_FAILURE\n  \x23{model} text\n  expected: \x23{x}\nSPEC_FAILURE\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        // Lines 2 and 3 are heredoc content — should not be flagged
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            !flagged_lines.contains(&2),
+            "Heredoc body line 2 should not be flagged: {:?}",
+            diags
+        );
+        assert!(
+            !flagged_lines.contains(&3),
+            "Heredoc body line 3 should not be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_xstring_content_flagged() {
+        // FN fix: RuboCop does NOT skip xstring (backtick) content
+        let source = b"x = `\n  command\n`\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            flagged_lines.contains(&2),
+            "xstring content should be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_heredoc_xstring_content_flagged() {
+        // FN fix: RuboCop does NOT skip heredoc xstring content
+        let source = b"x = <<~`CMD`\n  echo hello\nCMD\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            flagged_lines.contains(&2),
+            "heredoc xstring content should be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_stacked_heredoc_closing_delimiter() {
+        // FN fix: stacked heredoc closing delimiters with space indentation
+        let source = b"method(<<-A, <<-B)\n  body a\n  A\n  body b\n  B\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            flagged_lines.contains(&3),
+            "Closing delimiter A should be flagged: {:?}",
+            diags
+        );
+        assert!(
+            flagged_lines.contains(&5),
+            "Closing delimiter B should be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_heredoc_closing_delimiter_spaces() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("tabs".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"x = <<-INPUT\n  text here\n  INPUT\n";
+        let diags = crate::testutil::run_cop_full_with_config(&IndentationStyle, source, config);
+        for d in &diags {
+            eprintln!(
+                "DIAG: line={} col={} msg={}",
+                d.location.line, d.location.column, d.message
+            );
+        }
+        let closing_line_flagged = diags.iter().any(|d| d.location.line == 3);
+        assert!(
+            closing_line_flagged,
+            "Should flag spaces in heredoc closing delimiter: {:?}",
+            diags
+        );
+    }
 
     #[test]
     fn heredoc_closing_tag_tab() {
