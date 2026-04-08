@@ -107,8 +107,8 @@ impl Cop for SpecialGlobalVars {
         let var_name = loc.as_slice();
 
         match enforced_style {
-            "use_perl_names" | "use_builtin_english_names" => {
-                // Flag English-style names, suggest perl equivalents
+            "use_perl_names" => {
+                // Flag all English-style names, suggest perl equivalents
                 if let Some(perl) = english_to_perl(var_name) {
                     let english_name = std::str::from_utf8(var_name).unwrap_or("$?");
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
@@ -129,6 +129,62 @@ impl Cop for SpecialGlobalVars {
                         diag.corrected = true;
                     }
                     diagnostics.push(diag);
+                }
+            }
+            "use_builtin_english_names" => {
+                // Like use_perl_names but allows builtin English globals
+                // ($LOAD_PATH, $LOADED_FEATURES, $PROGRAM_NAME).
+                // Also flags perl names that have builtin equivalents ($:, $", $0)
+                // and suggests the English builtin instead.
+                if let Some(perl) = english_to_perl(var_name) {
+                    let english_name = std::str::from_utf8(var_name).unwrap_or("$?");
+                    if is_builtin_english(english_name) {
+                        // Builtin English name — allowed
+                        return;
+                    }
+                    // Non-builtin English name → suggest perl
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        format!("Prefer `{}` over `{}`.", perl, english_name),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: perl.to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
+                } else if let Some(english) = perl_to_english(var_name) {
+                    if is_builtin_english(english) {
+                        // Perl name for a builtin → suggest English builtin
+                        let perl_name = std::str::from_utf8(var_name).unwrap_or("$?");
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            format!("Prefer `{}` over `{}`.", english, perl_name),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: loc.start_offset(),
+                                end: loc.end_offset(),
+                                replacement: english.to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                    // Perl name for non-builtin → allowed
                 }
             }
             _ => {
@@ -236,6 +292,48 @@ mod tests {
         assert!(
             !diags[0].message.contains("require 'English'"),
             "RequireEnglish: false should not include require hint"
+        );
+    }
+
+    #[test]
+    fn use_builtin_english_names_offense_fixture() {
+        use crate::testutil::assert_cop_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("use_builtin_english_names".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        assert_cop_offenses_full_with_config(
+            &SpecialGlobalVars,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/special_global_vars/use_builtin_english_names_offense.rb"
+            ),
+            config,
+        );
+    }
+
+    #[test]
+    fn use_builtin_english_names_no_offense_fixture() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("use_builtin_english_names".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        assert_cop_no_offenses_full_with_config(
+            &SpecialGlobalVars,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/special_global_vars/use_builtin_english_names_no_offense.rb"
+            ),
+            config,
         );
     }
 
