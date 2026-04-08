@@ -69,6 +69,17 @@ impl Cop for UselessAssignment {
         let rescue_contexts = collect_multi_rescue_contexts(parse_result);
         let conditional_operator_offsets = collect_conditional_operator_write_offsets(parse_result);
         let pattern_match_offsets = collect_pattern_match_target_offsets(parse_result);
+        let or_condition_offsets = collect_or_condition_write_offsets(parse_result);
+        let do_while_body_offsets = collect_do_while_body_write_offsets(parse_result);
+        let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
+        rescue_modifier_collector.visit(&parse_result.node());
+        let mut rescue_modifier_offsets = rescue_modifier_collector.offsets;
+        // Also suppress preceding writes to variables that are written in rescue modifiers
+        let preceding = collect_rescue_modifier_preceding_write_offsets(
+            parse_result,
+            &rescue_modifier_collector.rescue_value_var_names,
+        );
+        rescue_modifier_offsets.extend(preceding);
         let mut candidates = collector.take_candidates();
         candidates.sort_by_key(|candidate| candidate.node_offset);
 
@@ -81,6 +92,9 @@ impl Cop for UselessAssignment {
                 true
             } else if !candidate.engine_used {
                 !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
+                    && !or_condition_offsets.contains(&candidate.node_offset)
+                    && !do_while_body_offsets.contains(&candidate.node_offset)
+                    && !rescue_modifier_offsets.contains(&candidate.node_offset)
             } else {
                 false
             };
@@ -465,6 +479,224 @@ impl<'pr> Visit<'pr> for PatternMatchTargetCollector {
         if self.in_pattern {
             self.offsets.insert(node.location().start_offset());
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: assignments inside || / or expressions
+// ---------------------------------------------------------------------------
+//
+// In `if foo(x = 1) || foo(x = 2)`, short-circuit evaluation means only one
+// branch executes, but the VF engine sees both assignments as sequential in
+// the same scope. Suppress the LHS assignment when the same variable is also
+// assigned in the RHS of an `or`/`||` node.
+
+fn collect_or_condition_write_offsets(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashSet<usize> {
+    let mut collector = OrConditionWriteCollector::default();
+    collector.visit(&parse_result.node());
+    collector.offsets
+}
+
+#[derive(Default)]
+struct OrConditionWriteCollector {
+    offsets: HashSet<usize>,
+}
+
+/// Helper visitor that collects all local variable write offsets within a subtree.
+#[derive(Default)]
+struct LvarWriteSubtreeCollector {
+    writes: Vec<(Vec<u8>, usize)>,
+}
+
+impl<'pr> Visit<'pr> for LvarWriteSubtreeCollector {
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        self.writes.push((
+            node.name().as_slice().to_vec(),
+            node.location().start_offset(),
+        ));
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+}
+
+impl OrConditionWriteCollector {
+    fn process_or_node(&mut self, node: &ruby_prism::OrNode<'_>) {
+        let mut lhs_collector = LvarWriteSubtreeCollector::default();
+        lhs_collector.visit(&node.left());
+        let mut rhs_collector = LvarWriteSubtreeCollector::default();
+        rhs_collector.visit(&node.right());
+
+        // For each variable written in LHS that is also written in RHS,
+        // suppress the LHS write offset.
+        for (lhs_name, lhs_offset) in &lhs_collector.writes {
+            if rhs_collector
+                .writes
+                .iter()
+                .any(|(rhs_name, _)| rhs_name == lhs_name)
+            {
+                self.offsets.insert(*lhs_offset);
+            }
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for OrConditionWriteCollector {
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        self.process_or_node(node);
+        ruby_prism::visit_or_node(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: assignments inside begin/end until or begin/end while loops
+// ---------------------------------------------------------------------------
+//
+// `begin ... end until cond` is a do-while loop: the body executes at least
+// once before the condition is checked. The VF engine may flag a write inside
+// the body as unused if the only read is in the loop condition, because it
+// processes the condition before the body.
+
+fn collect_do_while_body_write_offsets(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashSet<usize> {
+    let mut collector = DoWhileBodyWriteCollector::default();
+    collector.visit(&parse_result.node());
+    collector.offsets
+}
+
+#[derive(Default)]
+struct DoWhileBodyWriteCollector {
+    offsets: HashSet<usize>,
+}
+
+/// Helper visitor that collects all local variable read names within a subtree.
+#[derive(Default)]
+struct LvarReadSubtreeCollector {
+    names: HashSet<Vec<u8>>,
+}
+
+impl<'pr> Visit<'pr> for LvarReadSubtreeCollector {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        self.names.insert(node.name().as_slice().to_vec());
+    }
+}
+
+impl DoWhileBodyWriteCollector {
+    fn process_loop(
+        &mut self,
+        predicate: &ruby_prism::Node<'_>,
+        body: Option<ruby_prism::StatementsNode<'_>>,
+        is_begin_modifier: bool,
+    ) {
+        if !is_begin_modifier {
+            return;
+        }
+        let mut cond_reader = LvarReadSubtreeCollector::default();
+        cond_reader.visit(predicate);
+        if cond_reader.names.is_empty() {
+            return;
+        }
+        if let Some(stmts) = body {
+            let mut body_writer = LvarWriteSubtreeCollector::default();
+            for stmt in stmts.body().iter() {
+                body_writer.visit(&stmt);
+            }
+            for (name, offset) in body_writer.writes {
+                if cond_reader.names.contains(&name) {
+                    self.offsets.insert(offset);
+                }
+            }
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for DoWhileBodyWriteCollector {
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+        self.process_loop(
+            &node.predicate(),
+            node.statements(),
+            node.is_begin_modifier(),
+        );
+        ruby_prism::visit_until_node(self, node);
+    }
+
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+        self.process_loop(
+            &node.predicate(),
+            node.statements(),
+            node.is_begin_modifier(),
+        );
+        ruby_prism::visit_while_node(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: assignments inside rescue modifier expressions
+// ---------------------------------------------------------------------------
+//
+// `x = Float(y) rescue err = "bad"` — the rescue modifier creates an implicit
+// branch but the VF engine sees `err = "bad"` as sequential with prior writes.
+// Suppress writes inside the rescue value of a RescueModifierNode.
+
+#[derive(Default)]
+struct RescueModifierWriteCollector {
+    offsets: HashSet<usize>,
+    /// Variable names that have writes inside rescue modifier expressions.
+    rescue_value_var_names: HashSet<Vec<u8>>,
+    in_rescue_value: bool,
+}
+
+impl<'pr> Visit<'pr> for RescueModifierWriteCollector {
+    fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
+        // Visit the expression (normal path) normally
+        self.visit(&node.expression());
+        // Visit the rescue value (fallback path) with suppression active
+        let was = self.in_rescue_value;
+        self.in_rescue_value = true;
+        self.visit(&node.rescue_expression());
+        self.in_rescue_value = was;
+    }
+
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        if self.in_rescue_value {
+            self.offsets.insert(node.location().start_offset());
+            self.rescue_value_var_names
+                .insert(node.name().as_slice().to_vec());
+        }
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+}
+
+/// Second pass: suppress writes to variables that are also written inside rescue
+/// modifiers. The initial `err = nil` before `x = Float(y) rescue err = "bad"`
+/// is a fallback value, not a dead write.
+fn collect_rescue_modifier_preceding_write_offsets(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    rescue_value_var_names: &HashSet<Vec<u8>>,
+) -> HashSet<usize> {
+    if rescue_value_var_names.is_empty() {
+        return HashSet::new();
+    }
+    let mut collector = RescueModifierPrecedingWriteCollector {
+        offsets: HashSet::new(),
+        names: rescue_value_var_names,
+    };
+    collector.visit(&parse_result.node());
+    collector.offsets
+}
+
+struct RescueModifierPrecedingWriteCollector<'a> {
+    offsets: HashSet<usize>,
+    names: &'a HashSet<Vec<u8>>,
+}
+
+impl<'pr> Visit<'pr> for RescueModifierPrecedingWriteCollector<'_> {
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        if self.names.contains(node.name().as_slice()) {
+            self.offsets.insert(node.location().start_offset());
+        }
+        ruby_prism::visit_local_variable_write_node(self, node);
     }
 }
 
