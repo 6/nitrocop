@@ -18,6 +18,20 @@ use crate::parse::source::SourceFile;
 /// The fix checks `call.block().is_none()` in the literal style branch to
 /// skip these bare lambda calls.
 ///
+/// ## Variant FP Fix (literal style, 2026-04-08)
+///
+/// RuboCop's Parser gem crashes on control/meta hex escapes such as
+/// `/\c\xFF/`, `/\C-\xFF/`, `/\M-\xFF/`, and matching string literals like
+/// `"\c\xFF"`. When that happens, RuboCop never reaches `Style/Lambda`, so
+/// later `lambda do ... end` blocks in the same file produce no
+/// `Style/Lambda` offense. Prism parses these files successfully, so nitrocop
+/// previously flagged those later lambdas and drifted from RuboCop on the
+/// `EnforcedStyle: literal` variant.
+///
+/// The cop now skips literal-style `lambda` method offenses when the source
+/// contains the specific escape forms that trigger RuboCop's parser crash,
+/// matching RuboCop's "no offense because the file crashed first" behavior.
+///
 /// ## Original Investigation (2026-03-11)
 ///
 /// Corpus oracle reported FP=2, FN=2.
@@ -34,6 +48,8 @@ use crate::parse::source::SourceFile;
 /// remaining corpus misses are likely file/context-specific rather than this
 /// cop's core selector logic.
 pub struct Lambda;
+
+const RUBOCOP_PARSER_CRASH_ESCAPES: [&[u8]; 3] = [b"\\c\\x", b"\\C-\\x", b"\\M-\\x"];
 
 impl Cop for Lambda {
     fn name(&self) -> &'static str {
@@ -149,7 +165,7 @@ impl Lambda {
                 // `lambda` calls without an attached block. Such calls are just
                 // references to the lambda method (e.g., `b = lambda` inside a
                 // block) and should not be flagged.
-                if call.block().is_none() {
+                if call.block().is_none() || source_has_rubocop_parser_crash_escape(source) {
                     return;
                 }
                 let loc = call.message_loc().unwrap_or_else(|| call.location());
@@ -203,10 +219,31 @@ impl Lambda {
     }
 }
 
+fn source_has_rubocop_parser_crash_escape(source: &SourceFile) -> bool {
+    let bytes = source.as_bytes();
+    RUBOCOP_PARSER_CRASH_ESCAPES
+        .iter()
+        .any(|needle| bytes.windows(needle.len()).any(|window| window == *needle))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{run_cop_full, run_cop_full_with_config};
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, run_cop_full, run_cop_full_with_config,
+    };
+
+    fn literal_style_config() -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("literal".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
 
     crate::cop_fixture_tests!(Lambda, "cops/style/lambda");
 
@@ -219,17 +256,17 @@ mod tests {
 
     #[test]
     fn literal_no_offense_bare_lambda() {
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("literal".into()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"b = lambda\n";
-        let diags = run_cop_full_with_config(&Lambda, source, config);
+        let diags = run_cop_full_with_config(&Lambda, source, literal_style_config());
         assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn literal_no_offense_when_rubocop_parser_crashes() {
+        assert_cop_no_offenses_full_with_config(
+            &Lambda,
+            include_bytes!("../../../tests/fixtures/cops/style/lambda/literal_no_offense.rb"),
+            literal_style_config(),
+        );
     }
 }
