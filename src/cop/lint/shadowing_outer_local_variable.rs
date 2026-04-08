@@ -23,8 +23,8 @@ struct ShadowingContext {
     inherited_cond_map: Vec<InheritedCondEntry>,
     when_condition_ranges: Vec<(usize, usize, usize)>,
     when_body_ranges: Vec<(usize, usize, usize)>,
-    /// (var_name, lhs_offset, rhs_start, rhs_end).
-    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize)>,
+    /// (var_name, lhs_offset, rhs_start, rhs_end, rhs_content_hash).
+    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize, u64)>,
     block_body_ranges: Vec<(usize, usize, usize)>,
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
@@ -186,7 +186,7 @@ impl ShadowingContext {
     fn is_in_assignment_rhs(&self, lhs_offset: usize, param_offset: usize) -> bool {
         self.assignment_rhs_ranges
             .iter()
-            .any(|(_, lhs, rhs_start, rhs_end)| {
+            .any(|(_, lhs, rhs_start, rhs_end, _)| {
                 *lhs == lhs_offset && *rhs_start <= param_offset && param_offset < *rhs_end
             })
     }
@@ -209,32 +209,30 @@ impl ShadowingContext {
         let current_rhs =
             self.assignment_rhs_ranges
                 .iter()
-                .find(|(name, lhs, rhs_start, rhs_end)| {
+                .find(|(name, lhs, rhs_start, rhs_end, _)| {
                     name == var_name
                         && *lhs != outer_offset
                         && *rhs_start <= param_offset
                         && param_offset < *rhs_end
                 });
-        let Some((_, _, curr_rhs_start, curr_rhs_end)) = current_rhs else {
+        let Some((_, _, _, _, curr_hash)) = current_rhs else {
             return false;
         };
-        let curr_rhs_len = curr_rhs_end - curr_rhs_start;
 
         // Find the first declaration's RHS.
         let original_rhs = self
             .assignment_rhs_ranges
             .iter()
-            .find(|(name, lhs, _, _)| name == var_name && *lhs == outer_offset);
-        let Some((_, _, orig_rhs_start, orig_rhs_end)) = original_rhs else {
+            .find(|(name, lhs, _, _, _)| name == var_name && *lhs == outer_offset);
+        let Some((_, _, orig_rhs_start, orig_rhs_end, orig_hash)) = original_rhs else {
             return false;
         };
-        let orig_rhs_len = orig_rhs_end - orig_rhs_start;
 
-        // Check structural equivalence: both RHS must have the same byte length
-        // AND the first declaration's RHS must also contain a block. Identical
-        // byte length is a strong proxy for parser gem structural equality since
-        // the same source text yields the same AST.
-        if orig_rhs_len != curr_rhs_len {
+        // Check structural equivalence: both RHS must have identical content
+        // (same hash) AND the first declaration's RHS must also contain a block.
+        // Identical source bytes yield identical parser gem AST nodes, so
+        // content hash equality is a sound proxy for structural `==`.
+        if orig_hash != curr_hash {
             return false;
         }
 
@@ -772,7 +770,7 @@ struct ContextCollector {
     inherited_cond_map: Vec<InheritedCondEntry>,
     when_condition_ranges: Vec<(usize, usize, usize)>,
     when_body_ranges: Vec<(usize, usize, usize)>,
-    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize)>,
+    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize, u64)>,
     block_body_ranges: Vec<(usize, usize, usize)>,
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
@@ -1067,8 +1065,9 @@ impl<'pr> Visit<'pr> for ContextCollector {
         let lhs_offset = node.location().start_offset();
         let start = node.value().location().start_offset();
         let end = node.value().location().end_offset();
+        let rhs_hash = simple_hash(node.value().location().as_slice());
         self.assignment_rhs_ranges
-            .push((var_name.clone(), lhs_offset, start, end));
+            .push((var_name.clone(), lhs_offset, start, end, rhs_hash));
         // Record branch context for this variable write (used to detect
         // sibling-branch assignments for the same variable).
         if let Some(entry) = self.conditional_branch_stack.last() {
@@ -1127,6 +1126,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
         let rhs_start = node.value().location().start_offset();
         let rhs_end = node.value().location().end_offset();
+        let rhs_hash = simple_hash(node.value().location().as_slice());
         // Record each LHS target's offset as mapping to the RHS range
         for target in node.lefts().iter() {
             if let Some(t) = target.as_local_variable_target_node() {
@@ -1135,6 +1135,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     t.location().start_offset(),
                     rhs_start,
                     rhs_end,
+                    rhs_hash,
                 ));
             }
         }
@@ -1147,6 +1148,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                             t.location().start_offset(),
                             rhs_start,
                             rhs_end,
+                            rhs_hash,
                         ));
                     }
                 }
@@ -1159,6 +1161,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     t.location().start_offset(),
                     rhs_start,
                     rhs_end,
+                    rhs_hash,
                 ));
             }
         }
@@ -1488,6 +1491,16 @@ impl<'pr> Visit<'pr> for ContextCollector {
 }
 
 /// Check if a CallNode is `Ractor.new(...)` or `::Ractor.new(...)`.
+/// Simple FNV-1a-style hash for comparing RHS source bytes.
+fn simple_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 fn is_ractor_new_call(node: &ruby_prism::CallNode<'_>) -> bool {
     let name = std::str::from_utf8(node.name().as_slice()).unwrap_or("");
     if name != "new" {
