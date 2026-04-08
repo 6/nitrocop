@@ -144,6 +144,20 @@ use crate::parse::source::SourceFile;
 ///     (b) use `next_line_empty_and_exists?` (body_end OR actual blank, AND
 ///     not at EOF) for the "Remove after" check, and (c) fire at most one
 ///     offense per modifier (2026-04-07).
+///
+/// 16. The remaining `only_before` variant gaps came from two RuboCop
+///     `bare_access_modifier?` details: assignment wrappers like
+///     `CONST = CommandClass.new do ... private ... end` break macro scope, but
+///     postfix conditional forms like `protected unless $TESTING` still expose
+///     the inner bare send node. Fix: treat non-local write nodes as
+///     non-macro wrappers during visitation, and accept postfix `if`/`unless`
+///     tails in the line-shape filter (2026-04-08).
+///
+/// 17. RuboCop's `class_constructor?` also treats `Data.define do ... end` as a
+///     class-like scope, even when wrapped by a constant assignment such as
+///     `StepDefinition = Data.define(...) do ... private ... end`. Fix:
+///     recognize `Data.define` alongside `Class/Module/Struct.new` when
+///     promoting block bodies to class scope (2026-04-08).
 pub struct EmptyLinesAroundAccessModifier;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -160,8 +174,9 @@ fn is_comment_line(line: &[u8]) -> bool {
 }
 
 /// Check whether the source from `column` to end-of-line is exactly the access
-/// modifier keyword, optionally followed by whitespace and a trailing comment.
-/// This matches plain `private`, `private # comment`, and same-line body-opening
+/// modifier keyword, optionally followed by whitespace, a postfix `if`/`unless`
+/// condition, or a trailing comment. This matches plain `private`,
+/// `private # comment`, `protected unless $TESTING`, and same-line body-opening
 /// forms such as `module Backend; private # comment`.
 fn is_trailing_bare_modifier_line(line: &[u8], column: usize, method_name: &[u8]) -> bool {
     let end_pos = column.saturating_add(method_name.len());
@@ -174,11 +189,26 @@ fn is_trailing_bare_modifier_line(line: &[u8], column: usize, method_name: &[u8]
         match line[idx] {
             b' ' | b'\t' | b'\r' | b'\n' => idx += 1,
             b'#' => return true,
-            _ => return false,
+            _ => break,
         }
     }
 
-    true
+    if idx == line.len() {
+        return true;
+    }
+
+    let trailing = &line[idx..];
+    matches_postfix_conditional(trailing, b"if") || matches_postfix_conditional(trailing, b"unless")
+}
+
+fn matches_postfix_conditional(trailing: &[u8], keyword: &[u8]) -> bool {
+    if trailing.len() < keyword.len() || &trailing[..keyword.len()] != keyword {
+        return false;
+    }
+
+    trailing
+        .get(keyword.len())
+        .is_some_and(|b| matches!(b, b' ' | b'\t'))
 }
 
 /// Allow inline brace-block forms like `1.times { private }` and
@@ -388,34 +418,34 @@ macro_rules! visit_write_node_as_non_class_scope {
     };
 }
 
-fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
-    if call.name().as_slice() != b"new" {
-        return false;
-    }
-
-    let Some(receiver) = call.receiver() else {
-        return false;
-    };
-
+fn receiver_is_global_constant(receiver: ruby_prism::Node<'_>, names: &[&[u8]]) -> bool {
     if let Some(const_read) = receiver.as_constant_read_node() {
-        return matches!(
-            const_read.name().as_slice(),
-            b"Class" | b"Module" | b"Struct" | b"Data"
-        );
+        return names
+            .iter()
+            .any(|&name| const_read.name().as_slice() == name);
     }
 
     if let Some(const_path) = receiver.as_constant_path_node() {
         if const_path.parent().is_none() {
             if let Some(name_node) = const_path.name() {
-                return matches!(
-                    name_node.as_slice(),
-                    b"Class" | b"Module" | b"Struct" | b"Data"
-                );
+                return names.iter().any(|&name| name_node.as_slice() == name);
             }
         }
     }
 
     false
+}
+
+fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    match call.name().as_slice() {
+        b"new" => receiver_is_global_constant(receiver, &[b"Class", b"Module", b"Struct"]),
+        b"define" => receiver_is_global_constant(receiver, &[b"Data"]),
+        _ => false,
+    }
 }
 
 impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
@@ -614,6 +644,106 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
         visit_local_variable_or_write_node,
         ruby_prism::LocalVariableOrWriteNode<'pr>,
         visit_local_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_and_write_node,
+        ruby_prism::ClassVariableAndWriteNode<'pr>,
+        visit_class_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_operator_write_node,
+        ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+        visit_class_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_or_write_node,
+        ruby_prism::ClassVariableOrWriteNode<'pr>,
+        visit_class_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_write_node,
+        ruby_prism::ClassVariableWriteNode<'pr>,
+        visit_class_variable_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_and_write_node,
+        ruby_prism::ConstantAndWriteNode<'pr>,
+        visit_constant_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_operator_write_node,
+        ruby_prism::ConstantOperatorWriteNode<'pr>,
+        visit_constant_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_or_write_node,
+        ruby_prism::ConstantOrWriteNode<'pr>,
+        visit_constant_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_and_write_node,
+        ruby_prism::ConstantPathAndWriteNode<'pr>,
+        visit_constant_path_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_operator_write_node,
+        ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+        visit_constant_path_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_or_write_node,
+        ruby_prism::ConstantPathOrWriteNode<'pr>,
+        visit_constant_path_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_write_node,
+        ruby_prism::ConstantPathWriteNode<'pr>,
+        visit_constant_path_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_write_node,
+        ruby_prism::ConstantWriteNode<'pr>,
+        visit_constant_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_and_write_node,
+        ruby_prism::GlobalVariableAndWriteNode<'pr>,
+        visit_global_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_operator_write_node,
+        ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+        visit_global_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_or_write_node,
+        ruby_prism::GlobalVariableOrWriteNode<'pr>,
+        visit_global_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_write_node,
+        ruby_prism::GlobalVariableWriteNode<'pr>,
+        visit_global_variable_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_and_write_node,
+        ruby_prism::InstanceVariableAndWriteNode<'pr>,
+        visit_instance_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_operator_write_node,
+        ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+        visit_instance_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_or_write_node,
+        ruby_prism::InstanceVariableOrWriteNode<'pr>,
+        visit_instance_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_write_node,
+        ruby_prism::InstanceVariableWriteNode<'pr>,
+        visit_instance_variable_write_node
     );
 }
 
@@ -953,6 +1083,67 @@ mod tests {
         );
         // no offense - only_before doesn't check blank line after module_function
         assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn only_before_style_allows_blank_line_after_private_inside_constant_assignment_block() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"module Authentication\n  Authenticate = CommandClass.new(\n    inputs: %i[a]\n  ) do\n    def call\n    end\n\n    private\n\n    def authenticator\n    end\n  end\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 0, "Expected no offenses but got {:?}", diags);
+    }
+
+    #[test]
+    fn only_before_style_flags_postfix_conditional_special_modifier() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class C\n\n  protected unless $TESTING\n\n  MAGIC_ARITY_THRESHOLD = 15\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 3);
+        assert!(diags[0].message.contains("Remove a blank line after"));
+    }
+
+    #[test]
+    fn only_before_style_flags_blank_line_after_private_inside_data_define_block() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Wizard\n  StepDefinition = Data.define(:name) do\n    def use_on?\n    end\n\n    private\n\n    def call_with_model\n    end\n  end\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 6);
+        assert!(diags[0].message.contains("Remove a blank line after"));
     }
 
     #[test]
