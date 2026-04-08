@@ -78,12 +78,12 @@ use ruby_prism::Visit;
 /// - `&&` inside `private def` / `private_class_method def` wrappers is no longer skipped
 ///   just because the definition itself is a call argument. The existing `in_unsafe_parent`
 ///   chain-length check already models RuboCop's real suppression boundary.
-/// - Modifier `if`/`unless` with a block-call body now tracks outer call ancestry above the
-///   surrounding block. RuboCop's `chain_length` / `unsafe_method_used?` walk skips the
-///   block node and can escape into outer container calls like `([Builder.new do ... end] + x)`.
-///   We now suppress only that narrow non-direct-receiver block case, fixing FPs like
-///   `reader.options.each do ... end if reader` inside the RDF CLI option array while still
-///   flagging ordinary block-local cases such as `items.collect { x.to_edges if x }`.
+/// - Modifier `if`/`unless` with a block-call body now tracks only OUTER unsafe send ancestry
+///   above the surrounding block. RuboCop's `unsafe_method_used?` walk can escape through the
+///   enclosing block into outer unsafe container sends like `([Builder.new do ... end] + x)` or
+///   `puts(items.map do ... end)`, but safe outer wrappers alone do not suppress. This keeps
+///   the RDF CLI array case skipped while still flagging ordinary nested safe-block cases such as
+///   `outer.wrap { inner.wrap { items.each { ... } if items } }`.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,10 +117,11 @@ struct ModifierIfCheckContext<'a> {
     /// Whether an outer assignment/operator ancestor remains above the modifier-if.
     /// Like RuboCop's ancestor walk, this only suppresses chain-length-1 cases.
     in_assignment_or_operator_parent: bool,
-    /// Number of call ancestors above the surrounding block node.
-    /// RuboCop's ancestor walk for modifier-if bodies can escape through the
-    /// enclosing block and reach these outer container calls.
-    outer_call_ancestors_above_current_block: usize,
+    /// Whether an unsafe send ancestor remains above the surrounding block node.
+    /// For block-call bodies, RuboCop can escape through the enclosing block and
+    /// reach outer unsafe container sends like `+` / `puts`, but safe outer calls
+    /// alone do not suppress.
+    has_outer_unsafe_parent_above_current_block: bool,
 }
 
 /// Methods that `nil` responds to in vanilla Ruby.
@@ -684,8 +685,7 @@ impl Cop for SafeNavigation {
             in_and_clause_visit: 0,
             in_definition_argument_wrapper: 0,
             in_nil_method_call_arguments: 0,
-            call_depth: 0,
-            outer_call_ancestors_above_current_block_stack: Vec::new(),
+            outer_unsafe_parent_above_current_block_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -716,8 +716,7 @@ struct SafeNavVisitor<'a> {
     in_and_clause_visit: usize,
     in_definition_argument_wrapper: usize,
     in_nil_method_call_arguments: usize,
-    call_depth: usize,
-    outer_call_ancestors_above_current_block_stack: Vec<usize>,
+    outer_unsafe_parent_above_current_block_stack: Vec<bool>,
 }
 
 impl<'a> SafeNavVisitor<'a> {
@@ -1125,7 +1124,6 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        self.call_depth += 1;
         let is_unsafe = Self::is_unsafe_parent_call(node);
         if is_unsafe {
             self.in_unsafe_parent += 1;
@@ -1197,13 +1195,13 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         }
 
         if let Some(block) = node.block() {
-            self.outer_call_ancestors_above_current_block_stack
-                .push(self.call_depth.saturating_sub(1));
             if is_unsafe && self.in_and_clause_visit == 0 {
                 self.in_unsafe_parent -= 1;
             }
+            self.outer_unsafe_parent_above_current_block_stack
+                .push(self.in_unsafe_parent > 0);
             self.visit(&block);
-            self.outer_call_ancestors_above_current_block_stack.pop();
+            self.outer_unsafe_parent_above_current_block_stack.pop();
         }
 
         if is_assignment_or_operator_parent {
@@ -1218,7 +1216,6 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         if is_unsafe && node.block().is_none_or(|_| self.in_and_clause_visit > 0) {
             self.in_unsafe_parent -= 1;
         }
-        self.call_depth -= 1;
     }
 
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
@@ -1381,11 +1378,11 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                     .is_direct_receiver_block_body(&node.as_node()),
                 in_unsafe_parent: self.in_unsafe_parent > 0,
                 in_assignment_or_operator_parent: self.in_assignment_or_operator_parent > 0,
-                outer_call_ancestors_above_current_block: self
-                    .outer_call_ancestors_above_current_block_stack
+                has_outer_unsafe_parent_above_current_block: self
+                    .outer_unsafe_parent_above_current_block_stack
                     .last()
                     .copied()
-                    .unwrap_or(0),
+                    .unwrap_or(false),
             },
         );
         self.diagnostics.extend(diags);
@@ -1826,7 +1823,7 @@ impl SafeNavigation {
 
         if body_call.block().is_some()
             && !context.skip_direct_receiver_block_body_block_calls
-            && context.outer_call_ancestors_above_current_block > 0
+            && context.has_outer_unsafe_parent_above_current_block
         {
             return Vec::new();
         }

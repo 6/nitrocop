@@ -247,3 +247,12 @@ parts[:scheme] = (scheme.dup.force_encoding(Encoding::UTF_8) if scheme)
 
 parts[:authority] = (authority.dup.force_encoding(Encoding::UTF_8) if authority)
                      ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+outer.wrap do
+  inner.wrap do
+    items.each do |item|
+    ^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+      item
+    end if items
+  end
+end
