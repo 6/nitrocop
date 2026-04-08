@@ -5,6 +5,7 @@ use crate::cop::shared::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// ## Corpus investigation (2026-03-10)
 ///
@@ -32,6 +33,17 @@ use crate::parse::source::SourceFile;
 /// when the body is `begin_type?` (i.e., 2+ statements). A body containing only
 /// an access modifier and no other statements is not flagged. This matches cases
 /// like `class Foo\n  protected\nend` or `module ClassMethods\n  private\nend`.
+///
+/// ### Round 4 (2026-04-08): Skip blocks inside method definitions (macro scope)
+/// Root cause of 110 FPs with `EnforcedStyle: outdent`: RuboCop's
+/// `bare_access_modifier?` calls `macro?` → `in_macro_scope?`, which walks the
+/// parent chain. A block inside a `def`/`defs` is NOT in macro scope (unless a
+/// class/module/sclass resets scope between the def and the block). This means
+/// access modifiers inside `class_eval do...end` blocks nested inside methods
+/// are not considered "bare" access modifiers by RuboCop, so the cop skips them.
+/// Fixed by adding a `MacroScopeChecker` visitor that walks the AST from the root
+/// to the block node, tracking `in_def` state. Blocks not in macro scope are now
+/// skipped. This matches RuboCop's behavior for both `indent` and `outdent` styles.
 pub struct AccessModifierIndentation;
 
 // Uses access_modifier_predicates::is_bare_access_modifier() instead of local constant.
@@ -42,6 +54,97 @@ fn body_statements(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
     } else {
         vec![body]
     }
+}
+
+/// Checks if a block node (identified by offset) is in macro scope.
+///
+/// RuboCop's `bare_access_modifier?` calls `macro?` → `in_macro_scope?`, which
+/// walks the parent chain. A block inside a `def`/`defs` is NOT in macro scope
+/// (unless a class/module/sclass resets scope between the def and the block).
+/// This means access modifiers inside such blocks are not "bare" access modifiers
+/// and should not be checked by this cop.
+struct MacroScopeChecker {
+    target_start: usize,
+    target_end: usize,
+    in_def: bool,
+    result: Option<bool>,
+}
+
+impl MacroScopeChecker {
+    fn new(target_start: usize, target_end: usize) -> Self {
+        Self {
+            target_start,
+            target_end,
+            in_def: false,
+            result: None,
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for MacroScopeChecker {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        let prev = self.in_def;
+        self.in_def = true;
+        ruby_prism::visit_def_node(self, node);
+        self.in_def = prev;
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        let prev = self.in_def;
+        self.in_def = false;
+        ruby_prism::visit_class_node(self, node);
+        self.in_def = prev;
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        let prev = self.in_def;
+        self.in_def = false;
+        ruby_prism::visit_module_node(self, node);
+        self.in_def = prev;
+    }
+
+    fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        let prev = self.in_def;
+        self.in_def = false;
+        ruby_prism::visit_singleton_class_node(self, node);
+        self.in_def = prev;
+    }
+
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        let loc = node.location();
+        let start = loc.start_offset();
+        let end = loc.end_offset();
+        if start == self.target_start && end == self.target_end {
+            self.result = Some(!self.in_def);
+            return;
+        }
+        ruby_prism::visit_block_node(self, node);
+    }
+}
+
+fn is_block_in_macro_scope(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    block_start: usize,
+    block_end: usize,
+) -> bool {
+    let mut checker = MacroScopeChecker::new(block_start, block_end);
+    checker.visit(&parse_result.node());
+    checker.result.unwrap_or(true)
 }
 
 impl Cop for AccessModifierIndentation {
@@ -103,6 +206,15 @@ impl Cop for AccessModifierIndentation {
                     None => return,
                 }
             } else if let Some(block_node) = node.as_block_node() {
+                // RuboCop's bare_access_modifier? checks in_macro_scope?, which
+                // returns false for blocks inside def/defs. Skip blocks that are
+                // not in macro scope (e.g., class_eval do...end inside a method).
+                let loc = block_node.location();
+                let block_start = loc.start_offset();
+                let block_end = loc.end_offset();
+                if !is_block_in_macro_scope(_parse_result, block_start, block_end) {
+                    return;
+                }
                 match block_node.body() {
                     Some(b) => (
                         b,
@@ -201,6 +313,78 @@ mod tests {
         assert!(
             diags.is_empty(),
             "width 4 should accept a 4-space access modifier inside a block: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_skips_block_inside_def() {
+        // RuboCop's bare_access_modifier? returns false for `private` inside
+        // a block that's inside a method definition (not in macro scope).
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"class Foo\n  def self.setup(base)\n    base.class_eval do\n      def color; end\n      private\n      def secret; end\n    end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert!(
+            diags.is_empty(),
+            "block inside def is not in macro scope, should not flag: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_still_checks_block_in_class_body() {
+        // A block directly in a class body IS in macro scope.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"class Foo\n  class_eval do\n    def color; end\n    private\n    def secret; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "block in class body is in macro scope, should flag: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_skips_block_inside_standalone_def() {
+        // A block inside a standalone def (no enclosing class) is not in macro scope.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"def setup(base)\n  base.class_eval do\n    def color; end\n    private\n    def secret; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert!(
+            diags.is_empty(),
+            "block inside standalone def is not in macro scope: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn indent_skips_block_inside_def() {
+        // Same check for indent style — blocks inside defs are not in macro scope.
+        let source = b"class Foo\n  def self.setup(base)\n    base.class_eval do\n      def color; end\n      private\n      def secret; end\n    end\n  end\nend\n";
+        let diags =
+            run_cop_full_with_config(&AccessModifierIndentation, source, CopConfig::default());
+        assert!(
+            diags.is_empty(),
+            "block inside def is not in macro scope (indent style): {:?}",
             diags
         );
     }
