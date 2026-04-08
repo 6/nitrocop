@@ -317,3 +317,15 @@ else
     default_action
     ^^ Layout/IndentationWidth: Use 2 (not 4) spaces for indentation.
 end
+
+# begin with misindented end — body should be checked from end col, not begin col
+    begin
+      do_something
+      ^^ Layout/IndentationWidth: Use 2 (not 0) spaces for indentation.
+      end
+
+# begin in assignment — body aligned to begin keyword, not end
+result = begin
+           compute_value
+           ^ Layout/IndentationWidth: Use 2 (not 11) spaces for indentation.
+end
