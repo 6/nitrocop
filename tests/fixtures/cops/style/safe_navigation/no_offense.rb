@@ -187,3 +187,19 @@ scope :accessible, ->(u) { items.select { |i| i && i.active? } }
 obj.bar if (obj)
 Plugin.dialog_manager.validate(X) if (Plugin.dialog_manager)
 @cmd.set_validation_proc { Plugin.dialog_manager.validate(X) if (Plugin.dialog_manager) }
+
+# && inside if-else body of assignment — unsafe parent crosses if branches
+cookies[k] = if v && v.to_s
+  v
+else
+  default
+end
+
+# Modifier-if inside block of dotless call — unsafe parent crosses block boundary
+puts(items.map { |x| x.value if x })
+
+# Modifier-unless inside block of dotless call — unsafe parent crosses block boundary
+puts(items.map { |x| x.bar unless x.nil? })
+
+# && inside else body of !!() — unsafe parent preserved across if branches
+!!(if cached; cached; else; data && data.to_json; end)

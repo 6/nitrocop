@@ -209,3 +209,17 @@ text_field_tag("#{name}[value]", (value ? value.to_d : nil))
 
 Packet.from_source(self, (session.event_type if session))
                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+text_field_tag("#{name}[value]", (value ? value.to_d : nil)) +
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  text_field_tag("#{name2}[value]", (value2 ? value2.to_d : nil))
+                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+Net::IMAP.recordings[digest] << [action, response.dup, @responses ? @responses.dup : nil, all_responses]
+                                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+pages << ($1.nil?? nil : $1.to_i)
+          ^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+methods-[extension_modules.last ? extension_modules.last.methods : nil]-self.class.instance_methods
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
