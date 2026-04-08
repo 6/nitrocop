@@ -152,6 +152,12 @@ use crate::parse::source::SourceFile;
 ///     the inner bare send node. Fix: treat non-local write nodes as
 ///     non-macro wrappers during visitation, and accept postfix `if`/`unless`
 ///     tails in the line-shape filter (2026-04-08).
+///
+/// 17. RuboCop's `class_constructor?` also treats `Data.define do ... end` as a
+///     class-like scope, even when wrapped by a constant assignment such as
+///     `StepDefinition = Data.define(...) do ... private ... end`. Fix:
+///     recognize `Data.define` alongside `Class/Module/Struct.new` when
+///     promoting block bodies to class scope (2026-04-08).
 pub struct EmptyLinesAroundAccessModifier;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -412,34 +418,34 @@ macro_rules! visit_write_node_as_non_class_scope {
     };
 }
 
-fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
-    if call.name().as_slice() != b"new" {
-        return false;
-    }
-
-    let Some(receiver) = call.receiver() else {
-        return false;
-    };
-
+fn receiver_is_global_constant(receiver: ruby_prism::Node<'_>, names: &[&[u8]]) -> bool {
     if let Some(const_read) = receiver.as_constant_read_node() {
-        return matches!(
-            const_read.name().as_slice(),
-            b"Class" | b"Module" | b"Struct" | b"Data"
-        );
+        return names
+            .iter()
+            .any(|&name| const_read.name().as_slice() == name);
     }
 
     if let Some(const_path) = receiver.as_constant_path_node() {
         if const_path.parent().is_none() {
             if let Some(name_node) = const_path.name() {
-                return matches!(
-                    name_node.as_slice(),
-                    b"Class" | b"Module" | b"Struct" | b"Data"
-                );
+                return names.iter().any(|&name| name_node.as_slice() == name);
             }
         }
     }
 
     false
+}
+
+fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    match call.name().as_slice() {
+        b"new" => receiver_is_global_constant(receiver, &[b"Class", b"Module", b"Struct"]),
+        b"define" => receiver_is_global_constant(receiver, &[b"Data"]),
+        _ => false,
+    }
 }
 
 impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
@@ -1116,6 +1122,27 @@ mod tests {
         );
         assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
         assert_eq!(diags[0].location.line, 3);
+        assert!(diags[0].message.contains("Remove a blank line after"));
+    }
+
+    #[test]
+    fn only_before_style_flags_blank_line_after_private_inside_data_define_block() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Wizard\n  StepDefinition = Data.define(:name) do\n    def use_on?\n    end\n\n    private\n\n    def call_with_model\n    end\n  end\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 6);
         assert!(diags[0].message.contains("Remove a blank line after"));
     }
 
