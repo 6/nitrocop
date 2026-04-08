@@ -70,6 +70,19 @@ use ruby_prism::Visit;
 /// Fix: add `is_body_bare_named_param()` to skip when body is a bare named parameter
 /// reference. This matches RuboCop's `each_descendant` semantics for both
 /// `check_named_block` (CallNode blocks) and `check_lambda` (lambda blocks).
+///
+/// ## Investigation findings (2026-04-08)
+///
+/// Variant `always` style FN (31,792 total): `NamedParamFinder` stopped traversal
+/// at nested block/lambda boundaries (`visit_block_node`/`visit_lambda_node` returned
+/// early). RuboCop's `find_block_variables` uses `node.body.each_descendant(:lvar)`
+/// which traverses ALL descendants including those inside nested blocks. Named
+/// parameters can be captured by closures, so references in nested blocks must be found.
+///
+/// Fix: removed `visit_block_node` and `visit_lambda_node` overrides from
+/// `NamedParamFinder`, restoring the default traversal behavior that descends into
+/// all child nodes. `ItReferenceFinder` and `NumberedParamFinder` retain their
+/// nested-block stops because `it`/`_1` are lexically scoped to their block.
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -592,9 +605,11 @@ impl<'pr, 'a> Visit<'pr> for NamedParamFinder<'a> {
         }
     }
 
-    // Don't descend into nested blocks
-    fn visit_block_node(&mut self, _node: &ruby_prism::BlockNode<'pr>) {}
-    fn visit_lambda_node(&mut self, _node: &ruby_prism::LambdaNode<'pr>) {}
+    // Unlike ItReferenceFinder and NumberedParamFinder, NamedParamFinder DOES
+    // descend into nested blocks. RuboCop's `find_block_variables` uses
+    // `node.body.each_descendant(:lvar)` which traverses all descendants including
+    // those inside nested blocks. Named parameters can be captured by closures,
+    // so references in nested blocks must be found for the `always` style.
 }
 
 #[cfg(test)]
@@ -649,6 +664,41 @@ mod tests {
             &ItBlockParameter,
             include_bytes!("../../../tests/fixtures/cops/style/it_block_parameter/offense.rb"),
         );
+    }
+
+    #[test]
+    fn offense_always_style() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ItBlockParameter,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/it_block_parameter/always_offense.rb"
+            ),
+            always_style_config(),
+        );
+    }
+
+    #[test]
+    fn lambda_always_style_direct_ref() {
+        // Lambda with parenthesized params — the only valid lambda param syntax
+        let source = b"-> (x) { x.to_s }\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ItBlockParameter,
+            source,
+            always_style_config(),
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense: {:?}", diags);
+    }
+
+    #[test]
+    fn lambda_always_style_nested_block() {
+        // Lambda with named param used inside a nested block
+        let source = b"-> (x) { bar { x.to_s } }\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ItBlockParameter,
+            source,
+            always_style_config(),
+        );
+        assert!(!diags.is_empty(), "Expected at least 1 offense but got 0");
     }
 
     #[test]
