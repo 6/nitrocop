@@ -58,3 +58,16 @@ def change
   add_column :projects, :fork, :boolean
   add_column :projects, :github_id, :bigint
 end
+
+class AddTypeAndUserIdToLogEntry < ActiveRecord::Migration[5.2]
+  def change
+    add_column :log_entries, :type, :string
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can use `change_table :log_entries, bulk: true` to combine alter queries.
+    add_column :log_entries, :user_id, :integer
+
+    LogEntry.find_each do |log_entry|
+      log_entry.type = "CharacterLogEntry"
+      log_entry.save!
+    end
+  end
+end
