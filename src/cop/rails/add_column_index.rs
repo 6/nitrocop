@@ -1,9 +1,19 @@
 use crate::cop::shared::node_type::CALL_NODE;
-use crate::cop::shared::util::keyword_arg_value;
+use crate::cop::shared::util::{keyword_arg_pair_start_offset, keyword_arg_value};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Detects `add_column` calls that incorrectly pass an `index:` option.
+///
+/// ## Investigation findings (2026-04-08)
+///
+/// Corpus FN investigation found one real detection bug: multiline `add_column`
+/// calls were reported at the call start even when the `index:` keyword pair
+/// lived on the following line. The corpus oracle compares by `(file, line)`,
+/// and RuboCop anchors the offense on the `index:` pair, so those continuation
+/// lines were counted as false negatives. Fix: when the `index:` pair starts on
+/// a later line than the `add_column` call, report at the pair instead.
 pub struct AddColumnIndex;
 
 impl Cop for AddColumnIndex {
@@ -46,8 +56,12 @@ impl Cop for AddColumnIndex {
             return;
         }
 
-        let loc = node.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let call_start = node.location().start_offset();
+        let call_line = source.offset_to_line_col(call_start).0;
+        let offset = keyword_arg_pair_start_offset(&call, b"index")
+            .filter(|pair_start| source.offset_to_line_col(*pair_start).0 != call_line)
+            .unwrap_or(call_start);
+        let (line, column) = source.offset_to_line_col(offset);
         diagnostics.push(self.diagnostic(
             source,
             line,
