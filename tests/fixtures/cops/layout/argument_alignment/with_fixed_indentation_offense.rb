@@ -19,3 +19,12 @@ Report.new(
     issues: 'sort'
     ^^ Layout/ArgumentAlignment: Use one level of indentation for arguments following the first line of a multi-line method call.
 )
+
+# Sole braced hash with multiple pairs is still checked
+expect(subject).to eq(
+    {
+    ^ Layout/ArgumentAlignment: Use one level of indentation for arguments following the first line of a multi-line method call.
+      a: 1,
+      b: 2,
+    }
+)

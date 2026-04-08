@@ -13,3 +13,11 @@ Report.new(
   sitemap: 200,
   issues: 'sort'
 )
+
+# Sole braced hash at fixed indentation
+expect(subject).to eq(
+  {
+    a: 1,
+    b: 2,
+  }
+)

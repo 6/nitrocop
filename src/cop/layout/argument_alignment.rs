@@ -100,6 +100,18 @@ use crate::parse::source::SourceFile;
 /// of a multi-line method call.") than the default `with_first_argument`
 /// ("Align the arguments of a method call if they span more than one
 /// line.").
+///
+/// **FN root cause — flattened item count is NOT RuboCop's gate:**
+/// RuboCop decides whether to check a call with `multiple_arguments?`,
+/// using the unflattened `node.arguments` list and, for a sole hash arg,
+/// `first_argument.pairs.count >= 2`. Our previous `effective_args.len() < 2`
+/// early return ran AFTER flattening, so a single explicit hash argument like
+/// `eq(\n    { a: 1, b: 2 }\n)` was skipped in `with_fixed_indentation`
+/// even though RuboCop still checks that lone hash node against
+/// `call_indent + indent_width`. Fix: add a RuboCop-style multiple-argument
+/// gate based on the original Prism args (including `HashNode` and
+/// `KeywordHashNode` pair counts) and only use the flattened list for
+/// alignment iteration.
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -156,6 +168,10 @@ impl Cop for ArgumentAlignment {
             return;
         }
 
+        if !has_multiple_arguments(&args_vec) {
+            return;
+        }
+
         // Collect effective arguments, matching RuboCop's behavior:
         //
         // with_first_argument style (arguments_or_first_arg_pairs):
@@ -206,7 +222,7 @@ impl Cop for ArgumentAlignment {
             }
         }
 
-        if effective_args.len() < 2 {
+        if effective_args.is_empty() {
             return;
         }
 
@@ -290,6 +306,34 @@ impl Cop for ArgumentAlignment {
             }
         }
     }
+}
+
+fn has_multiple_arguments(args: &[ruby_prism::Node<'_>]) -> bool {
+    if args.len() >= 2 {
+        return true;
+    }
+
+    args.first()
+        .and_then(hash_pair_count)
+        .is_some_and(|count| count >= 2)
+}
+
+fn hash_pair_count(node: &ruby_prism::Node<'_>) -> Option<usize> {
+    if let Some(hash) = node.as_keyword_hash_node() {
+        return Some(
+            hash.elements()
+                .iter()
+                .filter(|elem| elem.as_assoc_splat_node().is_none())
+                .count(),
+        );
+    }
+
+    node.as_hash_node().map(|hash| {
+        hash.elements()
+            .iter()
+            .filter(|elem| elem.as_assoc_splat_node().is_none())
+            .count()
+    })
 }
 
 fn display_column(source: &SourceFile, byte_offset: usize) -> Option<usize> {
