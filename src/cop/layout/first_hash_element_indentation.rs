@@ -19,15 +19,7 @@ fn char_width(bytes: &[u8]) -> usize {
 
 fn config_style_matches(config: &CopConfig, key: &str, target: &str, default: &str) -> bool {
     match config.options.get(key) {
-        Some(value) => {
-            if let Some(style) = value.as_str() {
-                return style == target;
-            }
-
-            value
-                .as_sequence()
-                .is_some_and(|styles| styles.iter().any(|style| style.as_str() == Some(target)))
-        }
+        Some(value) => value.as_str().is_some_and(|style| style == target),
         None => default == target,
     }
 }
@@ -97,8 +89,10 @@ fn config_style_matches(config: &CopConfig, key: &str, target: &str, default: &s
 /// A smaller FP bucket came from separator-aligned hashes under
 /// `Layout/HashAlignment`. RuboCop adds the longest-key offset when
 /// `EnforcedColonStyle` / `EnforcedHashRocketStyle` is `separator`, even for
-/// `FirstHashElementIndentation`. Nitrocop now applies that offset when those
-/// sibling settings are present in the effective cop config.
+/// `FirstHashElementIndentation`. RuboCop only does that when the sibling
+/// setting is exactly the string `separator`; mixed-style arrays like
+/// `['key', 'separator']` do not trigger the offset here. Nitrocop now mirrors
+/// that exact-string check while still inheriting the raw sibling config.
 pub struct FirstHashElementIndentation;
 
 impl Cop for FirstHashElementIndentation {
@@ -748,6 +742,30 @@ mod tests {
         }
     }
 
+    fn consistent_separator_sequence_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("consistent".into()),
+                ),
+                (
+                    "EnforcedColonStyle".into(),
+                    serde_yml::Value::Sequence(vec![
+                        serde_yml::Value::String("key".into()),
+                        serde_yml::Value::String("separator".into()),
+                    ]),
+                ),
+                (
+                    "EnforcedHashRocketStyle".into(),
+                    serde_yml::Value::String("key".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn offense_consistent_fixture() {
         use crate::testutil::assert_cop_offenses_full_with_config;
@@ -781,6 +799,25 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/first_hash_element_indentation/no_offense.consistent.separator.rb"
             ),
             consistent_separator_config(),
+        );
+    }
+
+    #[test]
+    fn mixed_separator_style_array_does_not_add_first_pair_offset() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let source = include_bytes!(
+            "../../../tests/fixtures/cops/layout/first_hash_element_indentation/no_offense.consistent.separator.rb"
+        );
+        let diags = run_cop_full_with_config(
+            &FirstHashElementIndentation,
+            source,
+            consistent_separator_sequence_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "RuboCop ignores mixed-style arrays here and still expects consistent indentation"
         );
     }
 }
