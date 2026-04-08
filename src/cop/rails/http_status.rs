@@ -45,6 +45,16 @@ use crate::parse::source::SourceFile;
 /// keyword `status:` for all methods. Fix: skip keyword arg lookup for `head` and
 /// `assert_response` (the `DIRECT_STATUS_METHODS`), matching RuboCop's NodePattern exactly.
 /// The previous investigation incorrectly attributed these FPs to file-exclusion issues.
+///
+/// **Variant divergence fix (numeric style, 2026-04-08):** RuboCop's `NumericStyleChecker`
+/// uses `Rack::Utils::SYMBOL_TO_STATUS_CODE` to determine if a symbol maps to a valid
+/// HTTP status code. The FP root cause was that Nitrocop's `symbol_to_status_code`
+/// included `:unprocessable_entity` (422) which is NOT in `Rack::Utils::SYMBOL_TO_STATUS_CODE`
+/// (Rails 7.1 renamed it to `:unprocessable_content`). The FN root cause was that
+/// `:unprocessable_content` was NOT in Nitrocop's map but IS in `Rack::Utils`.
+/// Fix: updated `symbol_to_status_code` to use `:unprocessable_content` (matching Rack::Utils)
+/// and `status_code_to_symbol` to return `:unprocessable_content` for code 422.
+/// This ensures nitrocop matches RuboCop's behavior for the `numeric` EnforcedStyle.
 pub struct HttpStatus;
 
 fn status_code_to_symbol(code: i64) -> Option<&'static str> {
@@ -90,7 +100,7 @@ fn status_code_to_symbol(code: i64) -> Option<&'static str> {
         416 => Some(":range_not_satisfiable"),
         417 => Some(":expectation_failed"),
         421 => Some(":misdirected_request"),
-        422 => Some(":unprocessable_entity"),
+        422 => Some(":unprocessable_content"),
         423 => Some(":locked"),
         424 => Some(":failed_dependency"),
         425 => Some(":too_early"),
@@ -157,7 +167,7 @@ fn symbol_to_status_code(sym: &[u8]) -> Option<i64> {
         b"range_not_satisfiable" => Some(416),
         b"expectation_failed" => Some(417),
         b"misdirected_request" => Some(421),
-        b"unprocessable_entity" => Some(422),
+        b"unprocessable_content" => Some(422),
         b"locked" => Some(423),
         b"failed_dependency" => Some(424),
         b"too_early" => Some(425),
