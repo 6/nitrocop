@@ -521,3 +521,27 @@ def complete_text(text, pos)
                                                              ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `pos`.
   end
 end
+
+$:.each do |path|
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `path`.
+
+http.start do |http|
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `http`.
+
+for yaku, count in yaku_stats.sort_by{|yaku, count| -count}
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `yaku`.
+
+for dora, count in dora_stats.sort_by{|dora, count| -count}
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `count`.
+
+hash.sort_by(&:first).each do |key, value|
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `key`.
+
+widget.signal_connect("motion_notify_event") do |widget, event|
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `widget`.
+
+widget.signal_connect("scroll_event") do |widget, event|
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `widget`.
+
+addrinfo.each do |_, port, name, addr, af|
+^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `port`.
