@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::node_type::{CALL_NODE, FALSE_NODE, TRUE_NODE};
 use crate::cop::shared::node_type_groups;
 use crate::cop::shared::util::RSPEC_DEFAULT_INCLUDE;
@@ -74,7 +75,7 @@ impl Cop for PredicateMatcher {
 
         if enforced_style == "explicit" {
             let expect_call = match call.receiver().and_then(|receiver| receiver.as_call_node()) {
-                Some(c) if c.name().as_slice() == b"expect" && c.receiver().is_none() => c,
+                Some(c) if method_dispatch_predicates::is_command(&c, b"expect") => c,
                 _ => return,
             };
 
