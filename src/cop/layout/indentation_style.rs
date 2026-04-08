@@ -73,6 +73,26 @@ use ruby_prism::Visit;
 ///    range_end` check fails.
 ///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
 ///    switched `heredoc_range_end()` to use it.
+///
+/// ## Corpus investigation (2026-04-08, tabs variant: FP=122, FN=10)
+///
+/// Two root causes, both involving **nested heredocs** (an inner heredoc opened
+/// inside `#{}` interpolation of an outer heredoc):
+///
+/// 1. **FP on inner heredoc closing delimiters**: Inner heredoc terminators
+///    (e.g., `    EOI` inside an outer `<<~EOH`) were incorrectly flagged.
+///    RuboCop skips them because they fall inside the outer heredoc's
+///    `string_literal_ranges` (the outer `heredoc_body` covers everything).
+///    Fix: check `heredoc_nesting_depth()` — if the closing delimiter is
+///    inside another heredoc (depth > 1), treat it as string content and skip.
+///
+/// 2. **FN on outer heredoc closing delimiters**: The old
+///    `is_heredoc_closing_delimiter()` used `heredoc_range_end()` which does
+///    binary search on `raw_heredoc_ranges`. With nested heredocs, the ranges
+///    overlap (outer range starts before inner ranges) and binary search fails
+///    to find the outer range for offsets past the inner ranges.
+///    Fix: replaced with `CodeMap::is_heredoc_closing_line()` which uses
+///    linear scan to correctly handle overlapping ranges.
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {
@@ -108,7 +128,17 @@ impl Cop for IndentationStyle {
                 .iter()
                 .take_while(|&&b| b == b' ' || b == b'\t')
                 .count();
-            let is_heredoc_closing = is_heredoc_closing_delimiter(line, code_map, line_start);
+            let next_line_start = line_start + line.len() + 1;
+            // Use linear scan instead of binary search to correctly handle
+            // nested/overlapping heredoc ranges.
+            let is_any_heredoc_closing =
+                code_map.is_heredoc_closing_line(line_start, next_line_start);
+            // A heredoc closing delimiter that is also inside an outer heredoc
+            // (nesting depth > 1) is treated as string content by RuboCop,
+            // because the outer heredoc's `heredoc_body` is in
+            // `string_literal_ranges`. Only outermost heredoc closers are checked.
+            let is_heredoc_closing =
+                is_any_heredoc_closing && code_map.heredoc_nesting_depth(line_start) <= 1;
             let in_interpolated_string = indent_end > 0
                 && range_contained_in_any(
                     &interpolated_string_ranges,
@@ -119,7 +149,8 @@ impl Cop for IndentationStyle {
             // Skip lines whose indentation starts in a string/heredoc region.
             // RuboCop checks indentation in comments (including =begin/=end blocks)
             // but skips string literals, so use is_not_string() instead of is_code().
-            // Exception 1: heredoc closing delimiters (e.g., `\tSQL`) are NOT skipped.
+            // Exception 1: heredoc closing delimiters (e.g., `\tSQL`) are NOT skipped,
+            // but only if they are the outermost heredoc (not nested inside another).
             // In Parser gem, the closing delimiter is a separate :tSTRING_END token
             // outside the string_literal_range, so RuboCop checks its indentation.
             // Exception 2: regex literals are NOT skipped. RuboCop's
@@ -263,28 +294,6 @@ fn range_contained_in_any(ranges: &[(usize, usize)], start: usize, end: usize) -
     ranges
         .iter()
         .any(|&(range_start, range_end)| start >= range_start && end <= range_end)
-}
-
-/// Check if a line is a heredoc closing delimiter.
-/// The closing delimiter is the last line within a heredoc range. We detect this
-/// by checking whether the next line's start offset falls outside the heredoc range.
-/// This is more reliable than pattern-matching on content, which can false-positive
-/// on short content lines like `y` or `end` that look like identifiers.
-///
-/// In Parser gem, the closing delimiter is a `:tSTRING_END` token and is NOT
-/// included in `string_literal_ranges`, so RuboCop checks its indentation.
-fn is_heredoc_closing_delimiter(line: &[u8], code_map: &CodeMap, line_start: usize) -> bool {
-    // Must be inside a heredoc range
-    let range_end = match code_map.heredoc_range_end(line_start) {
-        Some(end) => end,
-        None => return false,
-    };
-
-    // The closing delimiter line is the last line in the heredoc range.
-    // The next line starts at line_start + line.len() + 1 (for the newline).
-    // If that offset is >= the heredoc range end, this is the closing delimiter.
-    let next_line_start = line_start + line.len() + 1;
-    next_line_start >= range_end
 }
 
 #[cfg(test)]

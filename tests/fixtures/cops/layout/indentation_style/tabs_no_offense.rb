@@ -19,3 +19,17 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Inner heredoc closing delimiter with spaces inside an outer heredoc body
+# should NOT be flagged (RuboCop considers it string content via the outer
+# heredoc's string_literal_ranges)
+def powershell_wrapper
+	<<~EOH
+		text
+#{if true
+    <<-EOI
+		content
+    EOI
+  end}
+	EOH
+end

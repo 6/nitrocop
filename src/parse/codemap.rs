@@ -178,6 +178,26 @@ impl CodeMap {
             .map(|idx| self.raw_heredoc_ranges[idx].1)
     }
 
+    /// Returns true if the line starting at `line_start` (with next line at
+    /// `next_line_start`) is the closing delimiter of any raw heredoc range.
+    /// Uses linear scan to correctly handle nested/overlapping heredoc ranges,
+    /// which binary search cannot handle reliably.
+    pub fn is_heredoc_closing_line(&self, line_start: usize, next_line_start: usize) -> bool {
+        self.raw_heredoc_ranges
+            .iter()
+            .any(|&(start, end)| line_start >= start && line_start < end && next_line_start >= end)
+    }
+
+    /// Returns the number of raw heredoc ranges that contain the given offset.
+    /// A depth > 1 means the offset is inside nested heredocs (e.g., an inner
+    /// heredoc terminator that is also inside an outer heredoc body).
+    pub fn heredoc_nesting_depth(&self, offset: usize) -> usize {
+        self.raw_heredoc_ranges
+            .iter()
+            .filter(|&&(start, end)| offset >= start && offset < end)
+            .count()
+    }
+
     /// Returns true if the given byte offset is inside `#{}` interpolation
     /// within a heredoc. These offsets are marked non-code by `is_code()` (since
     /// the entire heredoc body is non-code), but contain actual Ruby expressions
