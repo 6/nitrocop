@@ -151,3 +151,6 @@ end
 def languages
   Array(foo((bar || [])))
 end
+
+# omit_parentheses: any direct send arg unlocks RuboCop's broad hash-descendant allowance
+foo(([{a: 1}]), bar(1))

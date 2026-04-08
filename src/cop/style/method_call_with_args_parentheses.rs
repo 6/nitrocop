@@ -166,14 +166,21 @@ use crate::parse::source::SourceFile;
 ///
 /// ## Variant fix (2026-04-08)
 ///
-/// `omit_parentheses` still diverged in two Prism-specific edge cases:
+/// `omit_parentheses` still diverged in Prism-specific grouping edge cases:
 ///
 /// 1. Parenthesized ambiguous descendants such as `Array(foo((bar || [])))`
 ///    were flagged because ambiguity checks stopped at `ParenthesesNode`.
 ///    RuboCop still sees the inner grouped `||` descendant and allows the
 ///    outer parens.
 ///
-/// 2. Assigned values under assignment-like parent sends such as
+/// 2. Inner calls wrapped in grouping parentheses such as `foo((bar(1)))`
+///    and `if (server = response.take(1))` were skipped because Prism keeps
+///    the surrounding parent call/assignment on the stack unless
+///    `ParenthesesNode` is tracked explicitly. RuboCop sees an intervening
+///    `begin` parent, so grouped inner calls are not treated as direct
+///    arguments or direct assignment-in-condition children.
+///
+/// 3. Assigned values under assignment-like parent sends such as
 ///    `session[:x] = foo(bar)` and `self.value = foo(bar)` were skipped because
 ///    Prism models `[]=` and setters as `CallNode`s. RuboCop's
 ///    `call_as_argument_or_chain?` only exempts children that appear before the
@@ -182,10 +189,10 @@ use crate::parse::source::SourceFile;
 ///    `ParentKind::Assignment`, while leaving receiver/index children before `=`
 ///    in ordinary call context.
 ///
-/// Hash-literal allowances stay gated like RuboCop: only a direct braced hash
-/// argument, or a direct send argument that contains a braced hash descendant,
-/// may keep outer parentheses. Grouping or container wrappers around the direct
-/// argument do not qualify.
+/// Hash-literal allowances follow RuboCop's broader descendant scan: once any
+/// direct argument is a send, a braced hash descendant anywhere under the outer
+/// call keeps the outer parentheses. Grouped direct arguments still do not
+/// satisfy the direct-send gate.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -273,6 +280,7 @@ enum ParentKind {
     Conditional,
     ClassConstructor,
     ConstantPath,
+    Grouped,
     FlowControl,
     Interpolation,
 }
@@ -388,7 +396,7 @@ impl ParenVisitor<'_> {
         self.parent_stack[baseline..].iter().any(|kind| {
             !matches!(
                 kind,
-                ParentKind::TernaryBranch | ParentKind::ClassConstructor
+                ParentKind::TernaryBranch | ParentKind::ClassConstructor | ParentKind::Grouped
             )
         })
     }
@@ -694,22 +702,26 @@ impl ParenVisitor<'_> {
     }
 
     fn hash_literal_in_arguments(&self, call: &ruby_prism::CallNode<'_>) -> bool {
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                if arg
-                    .as_hash_node()
-                    .is_some_and(|hash| hash.opening_loc().as_slice() == b"{")
-                {
-                    return true;
-                }
+        let Some(args) = call.arguments() else {
+            return false;
+        };
 
-                // Match RuboCop's direct-argument gate: only send args get the
-                // descendant hash-literal allowance.
-                if arg.as_call_node().is_some() && has_hash_literal(&arg) {
-                    return true;
-                }
+        let mut has_direct_send_arg = false;
+        for arg in args.arguments().iter() {
+            if arg
+                .as_hash_node()
+                .is_some_and(|hash| hash.opening_loc().as_slice() == b"{")
+            {
+                return true;
             }
+
+            has_direct_send_arg |= arg.as_call_node().is_some();
         }
+
+        if has_direct_send_arg && call_contains_hash_literal(call) {
+            return true;
+        }
+
         false
     }
 
@@ -992,6 +1004,24 @@ fn has_hash_literal(node: &ruby_prism::Node<'_>) -> bool {
             return true;
         }
     }
+    false
+}
+
+fn call_contains_hash_literal(call: &ruby_prism::CallNode<'_>) -> bool {
+    if let Some(recv) = call.receiver() {
+        if has_hash_literal(&recv) {
+            return true;
+        }
+    }
+
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            if has_hash_literal(&arg) {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -1412,6 +1442,12 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             }
             self.pop_scope();
         }
+    }
+
+    fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
+        self.parent_stack.push(ParentKind::Grouped);
+        ruby_prism::visit_parentheses_node(self, node);
+        self.parent_stack.pop();
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
@@ -2457,6 +2493,24 @@ mod tests {
     }
 
     #[test]
+    fn omit_accepts_hash_descendant_anywhere_when_any_direct_argument_is_send() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"foo(([{a: 1}]), bar(1))\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when any direct send arg is present and the call contains a braced hash descendant"
+        );
+    }
+
+    #[test]
     fn omit_accepts_parens_in_match_pattern() {
         use std::collections::HashMap;
         let config = CopConfig {
@@ -2506,6 +2560,44 @@ mod tests {
             diags.len(),
             1,
             "Should flag assigned values under setter parent calls"
+        );
+    }
+
+    #[test]
+    fn omit_flags_grouped_inner_call_argument() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"foo((bar(1)))\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            2,
+            "Should flag both the outer grouped call and the grouped inner argument call"
+        );
+    }
+
+    #[test]
+    fn omit_flags_grouped_assignment_condition_value_call() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"if (server = response.take(1))\nend\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag grouped assignment-condition value calls"
         );
     }
 
