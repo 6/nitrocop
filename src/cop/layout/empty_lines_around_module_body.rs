@@ -1,18 +1,22 @@
+use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::MODULE_NODE;
 use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
 
-/// ## Implementation notes
+/// Investigation: `empty_lines`, `empty_lines_except_namespace`, and
+/// `empty_lines_special` diverged from RuboCop for module bodies with no AST
+/// body (`module X` containing only comments) and for the special-style branch
+/// where the first child is not a def/class/module/visibility modifier.
 ///
-/// This cop originally only handled `no_empty_lines` and `empty_lines` styles.
-/// The `empty_lines_except_namespace` and `empty_lines_special` styles were
-/// implemented by mirroring RuboCop's `EmptyLinesAroundBody` mixin logic:
-/// - `namespace?(body, with_one_child: true)` detects when a module body is a
-///   single module/class child (namespace style), requiring `no_empty_lines`
-/// - `first_child_requires_empty_line?(body)` detects when the first body child
-///   is a def/class/module/visibility modifier, requiring empty lines
+/// Fixed behavior:
+/// - `body.nil?` now short-circuits non-default styles, matching RuboCop's
+///   `valid_body_style?` behavior for comment-only/empty bodies.
+/// - `empty_lines_special` now checks `no_empty_lines` at the beginning when
+///   the first child does not require a blank line, emits the deferred
+///   "before first <type> definition" offense on RuboCop's line, and reports
+///   missing end blanks on the `end` line instead of the previous body line.
 pub struct EmptyLinesAroundModuleBody;
 
 impl Cop for EmptyLinesAroundModuleBody {
@@ -42,12 +46,16 @@ impl Cop for EmptyLinesAroundModuleBody {
             Some(m) => m,
             None => return,
         };
+        let body = module_node.body();
 
         let kw_offset = module_node.module_keyword_loc().start_offset();
         let end_offset = module_node.end_keyword_loc().start_offset();
 
         match style {
             "empty_lines" => {
+                if body.is_none() {
+                    return;
+                }
                 diagnostics.extend(
                     util::check_missing_empty_lines_around_body_with_corrections(
                         self.name(),
@@ -60,6 +68,9 @@ impl Cop for EmptyLinesAroundModuleBody {
                 );
             }
             "empty_lines_except_namespace" => {
+                if body.is_none() {
+                    return;
+                }
                 self.check_except_namespace(source, &module_node, diagnostics, corrections);
             }
             "empty_lines_special" => {
@@ -135,23 +146,110 @@ impl EmptyLinesAroundModuleBody {
 
     /// Check if a node requires an empty line before it
     fn node_requires_empty_line(node: &ruby_prism::Node<'_>) -> bool {
-        if node.as_def_node().is_some()
+        node.as_def_node().is_some()
             || node.as_class_node().is_some()
             || node.as_module_node().is_some()
-        {
-            return true;
-        }
-        if let Some(call) = node.as_call_node() {
-            if call.receiver().is_none() {
-                let name = call.name();
-                let name_bytes = name.as_slice();
-                if name_bytes == b"private" || name_bytes == b"protected" || name_bytes == b"public"
-                {
-                    return true;
+            || Self::is_bare_access_modifier(node)
+    }
+
+    /// Find the first child that requires an empty line and return its line and type name.
+    fn first_empty_line_required_child_line(
+        source: &SourceFile,
+        body: &Option<ruby_prism::Node<'_>>,
+    ) -> Option<(usize, &'static str)> {
+        let body_node = body.as_ref()?;
+
+        if let Some(stmts) = body_node.as_statements_node() {
+            for child in stmts.body().iter() {
+                if let Some(type_name) = Self::empty_line_required_type_name(&child) {
+                    let line = source.offset_to_line_col(child.location().start_offset()).0;
+                    return Some((line, type_name));
                 }
             }
+            None
+        } else {
+            let type_name = Self::empty_line_required_type_name(body_node)?;
+            let line = source
+                .offset_to_line_col(body_node.location().start_offset())
+                .0;
+            Some((line, type_name))
         }
-        false
+    }
+
+    fn empty_line_required_type_name(node: &ruby_prism::Node<'_>) -> Option<&'static str> {
+        if node.as_def_node().is_some() {
+            Some("def")
+        } else if node.as_class_node().is_some() {
+            Some("class")
+        } else if node.as_module_node().is_some() {
+            Some("module")
+        } else if Self::is_bare_access_modifier(node) {
+            Some("send")
+        } else {
+            None
+        }
+    }
+
+    fn is_bare_access_modifier(node: &ruby_prism::Node<'_>) -> bool {
+        if let Some(call) = node.as_call_node() {
+            call.receiver().is_none()
+                && call.arguments().is_none()
+                && call.block().is_none()
+                && access_modifier_predicates::is_access_modifier_name(call.name().as_slice())
+        } else {
+            false
+        }
+    }
+
+    fn is_comment_line(line: &[u8]) -> bool {
+        let mut idx = 0;
+        while idx < line.len() && (line[idx] == b' ' || line[idx] == b'\t') {
+            idx += 1;
+        }
+        line.get(idx) == Some(&b'#')
+    }
+
+    /// Match RuboCop's `previous_line_ignoring_comments(node.first_line)`.
+    /// Returns a 0-based line index into `processed_source.lines`.
+    fn previous_line_ignoring_comments(source: &SourceFile, send_line: usize) -> usize {
+        let mut line_idx = send_line.saturating_sub(2);
+        loop {
+            if let Some(line) = util::line_at(source, line_idx + 1) {
+                if !Self::is_comment_line(line) {
+                    return line_idx;
+                }
+            }
+            if line_idx == 0 {
+                return 0;
+            }
+            line_idx -= 1;
+        }
+    }
+
+    fn check_deferred_empty_line(
+        &self,
+        source: &SourceFile,
+        body: &Option<ruby_prism::Node<'_>>,
+    ) -> Option<Diagnostic> {
+        let (child_line, type_name) = Self::first_empty_line_required_child_line(source, body)?;
+        let previous_line = Self::previous_line_ignoring_comments(source, child_line);
+        let line_content = util::line_at(source, previous_line + 1)?;
+
+        if util::is_blank_or_whitespace_line(line_content) {
+            return None;
+        }
+
+        Some(Diagnostic {
+            path: source.path_str().to_string(),
+            location: Location {
+                line: previous_line + 2,
+                column: 0,
+            },
+            severity: Severity::Convention,
+            cop_name: self.name().to_string(),
+            message: format!("Empty line missing before first {} definition.", type_name),
+            corrected: false,
+        })
     }
 
     fn check_except_namespace(
@@ -164,6 +262,10 @@ impl EmptyLinesAroundModuleBody {
         let kw_offset = module_node.module_keyword_loc().start_offset();
         let end_offset = module_node.end_keyword_loc().start_offset();
         let body = module_node.body();
+
+        if body.is_none() {
+            return;
+        }
 
         let is_namespace = Self::is_namespace_style_body(&body, true);
 
@@ -215,38 +317,49 @@ impl EmptyLinesAroundModuleBody {
                 corrections,
             ));
         } else if Self::first_child_requires_empty_line(&body) {
-            diagnostics.extend(
-                util::check_missing_empty_lines_around_body_with_corrections(
-                    self.name(),
-                    source,
-                    kw_offset,
-                    end_offset,
-                    "module",
-                    corrections,
-                ),
+            let mut begin_diags = util::check_missing_empty_lines_around_body(
+                self.name(),
+                source,
+                kw_offset,
+                end_offset,
+                "module",
             );
-        } else {
-            let (kw_line, _) = source.offset_to_line_col(kw_offset);
-            let (end_line, _) = source.offset_to_line_col(end_offset);
+            begin_diags.retain(|d| d.message.contains("beginning"));
+            diagnostics.extend(begin_diags);
 
-            if end_line > kw_line + 1 {
-                let before_end_line = end_line - 1;
-                if let Some(line) = util::line_at(source, before_end_line) {
-                    if !util::is_blank_line(line) {
-                        diagnostics.push(Diagnostic {
-                            path: source.path_str().to_string(),
-                            location: Location {
-                                line: before_end_line,
-                                column: 0,
-                            },
-                            severity: Severity::Convention,
-                            cop_name: self.name().to_string(),
-                            message: "Empty line missing at module body end.".to_string(),
-                            corrected: false,
-                        });
-                    }
-                }
+            let mut end_diags = util::check_missing_empty_lines_around_body(
+                self.name(),
+                source,
+                kw_offset,
+                end_offset,
+                "module",
+            );
+            end_diags.retain(|d| d.message.contains("end"));
+            diagnostics.extend(end_diags);
+        } else {
+            let mut begin_diags = util::check_empty_lines_around_body(
+                self.name(),
+                source,
+                kw_offset,
+                end_offset,
+                "module",
+            );
+            begin_diags.retain(|d| d.message.contains("beginning"));
+            diagnostics.extend(begin_diags);
+
+            if let Some(deferred_diag) = self.check_deferred_empty_line(source, &body) {
+                diagnostics.push(deferred_diag);
             }
+
+            let mut end_diags = util::check_missing_empty_lines_around_body(
+                self.name(),
+                source,
+                kw_offset,
+                end_offset,
+                "module",
+            );
+            end_diags.retain(|d| d.message.contains("end"));
+            diagnostics.extend(end_diags);
         }
     }
 }
@@ -372,8 +485,9 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        // Single child namespace - no empty lines at Parent body level
-        let src = b"module Parent\n  module Child\n\n    do_something\n\n  end\nend\n";
+        // Single child namespace - no empty lines at Parent body level.
+        // The child module itself still uses special-style rules.
+        let src = b"module Parent\n  module Child\n    do_something\n\n  end\nend\n";
         let diags = run_cop_full_with_config(&EmptyLinesAroundModuleBody, src, config);
         assert!(
             diags.is_empty(),
@@ -420,5 +534,71 @@ mod tests {
             diags.len() >= 1,
             "empty_lines_special with non-def first child should require empty line before def"
         );
+    }
+
+    #[test]
+    fn empty_lines_comment_only_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EmptyLinesAroundModuleBody,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/empty_lines_around_module_body/comment_only_no_offense.rb"
+            ),
+            empty_lines_config(),
+        );
+    }
+
+    #[test]
+    fn empty_lines_except_namespace_comment_only_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EmptyLinesAroundModuleBody,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/empty_lines_around_module_body/comment_only_no_offense.rb"
+            ),
+            empty_lines_except_namespace_config(),
+        );
+    }
+
+    #[test]
+    fn empty_lines_special_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &EmptyLinesAroundModuleBody,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/empty_lines_around_module_body/empty_lines_special_offense.rb"
+            ),
+            empty_lines_special_config(),
+        );
+    }
+
+    fn empty_lines_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    fn empty_lines_except_namespace_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines_except_namespace".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    fn empty_lines_special_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("empty_lines_special".into()),
+            )]),
+            ..CopConfig::default()
+        }
     }
 }
