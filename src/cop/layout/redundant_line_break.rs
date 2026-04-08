@@ -179,6 +179,7 @@ impl Cop for RedundantLineBreak {
         let mut sl_block_collector = SingleLineBlockCollector {
             ranges: Vec::new(),
             source,
+            ancestors: Vec::new(),
         };
         sl_block_collector.visit(&parse_result.node());
         let single_line_block_ranges = sl_block_collector.ranges;
@@ -371,23 +372,88 @@ impl<'pr> Visit<'pr> for BlockRangeCollector<'_> {
     }
 }
 
-/// Collects byte ranges of single-line block nodes.
-struct SingleLineBlockCollector<'a> {
+/// Collects byte ranges of single-line block nodes whose parent (in Parser AST
+/// terms) is a send with a dot.
+///
+/// Matches RuboCop's `other_cop_takes_precedence?` which checks:
+///   `block_node.parent.send_type? && block_node.parent.loc.dot && !block_node.multiline?`
+///
+/// In Parser AST, `block_node.parent` is the CONTAINING node. For:
+///   - `foo.map { ... }.compact` → block parent is `.compact` send (has dot) ✓
+///   - `foo.bar(proc { ... })` → block parent is `.bar` send (has dot) ✓
+///   - `x = foo.map { ... }` → block parent is assignment (no dot) ✗
+///   - `bar(proc { ... })` → block parent is `bar` send (no dot) ✗
+///
+/// In Prism, a block is always a child of its "owning" CallNode. The "containing"
+/// node in Parser AST terms is found by skipping the owning CallNode and any
+/// ArgumentsNode wrapper in the ancestor stack.
+struct SingleLineBlockCollector<'a, 'pr> {
     ranges: Vec<(usize, usize)>,
     source: &'a SourceFile,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
 }
 
-impl<'pr> Visit<'pr> for SingleLineBlockCollector<'_> {
+impl<'pr> Visit<'pr> for SingleLineBlockCollector<'_, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         let loc = node.location();
         let (start_line, _) = self.source.offset_to_line_col(loc.start_offset());
         let (end_line, _) = self
             .source
             .offset_to_line_col(loc.end_offset().saturating_sub(1));
-        if start_line == end_line {
+        if start_line == end_line && self.containing_call_has_dot() {
             self.ranges.push((loc.start_offset(), loc.end_offset()));
         }
         ruby_prism::visit_block_node(self, node);
+    }
+}
+
+impl SingleLineBlockCollector<'_, '_> {
+    /// Check if the block's "parent" in Parser AST terms is a CallNode with a dot.
+    ///
+    /// Walk up ancestors, skipping the owning CallNode (immediate parent of the
+    /// block in Prism) and any ArgumentsNode wrapper (Prism-only, no Parser
+    /// equivalent). The next significant node is the "containing" context.
+    fn containing_call_has_dot(&self) -> bool {
+        let len = self.ancestors.len();
+        // Need at least 2 ancestors: the BlockNode itself (pushed by
+        // visit_branch_node_enter before visit_block_node runs) and
+        // the owning CallNode above it.
+        if len < 2 {
+            return false;
+        }
+        let mut skipped_owning_call = false;
+        // Start at len-2 to skip the current BlockNode at the top of the stack.
+        for i in (0..len - 1).rev() {
+            let ancestor = &self.ancestors[i];
+            // The first CallNode we encounter (nearest) is the "owning" call
+            // (e.g., `proc` for `proc { ... }`, or `.map` for `.map { ... }`).
+            // Skip it to find the containing context.
+            if !skipped_owning_call {
+                if ancestor.as_call_node().is_some() {
+                    skipped_owning_call = true;
+                    continue;
+                }
+            }
+            // ArgumentsNode is a Prism wrapper with no Parser AST equivalent.
+            if ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+            // Found the containing node. Check if it's a CallNode with a dot.
+            return ancestor
+                .as_call_node()
+                .is_some_and(|c| c.call_operator_loc().is_some());
+        }
+        false
     }
 }
 
@@ -674,9 +740,18 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
                 false
             };
 
+            // When InspectBlocks is false and this CallNode has a convertible block,
+            // the node maps to a block_type in RuboCop's walk-up (on_send walks
+            // through convertible blocks, making the outermost node a :block).
+            // RuboCop's `node.any_block_type?` returns true → skip.
+            // A block is convertible when: parenthesized OR no explicit args.
+            let has_convertible_block = !has_non_convertible_block
+                && node.block().and_then(|b| b.as_block_node()).is_some();
+
             if !is_index_chain
                 && self.suitable_as_single_line(start_offset, check_end)
                 && !self.configured_to_not_be_inspected(start_offset, check_end)
+                && !(has_convertible_block && !self.inspect_blocks)
             {
                 self.register_offense(start_offset, check_end);
             }

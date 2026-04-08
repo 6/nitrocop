@@ -227,3 +227,33 @@ expect(foo).to be_a(Parlour::RbsGenerator::Method) & have_attributes(
     )
   ]),
 )
+
+# Assignment with method chain containing single-line block — not chained
+# after the block, so Layout/SingleLineBlockChain does NOT take precedence.
+# RuboCop flags these because block_node.parent is the assignment, not a send.
+parameters = yard_parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  .map { |x| process(x) }
+
+parameters = split_type_parameters(type_parameters)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  .map { |x| process(x) }
+
+# Assignment with hash containing lambda (single-line block on `lambda` call)
+options = {
+^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  formatter: lambda { |tags| tags.join(" ") }
+}.merge(options)
+
+# Call with single-line block in argument — block parent is the outer call,
+# not a chained send with dot, so Layout/SingleLineBlockChain doesn't apply.
+scope = by_file_type(
+^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  sources.map { |ext| lookup(ext) }
+)
+
+# Multi-write assignment with chain ending in single-line block
+failures, successes = repository
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  .search_tests(input.split)
+  .partition { |k, v| v.nil? }
