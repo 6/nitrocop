@@ -2,6 +2,7 @@ use crate::cop::shared::node_type::{HASH_NODE, KEYWORD_HASH_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Layout/HashAlignment checks that keys, separators, and values of multi-line
 /// hash literals are aligned according to configuration.
@@ -44,9 +45,14 @@ use crate::parse::source::SourceFile;
 ///    Fixed by skipping kwsplats that share a line with any non-kwsplat pair.
 ///
 /// 4. **Remaining gap:** `is_call_arg` heuristic for `EnforcedLastArgumentHashStyle`
-///    uses `!begins_its_line` as a proxy for "is last argument of call," which is
-///    imprecise for hashes on their own line inside calls. This only matters for
-///    non-default `always_ignore`/`ignore_explicit` configurations.
+///    used `!begins_its_line` as a proxy for "is last argument of call," which was
+///    wrong in both directions for explicit hashes:
+///    - false negatives: plain hash assignments like `CONST = { ... }` were skipped
+///      under `always_ignore` / `ignore_explicit` just because `{` did not begin the line;
+///    - false positives: explicit last-argument hashes on their own line inside
+///      calls/setters were still inspected, even though RuboCop ignores them.
+///    Fixed by checking the Prism parent chain directly and only ignoring hashes that
+///    are actually the last argument of a `CallNode`, `SuperNode`, or `YieldNode`.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -216,6 +222,53 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
         })
     } else {
         None
+    }
+}
+
+fn is_last_argument_hash(
+    node: &ruby_prism::Node<'_>,
+    parent: Option<&ruby_prism::Node<'_>>,
+) -> bool {
+    let Some(parent) = parent else {
+        return false;
+    };
+
+    let is_last_argument = |arguments: Option<ruby_prism::ArgumentsNode<'_>>| {
+        arguments.is_some_and(|args| {
+            args.arguments().iter().last().is_some_and(|last_arg| {
+                last_arg.location().start_offset() == node.location().start_offset()
+                    && last_arg.location().end_offset() == node.location().end_offset()
+            })
+        })
+    };
+
+    if let Some(call) = parent.as_call_node() {
+        return is_last_argument(call.arguments());
+    }
+    if let Some(super_node) = parent.as_super_node() {
+        return is_last_argument(super_node.arguments());
+    }
+    if let Some(yield_node) = parent.as_yield_node() {
+        return is_last_argument(yield_node.arguments());
+    }
+
+    false
+}
+
+fn should_ignore_last_argument_hash(
+    is_last_argument_hash: bool,
+    is_keyword_hash: bool,
+    last_arg_style: &str,
+) -> bool {
+    if !is_last_argument_hash {
+        return false;
+    }
+
+    match last_arg_style {
+        "always_ignore" => true,
+        "ignore_explicit" => !is_keyword_hash,
+        "ignore_implicit" => is_keyword_hash,
+        _ => false,
     }
 }
 
@@ -544,163 +597,34 @@ impl Cop for HashAlignment {
         &[HASH_NODE, KEYWORD_HASH_NODE]
     }
 
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let _allow_multiple = config.get_bool("AllowMultipleStyles", true);
-        let rocket_styles = parse_styles(config, "EnforcedHashRocketStyle", "key");
-        let colon_styles = parse_styles(config, "EnforcedColonStyle", "key");
-        let last_arg_style = config.get_str("EnforcedLastArgumentHashStyle", "always_inspect");
-        let arg_alignment_style = config.get_str("ArgumentAlignmentStyle", "with_first_argument");
-        let fixed_indentation = arg_alignment_style == "with_fixed_indentation";
-
-        // Handle both HashNode (literal `{}`) and KeywordHashNode (keyword args `foo(a: 1)`)
-        let is_keyword_hash = node.as_keyword_hash_node().is_some();
-        let (elements, hash_node_start) = if let Some(hash_node) = node.as_hash_node() {
-            (hash_node.elements(), hash_node.location().start_offset())
-        } else if let Some(kw_hash_node) = node.as_keyword_hash_node() {
-            (
-                kw_hash_node.elements(),
-                kw_hash_node.location().start_offset(),
-            )
-        } else {
-            return;
+        let mut visitor = HashAlignmentVisitor {
+            cop: self,
+            source,
+            config,
+            diagnostics,
+            ancestors: Vec::new(),
         };
+        visitor.visit(&parse_result.node());
+    }
 
-        // Need at least 2 elements OR at least 1 element where we check spacing.
-        // RuboCop's on_hash requires node.pairs.empty? to be false and node.single_line? to be false.
-        // For single-element hashes, only separator/value spacing is checked (via first pair).
-        let elem_count = elements.len();
-        if elem_count == 0 {
-            return;
-        }
-
-        // Check if hash is single-line — skip if so
-        let hash_start_line = source.offset_to_line_col(hash_node_start).0;
-        let hash_end_offset = if let Some(hash_node) = node.as_hash_node() {
-            hash_node.location().end_offset()
-        } else if let Some(kw_hash_node) = node.as_keyword_hash_node() {
-            kw_hash_node.location().end_offset()
-        } else {
-            return;
-        };
-        let hash_end_line = source.offset_to_line_col(hash_end_offset).0;
-        if hash_start_line == hash_end_line {
-            return;
-        }
-
-        // EnforcedLastArgumentHashStyle handling
-        if is_keyword_hash {
-            match last_arg_style {
-                "always_ignore" | "ignore_implicit" => return,
-                _ => {}
-            }
-        } else {
-            let is_call_arg = !crate::cop::shared::util::begins_its_line(source, hash_node_start);
-            if is_call_arg {
-                match last_arg_style {
-                    "always_ignore" | "ignore_explicit" => return,
-                    _ => {}
-                }
-            }
-        }
-
-        // Extract pair info for all elements
-        let pairs: Vec<PairInfo> = elements
-            .iter()
-            .filter_map(|elem| extract_pair_info(source, &elem))
-            .collect();
-
-        if pairs.is_empty() {
-            return;
-        }
-
-        // Use first non-kwsplat pair as reference (matching RuboCop's `node.pairs.first`)
-        let first = match first_pair(&pairs) {
-            Some(p) => p,
-            None => return,
-        };
-
-        // autocorrect_incompatible_with_other_cops? check
-        if fixed_indentation {
-            if is_keyword_hash {
-                if !first.begins_line {
-                    return;
-                }
-            } else {
-                let hash_begins_line =
-                    crate::cop::shared::util::begins_its_line(source, hash_node_start);
-                if !hash_begins_line && !first.begins_line {
-                    return;
-                }
-            }
-        }
-
-        // Determine which styles apply based on pair types present
-        let has_rocket = pairs.iter().any(|p| !p.is_kwsplat && p.is_rocket);
-        let has_colon = pairs.iter().any(|p| !p.is_kwsplat && !p.is_rocket);
-
-        // Check if any style combination is valid for the hash
-        // RuboCop checks alignment_for_hash_rockets.any?(checkable_layout?) &&
-        //   alignment_for_colons.any?(checkable_layout?)
-        // For "key" style, checkable_layout? is always true.
-        // For separator/table, it requires !pairs_on_same_line? && !mixed_delimiters?
-        let rocket_checkable = rocket_styles.iter().any(|s| is_checkable(*s, &pairs));
-        let colon_checkable = colon_styles.iter().any(|s| is_checkable(*s, &pairs));
-
-        if has_rocket && !rocket_checkable {
-            return;
-        }
-        if has_colon && !colon_checkable {
-            return;
-        }
-        // If both are present, both must be checkable
-        if has_rocket && has_colon && (!rocket_checkable || !colon_checkable) {
-            return;
-        }
-
-        // For each pair, determine which style applies (based on whether it's rocket or colon)
-        // and check alignment. When multiple styles are allowed, pick the one with fewest offenses.
-
-        // We need to check the entire hash under each applicable style combination
-        // and report the one with fewest offenses.
-
-        // Collect offenses per style for rocket pairs and colon pairs separately,
-        // then combine.
-        let rocket_pair_offenses = if has_rocket {
-            best_offenses_for_styles(&rocket_styles, source, &pairs, true)
-        } else {
-            Vec::new()
-        };
-
-        let colon_pair_offenses = if has_colon {
-            best_offenses_for_styles(&colon_styles, source, &pairs, false)
-        } else {
-            Vec::new()
-        };
-
-        // Also check keyword splat offenses (always use key alignment for splats)
-        let kwsplat_offenses = check_kwsplat_alignment(source, &pairs);
-
-        // Emit diagnostics
-        for offense in rocket_pair_offenses
-            .iter()
-            .chain(colon_pair_offenses.iter())
-            .chain(kwsplat_offenses.iter())
-        {
-            diagnostics.push(self.diagnostic(
-                source,
-                offense.line,
-                offense.col,
-                offense.message.to_string(),
-            ));
-        }
+    fn check_node(
+        &self,
+        _source: &SourceFile,
+        _node: &ruby_prism::Node<'_>,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        _config: &CopConfig,
+        _diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
     }
 }
 
@@ -819,6 +743,209 @@ fn check_kwsplat_alignment(source: &SourceFile, pairs: &[PairInfo]) -> Vec<Align
     offenses
 }
 
+impl HashAlignment {
+    fn check_hash_node(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        is_last_argument_hash: bool,
+    ) {
+        let _allow_multiple = config.get_bool("AllowMultipleStyles", true);
+        let rocket_styles = parse_styles(config, "EnforcedHashRocketStyle", "key");
+        let colon_styles = parse_styles(config, "EnforcedColonStyle", "key");
+        let last_arg_style = config.get_str("EnforcedLastArgumentHashStyle", "always_inspect");
+        let arg_alignment_style = config.get_str("ArgumentAlignmentStyle", "with_first_argument");
+        let fixed_indentation = arg_alignment_style == "with_fixed_indentation";
+
+        // Handle both HashNode (literal `{}`) and KeywordHashNode (keyword args `foo(a: 1)`)
+        let is_keyword_hash = node.as_keyword_hash_node().is_some();
+        let (elements, hash_node_start) = if let Some(hash_node) = node.as_hash_node() {
+            (hash_node.elements(), hash_node.location().start_offset())
+        } else if let Some(kw_hash_node) = node.as_keyword_hash_node() {
+            (
+                kw_hash_node.elements(),
+                kw_hash_node.location().start_offset(),
+            )
+        } else {
+            return;
+        };
+
+        // Need at least 2 elements OR at least 1 element where we check spacing.
+        // RuboCop's on_hash requires node.pairs.empty? to be false and node.single_line? to be false.
+        // For single-element hashes, only separator/value spacing is checked (via first pair).
+        let elem_count = elements.len();
+        if elem_count == 0 {
+            return;
+        }
+
+        // Check if hash is single-line — skip if so
+        let hash_start_line = source.offset_to_line_col(hash_node_start).0;
+        let hash_end_offset = if let Some(hash_node) = node.as_hash_node() {
+            hash_node.location().end_offset()
+        } else if let Some(kw_hash_node) = node.as_keyword_hash_node() {
+            kw_hash_node.location().end_offset()
+        } else {
+            return;
+        };
+        let hash_end_line = source.offset_to_line_col(hash_end_offset).0;
+        if hash_start_line == hash_end_line {
+            return;
+        }
+
+        // Match RuboCop's `on_send` / `ignore_hash_argument?`: only ignore a hash
+        // when this node is actually the last argument of a call-like node.
+        if should_ignore_last_argument_hash(is_last_argument_hash, is_keyword_hash, last_arg_style)
+        {
+            return;
+        }
+
+        // Extract pair info for all elements
+        let pairs: Vec<PairInfo> = elements
+            .iter()
+            .filter_map(|elem| extract_pair_info(source, &elem))
+            .collect();
+
+        if pairs.is_empty() {
+            return;
+        }
+
+        // Use first non-kwsplat pair as reference (matching RuboCop's `node.pairs.first`)
+        let first = match first_pair(&pairs) {
+            Some(p) => p,
+            None => return,
+        };
+
+        // autocorrect_incompatible_with_other_cops? check
+        if fixed_indentation {
+            if is_keyword_hash {
+                if !first.begins_line {
+                    return;
+                }
+            } else {
+                let hash_begins_line =
+                    crate::cop::shared::util::begins_its_line(source, hash_node_start);
+                if !hash_begins_line && !first.begins_line {
+                    return;
+                }
+            }
+        }
+
+        // Determine which styles apply based on pair types present
+        let has_rocket = pairs.iter().any(|p| !p.is_kwsplat && p.is_rocket);
+        let has_colon = pairs.iter().any(|p| !p.is_kwsplat && !p.is_rocket);
+
+        // Check if any style combination is valid for the hash
+        // RuboCop checks alignment_for_hash_rockets.any?(checkable_layout?) &&
+        //   alignment_for_colons.any?(checkable_layout?)
+        // For "key" style, checkable_layout? is always true.
+        // For separator/table, it requires !pairs_on_same_line? && !mixed_delimiters?
+        let rocket_checkable = rocket_styles.iter().any(|s| is_checkable(*s, &pairs));
+        let colon_checkable = colon_styles.iter().any(|s| is_checkable(*s, &pairs));
+
+        if has_rocket && !rocket_checkable {
+            return;
+        }
+        if has_colon && !colon_checkable {
+            return;
+        }
+        // If both are present, both must be checkable
+        if has_rocket && has_colon && (!rocket_checkable || !colon_checkable) {
+            return;
+        }
+
+        // For each pair, determine which style applies (based on whether it's rocket or colon)
+        // and check alignment. When multiple styles are allowed, pick the one with fewest offenses.
+
+        // We need to check the entire hash under each applicable style combination
+        // and report the one with fewest offenses.
+
+        // Collect offenses per style for rocket pairs and colon pairs separately,
+        // then combine.
+        let rocket_pair_offenses = if has_rocket {
+            best_offenses_for_styles(&rocket_styles, source, &pairs, true)
+        } else {
+            Vec::new()
+        };
+
+        let colon_pair_offenses = if has_colon {
+            best_offenses_for_styles(&colon_styles, source, &pairs, false)
+        } else {
+            Vec::new()
+        };
+
+        // Also check keyword splat offenses (always use key alignment for splats)
+        let kwsplat_offenses = check_kwsplat_alignment(source, &pairs);
+
+        // Emit diagnostics
+        for offense in rocket_pair_offenses
+            .iter()
+            .chain(colon_pair_offenses.iter())
+            .chain(kwsplat_offenses.iter())
+        {
+            diagnostics.push(self.diagnostic(
+                source,
+                offense.line,
+                offense.col,
+                offense.message.to_string(),
+            ));
+        }
+    }
+}
+
+struct HashAlignmentVisitor<'a, 'src, 'pr> {
+    cop: &'a HashAlignment,
+    source: &'src SourceFile,
+    config: &'a CopConfig,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+}
+
+impl<'a, 'src, 'pr> HashAlignmentVisitor<'a, 'src, 'pr> {
+    fn current_parent(&self) -> Option<&ruby_prism::Node<'pr>> {
+        self.ancestors.iter().rev().nth(1)
+    }
+}
+
+impl<'a, 'src, 'pr> ruby_prism::Visit<'pr> for HashAlignmentVisitor<'a, 'src, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        let generic = node.as_node();
+        let is_last_arg = is_last_argument_hash(&generic, self.current_parent());
+        self.cop.check_hash_node(
+            self.source,
+            &generic,
+            self.config,
+            self.diagnostics,
+            is_last_arg,
+        );
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        let generic = node.as_node();
+        let is_last_arg = is_last_argument_hash(&generic, self.current_parent());
+        self.cop.check_hash_node(
+            self.source,
+            &generic,
+            self.config,
+            self.diagnostics,
+            is_last_arg,
+        );
+        ruby_prism::visit_keyword_hash_node(self, node);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -895,6 +1022,76 @@ mod tests {
             diags.len(),
             1,
             "keyword hash on own line should still be checked with fixed indentation"
+        );
+    }
+
+    fn variant_config(
+        hash_rocket_style: &'static str,
+        colon_style: &'static str,
+        last_arg_style: &'static str,
+    ) -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedHashRocketStyle".into(),
+                    serde_yml::Value::String(hash_rocket_style.into()),
+                ),
+                (
+                    "EnforcedColonStyle".into(),
+                    serde_yml::Value::String(colon_style.into()),
+                ),
+                (
+                    "EnforcedLastArgumentHashStyle".into(),
+                    serde_yml::Value::String(last_arg_style.into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn separator_always_ignore_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn ignore_explicit_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/ignore_explicit_offense.rb"
+            ),
+            variant_config("key", "key", "ignore_explicit"),
+        );
+    }
+
+    #[test]
+    fn explicit_last_arg_no_offense_fixture_for_always_ignore() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/explicit_last_arg_no_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn explicit_last_arg_no_offense_fixture_for_ignore_explicit() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/explicit_last_arg_no_offense.rb"
+            ),
+            variant_config("key", "key", "ignore_explicit"),
         );
     }
 
