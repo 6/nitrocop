@@ -9,10 +9,12 @@ use crate::parse::source::SourceFile;
 ///
 /// Fixed false positives where nitrocop walked up from a migration file and
 /// treated nested app configs like `spec/dummy/config/database.yml` as the
-/// active adapter; RuboCop only reads `config/database.yml` from the current
-/// working directory. Also fixed false negatives for `change_table` calls
-/// outside instance `def change/up/down` bodies, such as class-body migrations
-/// and `def self.up` / `def self.down`.
+/// active adapter. RuboCop reads `config/database.yml` from the project root
+/// (its working directory); corpus runs invoke nitrocop from `/tmp`, so we
+/// check the current directory first and then fall back to the enclosing git
+/// checkout of the analyzed file. Also fixed false negatives for
+/// `change_table` calls outside instance `def change/up/down` bodies, such as
+/// class-body migrations and `def self.up` / `def self.down`.
 pub struct BulkChangeTable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,17 +90,31 @@ fn extract_table_name(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
     None
 }
 
-fn database_kind(config: &CopConfig) -> Option<DatabaseKind> {
+fn database_kind(config: &CopConfig, source: &SourceFile) -> Option<DatabaseKind> {
     match config.get_str("Database", "") {
         "mysql" => Some(DatabaseKind::Mysql),
         "postgresql" => Some(DatabaseKind::PostgreSQL),
-        "" => database_kind_from_yaml().or_else(database_kind_from_env),
+        "" => database_kind_from_yaml(source).or_else(database_kind_from_env),
         _ => None,
     }
 }
 
-fn database_kind_from_yaml() -> Option<DatabaseKind> {
-    let database_yml = std::env::current_dir().ok()?.join("config/database.yml");
+fn database_kind_from_yaml(source: &SourceFile) -> Option<DatabaseKind> {
+    if let Some(database) = std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join("config/database.yml"))
+        .filter(|path| path.is_file())
+        .and_then(|path| parse_database_yml(&path))
+    {
+        return Some(database);
+    }
+
+    let repo_root = source
+        .path
+        .parent()?
+        .ancestors()
+        .find(|path| path.join(".git").exists())?;
+    let database_yml = repo_root.join("config/database.yml");
     if !database_yml.is_file() {
         return None;
     }
@@ -358,7 +374,7 @@ impl Cop for BulkChangeTable {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let database = match database_kind(config) {
+        let database = match database_kind(config, source) {
             Some(database) if supports_bulk_alter(database, config) => database,
             _ => return,
         };
@@ -543,6 +559,10 @@ mod tests {
         })
     }
 
+    fn mark_as_git_repo(path: &Path) {
+        fs::create_dir(path.join(".git")).expect("git dir");
+    }
+
     #[test]
     fn offense_fixture() {
         crate::testutil::assert_cop_offenses_full_with_config(
@@ -653,13 +673,49 @@ mod tests {
     }
 
     #[test]
+    fn detects_database_yml_from_source_repo_root_when_cwd_is_elsewhere() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let other_dir = tempfile::tempdir().expect("other dir");
+        let config_dir = tempdir.path().join("config");
+        let migrate_dir = tempdir.path().join("db/migrate");
+
+        fs::create_dir_all(&config_dir).expect("config dir");
+        fs::create_dir_all(&migrate_dir).expect("migrate dir");
+        mark_as_git_repo(tempdir.path());
+        fs::write(
+            config_dir.join("database.yml"),
+            "development:\n  adapter: mysql2\n",
+        )
+        .expect("database.yml");
+
+        let path = migrate_dir.join("001_test.rb");
+        let source = b"class AddNameAndAgeToUsers < ActiveRecord::Migration[6.0]\n  def change\n    add_column :users, :name, :string\n    add_column :users, :age, :integer\n  end\nend\n";
+        let diagnostics = with_current_dir(other_dir.path(), || {
+            crate::testutil::run_cop_full_internal(
+                &BulkChangeTable,
+                source,
+                CopConfig::default(),
+                path.to_str().unwrap(),
+            )
+        });
+
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Should fall back to the source repo root when the process cwd is outside the repo"
+        );
+    }
+
+    #[test]
     fn ignores_nested_app_database_yml_outside_project_root() {
         let tempdir = tempfile::tempdir().expect("tempdir");
+        let other_dir = tempfile::tempdir().expect("other dir");
         let nested_config_dir = tempdir.path().join("spec/dummy/config");
         let nested_migrate_dir = tempdir.path().join("spec/dummy/db/migrate");
 
         fs::create_dir_all(&nested_config_dir).expect("nested config dir");
         fs::create_dir_all(&nested_migrate_dir).expect("nested migrate dir");
+        mark_as_git_repo(tempdir.path());
         fs::write(
             nested_config_dir.join("database.yml"),
             "development:\n  adapter: mysql2\n",
@@ -668,7 +724,7 @@ mod tests {
 
         let path = nested_migrate_dir.join("001_test.rb");
         let source = b"class AddCountryAndCityToCourses < ActiveRecord::Migration[6.0]\n  def change\n    add_column :courses, :country, :string\n    add_column :courses, :city, :string\n  end\nend\n";
-        let diagnostics = with_current_dir(tempdir.path(), || {
+        let diagnostics = with_current_dir(other_dir.path(), || {
             crate::testutil::run_cop_full_internal(
                 &BulkChangeTable,
                 source,
