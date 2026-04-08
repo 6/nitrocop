@@ -92,6 +92,7 @@ pub struct EmptyLinesAroundBlockBody;
 ///   continuation line (e.g. `run_command(arg) \ \n  do |x|`). Walk
 ///   backward through `\` continuations to find the method-call line and
 ///   use that as the reference.
+///
 /// Compute the effective opening offset for empty-line checks.
 ///
 /// When `full_walkback` is true (used for `no_empty_lines` style), walk all
