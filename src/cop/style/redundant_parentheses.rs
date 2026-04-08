@@ -265,8 +265,6 @@ struct ParentInfo {
     is_match_operator: bool,
     is_endless_def: bool,
     is_assignment_parent: bool,
-    conditional_predicate_start_offset: Option<usize>,
-    conditional_predicate_end_offset: Option<usize>,
     /// The start offset of this parent node.
     /// Used to walk receiver chains for first-argument hash-literal exemptions.
     node_start_offset: usize,
@@ -1013,8 +1011,6 @@ impl RedundantParensVisitor<'_> {
             is_match_operator: false,
             is_endless_def: false,
             is_assignment_parent: false,
-            conditional_predicate_start_offset: None,
-            conditional_predicate_end_offset: None,
             node_start_offset,
             call_receiver_start_offset: None,
             call_first_arg_start_offset: None,
@@ -1676,9 +1672,6 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             } else {
                 top.kind = ParentKind::If;
             }
-            top.conditional_predicate_start_offset =
-                Some(node.predicate().location().start_offset());
-            top.conditional_predicate_end_offset = Some(node.predicate().location().end_offset());
         }
         ruby_prism::visit_if_node(self, node);
     }
@@ -1702,9 +1695,6 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::If; // treat unless same as if for conditional ancestor check
-            top.conditional_predicate_start_offset =
-                Some(node.predicate().location().start_offset());
-            top.conditional_predicate_end_offset = Some(node.predicate().location().end_offset());
         }
         ruby_prism::visit_unless_node(self, node);
     }
@@ -1713,9 +1703,6 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::While;
             top.single_child = node.statements().is_none();
-            top.conditional_predicate_start_offset =
-                Some(node.predicate().location().start_offset());
-            top.conditional_predicate_end_offset = Some(node.predicate().location().end_offset());
         }
         ruby_prism::visit_while_node(self, node);
     }
@@ -1723,9 +1710,6 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::Until;
-            top.conditional_predicate_start_offset =
-                Some(node.predicate().location().start_offset());
-            top.conditional_predicate_end_offset = Some(node.predicate().location().end_offset());
         }
         ruby_prism::visit_until_node(self, node);
     }
@@ -1733,10 +1717,6 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::Case;
-            if let Some(predicate) = node.predicate() {
-                top.conditional_predicate_start_offset = Some(predicate.location().start_offset());
-                top.conditional_predicate_end_offset = Some(predicate.location().end_offset());
-            }
         }
         ruby_prism::visit_case_node(self, node);
     }
