@@ -51,11 +51,12 @@ use crate::parse::source::SourceFile;
 ///    `empty_lines`. nitrocop was still requiring blank lines at beginning/end.
 /// 2. `super do ... end` blocks were missed because Prism exposes them through
 ///    `SuperNode` / `ForwardingSuperNode`, not plain `BlockNode`.
-/// 3. Two-line brace blocks whose body starts on the opening line
-///    (`it { foo.\n  bar }`) were incorrectly skipped as "single-line" by the
-///    shared helper. RuboCop still requires the blank line at block body
-///    beginning here, but not at block body end because there is no standalone
-///    line before `}`.
+/// 3. Two-line blocks where exactly one delimiter shares a body line diverge
+///    from the shared helper when the effective opening is the actual `do`/`{`
+///    line: `it { foo.\n  bar }` and `items.each { |x|\n  puts x }` both need
+///    the beginning offense only. Multiline `->` params are different because
+///    RuboCop still uses the earlier `->` line as the opening reference, so
+///    those cases continue through the normal missing-beginning/end checks.
 pub struct EmptyLinesAroundBlockBody;
 
 /// Compute the effective opening offset for empty-line checks.
@@ -180,19 +181,42 @@ fn check_empty_lines_style_with_rubocop_edge_cases(
     };
     let (body_start_line, _) = source.offset_to_line_col(body_start_offset);
 
-    // RuboCop still flags the "beginning" offense for multiline brace/do blocks
-    // whose body starts on the opening line and the closing delimiter is alone
-    // on the next line, e.g. `it { foo.\n  bar }`. The shared helper skips these
-    // because `end_line == keyword_line + 1`, so handle only this narrow shape
-    // locally and let the shared helper cover all other cases.
-    if body_start_line == opening_line && closing_line == opening_line + 1 {
-        let mut diagnostics = Vec::new();
-        if let Some(diag) =
-            missing_beginning_empty_line_diagnostic(cop_name, source, keyword_line + 1, corrections)
-        {
-            diagnostics.push(diag);
+    // RuboCop still flags only the "beginning" offense for two-line blocks
+    // where exactly one delimiter shares a body line, but only when the
+    // effective opening line is the physical `do`/`{` line. When multiline
+    // lambda params move the effective opening back to the `->` line, the
+    // shared helper still matches RuboCop and may require an end offense too.
+    if keyword_line == opening_line && closing_line == opening_line + 1 {
+        // Body starts on the opening line, closing delimiter is alone on the
+        // next line, e.g. `it { foo.\n  bar }`.
+        if body_start_line == opening_line {
+            let mut diagnostics = Vec::new();
+            if let Some(diag) = missing_beginning_empty_line_diagnostic(
+                cop_name,
+                source,
+                keyword_line + 1,
+                corrections,
+            ) {
+                diagnostics.push(diag);
+            }
+            return diagnostics;
         }
-        return diagnostics;
+
+        // Body starts on the next line and the closing delimiter shares that
+        // line, e.g. `items.each { |x|\n  puts x }` or `items.each do |x|\n
+        //   puts x end`.
+        if body_start_line == closing_line {
+            let mut diagnostics = Vec::new();
+            if let Some(diag) = missing_beginning_empty_line_diagnostic(
+                cop_name,
+                source,
+                keyword_line + 1,
+                corrections,
+            ) {
+                diagnostics.push(diag);
+            }
+            return diagnostics;
+        }
     }
 
     util::check_missing_empty_lines_around_body_with_corrections(
@@ -417,6 +441,26 @@ mod tests {
             1,
             "Lambda with single-line params should flag blank line after do"
         );
+    }
+
+    #[test]
+    fn empty_lines_multiline_lambda_body_on_opening_line_still_requires_end() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let src = b"handler = -> (first:,\n              second:) { do_something.\n  call_it }\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundBlockBody, src, empty_lines_config());
+
+        assert_eq!(
+            diags.len(),
+            2,
+            "multiline lambda params should still require both beginning and end offenses"
+        );
+        assert!(diags.iter().any(|d| {
+            d.location.line == 2 && d.message == "Empty line missing at block body beginning."
+        }));
+        assert!(diags.iter().any(|d| {
+            d.location.line == 3 && d.message == "Empty line missing at block body end."
+        }));
     }
 
     #[test]
