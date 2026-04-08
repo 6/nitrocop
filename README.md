@@ -15,9 +15,9 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 **Features**
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
-- Tested on [**5,590 open-source repos**](docs/corpus.md):
+- Tested on [**5,589 open-source repos**](docs/corpus.md):
   - **847 of 915** cops match RuboCop exactly with default config
-  - **793 of 915** match across all `EnforcedStyle` variants
+  - **794 of 915** match across all `EnforcedStyle` variants
   - Across **28.39M** offenses compared, **28.34M** (99.83%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
@@ -55,7 +55,7 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 ## Cops
 
 <!-- corpus-cops:start -->
-Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
+Compared with RuboCop on [**5,589 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
 
 **Default** = default RuboCop config. **All variants** = every supported `EnforcedStyle` (e.g. `EnforcedStyle: comma`).
 
@@ -63,16 +63,16 @@ Compared with RuboCop on [**5,590 open-source repos**](docs/corpus.md) (590k Rub
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Layout | 100 | 90 | 60 |
+| Layout | 100 | 91 | 60 |
 | Lint | 148 | 145 | 144 |
-| Style | 287 | 277 | 244 |
+| Style | 287 | 277 | 245 |
 | Metrics | 10 | **10 ✓** | **10 ✓** |
-| Naming | 19 | **19 ✓** | 18 |
+| Naming | 19 | 18 | 18 |
 | Security | 6 | **6 ✓** | **6 ✓** |
 | Bundler | 7 | **7 ✓** | **7 ✓** |
 | Gemspec | 10 | **10 ✓** | **10 ✓** |
 | Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **565 (96.0%)** | **500 (85.0%)** |
+| **Total** | **588** | **565 (96.0%)** | **501 (85.2%)** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
