@@ -275,6 +275,16 @@ use std::ops::Range;
 ///     `#{`, now returns just the opening `"` to match RuboCop's tokenization.
 ///     Fixes 2 FPs (inspec/inspec-aws) where `x = ""` / `x =  "#{value}"`
 ///     alignment was not recognized.
+///
+/// 31. **Heredoc interpolation closing-brace FNs (fixed)**: Heredoc bodies are
+///     marked non-code in `CodeMap`, and ExtraSpacing only opted back into the
+///     `statements()` span inside `#{...}`. That skipped whitespace immediately
+///     before the interpolation's closing `}` when the last expression ended in
+///     a non-code literal, such as the `"` in `"...\"  }` from cnab240's
+///     `attribute_accessors.rb`. Track heredoc interpolation closing-brace
+///     offsets from Prism and allow scanning only for gaps whose following token
+///     is that closing `}`. This matches RuboCop without broadening heredoc-body
+///     scanning.
 pub struct ExtraSpacing;
 
 impl Cop for ExtraSpacing {
@@ -324,6 +334,11 @@ impl Cop for ExtraSpacing {
         // not mistaken for append operators during alignment checks.
         let heredoc_opener_starts = collect_heredoc_opener_starts(parse_result);
 
+        // Heredoc bodies are non-code, but RuboCop still checks the gap before
+        // a heredoc interpolation's closing `}` token.
+        let heredoc_interpolation_closing_braces =
+            collect_heredoc_interpolation_closing_braces(parse_result);
+
         // Build the set of aligned comment lines (1-indexed). Two consecutive
         // comments that start at the same column are both considered "aligned".
         let aligned_comment_lines = build_aligned_comment_lines(parse_result, source);
@@ -371,10 +386,14 @@ impl Cop for ExtraSpacing {
 
                         // Get the byte offset in the full source
                         let abs_offset = line_start_offset + space_start;
+                        let next_abs_offset = line_start_offset + i;
+                        let before_heredoc_interpolation_close = line[i] == b'}'
+                            && heredoc_interpolation_closing_braces.contains(&next_abs_offset);
 
                         // Skip if inside string/comment, except for code inside
                         // #{...} interpolation within heredocs.
-                        if !code_map.is_code(abs_offset)
+                        if !before_heredoc_interpolation_close
+                            && !code_map.is_code(abs_offset)
                             && (!code_map.is_heredoc_interpolation(abs_offset)
                                 || code_map.is_non_code_in_heredoc_interpolation(abs_offset))
                         {
@@ -740,6 +759,42 @@ impl<'pr> Visit<'pr> for HeredocOpenerCollector {
                 self.starts.insert(opening.start_offset());
             }
         }
+        ruby_prism::visit_interpolated_string_node(self, node);
+    }
+}
+
+fn collect_heredoc_interpolation_closing_braces(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashSet<usize> {
+    let mut collector = HeredocInterpolationClosingBraceCollector {
+        offsets: HashSet::new(),
+    };
+    collector.visit(&parse_result.node());
+    collector.offsets
+}
+
+struct HeredocInterpolationClosingBraceCollector {
+    offsets: HashSet<usize>,
+}
+
+impl<'pr> Visit<'pr> for HeredocInterpolationClosingBraceCollector {
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        if node
+            .opening_loc()
+            .is_some_and(|opening| opening.as_slice().starts_with(b"<<"))
+        {
+            for part in node.parts().iter() {
+                let Some(embedded) = part.as_embedded_statements_node() else {
+                    continue;
+                };
+
+                let loc = embedded.location();
+                if loc.end_offset() > loc.start_offset() {
+                    self.offsets.insert(loc.end_offset() - 1);
+                }
+            }
+        }
+
         ruby_prism::visit_interpolated_string_node(self, node);
     }
 }
