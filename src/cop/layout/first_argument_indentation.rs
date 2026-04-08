@@ -95,6 +95,22 @@ use crate::parse::source::SourceFile;
 /// path. Fixed by treating only `BlockNode` values as attached blocks and
 /// keeping `BlockArgumentNode` (`&blk`) eligible for special inner-call
 /// indentation and the quoted base-range message.
+///
+/// ## Investigation (2026-04-08)
+///
+/// **Variant fix (`consistent_relative_to_receiver`):** RuboCop does not always
+/// indent relative to `node.source_range.begin_pos`. It uses
+/// `column_of(base_range(node, first_argument))`, which falls back to the
+/// previous code line when the base range spans multiple lines and also starts
+/// from a `*`/`**` wrapper when the call is splatted. nitrocop previously used
+/// the call start column unconditionally, which produced false positives like
+/// `puts x.\n  merge(\n    b: 2` and `*Dir.glob(\n    File.expand_path(`.
+///
+/// **Variant fix (`special_for_inner_method_call`):** RuboCop's
+/// `eligible_method_call?` for the outer send excludes only `[]=`. nitrocop was
+/// reusing the child-call skip logic and incorrectly rejected bare-operator and
+/// setter parents like `<<` and `foo.bar =`, which caused inner-call variant
+/// divergence under the non-default style.
 pub struct FirstArgumentIndentation;
 
 impl Cop for FirstArgumentIndentation {
@@ -148,7 +164,7 @@ struct ParentCallInfo {
     /// The start offsets of each argument in the parent call, so we can check
     /// if the current call node is one of the parent's arguments
     arg_start_offsets: Vec<usize>,
-    /// Not a setter or bare operator
+    /// RuboCop outer-send eligibility: any send except `[]=`
     is_eligible: bool,
 }
 
@@ -243,36 +259,39 @@ impl FirstArgVisitor<'_> {
         }
 
         if self.style == "consistent_relative_to_receiver" {
-            // Use the column of the call node start (includes receiver) + width
-            let (_, call_col) = self.source.offset_to_line_col(call_start_offset);
-            return call_col + self.width;
+            return self.base_range_indent(call_start_offset, first_arg_start_offset, arg_line)
+                + self.width;
         }
 
         // special_for_inner_method_call or special_for_inner_method_call_in_parentheses
         if self.is_special_inner_call(call_start_offset, has_attached_block) {
-            // Check if base_range (from call start to first arg) spans multiple lines
-            let (call_start_line, call_start_col) =
-                self.source.offset_to_line_col(call_start_offset);
-            let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
-
-            // Determine if the range from call start to arg start is "single line"
-            // after stripping whitespace (matching RuboCop's column_of behavior)
-            if is_single_line_base_range(
-                self.source,
-                call_start_offset,
-                first_arg_start_offset,
-                call_start_line,
-                arg_start_line,
-            ) {
-                // Single-line: use the column of the call expression start
-                call_start_col + self.width
-            } else {
-                // Multi-line: use previous code line indent
-                previous_code_line_indent(self.source, arg_line) + self.width
-            }
+            self.base_range_indent(call_start_offset, first_arg_start_offset, arg_line) + self.width
         } else {
             // Not a special inner call: use previous code line indent + width
             previous_code_line_indent(self.source, arg_line) + self.width
+        }
+    }
+
+    fn base_range_indent(
+        &self,
+        call_start_offset: usize,
+        first_arg_start_offset: usize,
+        arg_line: usize,
+    ) -> usize {
+        let base_start_offset = base_range_start_offset(self.source, call_start_offset);
+        let (base_start_line, base_start_col) = self.source.offset_to_line_col(base_start_offset);
+        let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
+
+        if is_single_line_base_range(
+            self.source,
+            base_start_offset,
+            first_arg_start_offset,
+            base_start_line,
+            arg_start_line,
+        ) {
+            base_start_col
+        } else {
+            previous_code_line_indent(self.source, arg_line)
         }
     }
 
@@ -331,21 +350,22 @@ impl FirstArgVisitor<'_> {
         first_arg_start_offset: usize,
         has_attached_block: bool,
     ) -> String {
+        let base_start_offset = base_range_start_offset(self.source, call_start_offset);
         let base_text = self
             .source
-            .try_byte_slice(call_start_offset, first_arg_start_offset)
+            .try_byte_slice(base_start_offset, first_arg_start_offset)
             .unwrap_or("")
             .trim();
-        let (call_start_line, _) = self.source.offset_to_line_col(call_start_offset);
+        let (base_start_line, _) = self.source.offset_to_line_col(base_start_offset);
         let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
 
         let base = if self.uses_base_range_message(call_start_offset, has_attached_block)
             && !base_text.contains('\n')
             && is_single_line_base_range(
                 self.source,
-                call_start_offset,
+                base_start_offset,
                 first_arg_start_offset,
-                call_start_line,
+                base_start_line,
                 arg_start_line,
             ) {
             format!("`{base_text}`")
@@ -443,6 +463,34 @@ fn leading_whitespace_count(line: &[u8]) -> usize {
         .count()
 }
 
+fn base_range_start_offset(source: &SourceFile, call_start_offset: usize) -> usize {
+    let bytes = source.as_bytes();
+
+    if call_start_offset >= 2
+        && bytes.get(call_start_offset - 2) == Some(&b'*')
+        && bytes.get(call_start_offset - 1) == Some(&b'*')
+        && is_splat_boundary(bytes.get(call_start_offset - 3).copied())
+    {
+        return call_start_offset - 2;
+    }
+
+    if call_start_offset >= 1
+        && bytes.get(call_start_offset - 1) == Some(&b'*')
+        && is_splat_boundary(bytes.get(call_start_offset - 2).copied())
+    {
+        return call_start_offset - 1;
+    }
+
+    call_start_offset
+}
+
+fn is_splat_boundary(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{' | b',')
+    )
+}
+
 fn is_bare_operator(name: &str, has_regular_dot: bool) -> bool {
     method_identifier_predicates::is_operator_method(name.as_bytes()) && !has_regular_dot
 }
@@ -456,15 +504,16 @@ fn is_setter_method(name: &str) -> bool {
     method_identifier_predicates::is_setter_method(name.as_bytes())
 }
 
+fn is_eligible_parent_call(name: &str) -> bool {
+    name != "[]="
+}
+
 impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let call_start_offset = node.location().start_offset();
         let name_bytes = node.name().as_slice();
         let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
         let call_operator_loc = node.call_operator_loc();
-        let has_regular_dot = call_operator_loc
-            .as_ref()
-            .is_some_and(|loc| loc.as_slice() == b".");
 
         // Check this call node for first argument indentation
         self.check_call(
@@ -482,8 +531,7 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
         // Determine if this call is parenthesized and eligible for being a
         // "parent call" context for inner calls
         let is_parenthesized = node.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
-        let is_eligible =
-            !is_bare_operator(name_str, has_regular_dot) && !is_setter_method(name_str);
+        let is_eligible = is_eligible_parent_call(name_str);
 
         // Collect argument start offsets
         let arg_start_offsets: Vec<usize> = node
@@ -555,11 +603,22 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
 mod tests {
     use super::*;
     use crate::testutil::run_cop_full;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         FirstArgumentIndentation,
         "cops/layout/first_argument_indentation"
     );
+
+    fn config_with_enforced_style(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
 
     #[test]
     fn args_on_same_line_ignored() {
@@ -646,6 +705,50 @@ mod tests {
         assert_eq!(
             diags[0].message,
             "Indent the first argument one step more than `foo.bar(`."
+        );
+    }
+
+    #[test]
+    fn consistent_relative_to_receiver_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/consistent_relative_to_receiver_no_offense.rb"
+            ),
+            config_with_enforced_style("consistent_relative_to_receiver"),
+        );
+    }
+
+    #[test]
+    fn consistent_relative_to_receiver_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/consistent_relative_to_receiver_offense.rb"
+            ),
+            config_with_enforced_style("consistent_relative_to_receiver"),
+        );
+    }
+
+    #[test]
+    fn special_for_inner_method_call_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/special_for_inner_method_call_no_offense.rb"
+            ),
+            config_with_enforced_style("special_for_inner_method_call"),
+        );
+    }
+
+    #[test]
+    fn special_for_inner_method_call_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/special_for_inner_method_call_offense.rb"
+            ),
+            config_with_enforced_style("special_for_inner_method_call"),
         );
     }
 }
