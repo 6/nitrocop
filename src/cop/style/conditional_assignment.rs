@@ -1,10 +1,24 @@
 use crate::cop::shared::method_identifier_predicates;
-use crate::cop::shared::node_type::{CASE_MATCH_NODE, CASE_NODE, IF_NODE, UNLESS_NODE};
+use crate::cop::shared::node_type::{
+    CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE, CASE_MATCH_NODE,
+    CASE_NODE, CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+    CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_WRITE_NODE, CONSTANT_AND_WRITE_NODE,
+    CONSTANT_OPERATOR_WRITE_NODE, CONSTANT_OR_WRITE_NODE, CONSTANT_PATH_AND_WRITE_NODE,
+    CONSTANT_PATH_OPERATOR_WRITE_NODE, CONSTANT_PATH_OR_WRITE_NODE, CONSTANT_PATH_WRITE_NODE,
+    CONSTANT_WRITE_NODE, GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_WRITE_NODE, IF_NODE, INDEX_AND_WRITE_NODE,
+    INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE, INSTANCE_VARIABLE_AND_WRITE_NODE,
+    INSTANCE_VARIABLE_OPERATOR_WRITE_NODE, INSTANCE_VARIABLE_OR_WRITE_NODE,
+    INSTANCE_VARIABLE_WRITE_NODE, LOCAL_VARIABLE_AND_WRITE_NODE,
+    LOCAL_VARIABLE_OPERATOR_WRITE_NODE, LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_WRITE_NODE,
+    MULTI_WRITE_NODE, UNLESS_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
 const MSG: &str = "Use the return of the conditional for variable assignment and comparison.";
+const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals.";
 
 /// Checks for `if`, `unless`, `case`, and `case/in` statements where each
 /// branch assigns to the same variable. Suggests using the return value of
@@ -59,7 +73,50 @@ impl Cop for ConditionalAssignment {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CASE_MATCH_NODE, CASE_NODE, IF_NODE, UNLESS_NODE]
+        &[
+            // For assign_to_condition (existing)
+            CASE_MATCH_NODE,
+            CASE_NODE,
+            IF_NODE,
+            UNLESS_NODE,
+            // For assign_inside_condition: variable writes
+            LOCAL_VARIABLE_WRITE_NODE,
+            INSTANCE_VARIABLE_WRITE_NODE,
+            CLASS_VARIABLE_WRITE_NODE,
+            GLOBAL_VARIABLE_WRITE_NODE,
+            CONSTANT_WRITE_NODE,
+            CONSTANT_PATH_WRITE_NODE,
+            MULTI_WRITE_NODE,
+            // Operator writes
+            LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
+            INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
+            CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+            GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+            CONSTANT_OPERATOR_WRITE_NODE,
+            CONSTANT_PATH_OPERATOR_WRITE_NODE,
+            CALL_OPERATOR_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            // And writes
+            LOCAL_VARIABLE_AND_WRITE_NODE,
+            INSTANCE_VARIABLE_AND_WRITE_NODE,
+            CLASS_VARIABLE_AND_WRITE_NODE,
+            GLOBAL_VARIABLE_AND_WRITE_NODE,
+            CONSTANT_AND_WRITE_NODE,
+            CONSTANT_PATH_AND_WRITE_NODE,
+            CALL_AND_WRITE_NODE,
+            INDEX_AND_WRITE_NODE,
+            // Or writes
+            LOCAL_VARIABLE_OR_WRITE_NODE,
+            INSTANCE_VARIABLE_OR_WRITE_NODE,
+            CLASS_VARIABLE_OR_WRITE_NODE,
+            GLOBAL_VARIABLE_OR_WRITE_NODE,
+            CONSTANT_OR_WRITE_NODE,
+            CONSTANT_PATH_OR_WRITE_NODE,
+            CALL_OR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+            // Call nodes (setter, []=, <<, comparisons)
+            CALL_NODE,
+        ]
     }
 
     fn check_node(
@@ -71,10 +128,14 @@ impl Cop for ConditionalAssignment {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        if config.get_str("EnforcedStyle", "assign_to_condition") != "assign_to_condition" {
+        let style = config.get_str("EnforcedStyle", "assign_to_condition");
+
+        if style == "assign_inside_condition" {
+            self.check_assign_inside_condition(source, node, config, diagnostics);
             return;
         }
 
+        // assign_to_condition (default)
         let single_line_only = config.get_bool("SingleLineConditionsOnly", true);
         let include_ternary = config.get_bool("IncludeTernaryExpressions", true);
         let max_line_length = config.get_usize("MaxLineLength", 120);
@@ -444,6 +505,300 @@ impl ConditionalAssignment {
         let (line, col) = source.offset_to_line_col(node_loc.start_offset());
         diagnostics.push(self.diagnostic(source, line, col, MSG.to_string()));
     }
+
+    /// Check for the `assign_inside_condition` variant.
+    /// Flags assignment nodes (variable writes, setter calls, etc.) whose RHS
+    /// is a conditional (if/unless/case/case_match).
+    fn check_assign_inside_condition(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let single_line_only = config.get_bool("SingleLineConditionsOnly", true);
+        let include_ternary = config.get_bool("IncludeTernaryExpressions", true);
+
+        // Extract the RHS of the assignment
+        let rhs = match get_assignment_value(node) {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Unwrap parentheses: x = (if ...) -> check the if inside
+        let rhs = unwrap_begin_single_child(rhs);
+
+        // Check if RHS is a conditional and validate branches
+        if let Some(if_node) = rhs.as_if_node() {
+            // Ternary: Prism IfNode with no if_keyword_loc
+            if if_node.if_keyword_loc().is_none() {
+                if !include_ternary {
+                    return;
+                }
+                // Ternaries always have both branches, no further checks needed
+            } else {
+                // Must have subsequent (elsif or else)
+                if if_node.subsequent().is_none() {
+                    return;
+                }
+                // SingleLineConditionsOnly: skip if any branch is multi-statement
+                if single_line_only && has_multiline_branches_if(&if_node) {
+                    return;
+                }
+            }
+        } else if let Some(unless_node) = rhs.as_unless_node() {
+            // Must have else clause
+            if unless_node.else_clause().is_none() {
+                return;
+            }
+            if single_line_only && has_multiline_branches_unless(&unless_node) {
+                return;
+            }
+        } else if let Some(case_node) = rhs.as_case_node() {
+            // Must have else clause
+            if case_node.else_clause().is_none() {
+                return;
+            }
+            if single_line_only && has_multiline_branches_case(&case_node) {
+                return;
+            }
+        } else if let Some(cm) = rhs.as_case_match_node() {
+            if cm.else_clause().is_none() {
+                return;
+            }
+            if single_line_only && has_multiline_branches_case_match(&cm) {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let loc = node.location();
+        let (line, col) = source.offset_to_line_col(loc.start_offset());
+        diagnostics.push(self.diagnostic(source, line, col, ASSIGN_TO_CONDITION_MSG.to_string()));
+    }
+}
+
+/// Extract the RHS value from any assignment node. Returns `None` for
+/// non-assignment nodes.
+fn get_assignment_value<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    // Variable writes
+    if let Some(w) = node.as_local_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_multi_write_node() {
+        return Some(w.value());
+    }
+    // Operator writes
+    if let Some(w) = node.as_local_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_call_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_index_operator_write_node() {
+        return Some(w.value());
+    }
+    // And writes
+    if let Some(w) = node.as_local_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_call_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_index_and_write_node() {
+        return Some(w.value());
+    }
+    // Or writes
+    if let Some(w) = node.as_local_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_call_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_index_or_write_node() {
+        return Some(w.value());
+    }
+    // Call nodes: setter methods, []=, <<, comparisons
+    if let Some(call) = node.as_call_node() {
+        if is_assignment_type_call(call.name().as_slice()) {
+            let args = call.arguments()?;
+            return args.arguments().iter().last();
+        }
+    }
+    None
+}
+
+/// Check if a call method name is assignment-like for this cop.
+/// Matches RuboCop's `assignment_type?` send pattern:
+/// `{:[]= :<< :=~ :!~ :<=> #end_with_eq? :< :>}`
+fn is_assignment_type_call(method: &[u8]) -> bool {
+    method.ends_with(b"=") // covers: foo=, []=, ==, ===, !=, <=, >=
+        || method == b"<<"
+        || method == b"=~"
+        || method == b"!~"
+        || method == b"<=>"
+        || method == b"<"
+        || method == b">"
+}
+
+/// Unwrap `ParenthesesNode` containing a single-expression body, matching
+/// RuboCop's `begin_type? && children.one?` unwrap in `assignment_node`.
+fn unwrap_begin_single_child(node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let items: Vec<_> = stmts.body().iter().collect();
+                if items.len() == 1 {
+                    return items.into_iter().next().unwrap();
+                }
+            }
+        }
+    }
+    node
+}
+
+/// Check if any branch of an if/elsif chain has multiple statements.
+/// Matches RuboCop's `allowed_single_line?` quirk: only the first branch
+/// and the direct subsequent (else body or elsif node as a whole) are
+/// checked. Inner elsif branches are not individually tested.
+fn has_multiline_branches_if(if_node: &ruby_prism::IfNode<'_>) -> bool {
+    if let Some(stmts) = if_node.statements() {
+        if stmts.body().len() > 1 {
+            return true;
+        }
+    }
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_node) = subsequent.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                if stmts.body().len() > 1 {
+                    return true;
+                }
+            }
+        }
+        // If subsequent is IfNode (elsif), it's not considered multi-line
+        // per RuboCop's deconstruction quirk.
+    }
+    false
+}
+
+/// Check if either branch of an unless/else has multiple statements.
+fn has_multiline_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
+    if let Some(stmts) = unless_node.statements() {
+        if stmts.body().len() > 1 {
+            return true;
+        }
+    }
+    if let Some(else_clause) = unless_node.else_clause() {
+        if let Some(stmts) = else_clause.statements() {
+            if stmts.body().len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if any when branch or else branch of a case has multiple statements.
+fn has_multiline_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
+    for condition in case_node.conditions().iter() {
+        if let Some(when_node) = condition.as_when_node() {
+            if let Some(stmts) = when_node.statements() {
+                if stmts.body().len() > 1 {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(else_clause) = case_node.else_clause() {
+        if let Some(stmts) = else_clause.statements() {
+            if stmts.body().len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if any in branch or else branch of a case_match has multiple statements.
+fn has_multiline_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool {
+    for condition in cm.conditions().iter() {
+        if let Some(in_node) = condition.as_in_node() {
+            if let Some(stmts) = in_node.statements() {
+                if stmts.body().len() > 1 {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(else_clause) = cm.else_clause() {
+        if let Some(stmts) = else_clause.statements() {
+            if stmts.body().len() > 1 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 struct AssignInfo {
@@ -819,4 +1174,37 @@ fn exceeds_line_limit(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ConditionalAssignment, "cops/style/conditional_assignment");
+
+    fn assign_inside_condition_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("assign_inside_condition".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn assign_inside_condition_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ConditionalAssignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/conditional_assignment/assign_inside_condition_offense.rb"
+            ),
+            assign_inside_condition_config(),
+        );
+    }
+
+    #[test]
+    fn assign_inside_condition_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ConditionalAssignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/conditional_assignment/assign_inside_condition_no_offense.rb"
+            ),
+            assign_inside_condition_config(),
+        );
+    }
 }
