@@ -1,6 +1,6 @@
-use crate::cop::{Cop, CopConfig};
+use crate::cop::{Cop, CopConfig, lint::syntax::is_rubocop_reported_semantic_error};
 use crate::diagnostic::Diagnostic;
-use crate::parse::source::SourceFile;
+use crate::parse::{parse_source, source::SourceFile};
 
 /// Checks for Windows-style line endings in the source code.
 ///
@@ -12,6 +12,15 @@ use crate::parse::source::SourceFile;
 /// when there is no line break to attach it to. nitrocop previously flagged such
 /// files as "Carriage return character missing." on every line, causing 108 false
 /// positives in the corpus.
+///
+/// RuboCop also never reaches `Layout/EndOfLine` when the file already produces
+/// a parser error that it reports as `Lint/Syntax` (structural parser failures,
+/// plus semantic `retry`/`return in class/module` errors that RuboCop surfaces).
+/// nitrocop's line-based pass used to run anyway and flagged the first LF line as
+/// "Carriage return character missing.", causing 6 `EnforcedStyle: crlf` false
+/// positives in parser-error files from JRuby and Rufo. The cop now suppresses
+/// only those `crlf` offenses while still flagging LF files that RuboCop accepts
+/// for `Layout/EndOfLine`, including semantic-only cases like bare `break`.
 ///
 /// @example EnforcedStyle: native (default)
 ///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
@@ -38,6 +47,22 @@ use crate::parse::source::SourceFile;
 ///   # good
 ///   puts 'Hello' # Return character is CR+LF on all platforms.
 pub struct EndOfLine;
+
+fn is_semantic_parse_error(message: &str) -> bool {
+    message.starts_with("Invalid break")
+        || message.starts_with("Invalid next")
+        || message.starts_with("Invalid redo")
+        || message.starts_with("Invalid retry")
+        || message == "Invalid yield"
+        || message.starts_with("Invalid return in class/module body")
+}
+
+fn has_rubocop_reported_parse_error(source: &SourceFile) -> bool {
+    parse_source(source.as_bytes()).errors().any(|err| {
+        let message = err.message();
+        !is_semantic_parse_error(message) || is_rubocop_reported_semantic_error(message)
+    })
+}
 
 impl Cop for EndOfLine {
     fn name(&self) -> &'static str {
@@ -104,6 +129,9 @@ impl Cop for EndOfLine {
                         break;
                     }
                     if !line.ends_with(b"\r") {
+                        if has_rubocop_reported_parse_error(source) {
+                            return;
+                        }
                         let newline_offset = byte_offset + line.len(); // position of \n
                         let mut diag = self.diagnostic(
                             source,
@@ -277,6 +305,50 @@ mod tests {
         let mut diags = Vec::new();
         EndOfLine.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1, "crlf style should flag first LF-only line");
+        assert_eq!(diags[0].message, "Carriage return character missing.");
+    }
+
+    #[test]
+    fn crlf_style_ignores_retry_syntax_error_fixture() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_no_offenses_with_config(
+            &EndOfLine,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/end_of_line/crlf_parse_error_no_offense.rb"
+            ),
+            config,
+        );
+    }
+
+    #[test]
+    fn crlf_style_still_flags_break_semantic_error() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes("test.rb", b"break\n".to_vec());
+        let mut diags = Vec::new();
+        EndOfLine.check_lines(&source, &config, &mut diags, None);
+
+        assert_eq!(
+            diags.len(),
+            1,
+            "bare break should still be flagged under crlf"
+        );
         assert_eq!(diags[0].message, "Carriage return character missing.");
     }
 }
