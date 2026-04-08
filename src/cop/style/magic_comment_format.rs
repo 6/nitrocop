@@ -20,12 +20,24 @@ use crate::parse::source::SourceFile;
 ///   with `EnforcedStyle: kebab_case`.
 /// - Fix: strip UTF-8 BOM from each line before checking if it starts with `#`.
 ///   The BOM is now removed before processing the line content.
+///
+/// Investigation findings (2026-04-08):
+/// - FP root cause (kebab_case variant): comment-only template files were still
+///   inspected even though RuboCop returns early when Prism produces no AST.
+///   This caused false positives for files that only contain generated comments
+///   plus a `frozen_string_literal` header.
+/// - FN root cause (kebab_case variant): `rbs_inline` was missing from the
+///   recognized directive set, so valid `# rbs_inline: enabled` comments were
+///   never style-checked.
+/// - Fix: skip comment-only files and recognize `rbs_inline` only when its
+///   value is RuboCop-valid (`enabled` or `disabled`).
 pub struct MagicCommentFormat;
 
 const MAGIC_COMMENT_DIRECTIVES: &[&str] = &[
     "frozen_string_literal",
     "frozen-string-literal",
     "encoding",
+    "rbs_inline",
     "shareable_constant_value",
     "shareable-constant-value",
     "typed",
@@ -41,6 +53,13 @@ impl MagicCommentFormat {
         s.strip_prefix(Self::UTF8_BOM).unwrap_or(s)
     }
 
+    fn has_code(lines: &[&str]) -> bool {
+        lines.iter().any(|line| {
+            let trimmed = Self::strip_bom(line).trim();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+    }
+
     fn directive_capitalization(config: &CopConfig) -> Option<&str> {
         match config.options.get("DirectiveCapitalization") {
             Some(value) => value.as_str(),
@@ -48,8 +67,20 @@ impl MagicCommentFormat {
         }
     }
 
-    fn is_magic_comment_directive(word: &str) -> bool {
+    fn valid_rbs_inline_value(value: &str) -> bool {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "enabled" | "disabled"
+        )
+    }
+
+    fn is_magic_comment_directive(word: &str, value: &str) -> bool {
         let normalized = word.replace(['-', '_'], "_").to_lowercase();
+
+        if normalized == "rbs_inline" {
+            return Self::valid_rbs_inline_value(value);
+        }
+
         MAGIC_COMMENT_DIRECTIVES
             .iter()
             .any(|&d| d.replace('-', "_").to_lowercase() == normalized)
@@ -106,6 +137,11 @@ impl Cop for MagicCommentFormat {
             .lines()
             .filter_map(|l| std::str::from_utf8(l).ok())
             .collect();
+
+        if !Self::has_code(&lines) {
+            return;
+        }
+
         let style = config.get_str("EnforcedStyle", "snake_case");
         let directive_capitalization = Self::directive_capitalization(config);
         let _value_capitalization = config.get_str("ValueCapitalization", "");
@@ -139,7 +175,8 @@ impl Cop for MagicCommentFormat {
                     let part = part.trim();
                     if let Some(colon_pos) = part.find(':') {
                         let directive = part[..colon_pos].trim();
-                        if Self::is_magic_comment_directive(directive) {
+                        let value = part[colon_pos + 1..].trim();
+                        if Self::is_magic_comment_directive(directive, value) {
                             if let Some(diagnostic) = self.check_directive_style(
                                 source,
                                 i,
@@ -157,7 +194,8 @@ impl Cop for MagicCommentFormat {
                 // Standard style: # directive: value
                 if let Some(colon_pos) = content.find(':') {
                     let directive = content[..colon_pos].trim();
-                    if Self::is_magic_comment_directive(directive) {
+                    let value = content[colon_pos + 1..].trim();
+                    if Self::is_magic_comment_directive(directive, value) {
                         if let Some(diagnostic) = self.check_directive_style(
                             source,
                             i,
@@ -244,6 +282,17 @@ mod tests {
             &MagicCommentFormat,
             include_bytes!(
                 "../../../tests/fixtures/cops/style/magic_comment_format/kebab_case_no_offense.rb"
+            ),
+            kebab_case_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_kebab_case_comment_only_file() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MagicCommentFormat,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/magic_comment_format/kebab_case_comment_only_no_offense.rb"
             ),
             kebab_case_config(),
         );
