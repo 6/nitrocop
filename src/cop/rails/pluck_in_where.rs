@@ -192,6 +192,21 @@ impl PluckInWhere {
                 }
             }
         }
+        // Check array elements (e.g., [*something.pluck(:id)] or [nil, *something.ids])
+        if let Some(arr) = node.as_array_node() {
+            for elem in arr.elements().iter() {
+                // Handle splat nodes (e.g., *something.ids)
+                if let Some(splat) = elem.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        if let Some(result) = self.find_pluck_call(&expr, style) {
+                            return Some(result);
+                        }
+                    }
+                } else if let Some(result) = self.find_pluck_call(&elem, style) {
+                    return Some(result);
+                }
+            }
+        }
         None
     }
 }
@@ -229,6 +244,51 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "aggressive style should flag non-constant receiver pluck"
+        );
+    }
+
+    #[test]
+    fn aggressive_style_flags_splat_pluck_in_array() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("aggressive".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        // Splat of pluck inside array argument to where
+        let source = b"Post.where(id: [*items.pluck(:id)])\n";
+        let diags = run_cop_full_with_config(&PluckInWhere, source, config);
+        assert!(
+            !diags.is_empty(),
+            "aggressive style should flag pluck inside splat in array"
+        );
+    }
+
+    #[test]
+    fn aggressive_style_flags_splat_ids_in_array() {
+        use crate::cop::CopConfig;
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("aggressive".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        // Splat of ids inside array argument to where
+        let source =
+            b"Post.where('starter_file_entries.id': [nil, *self.starter_file_entries.ids])\n";
+        let diags = run_cop_full_with_config(&PluckInWhere, source, config);
+        assert!(
+            !diags.is_empty(),
+            "aggressive style should flag ids inside splat in array"
         );
     }
 }
