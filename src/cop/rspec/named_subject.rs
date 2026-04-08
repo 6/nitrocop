@@ -63,6 +63,17 @@ use ruby_prism::Visit;
 /// (e.g., `if subject.is_a?(Foo)`), and `subject` in before/around hooks
 /// within shared_context. All patterns confirmed handled by the
 /// `is_shared_group_call` fix. Added 3 inline tests covering these patterns.
+///
+/// ## Corpus investigation (FP=2, named_only, 2026-04-08)
+///
+/// Both FPs were in `ruby-concurrency/concurrent-ruby` with
+/// `subject(:actor, &subject_definition)` inside an example group. In RuboCop's
+/// parser AST, that shape is a `send` with a `block_pass`, not a `subject { ... }`
+/// block node, so `NamedSubject` does not treat it as a subject definition for
+/// `named_only`. Prism stores the `&subject_definition` as `call.block()`, which
+/// made `find_subject_in_block` incorrectly classify it as a named subject
+/// definition. Fix: only treat `subject`/`subject!` calls with an actual
+/// `BlockNode` body as subject definitions.
 pub struct NamedSubject;
 
 /// EnforcedStyle:
@@ -127,7 +138,11 @@ fn find_subject_in_block(block_node: &ruby_prism::BlockNode<'_>) -> Option<bool>
             let name = call.name().as_slice();
             if (name == b"subject" || name == b"subject!")
                 && call.receiver().is_none()
-                && call.block().is_some()
+                // `subject(:name, &builder)` stores the block pass in
+                // `call.block()` as a BlockArgumentNode. RuboCop only treats
+                // real `subject { ... }` / `subject! { ... }` block nodes as
+                // subject definitions for `named_only`.
+                && call.block().is_some_and(|block| block.as_block_node().is_some())
             {
                 return Some(call.arguments().is_some());
             }
@@ -506,6 +521,27 @@ mod tests {
             diags.len(),
             1,
             "subject! named definition should be recognized in named_only mode"
+        );
+    }
+
+    #[test]
+    fn named_only_ignores_subject_definition_with_block_pass() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("named_only".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &NamedSubject,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/named_subject/no_offense.named_only.rb"
+            ),
+            config,
         );
     }
 
