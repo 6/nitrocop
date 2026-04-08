@@ -77,6 +77,17 @@ use ruby_prism::Visit;
 ///    so `describe self::Foo` effectively can't match any usage. Fixed by returning
 ///    `None` from `extract_const_name_from_path` when parent is `SelfNode`.
 ///    Affected all 3 Coursemology FPs.
+///
+/// ## Variant investigation (EnforcedStyle: explicit, 1907 FP, 2026-04-08)
+///
+/// **Explicit-style offenses were still emitted inside scope-changing closures.**
+/// The visitor already tracks `in_scope_change` for `Class.new {}`, `Data.define {}`,
+/// and the six `*_eval` / `*_exec` closures to suppress constant references in the
+/// default style. But the `explicit` branch reported bare `described_class` sends
+/// without checking that flag, so cases like `Class.new(described_class) do ... end`
+/// and `described_class.class_exec do ... end` were incorrectly flagged even though
+/// RuboCop stops recursion at the enclosing block. Fixed by applying the same
+/// `in_scope_change` guard to explicit-style `described_class` sends.
 pub struct DescribedClass;
 
 impl Cop for DescribedClass {
@@ -540,6 +551,7 @@ impl<'pr> Visit<'pr> for DescribedClassVisitor<'_> {
             && name == b"described_class"
             && node.receiver().is_none()
             && node.arguments().is_none()
+            && !self.in_scope_change
             && self.described_full_name.is_some()
         {
             let loc = node.location();
@@ -686,20 +698,46 @@ mod tests {
 
     crate::cop_fixture_tests!(DescribedClass, "cops/rspec/described_class");
 
-    #[test]
-    fn explicit_style_flags_described_class() {
+    fn explicit_config() -> crate::cop::CopConfig {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
 
-        let config = CopConfig {
+        CopConfig {
             options: HashMap::from([(
                 "EnforcedStyle".into(),
                 serde_yml::Value::String("explicit".into()),
             )]),
             ..CopConfig::default()
-        };
+        }
+    }
+
+    #[test]
+    fn explicit_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &DescribedClass,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/described_class/offense.explicit.rb"
+            ),
+            explicit_config(),
+        );
+    }
+
+    #[test]
+    fn explicit_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &DescribedClass,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/described_class/no_offense.explicit.rb"
+            ),
+            explicit_config(),
+        );
+    }
+
+    #[test]
+    fn explicit_style_flags_described_class() {
         let source = b"describe MyClass do\n  it { described_class.new }\nend\n";
-        let diags = crate::testutil::run_cop_full_with_config(&DescribedClass, source, config);
+        let diags =
+            crate::testutil::run_cop_full_with_config(&DescribedClass, source, explicit_config());
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("MyClass"));
     }
