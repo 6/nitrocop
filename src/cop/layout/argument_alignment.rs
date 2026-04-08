@@ -76,6 +76,30 @@ use crate::parse::source::SourceFile;
 /// reported a false positive. Fix: compute the first-argument base column from
 /// the display width of the line prefix, while keeping the rest of the
 /// alignment logic unchanged.
+///
+/// ## Investigation findings (2026-04-08)
+///
+/// **FN root cause — `with_fixed_indentation` first-arg skipping:**
+/// The alignment loop used `skip(1)` to always skip the first effective
+/// argument. For `with_first_argument` this is correct (the first arg
+/// defines the expected column), but for `with_fixed_indentation` the
+/// expected column is `call_indentation + indent_width`, so the first
+/// continuation-line argument CAN be misaligned. RuboCop's
+/// `each_bad_alignment` starts with `prev_line = -1` and checks ALL items.
+/// Fix: for `with_fixed_indentation`, iterate all effective args and start
+/// with an empty `checked_lines` set.
+///
+/// **FP root cause — `indentation_of` ignoring tabs:**
+/// `indentation_of()` only counted leading spaces. RuboCop uses
+/// `/\S.*/`.begin(0)` which counts all leading whitespace bytes (including
+/// tabs). Fix: count both spaces and tabs when computing the base
+/// indentation for `with_fixed_indentation`.
+///
+/// **Message text:** `with_fixed_indentation` uses a different message
+/// ("Use one level of indentation for arguments following the first line
+/// of a multi-line method call.") than the default `with_first_argument`
+/// ("Align the arguments of a method call if they span more than one
+/// line.").
 pub struct ArgumentAlignment;
 
 impl Cop for ArgumentAlignment {
@@ -186,12 +210,21 @@ impl Cop for ArgumentAlignment {
             return;
         }
 
+        let fixed_indentation = style == "with_fixed_indentation";
+
         let first_arg = &effective_args[0];
         let first_start = first_arg.location().start_offset();
         let (first_line, first_col) = source.offset_to_line_col(first_start);
 
         let mut checked_lines = std::collections::HashSet::new();
-        checked_lines.insert(first_line);
+        // For with_first_argument, the first arg defines the expected column,
+        // so it can never be misaligned — skip its line.
+        // For with_fixed_indentation, the reference is call indentation + indent_width,
+        // so the first arg CAN be misaligned — start with empty checked_lines
+        // (matching RuboCop's prev_line = -1 in each_bad_alignment).
+        if !fixed_indentation {
+            checked_lines.insert(first_line);
+        }
 
         // For "with_fixed_indentation", the expected column is the call line's
         // indentation + indent_width
@@ -212,12 +245,29 @@ impl Cop for ArgumentAlignment {
                         .0
                 };
                 let base_line_bytes = source.lines().nth(base_line - 1).unwrap_or(b"");
-                crate::cop::shared::util::indentation_of(base_line_bytes) + indent_width
+                // Count all leading whitespace (spaces + tabs), matching RuboCop's
+                // /\S.*/.match(line).begin(0) which finds the byte offset of the
+                // first non-whitespace character.
+                let indentation = base_line_bytes
+                    .iter()
+                    .take_while(|&&b| b == b' ' || b == b'\t')
+                    .count();
+                indentation + indent_width
             }
             _ => display_column(source, first_start).unwrap_or(first_col),
         };
 
-        for arg in effective_args.iter().skip(1) {
+        let message = if fixed_indentation {
+            "Use one level of indentation for arguments following the first line of a multi-line method call."
+        } else {
+            "Align the arguments of a method call if they span more than one line."
+        };
+
+        // For with_fixed_indentation, check ALL items (including the first);
+        // for with_first_argument, skip the first (it defines the expected column).
+        let skip_count = if fixed_indentation { 0 } else { 1 };
+
+        for arg in effective_args.iter().skip(skip_count) {
             let (arg_line, arg_col) = source.offset_to_line_col(arg.location().start_offset());
             // Only check the FIRST argument on each new line
             if !checked_lines.contains(&arg_line) {
@@ -230,15 +280,12 @@ impl Cop for ArgumentAlignment {
                     continue;
                 }
                 if arg_col != expected_col {
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            arg_line,
-                            arg_col,
-                            "Align the arguments of a method call if they span more than one line."
-                                .to_string(),
-                        ),
-                    );
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        arg_line,
+                        arg_col,
+                        message.to_string(),
+                    ));
                 }
             }
         }
@@ -389,6 +436,39 @@ mod tests {
         assert!(
             diags2.is_empty(),
             "with_fixed_indentation should accept fixed-indent args"
+        );
+    }
+
+    fn fixed_indent_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("with_fixed_indentation".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn with_fixed_indentation_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ArgumentAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/argument_alignment/with_fixed_indentation_offense.rb"
+            ),
+            fixed_indent_config(),
+        );
+    }
+
+    #[test]
+    fn with_fixed_indentation_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ArgumentAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/argument_alignment/with_fixed_indentation_no_offense.rb"
+            ),
+            fixed_indent_config(),
         );
     }
 }
