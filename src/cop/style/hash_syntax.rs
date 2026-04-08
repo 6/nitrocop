@@ -212,6 +212,7 @@ enum ShorthandKind {
 }
 
 /// Check EnforcedShorthandSyntax for Ruby 3.1 hash value omission.
+#[allow(clippy::too_many_arguments)]
 fn check_shorthand_syntax(
     cop: &HashSyntax,
     source: &SourceFile,
@@ -422,7 +423,7 @@ fn modifier_form_without_parenthesized_method_call(ancestors: &[ruby_prism::Node
         return false;
     };
 
-    if method_dispatch_is_parenthesized(&dispatch) {
+    if method_dispatch_is_parenthesized(dispatch) {
         return false;
     }
 
