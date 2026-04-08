@@ -186,6 +186,19 @@ use ruby_prism::Visit;
 ///    blank-line termination logic from RuboCop's `relevant_line_indent_at_level`.
 ///
 /// Sample check (15 repos): resolved 16 FP and 63 FN with 0 regressions.
+///
+/// ## Corpus fix (2026-04-08, setter/index writes)
+///
+/// Prism parses `obj.attr = value` and `hash[:key] = value` as `CallNode`
+/// attribute writes with the standalone `=` stored in `equal_loc()`. The text
+/// scanner was still handling those `=` tokens generically, which missed
+/// RuboCop's context-sensitive alignment behavior for setter/index writes.
+///
+/// Fix: visit `CallNode` attribute writes directly, report `equal_loc()` via the
+/// AST pass, and use the first argument's start offset as the trailing alignment
+/// anchor. This matches RuboCop's `on_setter_method` behavior closely enough to
+/// accept spaced-key cases like `content[ :query  ] =  ...` without weakening
+/// existing plain-assignment or wide-padding checks.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -1603,6 +1616,22 @@ impl OperatorChecker<'_> {
 impl<'pr> Visit<'pr> for OperatorChecker<'_> {
     // === Binary operators via CallNode (including match operators and ===) ===
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if node.is_attribute_write() {
+            if let Some(equal_loc) = node.equal_loc() {
+                self.reported_offsets.insert(equal_loc.start_offset());
+
+                let trailing_anchor = node
+                    .arguments()
+                    .and_then(|args| args.arguments().iter().next())
+                    .map(|arg| arg.location().start_offset());
+
+                self.check_operator_spacing_with_trailing_anchor(&equal_loc, trailing_anchor);
+            }
+
+            ruby_prism::visit_call_node(self, node);
+            return;
+        }
+
         let name = node.name().as_slice();
 
         // Check if this is a regular binary operator call (not via .method syntax)

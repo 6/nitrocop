@@ -240,3 +240,12 @@ def empty?          = @attributes.empty?
 options   = foo
 quux()
 new_line  = true
+
+# Index write with spaced key token: RuboCop uses the key position for
+# alignment on []= calls, so the extra space after = is allowed here.
+case kind
+when 'web_search_call'
+  web_search_call_action = response_item[ :action ] || {}
+  content[ :query  ] =  web_search_call_action[ :query ]
+  content[ :status ] =  :complete
+end
