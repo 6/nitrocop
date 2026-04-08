@@ -17,6 +17,26 @@ fn char_width(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
 }
 
+/// Compute the key width as RuboCop sees it.
+///
+/// In Prism, shorthand symbol keys like `params:` include the trailing colon
+/// in `key().location().as_slice()` → `"params:"` (7 bytes). RuboCop's Parser
+/// AST gives `"params"` (6 bytes) for the same key. For hash-rocket keys like
+/// `:host =>`, both Prism and Parser give `":host"` (5 bytes).
+///
+/// Detect the shorthand form by checking whether the AssocNode has no explicit
+/// operator (operator_loc is None) and subtract the trailing colon.
+fn rubocop_key_width(assoc: &ruby_prism::AssocNode<'_>) -> usize {
+    let raw = char_width(assoc.key().location().as_slice());
+    if assoc.operator_loc().is_none() {
+        // Shorthand symbol syntax `key: value` — Prism includes the trailing
+        // colon in the key location; RuboCop does not.
+        raw.saturating_sub(1)
+    } else {
+        raw
+    }
+}
+
 fn config_style_matches(config: &CopConfig, key: &str, target: &str, default: &str) -> bool {
     match config.options.get(key) {
         Some(value) => value.as_str().is_some_and(|style| style == target),
@@ -93,6 +113,19 @@ fn config_style_matches(config: &CopConfig, key: &str, target: &str, default: &s
 /// setting is exactly the string `separator`; mixed-style arrays like
 /// `['key', 'separator']` do not trigger the offset here. Nitrocop now mirrors
 /// that exact-string check while still inheriting the raw sibling config.
+///
+/// Additionally, `first_pair_offset` had a Prism-vs-Parser key width
+/// mismatch: for shorthand symbol syntax (`key: value`), Prism includes
+/// the trailing colon in the key source (`key:` = 4 chars), while
+/// RuboCop's Parser AST does not (`key` = 3 chars). This caused wrong
+/// separator-style offsets in mixed-key hashes (e.g., `{ 1 => x, a: y }`)
+/// — 8 FPs and 5 FNs under `EnforcedStyle=consistent` with
+/// `EnforcedHashRocketStyle=separator`. Fix: `rubocop_key_width()` adjusts
+/// for the trailing colon when `operator_loc()` is `None`.
+///
+/// The 4 `align_braces` FPs in jruby are phantom FPs caused by jruby's
+/// RuboCop run timing out in the corpus pipeline (empty JSON output).
+/// Both tools produce identical offenses on the affected code.
 pub struct FirstHashElementIndentation;
 
 impl Cop for FirstHashElementIndentation {
@@ -239,12 +272,12 @@ impl HashIndentVisitor<'_> {
             return 0;
         }
 
-        let first_key_width = char_width(first_assoc.key().location().as_slice());
+        let first_key_width = rubocop_key_width(&first_assoc);
         let max_key_width = hash_node
             .elements()
             .iter()
             .filter_map(|elem| elem.as_assoc_node())
-            .map(|assoc| char_width(assoc.key().location().as_slice()))
+            .map(|assoc| rubocop_key_width(&assoc))
             .max()
             .unwrap_or(first_key_width);
 
@@ -818,6 +851,66 @@ mod tests {
             diags.len(),
             1,
             "RuboCop ignores mixed-style arrays here and still expects consistent indentation"
+        );
+    }
+
+    fn consistent_separator_full_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("consistent".into()),
+                ),
+                (
+                    "EnforcedColonStyle".into(),
+                    serde_yml::Value::String("separator".into()),
+                ),
+                (
+                    "EnforcedHashRocketStyle".into(),
+                    serde_yml::Value::String("separator".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn consistent_separator_mixed_keys_no_fp() {
+        use crate::testutil::run_cop_full_with_config;
+
+        // Mixed key styles: integer with =>, symbols with shorthand colon.
+        // All single-char keys after adjustment — offset should be 0.
+        // RuboCop (Parser) sees key lengths [1, 1, 1], nitrocop must match.
+        let src = b"x = {\n  1 => 'a',\n  a: 'b',\n  b: 'c'\n}\n";
+        let diags = run_cop_full_with_config(
+            &FirstHashElementIndentation,
+            src,
+            consistent_separator_full_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "should not flag correctly indented mixed-key hash; got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn consistent_separator_over_indented_fn() {
+        use crate::testutil::run_cop_full_with_config;
+
+        // Over-indented hash with mixed key styles.
+        // RuboCop flags :host at column 10 (expected 8 from line indent 6 + width 2 + offset 1).
+        // Prism key widths must match Parser to detect this.
+        let src = b"      options = {\n          :host => 'example.com',\n          path: '/page',\n          params: {},\n      }\n";
+        let diags = run_cop_full_with_config(
+            &FirstHashElementIndentation,
+            src,
+            consistent_separator_full_config(),
+        );
+        assert!(
+            !diags.is_empty(),
+            "should flag over-indented first element in mixed-key hash"
         );
     }
 }
