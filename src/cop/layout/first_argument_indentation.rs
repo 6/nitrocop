@@ -117,6 +117,19 @@ use crate::parse::source::SourceFile;
 /// divergence under the non-default style. RuboCop also treats a call as
 /// "inner" when it is the receiver of an eligible parent send that starts
 /// earlier, such as `!!ActiveModel::Type::Boolean.new.cast(...)`.
+///
+/// **Variant FN fix (`consistent_relative_to_receiver`, 1 FN):** Calls with
+/// only a block argument like `foo.map(&method(:bar))` were missed because
+/// Prism stores `&expr` in `node.block()` as a `BlockArgumentNode`, not in
+/// `node.arguments()`. RuboCop's parser gem treats block_pass as a regular
+/// argument. Fixed by checking `block_arg_start_offset` as a fallback when
+/// `arguments` is None.
+///
+/// **Remaining variant FP (`consistent_relative_to_receiver`, 1 FP):**
+/// `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:2086` — RuboCop's
+/// parser gem crashes on this file (`invalid byte sequence in UTF-8`) and
+/// reports 0 offenses. Prism parses it fine, so nitrocop correctly flags the
+/// offense. This is a parser difference, not a detection bug.
 pub struct FirstArgumentIndentation;
 
 impl Cop for FirstArgumentIndentation {
@@ -181,6 +194,10 @@ struct ParentCallInfo {
 struct CallMetadata<'a> {
     name: &'a str,
     has_attached_block: bool,
+    /// Start offset of a block argument (`&expr`) when no regular arguments exist.
+    /// In Prism, `foo(&block)` stores the block arg in `node.block()`, not
+    /// `node.arguments()`, while RuboCop's parser gem treats it as a regular argument.
+    block_arg_start_offset: Option<usize>,
 }
 
 impl FirstArgVisitor<'_> {
@@ -193,21 +210,24 @@ impl FirstArgVisitor<'_> {
         arguments: Option<ruby_prism::ArgumentsNode<'_>>,
         metadata: CallMetadata<'_>,
     ) {
-        // Must have arguments (parenthesized or not)
-        let args_node = match arguments {
-            Some(a) => a,
-            None => return,
+        // Must have arguments (parenthesized or not).
+        // In Prism, `foo(&block)` stores the block arg in `node.block()`, not
+        // `node.arguments()`. Use block_arg_start_offset as a fallback.
+        let first_arg_start_offset = if let Some(args_node) = arguments {
+            let args: Vec<_> = args_node.arguments().iter().collect();
+            if args.is_empty() {
+                return;
+            }
+            args[0].location().start_offset()
+        } else if let Some(offset) = metadata.block_arg_start_offset {
+            offset
+        } else {
+            return;
         };
+
         let has_regular_dot = call_operator_loc
             .as_ref()
             .is_some_and(|loc| loc.as_slice() == b".");
-
-        let args: Vec<_> = args_node.arguments().iter().collect();
-        if args.is_empty() {
-            return;
-        }
-
-        let first_arg = &args[0];
 
         // Use message_loc (method name) for determining the call line.
         // This handles chained calls where call_start_offset would be on
@@ -222,8 +242,7 @@ impl FirstArgVisitor<'_> {
             .unwrap_or(call_start_offset);
         let (call_line, _) = self.source.offset_to_line_col(call_line_offset);
 
-        let first_arg_loc = first_arg.location();
-        let (arg_line, arg_col) = self.source.offset_to_line_col(first_arg_loc.start_offset());
+        let (arg_line, arg_col) = self.source.offset_to_line_col(first_arg_start_offset);
 
         // Skip if first arg is on same line as method call
         if arg_line == call_line {
@@ -237,7 +256,7 @@ impl FirstArgVisitor<'_> {
 
         let expected = self.compute_expected_indent(
             call_start_offset,
-            first_arg_loc.start_offset(),
+            first_arg_start_offset,
             arg_line,
             metadata.has_attached_block,
         );
@@ -249,7 +268,7 @@ impl FirstArgVisitor<'_> {
                 arg_col,
                 self.message(
                     call_start_offset,
-                    first_arg_loc.start_offset(),
+                    first_arg_start_offset,
                     metadata.has_attached_block,
                 ),
             ));
@@ -531,6 +550,19 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
         let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
         let call_operator_loc = node.call_operator_loc();
 
+        let block = node.block();
+        let has_attached_block = block.as_ref().and_then(|b| b.as_block_node()).is_some();
+        // In Prism, `foo(&expr)` with no regular args stores the block arg
+        // in node.block() as a BlockArgumentNode, not in node.arguments().
+        let block_arg_start_offset = if node.arguments().is_none() {
+            block
+                .as_ref()
+                .and_then(|b| b.as_block_argument_node())
+                .map(|ba| ba.location().start_offset())
+        } else {
+            None
+        };
+
         // Check this call node for first argument indentation
         self.check_call(
             call_start_offset,
@@ -540,7 +572,8 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             node.arguments(),
             CallMetadata {
                 name: name_str,
-                has_attached_block: node.block().and_then(|b| b.as_block_node()).is_some(),
+                has_attached_block,
+                block_arg_start_offset,
             },
         );
 
@@ -549,8 +582,8 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
         let is_parenthesized = node.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
         let is_eligible = is_eligible_parent_call(name_str);
 
-        // Collect argument start offsets
-        let arg_start_offsets: Vec<usize> = node
+        // Collect argument start offsets (including block argument when no regular args)
+        let mut arg_start_offsets: Vec<usize> = node
             .arguments()
             .map(|args| {
                 args.arguments()
@@ -559,6 +592,9 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(offset) = block_arg_start_offset {
+            arg_start_offsets.push(offset);
+        }
 
         let parent_info = ParentCallInfo {
             call_start_offset,
@@ -588,6 +624,7 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             CallMetadata {
                 name: "super",
                 has_attached_block: false,
+                block_arg_start_offset: None,
             },
         );
 
