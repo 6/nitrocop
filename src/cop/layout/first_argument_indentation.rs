@@ -105,12 +105,18 @@ use crate::parse::source::SourceFile;
 /// from a `*`/`**` wrapper when the call is splatted. nitrocop previously used
 /// the call start column unconditionally, which produced false positives like
 /// `puts x.\n  merge(\n    b: 2` and `*Dir.glob(\n    File.expand_path(`.
+/// RuboCop only includes the splat marker when the immediate parent is the
+/// splat node. A chained inner call like
+/// `*incoming_exchange.variants.merge(...).map(&:id)` still bases indentation
+/// on `incoming_exchange.variants.merge(`, not on `*`.
 ///
 /// **Variant fix (`special_for_inner_method_call`):** RuboCop's
 /// `eligible_method_call?` for the outer send excludes only `[]=`. nitrocop was
 /// reusing the child-call skip logic and incorrectly rejected bare-operator and
 /// setter parents like `<<` and `foo.bar =`, which caused inner-call variant
-/// divergence under the non-default style.
+/// divergence under the non-default style. RuboCop also treats a call as
+/// "inner" when it is the receiver of an eligible parent send that starts
+/// earlier, such as `!!ActiveModel::Type::Boolean.new.cast(...)`.
 pub struct FirstArgumentIndentation;
 
 impl Cop for FirstArgumentIndentation {
@@ -159,10 +165,14 @@ struct FirstArgVisitor<'a> {
 }
 
 struct ParentCallInfo {
+    /// The start offset of the entire parent call expression.
+    call_start_offset: usize,
+    /// The start offset of the parent receiver when it is present.
+    receiver_start_offset: Option<usize>,
     /// Whether the parent call has parenthesized arguments
     is_parenthesized: bool,
     /// The start offsets of each argument in the parent call, so we can check
-    /// if the current call node is one of the parent's arguments
+    /// if the current call node is one of the parent's direct arguments.
     arg_start_offsets: Vec<usize>,
     /// RuboCop outer-send eligibility: any send except `[]=`
     is_eligible: bool,
@@ -278,7 +288,11 @@ impl FirstArgVisitor<'_> {
         first_arg_start_offset: usize,
         arg_line: usize,
     ) -> usize {
-        let base_start_offset = base_range_start_offset(self.source, call_start_offset);
+        let base_start_offset = base_range_start_offset(
+            self.source,
+            call_start_offset,
+            self.has_same_start_parent_call(call_start_offset),
+        );
         let (base_start_line, base_start_col) = self.source.offset_to_line_col(base_start_offset);
         let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
 
@@ -314,26 +328,18 @@ impl FirstArgVisitor<'_> {
                 return false;
             }
 
-            // The call must be an argument of the parent (not just any descendant).
-            // We check if call_start_offset matches any of the parent's argument
-            // start offsets or is contained within one of them.
-            // Actually, RuboCop checks: node.source_range.begin_pos > parent.source_range.begin_pos
-            // which means the inner call starts inside the parent call (not being the
-            // first part of a chained call).
-            // Since we're inside the parent's argument visitor, we know we're a descendant.
-            // We just need to verify the call starts after the parent call start
-            // (which is always true for arguments).
-            // But we also need to make sure the current call IS a direct argument,
-            // not just a deeply nested expression. For simplicity, we check if
-            // call_start_offset appears in the parent's arg_start_offsets.
-            // Actually, RuboCop just checks that the node is a direct child argument
-            // of the parent. It walks up one level via node.parent. We can simulate
-            // this by checking if the call_start_offset matches one of the parent's
-            // argument start offsets.
             parent.arg_start_offsets.contains(&call_start_offset)
+                || (parent.receiver_start_offset == Some(call_start_offset)
+                    && call_start_offset > parent.call_start_offset)
         } else {
             false
         }
+    }
+
+    fn has_same_start_parent_call(&self, call_start_offset: usize) -> bool {
+        self.parent_call_stack
+            .last()
+            .is_some_and(|parent| parent.call_start_offset == call_start_offset)
     }
 
     fn uses_base_range_message(&self, call_start_offset: usize, has_attached_block: bool) -> bool {
@@ -350,7 +356,11 @@ impl FirstArgVisitor<'_> {
         first_arg_start_offset: usize,
         has_attached_block: bool,
     ) -> String {
-        let base_start_offset = base_range_start_offset(self.source, call_start_offset);
+        let base_start_offset = base_range_start_offset(
+            self.source,
+            call_start_offset,
+            self.has_same_start_parent_call(call_start_offset),
+        );
         let base_text = self
             .source
             .try_byte_slice(base_start_offset, first_arg_start_offset)
@@ -463,10 +473,15 @@ fn leading_whitespace_count(line: &[u8]) -> usize {
         .count()
 }
 
-fn base_range_start_offset(source: &SourceFile, call_start_offset: usize) -> usize {
+fn base_range_start_offset(
+    source: &SourceFile,
+    call_start_offset: usize,
+    has_same_start_parent_call: bool,
+) -> usize {
     let bytes = source.as_bytes();
 
-    if call_start_offset >= 2
+    if !has_same_start_parent_call
+        && call_start_offset >= 2
         && bytes.get(call_start_offset - 2) == Some(&b'*')
         && bytes.get(call_start_offset - 1) == Some(&b'*')
         && is_splat_boundary(bytes.get(call_start_offset - 3).copied())
@@ -474,7 +489,8 @@ fn base_range_start_offset(source: &SourceFile, call_start_offset: usize) -> usi
         return call_start_offset - 2;
     }
 
-    if call_start_offset >= 1
+    if !has_same_start_parent_call
+        && call_start_offset >= 1
         && bytes.get(call_start_offset - 1) == Some(&b'*')
         && is_splat_boundary(bytes.get(call_start_offset - 2).copied())
     {
@@ -545,6 +561,10 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             .unwrap_or_default();
 
         let parent_info = ParentCallInfo {
+            call_start_offset,
+            receiver_start_offset: node
+                .receiver()
+                .map(|receiver| receiver.location().start_offset()),
             is_parenthesized,
             arg_start_offsets,
             is_eligible,
@@ -588,6 +608,8 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             .unwrap_or_default();
 
         let parent_info = ParentCallInfo {
+            call_start_offset,
+            receiver_start_offset: None,
             is_parenthesized,
             arg_start_offsets,
             is_eligible: false,
@@ -602,7 +624,7 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::run_cop_full;
+    use crate::testutil::{run_cop_full, run_cop_full_with_config};
     use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
@@ -749,6 +771,39 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/first_argument_indentation/special_for_inner_method_call_offense.rb"
             ),
             config_with_enforced_style("special_for_inner_method_call"),
+        );
+    }
+
+    #[test]
+    fn special_for_inner_method_call_treats_operator_parent_receiver_as_inner_call() {
+        let source =
+            b"foo = !!ActiveModel::Type::Boolean.new.cast(\n  params[:include_staged_users],\n)\n";
+        let diags = run_cop_full_with_config(
+            &FirstArgumentIndentation,
+            source,
+            config_with_enforced_style("special_for_inner_method_call"),
+        );
+
+        assert_eq!(diags.len(), 1, "expected one offense, got: {:?}", diags);
+        assert_eq!(
+            diags[0].message,
+            "Indent the first argument one step more than `ActiveModel::Type::Boolean.new.cast(`."
+        );
+    }
+
+    #[test]
+    fn consistent_relative_to_receiver_ignores_outer_splat_for_inner_chain_call() {
+        let source = b"values.push(\n  *incoming_exchange.variants.merge(\n    visible_incoming_variants(incoming_exchange.sender)\n  ).map(&:id).to_a\n)\n";
+        let diags = run_cop_full_with_config(
+            &FirstArgumentIndentation,
+            source,
+            config_with_enforced_style("consistent_relative_to_receiver"),
+        );
+
+        assert_eq!(diags.len(), 1, "expected one offense, got: {:?}", diags);
+        assert_eq!(
+            diags[0].message,
+            "Indent the first argument one step more than `incoming_exchange.variants.merge(`."
         );
     }
 }
