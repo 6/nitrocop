@@ -23,7 +23,8 @@ struct ShadowingContext {
     inherited_cond_map: Vec<InheritedCondEntry>,
     when_condition_ranges: Vec<(usize, usize, usize)>,
     when_body_ranges: Vec<(usize, usize, usize)>,
-    assignment_rhs_ranges: Vec<(usize, usize, usize)>,
+    /// (var_name, lhs_offset, rhs_start, rhs_end).
+    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize)>,
     block_body_ranges: Vec<(usize, usize, usize)>,
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
@@ -185,9 +186,62 @@ impl ShadowingContext {
     fn is_in_assignment_rhs(&self, lhs_offset: usize, param_offset: usize) -> bool {
         self.assignment_rhs_ranges
             .iter()
-            .any(|(lhs, rhs_start, rhs_end)| {
+            .any(|(_, lhs, rhs_start, rhs_end)| {
                 *lhs == lhs_offset && *rhs_start <= param_offset && param_offset < *rhs_end
             })
+    }
+
+    /// Check if a block param is in the RHS of a reassignment to the same
+    /// variable, where the first declaration is structurally equivalent.
+    ///
+    /// This replicates a RuboCop quirk: `variable_used_in_declaration_of_outer?`
+    /// uses `each_ancestor.any?(declaration_node)` which compares via `==`
+    /// (structural equality in parser gem). When `var = expr { |var| }` is
+    /// repeated with identical RHS, the lvasgn nodes are structurally equal,
+    /// causing suppression even though the block is in a different assignment.
+    fn is_in_reassignment_rhs_with_structural_match(
+        &self,
+        var_name: &[u8],
+        outer_offset: usize,
+        param_offset: usize,
+    ) -> bool {
+        // Find which reassignment the param is inside.
+        let current_rhs =
+            self.assignment_rhs_ranges
+                .iter()
+                .find(|(name, lhs, rhs_start, rhs_end)| {
+                    name == var_name
+                        && *lhs != outer_offset
+                        && *rhs_start <= param_offset
+                        && param_offset < *rhs_end
+                });
+        let Some((_, _, curr_rhs_start, curr_rhs_end)) = current_rhs else {
+            return false;
+        };
+        let curr_rhs_len = curr_rhs_end - curr_rhs_start;
+
+        // Find the first declaration's RHS.
+        let original_rhs = self
+            .assignment_rhs_ranges
+            .iter()
+            .find(|(name, lhs, _, _)| name == var_name && *lhs == outer_offset);
+        let Some((_, _, orig_rhs_start, orig_rhs_end)) = original_rhs else {
+            return false;
+        };
+        let orig_rhs_len = orig_rhs_end - orig_rhs_start;
+
+        // Check structural equivalence: both RHS must have the same byte length
+        // AND the first declaration's RHS must also contain a block. Identical
+        // byte length is a strong proxy for parser gem structural equality since
+        // the same source text yields the same AST.
+        if orig_rhs_len != curr_rhs_len {
+            return false;
+        }
+
+        // Verify the first declaration's RHS also contains a block.
+        self.block_body_ranges.iter().any(|(block_start, _, _)| {
+            *block_start >= *orig_rhs_start && *block_start < *orig_rhs_end
+        })
     }
 
     /// `def self.foo` and `class << self` are modeled as twisted scopes by
@@ -208,28 +262,6 @@ impl ShadowingContext {
                 *start <= param_offset
                     && param_offset < *end
                     && !(*start <= outer_offset && outer_offset < *end)
-            })
-    }
-
-    /// Check if a variable assignment at `lhs_offset` has a sibling-branch
-    /// assignment for the same variable name. Used to detect cases like
-    /// `unless cond; x = foo { |x| }; else; x = bar; end` where the sibling
-    /// branch's assignment means RuboCop's VF would see a different outer
-    /// variable (from the sibling), making the RHS suppression inapplicable.
-    fn has_sibling_branch_assignment(&self, lhs_offset: usize, var_name: &[u8]) -> bool {
-        // Find the branch write entry for this lhs_offset
-        let this_entry = self
-            .branch_var_writes
-            .iter()
-            .find(|(name, _, _, lhs)| *lhs == lhs_offset && name == var_name);
-        let Some((_, cond_offset, branch_offset, _)) = this_entry else {
-            return false;
-        };
-        // Check if any other entry has the same cond_offset but different branch_offset
-        self.branch_var_writes
-            .iter()
-            .any(|(name, cond, branch, _)| {
-                name == var_name && *cond == *cond_offset && *branch != *branch_offset
             })
     }
 
@@ -394,11 +426,11 @@ impl ShadowingContext {
 ///    `is_in_assignment_rhs` check (for `foo = bar { |foo| }`) was gated behind an
 ///    `outer_in_branch_body` guard that blocked it whenever the outer variable was
 ///    inside a conditional branch body. This was too broad: the suppression is valid
-///    in branches (e.g. `elsif` body with `ami = items.find { |ami| }`). The only
-///    case where it should NOT apply is when a sibling branch of the same conditional
-///    also assigns the same variable (because our VF visit order differs from RuboCop's).
-///    Fix: replaced `outer_in_branch_body` guard with targeted `has_sibling_branch_assignment`
-///    check that tracks per-branch variable writes via the context collector.
+///    in branches (e.g. `elsif` body with `ami = items.find { |ami| }`). Fix: the
+///    VF engine's `visit_unless_node` was also visiting branches in wrong order
+///    (body then else) vs RuboCop (else then body via parser gem's `(if cond B A)`
+///    representation). Fixing the VF visit order + removing the over-broad guard
+///    makes `is_in_assignment_rhs` work correctly for all branch configurations.
 ///
 /// 4. **FP: `def self...` / `class << self` body leakage.** VariableForce keeps
 ///    `defs` and singleton-class nodes twisted so receiver expressions stay in the
@@ -634,14 +666,15 @@ impl variable_force::VariableForceConsumer for ShadowingOuterLocalVariable {
             // the RHS range of the SAME assignment node that declared the outer
             // variable, so it cannot suppress a different assignment or a block
             // in a separate statement.
-            //
-            // Exception: when a sibling branch of the same conditional also assigns
-            // the same variable. In RuboCop's VF (which may visit branches in a
-            // different order, e.g., else-first for unless), the outer variable
-            // would come from the sibling branch, making this suppression incorrect.
-            if ctx.is_in_assignment_rhs(outer_offset, param_offset)
-                && !ctx.has_sibling_branch_assignment(outer_offset, name)
-            {
+            if ctx.is_in_assignment_rhs(outer_offset, param_offset) {
+                return false;
+            }
+
+            // Check for reassignment RHS suppression (RuboCop structural equality
+            // quirk). When `var = expr { |var| }` is reassigned with the same pattern,
+            // RuboCop's `variable_used_in_declaration_of_outer?` suppresses because
+            // the parser gem's `==` considers the lvasgn nodes structurally equal.
+            if ctx.is_in_reassignment_rhs_with_structural_match(name, outer_offset, param_offset) {
                 return false;
             }
 
@@ -739,7 +772,7 @@ struct ContextCollector {
     inherited_cond_map: Vec<InheritedCondEntry>,
     when_condition_ranges: Vec<(usize, usize, usize)>,
     when_body_ranges: Vec<(usize, usize, usize)>,
-    assignment_rhs_ranges: Vec<(usize, usize, usize)>,
+    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize)>,
     block_body_ranges: Vec<(usize, usize, usize)>,
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
@@ -1030,10 +1063,12 @@ impl<'pr> Visit<'pr> for ContextCollector {
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let var_name = node.name().as_slice().to_vec();
         let lhs_offset = node.location().start_offset();
         let start = node.value().location().start_offset();
         let end = node.value().location().end_offset();
-        self.assignment_rhs_ranges.push((lhs_offset, start, end));
+        self.assignment_rhs_ranges
+            .push((var_name.clone(), lhs_offset, start, end));
         // Record branch context for this variable write (used to detect
         // sibling-branch assignments for the same variable).
         if let Some(entry) = self.conditional_branch_stack.last() {
@@ -1095,8 +1130,12 @@ impl<'pr> Visit<'pr> for ContextCollector {
         // Record each LHS target's offset as mapping to the RHS range
         for target in node.lefts().iter() {
             if let Some(t) = target.as_local_variable_target_node() {
-                self.assignment_rhs_ranges
-                    .push((t.location().start_offset(), rhs_start, rhs_end));
+                self.assignment_rhs_ranges.push((
+                    t.name().as_slice().to_vec(),
+                    t.location().start_offset(),
+                    rhs_start,
+                    rhs_end,
+                ));
             }
         }
         if let Some(rest) = node.rest() {
@@ -1104,6 +1143,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 if let Some(expr) = splat.expression() {
                     if let Some(t) = expr.as_local_variable_target_node() {
                         self.assignment_rhs_ranges.push((
+                            t.name().as_slice().to_vec(),
                             t.location().start_offset(),
                             rhs_start,
                             rhs_end,
@@ -1114,8 +1154,12 @@ impl<'pr> Visit<'pr> for ContextCollector {
         }
         for target in node.rights().iter() {
             if let Some(t) = target.as_local_variable_target_node() {
-                self.assignment_rhs_ranges
-                    .push((t.location().start_offset(), rhs_start, rhs_end));
+                self.assignment_rhs_ranges.push((
+                    t.name().as_slice().to_vec(),
+                    t.location().start_offset(),
+                    rhs_start,
+                    rhs_end,
+                ));
             }
         }
         self.expression_depth += 1;

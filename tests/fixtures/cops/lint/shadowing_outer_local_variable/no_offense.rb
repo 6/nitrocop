@@ -452,3 +452,54 @@ def handle_result(items, flag)
     items.each { |val| process_val(val) }
   end
 end
+
+# FP fix: reassignment with block param — RuboCop suppresses via structural
+# equality of lvasgn nodes in `variable_used_in_declaration_of_outer?`.
+# When `var = expr { |var| }` is repeated, the lvasgn nodes are structurally
+# equal, so the ancestor check matches.
+def test_method
+  graph = RDF::Graph.new do |graph|
+    graph << reader
+  end
+  graph.statements
+
+  graph = RDF::Graph.new do |graph|
+    graph << reader
+  end
+  graph.statements
+end
+
+# FP fix: reassignment with block param (orthoses pattern — multiple unless blocks between)
+def test_lazy(t)
+  called = []
+  tp = Orthoses::LazyTracePoint.new(:call) do |tp|
+    called << tp
+  end
+  tp.enable {}
+
+  unless !tp.enabled?
+    t.error("nope")
+  end
+
+  called = []
+  tp = Orthoses::LazyTracePoint.new(:call) do |tp|
+    called << tp
+  end
+  tp.enable {}
+end
+
+# FP fix: reassignment with detect block param
+def close_window(title)
+  if title
+    win = Redcar.app.windows.detect{|win| win.title == title }
+  else
+    win = Redcar.app.focussed_window
+  end
+  win.close
+end
+
+# FP fix: reassignment with execute block param
+def check_package(name, opts)
+  result = execute("zypper se #{name}", opts) { |result| result }
+  result.stdout.include?('found')
+end

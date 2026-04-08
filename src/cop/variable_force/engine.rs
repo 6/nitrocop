@@ -845,17 +845,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             self.branch_depth -= 1;
         }
 
+        // Visit else clause FIRST, then unless body. The parser gem
+        // represents `unless cond; A; else; B; end` as `(if cond B A)`,
+        // so RuboCop's VF visits B (the else clause, as if-branch) before
+        // A (the unless body, as else-branch). We must match this order
+        // for `find_variable` to return the same declaration_offset as
+        // RuboCop's VF.
         let body_child = if pred_has_write { 1 } else { 0 };
         self.branch_depth += 1;
-        self.push_branch(parent_id, body_child);
-        if let Some(stmts) = node.statements() {
-            for stmt in stmts.body().iter() {
-                self.visit(&stmt);
-            }
-        }
-        self.pop_branch();
         if let Some(else_clause) = node.else_clause() {
-            self.push_branch(parent_id, body_child + 1);
+            self.push_branch(parent_id, body_child);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -863,6 +862,13 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
             self.pop_branch();
         }
+        self.push_branch(parent_id, body_child + 1);
+        if let Some(stmts) = node.statements() {
+            for stmt in stmts.body().iter() {
+                self.visit(&stmt);
+            }
+        }
+        self.pop_branch();
         self.branch_depth -= 1;
     }
 
