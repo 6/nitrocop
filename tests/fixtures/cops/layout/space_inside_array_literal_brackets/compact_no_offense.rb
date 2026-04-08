@@ -36,3 +36,12 @@ end
 ]
 # Mixed: real array + %w — only left side is multi-dim
 [[ 1, 2 ], %w[a b] ]
+# Multiline with nested arrays — brackets on different lines are NOT collapsed
+[
+  [ :A, :D, false ],
+  [ :N, :A, true ]
+]
+[
+  [ 1, 2, 3 ],
+  [ 4, 5, 6 ]
+]

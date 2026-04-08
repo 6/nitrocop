@@ -492,12 +492,13 @@ fn next_line_starts_with_comment(bytes: &[u8], pos: usize) -> bool {
     bytes.get(i) == Some(&b'#')
 }
 
-/// Check if the next non-whitespace character (including newlines) after `pos` is `[`.
+/// Check if the next non-whitespace character on the same line after `pos` is `[`.
+/// Stops at newlines — RuboCop only collapses adjacent brackets on the same line.
 fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i < bytes.len() {
         match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
+            b' ' | b'\t' => i += 1,
             b'[' => return true,
             _ => return false,
         }
@@ -505,14 +506,15 @@ fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
     false
 }
 
-/// Check if the previous non-whitespace character (including newlines) before `pos` is `]`
+/// Check if the previous non-whitespace character on the same line before `pos` is `]`
 /// from a real bracket array (not `%w[...]`, `%i[...]`, etc.).
+/// Stops at newlines — RuboCop only collapses adjacent brackets on the same line.
 fn is_adjacent_bracket_backward(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i > 0 {
         i -= 1;
         match bytes[i] {
-            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b' ' | b'\t' => continue,
             b']' => {
                 // Found `]` — find its matching `[` via bracket counting,
                 // then check it's not a %w[/%i[/etc. delimiter.
@@ -704,32 +706,24 @@ mod tests {
     }
 
     #[test]
-    fn compact_multiline_collapse_opening() {
+    fn compact_multiline_no_collapse_across_lines() {
         use crate::testutil::run_cop_full_with_config;
-        // Multiline: [ followed by newline then [ should collapse
+        // RuboCop does NOT collapse brackets across newlines — only same-line.
+        // Opening [ on one line, inner [ on the next → no collapse offense.
         let src = b"multiline = [\n  [ 1, 2, 3, 4 ],\n  [ 3, 4, 5, 6 ]]\n";
         let diags =
             run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
-        assert_eq!(
-            diags.len(),
-            1,
-            "multiline [ \\n [ should flag collapse at opening"
+        assert!(
+            !diags.iter().any(|d| d.message.contains("detected")),
+            "multiline [ \\n [ should NOT collapse across lines"
         );
-        assert!(diags[0].message.contains("detected"));
-    }
-
-    #[test]
-    fn compact_multiline_collapse_closing() {
-        use crate::testutil::run_cop_full_with_config;
-        // Multiline: ] followed by newline then ] should collapse
+        // Closing ] on one line, outer ] on the next → no collapse offense.
         let src = b"multiline = [[ 1, 2, 3, 4 ],\n  [ 3, 4, 5, 6 ]\n]\n";
         let diags =
             run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
-        assert_eq!(
-            diags.len(),
-            1,
-            "multiline ] \\n ] should flag collapse at closing"
+        assert!(
+            !diags.iter().any(|d| d.message.contains("detected")),
+            "multiline ] \\n ] should NOT collapse across lines"
         );
-        assert!(diags[0].message.contains("detected"));
     }
 }
