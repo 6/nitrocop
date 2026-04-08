@@ -269,6 +269,13 @@ opt = (mailer.default_url_options || {})
 loop { (i = 1) }
 [1].each { |x| (i = x) }
 foo { (x = bar) }
+# Assignment in ternary branch — RuboCop keeps these parens
+inject({}) { |hah, err| hah.merge(err) { |key, old_v, new_v| (new_v.is_a?(Array) ? (old_v |= new_v) : old_v.merge(new_v)) } }
+# Assignment in conditional bodies — RuboCop keeps these parens
+(x += 1) unless cond
+if cond
+  (x += 1)
+end
 # Non-empty while body — RuboCop only flags the empty-body form
 while (pop_messages(queue_url, 10).length > 0)
   work
