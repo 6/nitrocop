@@ -394,7 +394,7 @@ fn variable_context_start_offset(
         if let Some(parent) = ancestors.last() {
             if matches!(parent.kind, AncestorKind::Send) {
                 let node_start = node.location().start_offset();
-                let is_argument = parent.arguments_span.map_or(false, |(arg_start, arg_end)| {
+                let is_argument = parent.arguments_span.is_some_and(|(arg_start, arg_end)| {
                     node_start >= arg_start && node_start < arg_end
                 });
                 if is_argument {
