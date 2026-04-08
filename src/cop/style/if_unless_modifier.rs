@@ -139,6 +139,15 @@ use ruby_prism::Visit;
 /// parenthesization. Comments like `# :nodoc:` on the previous line falsely
 /// matched `:`. Fixed by stripping trailing comments before the check.
 ///
+/// FN root cause (2026-04-08): that trailing-comment stripper also treated
+/// string interpolation markers like `#{...}` as comments when they were
+/// preceded by whitespace on the previous line. That truncated lines such as
+/// `changes = ["Study file updated: #{@study_file.upload_file_name}"]` to a
+/// trailing `:`, incorrectly forced `(body if cond)`, and pushed several
+/// nested modifier forms from 119 chars to 121 chars. Fixed by ignoring
+/// interpolation markers (`#{...}`, `#@ivar`, `#$gvar`) in
+/// `strip_trailing_comment`.
+///
 /// FN root cause (2026-04-08): `first_line_comment_text` only found comments
 /// that were the first non-whitespace after the condition/predicate end. Comments
 /// after `then` keyword (e.g. `if cond then # comment`) were missed because
@@ -416,11 +425,16 @@ impl<'pr> Visit<'pr> for NestedConditionalFinder {
 /// Strip trailing comment from a line. Finds the first `#` preceded by
 /// whitespace (or at position 0) and returns the trimmed text before it.
 /// This prevents comment text like `# :nodoc:` from falsely matching
-/// operators like `=`, `:`, or `=>`.
+/// operators like `=`, `:`, or `=>`. Ignore interpolation markers like
+/// `#{...}`, `#@ivar`, and `#$gvar` — they are part of string content,
+/// not Ruby comments.
 fn strip_trailing_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b'#' && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') {
+        if b == b'#'
+            && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t')
+            && !matches!(bytes.get(i + 1), Some(b'{' | b'@' | b'$'))
+        {
             return line[..i].trim_end();
         }
     }
@@ -1250,7 +1264,8 @@ impl Cop for IfUnlessModifier {
         .into_owned();
 
         let mut expression = format!("{body_text} {keyword} {cond_text}");
-        if parenthesize_modifier_form(source, &kw_loc) {
+        let needs_parens = parenthesize_modifier_form(source, &kw_loc);
+        if needs_parens {
             expression = format!("({expression})");
         }
         if let Some(comment) = first_line_comment_text(source, kw_line, &predicate) {
