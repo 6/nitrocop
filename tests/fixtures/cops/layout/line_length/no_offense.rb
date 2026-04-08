@@ -56,5 +56,8 @@ puts "\nFor all saved admins, copy and paste into the wiki at https://wiki.trans
 # AllowURI: JSON-escaped URL with \\/\\/ slashes — URI regex matches the scheme and the escaped URL is valid
       expect(json_body["url"]).to eq("https:\\/\\/example.com\\/very\\/long\\/path\\/that\\/pushes\\/the\\/line\\/over\\/limit")
 
+# AllowURI: URLs with # fragments inside array brackets — "] after closing " is array bracket, not RDoc link
+x = {equivalentClass: ["http://purl.org/dc/dcmitype/Dataset", "http://rdfs.org/ns/void#Dataset", "http://www.w3.org/ns/dcat#Dataset"]}
+
 __END__
 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
