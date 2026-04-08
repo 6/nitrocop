@@ -79,13 +79,114 @@ use crate::parse::source::SourceFile;
 ///    Fix: compute argument length directly from the parameter source location
 ///    without adding a leading space.
 ///
-/// Remaining FP (33): files with parser-gem-incompatible encoding (e.g., jruby's
-/// `# coding: US-ASCII` test files with `[\x0-\xff]` regex) fail to parse in the
-/// parser gem, so RuboCop skips them entirely. Prism parses them fine, so nitrocop
-/// flags methods. This is a systemic Prism-vs-parser divergence not fixable per-cop.
+/// ## Variant-style fixes (2026-04-08, continued)
+///
+/// Two more `require_single_line` mismatches came from parser-gem compatibility:
+///
+/// 8. **Parser-incompatible encoded files**: some MRI/JRuby fixture files parse in
+///    Prism but not in RuboCop's parser gem, so RuboCop never runs this cop there.
+///    The confirmed cases were:
+///    - `# coding: US-ASCII` files containing `\x80`-style regexp escapes
+///    - non-UTF8 files with explicit magic encodings such as `fileencoding=euc-jp`
+///    For `require_single_line`, skip the cop on those parser-incompatible sources.
+///
+/// 9. **Heredoc-bearing call expression spans**: parser-gem `node.body.source` /
+///    `single_line?` stop at the heredoc opener line for calls like
+///    `assert_separately("#{<<~BEGIN}...")` or `execute <<-SQL`, while Prism's
+///    `location()` spans the full heredoc content. The fix uses a parser-like end
+///    offset for heredoc-bearing call nodes when checking single-line bodies and
+///    replacement length.
 pub struct EndlessMethod;
 
 impl EndlessMethod {
+    fn hex_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    fn declared_encoding(source: &SourceFile) -> Option<String> {
+        for line in source.lines().take(3) {
+            let lower: Vec<u8> = line.iter().map(u8::to_ascii_lowercase).collect();
+
+            for marker in [
+                b"fileencoding=".as_slice(),
+                b"encoding:".as_slice(),
+                b"coding:".as_slice(),
+            ] {
+                let Some(idx) = lower
+                    .windows(marker.len())
+                    .position(|window| window == marker)
+                else {
+                    continue;
+                };
+
+                let mut start = idx + marker.len();
+                while let Some(byte) = lower.get(start) {
+                    if byte.is_ascii_whitespace() {
+                        start += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                let mut end = start;
+                while let Some(byte) = lower.get(end) {
+                    if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                if end > start {
+                    return std::str::from_utf8(&lower[start..end])
+                        .ok()
+                        .map(str::to_string);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn contains_non_ascii_hex_escape(source: &SourceFile) -> bool {
+        source.lines().any(|line| {
+            let trimmed = line.iter().copied().skip_while(u8::is_ascii_whitespace);
+            if trimmed.into_iter().next() == Some(b'#') {
+                return false;
+            }
+
+            line.windows(4).any(|window| {
+                if window[0] != b'\\' || window[1] != b'x' {
+                    return false;
+                }
+
+                match (Self::hex_value(window[2]), Self::hex_value(window[3])) {
+                    (Some(high), Some(low)) => ((high << 4) | low) > 0x7f,
+                    _ => false,
+                }
+            })
+        })
+    }
+
+    fn rubocop_parser_incompatible_source(source: &SourceFile) -> bool {
+        let Some(encoding) = Self::declared_encoding(source) else {
+            return false;
+        };
+
+        let invalid_utf8 = std::str::from_utf8(source.as_bytes()).is_err();
+        if invalid_utf8 && !matches!(encoding.as_str(), "utf-8" | "utf8") {
+            return true;
+        }
+
+        matches!(encoding.as_str(), "us-ascii" | "ascii")
+            && Self::contains_non_ascii_hex_escape(source)
+    }
+
     /// Returns true if the node has a heredoc opening (`<<`).
     fn has_heredoc_opening(opening: Option<ruby_prism::Location<'_>>) -> bool {
         opening.is_some_and(|loc| loc.as_slice().starts_with(b"<<"))
@@ -139,10 +240,11 @@ impl EndlessMethod {
                     // In the parser gem, a heredoc with multi-line content (2+
                     // newlines) becomes :dstr, not :str. RuboCop's
                     // `each_descendant(:str)` won't find :dstr nodes, so only
-                    // single-line content heredocs (≤1 newline) are detected.
+                    // non-empty single-line content heredocs (exactly 1 newline)
+                    // are detected here. Empty nested heredocs become :dstr too.
                     let content = node.unescaped();
                     let newline_count = content.iter().filter(|&&b| b == b'\n').count();
-                    if newline_count <= 1 {
+                    if newline_count == 1 {
                         self.found = true;
                     }
                 }
@@ -172,6 +274,104 @@ impl EndlessMethod {
             return Self::has_heredoc_opening(Some(s.opening_loc()));
         }
         false
+    }
+
+    /// Returns true if the node or any descendant contains a heredoc, including
+    /// interpolated and empty heredocs that RuboCop may still treat as regular
+    /// expressions for this cop.
+    fn node_contains_any_heredoc(node: &ruby_prism::Node<'_>) -> bool {
+        use ruby_prism::Visit;
+
+        if Self::is_string_heredoc(node) {
+            return true;
+        }
+
+        struct AnyHeredocVisitor {
+            found: bool,
+        }
+
+        impl<'pr> Visit<'pr> for AnyHeredocVisitor {
+            fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+                if !self.found && EndlessMethod::has_heredoc_opening(node.opening_loc()) {
+                    self.found = true;
+                    return;
+                }
+                ruby_prism::visit_string_node(self, node);
+            }
+
+            fn visit_interpolated_string_node(
+                &mut self,
+                node: &ruby_prism::InterpolatedStringNode<'pr>,
+            ) {
+                if !self.found && EndlessMethod::has_heredoc_opening(node.opening_loc()) {
+                    self.found = true;
+                    return;
+                }
+                ruby_prism::visit_interpolated_string_node(self, node);
+            }
+
+            fn visit_x_string_node(&mut self, node: &ruby_prism::XStringNode<'pr>) {
+                if !self.found && EndlessMethod::has_heredoc_opening(Some(node.opening_loc())) {
+                    self.found = true;
+                    return;
+                }
+                ruby_prism::visit_x_string_node(self, node);
+            }
+
+            fn visit_interpolated_x_string_node(
+                &mut self,
+                node: &ruby_prism::InterpolatedXStringNode<'pr>,
+            ) {
+                if !self.found && EndlessMethod::has_heredoc_opening(Some(node.opening_loc())) {
+                    self.found = true;
+                    return;
+                }
+                ruby_prism::visit_interpolated_x_string_node(self, node);
+            }
+        }
+
+        let mut visitor = AnyHeredocVisitor { found: false };
+        visitor.visit(node);
+        visitor.found
+    }
+
+    fn line_end_offset(source: &SourceFile, start_offset: usize) -> usize {
+        let bytes = source.as_bytes();
+        let line_len = bytes[start_offset..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(bytes.len().saturating_sub(start_offset));
+        start_offset + line_len
+    }
+
+    /// Prism spans heredoc-bearing calls across the whole heredoc content, while
+    /// parser-gem source ranges stop at the call syntax line. Match RuboCop's
+    /// source length and `single_line?` behavior for those calls.
+    fn parser_like_expression_end_offset(
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+    ) -> usize {
+        if let Some(call) = node.as_call_node() {
+            if let Some(closing_loc) = call.closing_loc() {
+                return closing_loc.end_offset();
+            }
+
+            if Self::node_contains_any_heredoc(node) {
+                return Self::line_end_offset(source, node.location().start_offset());
+            }
+        }
+
+        node.location().end_offset()
+    }
+
+    fn parser_like_single_line(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+        let start_offset = node.location().start_offset();
+        let end_offset = Self::parser_like_expression_end_offset(source, node);
+        let start_line = source.offset_to_line_col(start_offset).0;
+        let end_line = source
+            .offset_to_line_col(end_offset.saturating_sub((end_offset > start_offset) as usize))
+            .0;
+        start_line == end_line
     }
 
     fn is_single_line(source: &SourceFile, loc: &ruby_prism::Location<'_>) -> bool {
@@ -217,7 +417,7 @@ impl EndlessMethod {
         }
 
         // Default: check full expression span
-        Self::is_single_line(source, &node.location())
+        Self::parser_like_single_line(source, node)
     }
 
     fn single_body_statement(body: ruby_prism::Node<'_>) -> Option<ruby_prism::Node<'_>> {
@@ -264,8 +464,13 @@ impl EndlessMethod {
             Some(body) => body,
             None => return 0,
         };
-        let body_loc = body.location();
-        let body_src = source.byte_slice(body_loc.start_offset(), body_loc.end_offset(), "");
+        let stmt = match Self::single_body_statement(body) {
+            Some(stmt) => stmt,
+            None => return 0,
+        };
+        let body_start = stmt.location().start_offset();
+        let body_end = Self::parser_like_expression_end_offset(source, &stmt);
+        let body_src = source.byte_slice(body_start, body_end, "");
         let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
 
         // Match RuboCop: arguments source without leading space for
@@ -393,6 +598,14 @@ impl Cop for EndlessMethod {
         }
 
         let style = config.get_str("EnforcedStyle", "allow_single_line");
+
+        // Verified against RuboCop on the corpus FP files: parser-gem rejects
+        // some encoded sources that Prism still parses, so this cop never runs
+        // there under `require_single_line`.
+        if style == "require_single_line" && Self::rubocop_parser_incompatible_source(source) {
+            return;
+        }
+
         let is_endless = def_node.end_keyword_loc().is_none() && def_node.equal_loc().is_some();
 
         match style {

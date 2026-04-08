@@ -46,3 +46,22 @@ def apply_vector_operator operator, vector, other
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/EndlessMethod: Use endless method definitions for single line methods.
   BoolArray.new(vector.zip(other).map { |d, o| !!d.send(operator, o) })
 end
+
+# Parser-gem `body.single_line?` uses the call expression source up to the
+# heredoc opener, not the full Prism span including heredoc content.
+def heredoc_arg
+^^^^^^^^^^^^^^^ Style/EndlessMethod: Use endless method definitions for single line methods.
+  assert_separately([], "#{<<-"BEGIN"}\n#{<<-'END'}")
+  BEGIN
+  puts 1
+  puts 2
+  END
+end
+
+# Empty nested heredoc becomes parser-gem `:dstr`, so RuboCop does not skip it
+# via `use_heredoc?` and still requires an endless method.
+def down
+^^^^^^^^ Style/EndlessMethod: Use endless method definitions for single line methods.
+  execute <<-SQL
+  SQL
+end
