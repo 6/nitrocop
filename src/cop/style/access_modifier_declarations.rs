@@ -78,7 +78,9 @@ use ruby_prism::Visit;
 /// Fix: added `visit_*_write_node` overrides for assignment node types that push
 /// `NotMacroScope`, breaking the macro scope chain. For class constructor blocks,
 /// push `InMacroScope` (class-like scope) instead of wrapper scope so they
-/// re-establish macro scope regardless of wrapping assignments.
+/// re-establish macro scope regardless of wrapping assignments. Also added
+/// `visit_and_node`/`visit_or_node` since logical operators are likewise
+/// non-transparent (e.g. `defined?(X) and Klass.class_eval do ... end`).
 pub struct AccessModifierDeclarations;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -665,6 +667,26 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
         access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
     }
 
+    // Logical `and`/`or` nodes are not transparent parents in RuboCop's
+    // `in_macro_scope?`. For example:
+    //   defined?(PTY) and SomeClass.class_eval do
+    //     private
+    //     def helper; end
+    //   end
+    // The `and` wrapper breaks macro scope so `private` is not flagged.
+
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_and_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_or_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let saved_next_block_owner_kind = self.next_block_owner_kind;
         let saved_next_block_group_scope = self.next_block_group_scope;
@@ -918,6 +940,20 @@ mod tests {
         assert!(
             diags.is_empty(),
             "inline style should NOT flag bare modifier in block under local variable assignment, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_in_block_under_and_expression() {
+        // defined?(X) and SomeClass.class_eval do ... private ... def helper ... end
+        // In RuboCop, the `and` node is not a transparent parent for in_macro_scope?,
+        // so the block's contents are not in macro scope and bare modifiers are skipped.
+        let source = b"defined?(PTY) and defined?(IO.console) and TestIO_Console.class_eval do\n  private\n  def helper; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier in block under and expression, got: {:?}",
             diags
         );
     }
