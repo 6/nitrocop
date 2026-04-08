@@ -94,6 +94,21 @@ use crate::parse::source::SourceFile;
 /// should be flagged. Prism parses the backtick command as `XStringNode`, and
 /// RuboCop treats `begin(xstr, str)` as static because both child nodes are
 /// literal-like. Added `XStringNode` handling in `is_static_value`.
+///
+/// ## Corpus investigation (2026-04-08, `EnforcedStyle: block`)
+///
+/// Variant divergence was a mix of one FP/FN location split plus two real
+/// detector gaps:
+/// 1. Offenses were reported at the whole send location (`allow(...)`) instead
+///    of the `and_return` selector. On multiline chains this produced paired
+///    corpus mismatches like 24pullrequests `:140` (our FP) vs `:142`
+///    (RuboCop's offense).
+/// 2. Bare keyword-hash arguments (`and_return(foo: 42)`) were treated as
+///    dynamic because Prism uses `KeywordHashNode`, while RuboCop still treats
+///    them as static via `recursive_literal_or_const?`.
+/// 3. The block-style branch was broader than RuboCop: RuboCop only flags
+///    `and_return` calls that contain a receiverless `receive(...)` matcher,
+///    and it ignores multi-argument `and_return(1, 2)` as dynamic.
 pub struct ReturnFromStub;
 impl Cop for ReturnFromStub {
     fn name(&self) -> &'static str {
@@ -157,20 +172,18 @@ impl Cop for ReturnFromStub {
         // "block" style: flag `.and_return(value)` — prefer block form
         if enforced_style == "block" {
             if method_name == b"and_return" {
-                if let Some(recv) = call.receiver() {
-                    if recv.as_call_node().is_some() {
-                        if let Some(args) = call.arguments() {
-                            let arg_list: Vec<_> = args.arguments().iter().collect();
-                            if !arg_list.is_empty() && arg_list.iter().all(|a| is_static_value(a)) {
-                                let loc = call.location();
-                                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                                diagnostics.push(self.diagnostic(
-                                    source,
-                                    line,
-                                    column,
-                                    "Use a block for static values.".to_string(),
-                                ));
-                            }
+                if contains_receive_matcher(node) {
+                    if let Some(args) = call.arguments() {
+                        let arg_list: Vec<_> = args.arguments().iter().collect();
+                        if arg_list.len() == 1 && is_static_value(&arg_list[0]) {
+                            let loc = call.message_loc().unwrap_or(call.location());
+                            let (line, column) = source.offset_to_line_col(loc.start_offset());
+                            diagnostics.push(self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Use block for static values.".to_string(),
+                            ));
                         }
                     }
                 }
@@ -257,6 +270,33 @@ impl Cop for ReturnFromStub {
             "Use `and_return` for static values.".to_string(),
         ));
     }
+}
+
+fn contains_receive_matcher(node: &ruby_prism::Node<'_>) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if call.name().as_slice() == b"receive" && call.receiver().is_none() {
+        return true;
+    }
+
+    if let Some(recv) = call.receiver() {
+        if contains_receive_matcher(&recv) {
+            return true;
+        }
+    }
+
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            if contains_receive_matcher(&arg) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if a call chain has `receive` as the root method name (without looking for blocks).
@@ -367,6 +407,16 @@ fn is_static_value(node: &ruby_prism::Node<'_>) -> bool {
         });
     }
 
+    if let Some(keyword_hash) = node.as_keyword_hash_node() {
+        return keyword_hash.elements().iter().all(|e| {
+            if let Some(assoc) = e.as_assoc_node() {
+                is_static_value(&assoc.key()) && is_static_value(&assoc.value())
+            } else {
+                false
+            }
+        });
+    }
+
     false
 }
 
@@ -375,22 +425,25 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReturnFromStub, "cops/rspec/return_from_stub");
 
-    #[test]
-    fn block_style_flags_and_return() {
-        use crate::cop::CopConfig;
+    fn block_style_config() -> CopConfig {
         use std::collections::HashMap;
 
-        let config = CopConfig {
+        CopConfig {
             options: HashMap::from([(
                 "EnforcedStyle".into(),
                 serde_yml::Value::String("block".into()),
             )]),
             ..CopConfig::default()
-        };
+        }
+    }
+
+    #[test]
+    fn block_style_flags_and_return() {
+        let config = block_style_config();
         let source = b"allow(foo).to receive(:bar).and_return(42)\n";
         let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
         assert_eq!(diags.len(), 1);
-        assert!(diags[0].message.contains("block"));
+        assert_eq!(diags[0].message, "Use block for static values.");
     }
 
     #[test]
@@ -409,17 +462,43 @@ mod tests {
 
     #[test]
     fn block_style_does_not_flag_block_form() {
-        use crate::cop::CopConfig;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("block".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = block_style_config();
         let source = b"allow(foo).to receive(:bar) { 42 }\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn block_style_flags_keyword_hash_argument() {
+        let config = block_style_config();
+        let source = b"allow(i).to receive(:settings).and_return(multiple: true, select_values: [\"handhelds\", \"fridges\"])\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Use block for static values.");
+    }
+
+    #[test]
+    fn block_style_reports_selector_location() {
+        let config = block_style_config();
+        let source = b"allow(controller).to receive(:repo_with_labels)\n  .with('24pullrequests/24pullrequests')\n  .and_return({ data: { repository: { html_url: \"/foo\" }, labels: ['foo', 'bar'] }, status: 200 })\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 3);
+        assert_eq!(diags[0].location.column, 3);
+    }
+
+    #[test]
+    fn block_style_ignores_irrelevant_and_return() {
+        let config = block_style_config();
+        let source = b"library.visit.and_return(42)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn block_style_ignores_multiple_return_values() {
+        let config = block_style_config();
+        let source = b"allow(foo).to receive(:bar).and_return(42, 43, 44)\n";
         let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
         assert!(diags.is_empty());
     }
