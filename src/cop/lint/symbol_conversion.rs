@@ -483,6 +483,67 @@ fn value_starts_with_identifier(value: &[u8]) -> bool {
         .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Check if a symbol node is inside a `undef` statement.
+/// In `EnforcedStyle: consistent`, RuboCop's `properly_quoted?` doesn't
+/// short-circuit on quote-less sources, so bare symbols in `undef` are flagged
+/// (e.g., `undef is_a?` → "use `:is_a?` instead").
+///
+/// Handles both simple `undef foo` and comma-separated `undef foo, bar`.
+fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
+    let start = sym.location().start_offset();
+    let src = source.as_bytes();
+    if start < 6 {
+        return false;
+    }
+
+    let mut pos = start;
+
+    // Skip whitespace
+    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+        pos -= 1;
+    }
+
+    // Direct `undef foo`
+    if pos >= 5 && &src[pos - 5..pos] == b"undef" {
+        return pos == 5 || !is_identifier_continue(src[pos - 6]);
+    }
+
+    // `undef foo, bar` — skip back over comma and previous arguments
+    while pos > 0 && src[pos - 1] == b',' {
+        pos -= 1; // skip comma
+
+        // Skip whitespace (including newlines for multi-line undef)
+        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
+            pos -= 1;
+        }
+
+        // Skip a bare symbol backward: optional suffix (?/!/=), then identifier body
+        let start_pos = pos;
+        if pos > 0 && matches!(src[pos - 1], b'?' | b'!' | b'=') {
+            pos -= 1;
+        }
+        while pos > 0 && is_identifier_continue(src[pos - 1]) {
+            pos -= 1;
+        }
+
+        if pos == start_pos {
+            return false;
+        }
+
+        // Skip whitespace
+        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+            pos -= 1;
+        }
+
+        // Check for `undef`
+        if pos >= 5 && &src[pos - 5..pos] == b"undef" {
+            return pos == 5 || !is_identifier_continue(src[pos - 6]);
+        }
+    }
+
+    false
+}
+
 /// Check if a symbol node is an argument to the `alias` keyword.
 /// RuboCop skips alias arguments because a symbol requiring quoting is not a
 /// valid method identifier, so flagging it would be unhelpful.
@@ -680,6 +741,10 @@ impl SymbolConversion {
             if matches!(opening, Some(b":\"" | b":'")) && is_rocket_hash_key(source, sym) {
                 return;
             }
+            // Skip bare hash keys (e.g., `foo:` in `{ foo: 1 }`) — source ends with `:`
+            if opening.is_none() && src.ends_with(b":") {
+                return;
+            }
         }
 
         if is_colon_hash_key {
@@ -713,6 +778,10 @@ impl SymbolConversion {
         match opening {
             Some(b":\"" | b":'") => {}
             _ if is_percent_s => {}
+            // In consistent mode, bare symbols in `undef` should be checked.
+            // RuboCop's `properly_quoted?` doesn't short-circuit for quote-less
+            // sources, so `undef is_a?` fires ("use `:is_a?` instead").
+            _ if !is_strict && opening.is_none() && is_in_undef(source, sym) => {}
             _ => return,
         }
 
@@ -1468,6 +1537,28 @@ mod tests {
                 diags[0].message
             );
         }
+    }
+
+    #[test]
+    fn consistent_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SymbolConversion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/lint/symbol_conversion/consistent_offense.rb"
+            ),
+            consistent_config(),
+        );
+    }
+
+    #[test]
+    fn consistent_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SymbolConversion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/lint/symbol_conversion/consistent_no_offense.rb"
+            ),
+            consistent_config(),
+        );
     }
 
     fn consistent_config() -> crate::cop::CopConfig {
