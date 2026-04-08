@@ -42,6 +42,14 @@ puts $+
 
 puts $&
 
+puts $MATCH
+
+puts $PREMATCH
+
+puts $POSTMATCH
+
+puts $LAST_PAREN_MATCH
+
 puts $`
 
 # Regular globals are not flagged
