@@ -39,11 +39,16 @@ use crate::parse::source::SourceFile;
 /// - Fix: added `as_interpolated_symbol_node()` to `is_immutable_literal()`.
 ///   Unlike plain `SymbolNode`, `InterpolatedSymbolNode` was missing from the check.
 ///
-/// - FN: Range constants (bare `1..10` and parenthesized `(1..10)`) were NOT
-///   being flagged in strict mode. RuboCop does flag them — its
-///   `immutable_literal?` does NOT include ranges. Both bare `RangeNode` and
-///   the `is_parenthesized_range` helper were incorrectly in the immutable
-///   list. Removed both so ranges are correctly flagged in strict mode.
+/// ## 2026-04-08 investigation (strict mode variant)
+///
+/// - FP: range constants (e.g. `200..299`, `MIN..MAX`, `(1..99)`) were
+///   incorrectly flagged in strict mode. RuboCop treats regexp and range
+///   literals as immutable when `TargetRubyVersion >= 3.0`.
+/// - Root cause: a prior strict-mode change removed ranges from the immutable
+///   path entirely, which matched neither the vendored RuboCop source nor the
+///   corpus examples.
+/// - Fix: thread `TargetRubyVersion` into strict-mode literal checks and treat
+///   regexps/ranges, including parenthesized ranges, as immutable only on Ruby 3.0+.
 pub struct MutableConstant;
 
 impl MutableConstant {
@@ -131,9 +136,26 @@ impl MutableConstant {
         false
     }
 
-    /// For `strict` mode: check if the value is an immutable literal
-    /// (numbers, symbols, booleans, nil, regexps, ranges in Ruby 3.0+).
-    fn is_immutable_literal(node: &ruby_prism::Node<'_>) -> bool {
+    /// For `strict` mode: check if the value is an immutable literal.
+    /// Regexp and range literals are frozen only on Ruby 3.0+.
+    fn is_immutable_literal(node: &ruby_prism::Node<'_>, target_ruby_version: f64) -> bool {
+        if let Some(parentheses) = node.as_parentheses_node() {
+            let Some(body) = parentheses.body() else {
+                return false;
+            };
+
+            if let Some(statements) = body.as_statements_node() {
+                let body = statements.body();
+                if body.len() != 1 {
+                    return false;
+                }
+                let inner = body.iter().next().unwrap();
+                return Self::is_immutable_literal(&inner, target_ruby_version);
+            }
+
+            return Self::is_immutable_literal(&body, target_ruby_version);
+        }
+
         node.as_integer_node().is_some()
             || node.as_float_node().is_some()
             || node.as_symbol_node().is_some()
@@ -145,11 +167,10 @@ impl MutableConstant {
             || node.as_imaginary_node().is_some()
             || node.as_source_line_node().is_some()
             || node.as_source_encoding_node().is_some()
-            || node.as_regular_expression_node().is_some()
-            || node.as_interpolated_regular_expression_node().is_some()
-        // NOTE: RangeNode (bare or parenthesized) is NOT included here.
-        // RuboCop's immutable_literal? does not include ranges — they are
-        // flagged in strict mode.
+            || (target_ruby_version >= 3.0
+                && (node.as_regular_expression_node().is_some()
+                    || node.as_interpolated_regular_expression_node().is_some()
+                    || node.as_range_node().is_some()))
     }
 
     /// For `strict` mode: check if operation produces an immutable object.
@@ -448,6 +469,7 @@ impl MutableConstant {
         value: &ruby_prism::Node<'_>,
         frozen_strings: bool,
         enforced_style: &str,
+        target_ruby_version: f64,
     ) -> Vec<Diagnostic> {
         // Already frozen via .freeze call
         if Self::is_frozen_value(value) {
@@ -461,7 +483,7 @@ impl MutableConstant {
 
         if enforced_style == "strict" {
             // Strict mode: flag everything that isn't immutable
-            if Self::is_immutable_literal(value) {
+            if Self::is_immutable_literal(value, target_ruby_version) {
                 return Vec::new();
             }
             if Self::operation_produces_immutable_object(value) {
@@ -523,40 +545,106 @@ impl Cop for MutableConstant {
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "literals");
         let frozen_strings = Self::has_frozen_string_literal_true(source);
+        let target_ruby_version = target_ruby_version(config);
 
         // Check ConstantWriteNode (CONST = value)
         if let Some(cw) = node.as_constant_write_node() {
             let value = cw.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                target_ruby_version,
+            ));
             return;
         }
 
         // Check ConstantPathWriteNode (Module::CONST = value)
         if let Some(cpw) = node.as_constant_path_write_node() {
             let value = cpw.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                target_ruby_version,
+            ));
             return;
         }
 
         // Check ConstantOrWriteNode (CONST ||= value)
         if let Some(cow) = node.as_constant_or_write_node() {
             let value = cow.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                target_ruby_version,
+            ));
             return;
         }
 
         // Check ConstantPathOrWriteNode (Module::CONST ||= value)
         if let Some(cpow) = node.as_constant_path_or_write_node() {
             let value = cpow.value();
-            diagnostics.extend(self.check_value(source, &value, frozen_strings, enforced_style));
+            diagnostics.extend(self.check_value(
+                source,
+                &value,
+                frozen_strings,
+                enforced_style,
+                target_ruby_version,
+            ));
         }
     }
+}
+
+fn target_ruby_version(config: &CopConfig) -> f64 {
+    config
+        .options
+        .get("TargetRubyVersion")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_u64().map(|value| value as f64))
+        })
+        .unwrap_or(2.7)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use crate::testutil::assert_cop_no_offenses_full_with_config;
     crate::cop_fixture_tests!(MutableConstant, "cops/style/mutable_constant");
+
+    fn strict_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".into(),
+            serde_yml::Value::String("strict".into()),
+        );
+        options.insert(
+            "TargetRubyVersion".into(),
+            serde_yml::Value::Number(4.into()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn strict_no_offense_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &MutableConstant,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/mutable_constant/strict_no_offense.rb"
+            ),
+            strict_config(),
+        );
+    }
 
     /// XStringNode (backtick) should be flagged even with frozen_string_literal: true.
     /// The magic comment only freezes str/dstr, not xstr.
