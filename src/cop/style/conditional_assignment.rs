@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{
     CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE, CASE_MATCH_NODE,
@@ -16,6 +18,13 @@ use crate::cop::shared::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+
+// Tracks assignment node ranges for `assign_inside_condition` to suppress
+// nested assignments (mirrors RuboCop's `ignore_node`/`part_of_ignored_node?`).
+// Cleared per file via `check_source`.
+thread_local! {
+    static IGNORED_ASSIGN_RANGES: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+}
 
 const MSG: &str = "Use the return of the conditional for variable assignment and comparison.";
 const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals.";
@@ -117,6 +126,19 @@ impl Cop for ConditionalAssignment {
             // Call nodes (setter, []=, <<, comparisons)
             CALL_NODE,
         ]
+    }
+
+    fn check_source(
+        &self,
+        _source: &SourceFile,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        _config: &CopConfig,
+        _diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        // Clear per-file state for assign_inside_condition nested-assignment suppression.
+        IGNORED_ASSIGN_RANGES.with(|ranges| ranges.borrow_mut().clear());
     }
 
     fn check_node(
@@ -509,6 +531,11 @@ impl ConditionalAssignment {
     /// Check for the `assign_inside_condition` variant.
     /// Flags assignment nodes (variable writes, setter calls, etc.) whose RHS
     /// is a conditional (if/unless/case/case_match).
+    ///
+    /// Mirrors RuboCop's `ignore_node`/`part_of_ignored_node?` mechanism:
+    /// assignments nested inside another assignment's RHS are suppressed.
+    /// RuboCop calls `ignore_node` on every candidate assignment node
+    /// (unconditionally), so ALL descendant assignments are skipped.
     fn check_assign_inside_condition(
         &self,
         source: &SourceFile,
@@ -516,6 +543,32 @@ impl ConditionalAssignment {
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
+        // Only process assignment-like nodes (not conditionals visited for
+        // the default style). Check this before the nesting logic.
+        if get_assignment_value(node).is_none() {
+            return;
+        }
+
+        let loc = node.location();
+        let node_start = loc.start_offset();
+        let node_end = node_start + loc.as_slice().len();
+
+        // Suppress assignments nested inside another assignment's source range
+        // (mirrors RuboCop's part_of_ignored_node?).
+        let is_nested = IGNORED_ASSIGN_RANGES.with(|ranges| {
+            ranges
+                .borrow()
+                .iter()
+                .any(|&(s, e)| node_start > s && node_end <= e)
+        });
+        if is_nested {
+            return;
+        }
+
+        // Record this assignment's range unconditionally (mirrors RuboCop's
+        // ignore_node — called before checking if the RHS is a conditional).
+        IGNORED_ASSIGN_RANGES.with(|ranges| ranges.borrow_mut().push((node_start, node_end)));
+
         let single_line_only = config.get_bool("SingleLineConditionsOnly", true);
         let include_ternary = config.get_bool("IncludeTernaryExpressions", true);
 
@@ -535,14 +588,19 @@ impl ConditionalAssignment {
                 if !include_ternary {
                     return;
                 }
-                // Ternaries always have both branches, no further checks needed
+                // Ternaries also respect SingleLineConditionsOnly:
+                // skip if any branch is parenthesized (begin_type? in RuboCop)
+                if single_line_only && has_begin_type_branches_ternary(&if_node) {
+                    return;
+                }
             } else {
                 // Must have subsequent (elsif or else)
                 if if_node.subsequent().is_none() {
                     return;
                 }
                 // SingleLineConditionsOnly: skip if any branch is multi-statement
-                if single_line_only && has_multiline_branches_if(&if_node) {
+                // or has a parenthesized expression (begin_type? in RuboCop)
+                if single_line_only && has_begin_type_branches_if(&if_node) {
                     return;
                 }
             }
@@ -551,7 +609,7 @@ impl ConditionalAssignment {
             if unless_node.else_clause().is_none() {
                 return;
             }
-            if single_line_only && has_multiline_branches_unless(&unless_node) {
+            if single_line_only && has_begin_type_branches_unless(&unless_node) {
                 return;
             }
         } else if let Some(case_node) = rhs.as_case_node() {
@@ -559,21 +617,20 @@ impl ConditionalAssignment {
             if case_node.else_clause().is_none() {
                 return;
             }
-            if single_line_only && has_multiline_branches_case(&case_node) {
+            if single_line_only && has_begin_type_branches_case(&case_node) {
                 return;
             }
         } else if let Some(cm) = rhs.as_case_match_node() {
             if cm.else_clause().is_none() {
                 return;
             }
-            if single_line_only && has_multiline_branches_case_match(&cm) {
+            if single_line_only && has_begin_type_branches_case_match(&cm) {
                 return;
             }
         } else {
             return;
         }
 
-        let loc = node.location();
         let (line, col) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(source, line, col, ASSIGN_TO_CONDITION_MSG.to_string()));
     }
@@ -718,40 +775,80 @@ fn unwrap_begin_single_child(node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_>
     node
 }
 
-/// Check if any branch of an if/elsif chain has multiple statements.
+/// Check if a statements body is `begin_type?` in RuboCop terms.
+/// In the parser gem, `begin_type?` covers both multi-statement bodies
+/// (wrapped in a `begin` node) AND single parenthesized expressions
+/// (`(expr)` → `(begin expr)`). Prism represents parenthesized expressions
+/// as `ParenthesesNode`, which we check here alongside `body.len() > 1`.
+fn stmts_is_begin_type(stmts: &ruby_prism::StatementsNode<'_>) -> bool {
+    let body = stmts.body();
+    if body.len() > 1 {
+        return true;
+    }
+    if body.len() == 1 {
+        let first = body.iter().next().unwrap();
+        if first.as_parentheses_node().is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if any branch of an if/elsif chain is begin_type?.
 /// Matches RuboCop's `allowed_single_line?` quirk: only the first branch
 /// and the direct subsequent (else body or elsif node as a whole) are
 /// checked. Inner elsif branches are not individually tested.
-fn has_multiline_branches_if(if_node: &ruby_prism::IfNode<'_>) -> bool {
+fn has_begin_type_branches_if(if_node: &ruby_prism::IfNode<'_>) -> bool {
     if let Some(stmts) = if_node.statements() {
-        if stmts.body().len() > 1 {
+        if stmts_is_begin_type(&stmts) {
             return true;
         }
     }
     if let Some(subsequent) = if_node.subsequent() {
         if let Some(else_node) = subsequent.as_else_node() {
             if let Some(stmts) = else_node.statements() {
-                if stmts.body().len() > 1 {
+                if stmts_is_begin_type(&stmts) {
                     return true;
                 }
             }
         }
-        // If subsequent is IfNode (elsif), it's not considered multi-line
+        // If subsequent is IfNode (elsif), it's not considered begin_type
         // per RuboCop's deconstruction quirk.
     }
     false
 }
 
-/// Check if either branch of an unless/else has multiple statements.
-fn has_multiline_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
+/// Check if either branch of a ternary has a parenthesized expression
+/// (begin_type? in RuboCop). This is a subset of the if branch check
+/// for ternary-specific handling.
+fn has_begin_type_branches_ternary(if_node: &ruby_prism::IfNode<'_>) -> bool {
+    if let Some(stmts) = if_node.statements() {
+        if stmts_is_begin_type(&stmts) {
+            return true;
+        }
+    }
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_node) = subsequent.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                if stmts_is_begin_type(&stmts) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if either branch of an unless/else is begin_type?.
+fn has_begin_type_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
     if let Some(stmts) = unless_node.statements() {
-        if stmts.body().len() > 1 {
+        if stmts_is_begin_type(&stmts) {
             return true;
         }
     }
     if let Some(else_clause) = unless_node.else_clause() {
         if let Some(stmts) = else_clause.statements() {
-            if stmts.body().len() > 1 {
+            if stmts_is_begin_type(&stmts) {
                 return true;
             }
         }
@@ -759,12 +856,12 @@ fn has_multiline_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> bo
     false
 }
 
-/// Check if any when branch or else branch of a case has multiple statements.
-fn has_multiline_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
+/// Check if any when branch or else branch of a case is begin_type?.
+fn has_begin_type_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     for condition in case_node.conditions().iter() {
         if let Some(when_node) = condition.as_when_node() {
             if let Some(stmts) = when_node.statements() {
-                if stmts.body().len() > 1 {
+                if stmts_is_begin_type(&stmts) {
                     return true;
                 }
             }
@@ -772,7 +869,7 @@ fn has_multiline_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     }
     if let Some(else_clause) = case_node.else_clause() {
         if let Some(stmts) = else_clause.statements() {
-            if stmts.body().len() > 1 {
+            if stmts_is_begin_type(&stmts) {
                 return true;
             }
         }
@@ -780,12 +877,12 @@ fn has_multiline_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     false
 }
 
-/// Check if any in branch or else branch of a case_match has multiple statements.
-fn has_multiline_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool {
+/// Check if any in branch or else branch of a case_match is begin_type?.
+fn has_begin_type_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool {
     for condition in cm.conditions().iter() {
         if let Some(in_node) = condition.as_in_node() {
             if let Some(stmts) = in_node.statements() {
-                if stmts.body().len() > 1 {
+                if stmts_is_begin_type(&stmts) {
                     return true;
                 }
             }
@@ -793,7 +890,7 @@ fn has_multiline_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool
     }
     if let Some(else_clause) = cm.else_clause() {
         if let Some(stmts) = else_clause.statements() {
-            if stmts.body().len() > 1 {
+            if stmts_is_begin_type(&stmts) {
                 return true;
             }
         }
