@@ -80,7 +80,6 @@ impl Cop for UselessAssignment {
             &rescue_modifier_collector.rescue_value_var_names,
         );
         rescue_modifier_offsets.extend(preceding);
-        let rescue_exception_suppress = collect_rescue_exception_suppress_offsets(parse_result);
         let mut candidates = collector.take_candidates();
         candidates.sort_by_key(|candidate| candidate.node_offset);
 
@@ -96,7 +95,6 @@ impl Cop for UselessAssignment {
                     && !or_condition_offsets.contains(&candidate.node_offset)
                     && !do_while_body_offsets.contains(&candidate.node_offset)
                     && !rescue_modifier_offsets.contains(&candidate.node_offset)
-                    && !rescue_exception_suppress.contains(&candidate.node_offset)
             } else {
                 false
             };
@@ -699,115 +697,6 @@ impl<'pr> Visit<'pr> for RescueModifierPrecedingWriteCollector<'_> {
             self.offsets.insert(node.location().start_offset());
         }
         ruby_prism::visit_local_variable_write_node(self, node);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FP suppression: unused rescue exception variables in multi-rescue chains
-// ---------------------------------------------------------------------------
-//
-// `rescue SocketError => e; raise ...; rescue StandardError => e; raise e.message`
-// — when multiple rescue clauses capture to the same variable and at least one
-// clause uses it, suppress offenses for clauses that don't. RuboCop's VF treats
-// the variable as used across the entire rescue chain.
-
-fn collect_rescue_exception_suppress_offsets(
-    parse_result: &ruby_prism::ParseResult<'_>,
-) -> HashSet<usize> {
-    let mut collector = RescueExceptionSuppressCollector::default();
-    collector.visit(&parse_result.node());
-    collector.offsets
-}
-
-#[derive(Default)]
-struct RescueExceptionSuppressCollector {
-    offsets: HashSet<usize>,
-}
-
-impl RescueExceptionSuppressCollector {
-    fn process_rescue_chain(&mut self, first_rescue: ruby_prism::RescueNode<'_>) {
-        // Collect all rescue clauses in this chain
-        let mut clauses = Vec::new();
-        let mut current = Some(first_rescue);
-        while let Some(rescue) = current {
-            let next = rescue.subsequent();
-            clauses.push(rescue);
-            current = next;
-        }
-        if clauses.len() < 2 {
-            return;
-        }
-
-        struct ClauseInfo {
-            var_name: Vec<u8>,
-            var_offset: usize,
-            var_used_in_body: bool,
-        }
-
-        let mut clause_infos: Vec<Option<ClauseInfo>> = Vec::new();
-        for clause in &clauses {
-            if let Some(reference) = clause.reference() {
-                if let Some(target) = reference.as_local_variable_target_node() {
-                    let name = target.name().as_slice().to_vec();
-                    let offset = target.location().start_offset();
-                    let used = if let Some(stmts) = clause.statements() {
-                        let mut reader = LvarReadSubtreeCollector::default();
-                        for stmt in stmts.body().iter() {
-                            reader.visit(&stmt);
-                        }
-                        reader.names.contains(&name)
-                    } else {
-                        false
-                    };
-                    clause_infos.push(Some(ClauseInfo {
-                        var_name: name,
-                        var_offset: offset,
-                        var_used_in_body: used,
-                    }));
-                } else {
-                    clause_infos.push(None);
-                }
-            } else {
-                clause_infos.push(None);
-            }
-        }
-
-        // For each variable name, check if ANY clause uses it.
-        // If so, suppress offsets for clauses that DON'T use it.
-        let all_names: HashSet<Vec<u8>> = clause_infos
-            .iter()
-            .filter_map(|ci| ci.as_ref().map(|c| c.var_name.clone()))
-            .collect();
-
-        for name in &all_names {
-            let any_used = clause_infos.iter().any(|ci| {
-                ci.as_ref()
-                    .is_some_and(|c| &c.var_name == name && c.var_used_in_body)
-            });
-            if any_used {
-                for c in clause_infos.iter().flatten() {
-                    if &c.var_name == name && !c.var_used_in_body {
-                        self.offsets.insert(c.var_offset);
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl<'pr> Visit<'pr> for RescueExceptionSuppressCollector {
-    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
-        if let Some(first_rescue) = node.rescue_clause() {
-            self.process_rescue_chain(first_rescue);
-        }
-        ruby_prism::visit_begin_node(self, node);
-    }
-
-    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        // Method-level rescue: `def foo; ...; rescue Error => e; ...; end`
-        // DefNode wraps its body in a BeginNode when rescue is present,
-        // so visit_begin_node handles it via the default visitor.
-        ruby_prism::visit_def_node(self, node);
     }
 }
 

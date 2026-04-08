@@ -556,14 +556,3 @@ def inline_rescue_assign
   raise "Invalid #{err}" if err
   [red_low, yellow_low, yellow_high, red_high]
 end
-
-# FP fix: rescue exception variable in multi-rescue chain — any clause uses it
-def rescue_exception_var_multi
-  do_work
-rescue SocketError => e
-  raise StandardError, "socket error"
-rescue Net::OpenTimeout => e
-  raise StandardError, "timeout"
-rescue StandardError => e
-  raise StandardError, e.message
-end
