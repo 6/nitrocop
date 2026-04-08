@@ -214,26 +214,54 @@ impl Cop for SpaceInsideParens {
             }
             "compact" => {
                 if !ignore_open_side {
-                    check_missing_open_space(
-                        self,
-                        source,
-                        diagnostics,
-                        &mut corrections,
-                        bytes,
-                        open_side,
-                        true,
-                    );
+                    if let NextSameLineItem::Code(code_start) = open_side {
+                        if bytes.get(code_start) == Some(&b'(') {
+                            // Consecutive left parens: flag exactly one space
+                            check_extraneous_consecutive_paren_space(
+                                self,
+                                source,
+                                diagnostics,
+                                &mut corrections,
+                                open_end,
+                                code_start,
+                            );
+                        } else {
+                            check_missing_open_space(
+                                self,
+                                source,
+                                diagnostics,
+                                &mut corrections,
+                                bytes,
+                                open_side,
+                                true,
+                            );
+                        }
+                    }
                 }
-                check_missing_close_space(
-                    self,
-                    source,
-                    diagnostics,
-                    &mut corrections,
-                    bytes,
-                    close_side,
-                    close_start,
-                    true,
-                );
+                if let Some(prev_code) = close_side {
+                    if bytes[prev_code] == b')' {
+                        // Consecutive right parens: flag exactly one space
+                        check_extraneous_consecutive_paren_space(
+                            self,
+                            source,
+                            diagnostics,
+                            &mut corrections,
+                            prev_code + 1,
+                            close_start,
+                        );
+                    } else {
+                        check_missing_close_space(
+                            self,
+                            source,
+                            diagnostics,
+                            &mut corrections,
+                            bytes,
+                            close_side,
+                            close_start,
+                            true,
+                        );
+                    }
+                }
             }
             _ => {
                 if !ignore_open_side {
@@ -559,6 +587,30 @@ fn is_trailing_backslash(bytes: &[u8], idx: usize, line_end: usize) -> bool {
     i >= line_end
 }
 
+/// Flags exactly one space between consecutive parens in compact style.
+/// Mirrors RuboCop's `correct_extraneous_space_between_consecutive_parens`
+/// which only flags when the source between the two paren tokens is exactly `' '`.
+fn check_extraneous_consecutive_paren_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    space_start: usize,
+    space_end: usize,
+) {
+    if space_end == space_start + 1 && source.as_bytes()[space_start] == b' ' {
+        push_remove_offense(
+            cop,
+            source,
+            diagnostics,
+            corrections,
+            space_start,
+            space_end,
+            MSG,
+        );
+    }
+}
+
 fn check_extraneous_open_space(
     cop: &SpaceInsideParens,
     source: &SourceFile,
@@ -725,6 +777,39 @@ mod tests {
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
+
+    fn compact_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn compact_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideParens,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_parens/compact_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
+
+    #[test]
+    fn compact_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideParens,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_parens/compact_no_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
 
     #[test]
     fn space_style_flags_missing_spaces() {
