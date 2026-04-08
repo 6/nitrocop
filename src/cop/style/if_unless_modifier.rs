@@ -92,6 +92,26 @@ use ruby_prism::Visit;
 /// on the same line). The `;` was actually a statement separator, not indicating
 /// a sibling. Fixed by checking if the semicolon is followed by actual code
 /// vs. just closing delimiters (`}` or `]`).
+///
+/// FN root cause (2026-04-08): `has_another_statement_on_same_line` treated
+/// `; end` after a modifier if/unless as a sibling statement, but `end` is a
+/// closing keyword of a parent block (e.g. `unless defined?(x); foo; end; x`).
+/// Fixed by extending `is_only_closing_tokens` to also recognize `end` as a
+/// closing token alongside `}`, `]`, and `)`.
+///
+/// FP root cause (2026-04-08): modifier forms on lines with
+/// `# rubocop:disable Layout/LineLength` (inline or block-level) were flagged
+/// as "too long", but RuboCop's `too_long_single_line?` calls
+/// `line_length_enabled_at_line?` which returns false when Layout/LineLength is
+/// disabled via directive. Fixed by adding `line_length_disabled_at_line` that
+/// scans for both inline `rubocop:disable` on the current line and block-level
+/// `rubocop:disable` on preceding lines (tracking enable/disable state).
+///
+/// FP root cause (2026-04-08): URI-based AllowURI exemption only matched
+/// `scheme://` patterns, but RuboCop uses `URI::DEFAULT_PARSER.make_regexp`
+/// which also matches bare `scheme:` (e.g. `https:` at end of line in a regex).
+/// Fixed by adding `scheme:` as an additional search prefix in
+/// `uri_extends_to_end`.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -503,7 +523,14 @@ fn uri_extends_to_end(
 ) -> bool {
     let mut all_starts = Vec::new();
     for scheme in schemes {
-        for prefix in [format!("{scheme}://"), format!(r"{scheme}:\/\/")] {
+        // RuboCop uses URI::DEFAULT_PARSER.make_regexp which matches `scheme:`
+        // followed by any valid URI characters (not just `://`). This includes
+        // patterns like `https:/path` and bare `https:` at line end.
+        for prefix in [
+            format!("{scheme}://"),
+            format!(r"{scheme}:\/\/"),
+            format!("{scheme}:"),
+        ] {
             let mut search_from = 0;
             while let Some(pos) = line[search_from..].find(&prefix) {
                 let abs_pos = search_from + pos;
@@ -545,6 +572,82 @@ fn uri_extends_to_end(
     false
 }
 
+/// Check if `Layout/LineLength` is disabled at a given line via rubocop:disable
+/// comments (inline or block). RuboCop's `line_length_enabled_at_line?` checks
+/// `processed_source.comment_config.cop_enabled_at_line?('Layout/LineLength', line)`.
+/// Since cops don't have access to the global DisabledRanges, we scan the source
+/// for disable directives ourselves.
+fn line_length_disabled_at_line(source: &SourceFile, line_num: usize) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    if line_num == 0 || line_num > lines.len() {
+        return false;
+    }
+
+    // Check inline: current line has `# rubocop:disable Layout/LineLength` or `all`
+    let current_line = String::from_utf8_lossy(lines[line_num - 1]);
+    if line_disables_line_length(&current_line) {
+        return true;
+    }
+
+    // Check block: scan preceding lines for standalone `# rubocop:disable` that
+    // covers Layout/LineLength without a matching `# rubocop:enable` before us
+    let mut block_disabled = false;
+    for i in 0..line_num.saturating_sub(1) {
+        let line_str = String::from_utf8_lossy(lines[i]);
+        let trimmed = line_str.trim();
+        // Block directives are standalone comments (no code before the `#`)
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        if directive_disables_line_length(trimmed) {
+            block_disabled = true;
+        } else if directive_enables_line_length(trimmed) {
+            block_disabled = false;
+        }
+    }
+    block_disabled
+}
+
+/// Check if a line contains an inline `# rubocop:disable` for Layout/LineLength or all.
+fn line_disables_line_length(line: &str) -> bool {
+    // Inline directives have code before the comment
+    if let Some(pos) = line.find("# rubocop:disable") {
+        let cops = &line[pos + "# rubocop:disable".len()..];
+        return cops_list_includes_line_length(cops);
+    }
+    false
+}
+
+/// Check if a standalone comment directive disables Layout/LineLength.
+fn directive_disables_line_length(trimmed: &str) -> bool {
+    if let Some(pos) = trimmed.find("rubocop:disable") {
+        let cops = &trimmed[pos + "rubocop:disable".len()..];
+        return cops_list_includes_line_length(cops);
+    }
+    false
+}
+
+/// Check if a standalone comment directive enables Layout/LineLength.
+fn directive_enables_line_length(trimmed: &str) -> bool {
+    if let Some(pos) = trimmed.find("rubocop:enable") {
+        let cops = &trimmed[pos + "rubocop:enable".len()..];
+        return cops_list_includes_line_length(cops);
+    }
+    false
+}
+
+/// Check if a comma-separated cop list includes Layout/LineLength, Metrics/LineLength,
+/// or `all`.
+fn cops_list_includes_line_length(cops_str: &str) -> bool {
+    for cop in cops_str.split(',') {
+        let cop = cop.trim();
+        if cop == "all" || cop == "Layout/LineLength" || cop == "Metrics/LineLength" {
+            return true;
+        }
+    }
+    false
+}
+
 fn modifier_form_too_long(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
@@ -561,6 +664,12 @@ fn modifier_form_too_long(
     }
 
     let (line_num, _) = source.offset_to_line_col(node.location().start_offset());
+
+    // RuboCop's `line_length_enabled_at_line?` — skip if Layout/LineLength
+    // is disabled at this line via rubocop:disable comments
+    if line_length_disabled_at_line(source, line_num) {
+        return false;
+    }
     let lines: Vec<&[u8]> = source.lines().collect();
     if line_num == 0 || line_num > lines.len() {
         return false;
@@ -616,6 +725,44 @@ fn modifier_form_too_long(
     true
 }
 
+/// Check if a byte slice consists only of closing tokens: `end` keywords,
+/// `}`, `]`, `)`, semicolons, and whitespace. These are not sibling statements
+/// but rather closing delimiters of parent blocks.
+fn is_only_closing_tokens(bytes: &[u8]) -> bool {
+    let mut remaining = bytes;
+    loop {
+        // Skip whitespace and semicolons
+        while remaining
+            .first()
+            .is_some_and(|&b| b == b' ' || b == b'\t' || b == b';')
+        {
+            remaining = &remaining[1..];
+        }
+        if remaining.is_empty() {
+            return true;
+        }
+        // Check for closing delimiters
+        if matches!(remaining[0], b'}' | b']' | b')') {
+            remaining = &remaining[1..];
+            continue;
+        }
+        // Check for `end` keyword (must not be followed by identifier chars)
+        if remaining.starts_with(b"end") {
+            let after = &remaining[3..];
+            if after.is_empty()
+                || (!after[0].is_ascii_alphanumeric()
+                    && after[0] != b'_'
+                    && after[0] != b'!'
+                    && after[0] != b'?')
+            {
+                remaining = after;
+                continue;
+            }
+        }
+        return false;
+    }
+}
+
 fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     let (line_num, _) = source.offset_to_line_col(node.location().end_offset());
     let lines: Vec<&[u8]> = source.lines().collect();
@@ -637,18 +784,16 @@ fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::No
         .skip_while(|&b| b == b' ' || b == b'\t')
         .collect::<Vec<_>>();
 
-    // Check for semicolon followed by actual code (not just closing delimiters)
+    // Check for semicolon followed by actual code (not just closing delimiters
+    // or `end` keywords closing parent blocks)
     if trimmed.first() == Some(&b';') {
-        // Make sure there's actual code after the semicolon, not just } or ]
+        // Make sure there's actual code after the semicolon, not just }, ], or `end`
         let remaining: Vec<_> = trimmed[1..]
             .iter()
             .copied()
             .skip_while(|&b| b == b' ' || b == b'\t')
             .collect();
-        if remaining.is_empty()
-            || remaining.first() == Some(&b'}')
-            || remaining.first() == Some(&b']')
-        {
+        if is_only_closing_tokens(&remaining) {
             return false;
         }
         return true;
