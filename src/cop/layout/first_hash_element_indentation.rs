@@ -13,6 +13,25 @@ fn leading_whitespace_columns(line: &[u8]) -> usize {
         .count()
 }
 
+fn char_width(bytes: &[u8]) -> usize {
+    bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+}
+
+fn config_style_matches(config: &CopConfig, key: &str, target: &str, default: &str) -> bool {
+    match config.options.get(key) {
+        Some(value) => {
+            if let Some(style) = value.as_str() {
+                return style == target;
+            }
+
+            value
+                .as_sequence()
+                .is_some_and(|styles| styles.iter().any(|style| style.as_str() == Some(target)))
+        }
+        None => default == target,
+    }
+}
+
 /// ## Corpus investigation (2026-03-08)
 ///
 /// Corpus oracle reported high FN volume concentrated in closing-brace sites.
@@ -67,6 +86,19 @@ fn leading_whitespace_columns(line: &[u8]) -> usize {
 /// block body for nested call arguments, while still skipping nested call
 /// receivers and argument lists so outer-parenthesis indentation does not leak
 /// into unrelated inner sends.
+///
+/// ## Variant divergence fix (2026-04-08)
+///
+/// `EnforcedStyle=consistent` still uses RuboCop's `parent_hash_key` indent
+/// base for nested hash values in multi-pair hashes; nitrocop had disabled
+/// that base for `consistent`, which produced large FN volume on shapes like
+/// `options = { parse: { ... }, render: { ... } }`.
+///
+/// A smaller FP bucket came from separator-aligned hashes under
+/// `Layout/HashAlignment`. RuboCop adds the longest-key offset when
+/// `EnforcedColonStyle` / `EnforcedHashRocketStyle` is `separator`, even for
+/// `FirstHashElementIndentation`. Nitrocop now applies that offset when those
+/// sibling settings are present in the effective cop config.
 pub struct FirstHashElementIndentation;
 
 impl Cop for FirstHashElementIndentation {
@@ -90,6 +122,18 @@ impl Cop for FirstHashElementIndentation {
             source,
             style,
             width,
+            colon_separator_style: config_style_matches(
+                config,
+                "EnforcedColonStyle",
+                "separator",
+                "key",
+            ),
+            hash_rocket_separator_style: config_style_matches(
+                config,
+                "EnforcedHashRocketStyle",
+                "separator",
+                "key",
+            ),
             diagnostics: Vec::new(),
             handled_hashes: Vec::new(),
             parent_pair_col: None,
@@ -104,6 +148,8 @@ struct HashIndentVisitor<'a> {
     source: &'a SourceFile,
     style: &'a str,
     width: usize,
+    colon_separator_style: bool,
+    hash_rocket_separator_style: bool,
     diagnostics: Vec<Diagnostic>,
     /// Start offsets of hash nodes already checked via a parent call with parentheses.
     handled_hashes: Vec<usize>,
@@ -142,7 +188,7 @@ impl HashIndentVisitor<'_> {
         index: usize,
         elem: &ruby_prism::Node<'_>,
     ) -> Option<usize> {
-        if self.style == "consistent" || self.style == "align_braces" {
+        if self.style == "align_braces" {
             return None;
         }
 
@@ -180,6 +226,37 @@ impl HashIndentVisitor<'_> {
         )
     }
 
+    fn first_pair_offset(
+        &self,
+        hash_node: &ruby_prism::HashNode<'_>,
+        first_pair: &ruby_prism::Node<'_>,
+    ) -> usize {
+        let Some(first_assoc) = first_pair.as_assoc_node() else {
+            return 0;
+        };
+
+        let use_separator_style = match first_assoc.operator_loc().map(|loc| loc.as_slice()) {
+            Some(b":") => self.colon_separator_style,
+            Some(b"=>") => self.hash_rocket_separator_style,
+            None => self.colon_separator_style,
+            _ => false,
+        };
+        if !use_separator_style {
+            return 0;
+        }
+
+        let first_key_width = char_width(first_assoc.key().location().as_slice());
+        let max_key_width = hash_node
+            .elements()
+            .iter()
+            .filter_map(|elem| elem.as_assoc_node())
+            .map(|assoc| char_width(assoc.key().location().as_slice()))
+            .max()
+            .unwrap_or(first_key_width);
+
+        max_key_width.saturating_sub(first_key_width)
+    }
+
     fn find_hashes_in_elements(
         &mut self,
         elements: ruby_prism::NodeList<'_>,
@@ -205,16 +282,19 @@ impl HashIndentVisitor<'_> {
         let open_line_indent = leading_whitespace_columns(open_line_bytes);
 
         match self.style {
-            "consistent" => (open_line_indent, IndentBaseKind::StartOfLine),
             "align_braces" => (open_col, IndentBaseKind::LeftBrace),
             _ => {
                 if let Some(pair_col) = self.parent_pair_col {
                     (pair_col, IndentBaseKind::ParentHashKey)
-                } else if let Some(paren_col) = left_paren_col {
-                    (
-                        paren_col + 1,
-                        IndentBaseKind::FirstPositionAfterLeftParenthesis,
-                    )
+                } else if self.style == "special_inside_parentheses" {
+                    if let Some(paren_col) = left_paren_col {
+                        (
+                            paren_col + 1,
+                            IndentBaseKind::FirstPositionAfterLeftParenthesis,
+                        )
+                    } else {
+                        (open_line_indent, IndentBaseKind::StartOfLine)
+                    }
                 } else {
                     (open_line_indent, IndentBaseKind::StartOfLine)
                 }
@@ -294,7 +374,8 @@ impl HashIndentVisitor<'_> {
             }
 
             let (base_indent, _) = self.indent_base(opening_loc, left_paren_col);
-            let expected = base_indent + self.width;
+            let expected =
+                base_indent + self.width + self.first_pair_offset(hash_node, &first_element);
 
             if elem_col != expected {
                 self.diagnostics.push(self.cop.diagnostic(
@@ -441,60 +522,10 @@ impl HashIndentVisitor<'_> {
     fn visit_pairs_with_hash_values(&mut self, elements: ruby_prism::NodeList<'_>) {
         let elems: Vec<_> = elements.iter().collect();
         for (i, elem) in elems.iter().enumerate() {
-            let assoc = match elem.as_assoc_node() {
-                Some(a) => a,
-                None => {
-                    self.visit(elem);
-                    continue;
-                }
-            };
-
-            // Check if the value is a HashNode with `{`
-            let value = assoc.value();
-            let is_hash_value = value
-                .as_hash_node()
-                .is_some_and(|h| h.opening_loc().as_slice() == b"{");
-
-            if !is_hash_value || self.style == "consistent" || self.style == "align_braces" {
-                self.visit(elem);
-                continue;
-            }
-
-            // Check condition: key and value begin on the same line
-            let (key_line, _) = self
-                .source
-                .offset_to_line_col(assoc.key().location().start_offset());
-            let (val_line, _) = self
-                .source
-                .offset_to_line_col(value.location().start_offset());
-            if key_line != val_line {
-                self.visit(elem);
-                continue;
-            }
-
-            // Check condition: right sibling begins on a subsequent line
-            let has_right_sibling_on_next_line = if i + 1 < elems.len() {
-                let (pair_last_line, _) =
-                    self.source.offset_to_line_col(elem.location().end_offset());
-                let (sibling_line, _) = self
-                    .source
-                    .offset_to_line_col(elems[i + 1].location().start_offset());
-                pair_last_line < sibling_line
-            } else {
-                false
-            };
-
-            if has_right_sibling_on_next_line {
-                let (_, pair_col) = self
-                    .source
-                    .offset_to_line_col(elem.location().start_offset());
-                let saved = self.parent_pair_col;
-                self.parent_pair_col = Some(pair_col);
-                self.visit(elem);
-                self.parent_pair_col = saved;
-            } else {
-                self.visit(elem);
-            }
+            let saved = self.parent_pair_col;
+            self.parent_pair_col = self.parent_pair_col_for_child_hash(elems.as_slice(), i, elem);
+            self.visit(elem);
+            self.parent_pair_col = saved;
         }
     }
 }
@@ -696,6 +727,27 @@ mod tests {
         }
     }
 
+    fn consistent_separator_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("consistent".into()),
+                ),
+                (
+                    "EnforcedColonStyle".into(),
+                    serde_yml::Value::String("separator".into()),
+                ),
+                (
+                    "EnforcedHashRocketStyle".into(),
+                    serde_yml::Value::String("key".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn offense_consistent_fixture() {
         use crate::testutil::assert_cop_offenses_full_with_config;
@@ -717,6 +769,18 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/first_hash_element_indentation/no_offense.consistent.rb"
             ),
             consistent_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_consistent_separator_fixture() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        assert_cop_no_offenses_full_with_config(
+            &FirstHashElementIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_hash_element_indentation/no_offense.consistent.separator.rb"
+            ),
+            consistent_separator_config(),
         );
     }
 }
