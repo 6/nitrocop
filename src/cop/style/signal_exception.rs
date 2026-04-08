@@ -4,23 +4,20 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Corpus investigation (2026-03-27):
+/// Variant conformance fixes:
 ///
-/// FN=1 remained in `oriuminc__vagrant-ariadne__bb22d52` at
-/// `cookbooks-override/ariadne/libraries/helpers.rb:42`.
-/// `Style/SignalException` already detects that `fail ... unless ...` call in
-/// isolation, in fixtures, and when the repo is linted directly against
-/// `bench/corpus/baseline_rubocop.yml`.
-///
-/// The miss only reproduces through the corpus helper's generated overlay config
-/// under `/tmp/nitrocop_corpus_configs/`. That overlay adds an absolute
-/// `AllCops: Exclude: /.../cookbooks/**/*` pattern, and nitrocop's global
-/// exclude matcher currently overmatches sibling directories such as
-/// `cookbooks-override/**/*`, filtering the file out before this cop runs.
-///
-/// No cop-local detection change is needed here; the correct fix belongs in the
-/// config/file-selection pipeline (`src/config/mod.rs` or corpus overlay path
-/// handling) so absolute exclude globs keep directory-segment boundaries.
+/// - `EnforcedStyle: only_fail` must treat bare `raise`, `Kernel.raise`, and
+///   `::Kernel.raise` as offenses. The previous implementation only matched
+///   receiverless calls, which missed the corpus `Kernel.raise` family.
+/// - `EnforcedStyle: semantic` must model rescue scope boundaries the same way
+///   RuboCop does. Two variant mismatches came from a single gap:
+///   `in_rescue_body` leaked through nested `begin/rescue` nodes, so inner
+///   begin bodies were treated like rethrow sites, and inline
+///   `expr rescue raise/fail` rescue modifiers were never given rescue-body
+///   semantics at all.
+/// - The receiver check intentionally matches only bare `Kernel` and `::Kernel`
+///   (not qualified paths like `Foo::Kernel`) to mirror RuboCop's
+///   `(const {nil? cbase} :Kernel)` matcher.
 pub struct SignalException;
 
 impl Cop for SignalException {
@@ -73,22 +70,23 @@ struct SignalExceptionVisitor<'a> {
     raise_diagnostics: Vec<Diagnostic>,
 }
 
-/// Check if a call node's receiver is `Kernel` or `::Kernel`.
+/// Check if a call node's receiver is bare `Kernel` or `::Kernel`.
 fn is_kernel_receiver(node: &ruby_prism::CallNode<'_>) -> bool {
     if let Some(recv) = node.receiver() {
         if let Some(cr) = recv.as_constant_read_node() {
             return cr.name().as_slice() == b"Kernel";
         }
         if let Some(cp) = recv.as_constant_path_node() {
-            return cp.name().is_some_and(|n| n.as_slice() == b"Kernel");
+            return cp.parent().is_none() && cp.name().is_some_and(|n| n.as_slice() == b"Kernel");
         }
     }
     false
 }
 
-/// Check if a call is bare (no receiver) or has Kernel/::Kernel as receiver.
-fn is_bare_or_kernel_call(node: &ruby_prism::CallNode<'_>) -> bool {
-    node.receiver().is_none() || is_kernel_receiver(node)
+/// Check if a call is bare (no receiver) or has bare `Kernel`/`::Kernel` as
+/// receiver, and the method name matches.
+fn is_command_or_kernel_call(node: &ruby_prism::CallNode<'_>, name: &[u8]) -> bool {
+    node.name().as_slice() == name && (node.receiver().is_none() || is_kernel_receiver(node))
 }
 
 impl Visit<'_> for SignalExceptionVisitor<'_> {
@@ -100,9 +98,32 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
         ruby_prism::visit_def_node(self, node);
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'_>) {
+        if self.enforced_style == "semantic" && node.rescue_clause().is_some() {
+            let prev = self.in_rescue_body;
+            self.in_rescue_body = false;
+
+            if let Some(stmts) = node.statements() {
+                self.visit_statements_node(&stmts);
+            }
+            if let Some(rescue_clause) = node.rescue_clause() {
+                self.visit_rescue_node(&rescue_clause);
+            }
+            if let Some(else_clause) = node.else_clause() {
+                self.visit_else_node(&else_clause);
+            }
+            if let Some(ensure_clause) = node.ensure_clause() {
+                self.visit_ensure_node(&ensure_clause);
+            }
+
+            self.in_rescue_body = prev;
+        } else {
+            ruby_prism::visit_begin_node(self, node);
+        }
+    }
+
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'_>) {
         if self.enforced_style == "semantic" {
-            // Visit rescue body with in_rescue_body = true
             let prev = self.in_rescue_body;
             self.in_rescue_body = true;
             if let Some(stmts) = node.statements() {
@@ -110,7 +131,6 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
             }
             self.in_rescue_body = prev;
 
-            // Visit subsequent rescue clauses
             if let Some(subsequent) = node.subsequent() {
                 self.visit_rescue_node(&subsequent);
             }
@@ -119,13 +139,28 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
         }
     }
 
+    fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'_>) {
+        if self.enforced_style == "semantic" {
+            let prev = self.in_rescue_body;
+
+            self.in_rescue_body = false;
+            self.visit(&node.expression());
+
+            self.in_rescue_body = true;
+            self.visit(&node.rescue_expression());
+
+            self.in_rescue_body = prev;
+        } else {
+            ruby_prism::visit_rescue_modifier_node(self, node);
+        }
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'_>) {
         let name = node.name().as_slice();
 
         match self.enforced_style {
             "only_raise" => {
-                // Only bare raise/fail (no receiver)
-                if node.receiver().is_none() && name == b"fail" {
+                if is_command_or_kernel_call(node, b"fail") {
                     let loc = node.message_loc().unwrap_or_else(|| node.location());
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                     self.pending_fail_diagnostics.push(self.cop.diagnostic(
@@ -137,7 +172,7 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
                 }
             }
             "only_fail" => {
-                if node.receiver().is_none() && name == b"raise" {
+                if is_command_or_kernel_call(node, b"raise") {
                     let loc = node.message_loc().unwrap_or_else(|| node.location());
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                     self.raise_diagnostics.push(self.cop.diagnostic(
@@ -149,10 +184,11 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
                 }
             }
             "semantic" => {
-                if is_bare_or_kernel_call(node) {
+                if is_command_or_kernel_call(node, b"fail")
+                    || is_command_or_kernel_call(node, b"raise")
+                {
                     let loc = node.message_loc().unwrap_or_else(|| node.location());
                     if self.in_rescue_body {
-                        // Inside rescue body: fail → offense (use raise)
                         if name == b"fail" {
                             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                             self.raise_diagnostics.push(self.cop.diagnostic(
@@ -162,9 +198,7 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
                                 "Use `raise` instead of `fail` to rethrow exceptions.".to_string(),
                             ));
                         }
-                        // raise in rescue body → OK, no diagnostic
                     } else {
-                        // Outside rescue body: raise → offense (use fail)
                         if name == b"raise" {
                             let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                             self.raise_diagnostics.push(self.cop.diagnostic(
@@ -174,7 +208,6 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
                                 "Use `fail` instead of `raise` to signal exceptions.".to_string(),
                             ));
                         }
-                        // fail outside rescue body → OK, no diagnostic
                     }
                 }
             }
@@ -244,5 +277,26 @@ mod tests {
         let diags = run_cop_full_with_config(&SignalException, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("Use `fail`"));
+    }
+
+    #[test]
+    fn only_fail_offense() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("only_fail".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        assert_cop_offenses_full_with_config(
+            &SignalException,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/signal_exception/only_fail_offense.rb"
+            ),
+            config,
+        );
     }
 }

@@ -38,3 +38,17 @@ begin
 rescue StandardError
   raise
 end
+
+# raise in rescue modifier → OK (rethrowing)
+ENV[""] rescue raise Eye::Dsl::Error, "ENV is not a hash '#{ENV.inspect}'"
+
+# fail in nested begin inside rescue body → OK (not a rethrow)
+begin
+  fail
+rescue Exception
+  begin
+    fail unless column_line
+  rescue
+    default_width
+  end
+end
