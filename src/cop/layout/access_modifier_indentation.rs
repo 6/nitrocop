@@ -35,15 +35,17 @@ use ruby_prism::Visit;
 /// like `class Foo\n  protected\nend` or `module ClassMethods\n  private\nend`.
 ///
 /// ### Round 4 (2026-04-08): Skip blocks inside method definitions (macro scope)
-/// Root cause of 110 FPs with `EnforcedStyle: outdent`: RuboCop's
+/// Root cause of FPs with `EnforcedStyle: outdent`: RuboCop's
 /// `bare_access_modifier?` calls `macro?` → `in_macro_scope?`, which walks the
 /// parent chain. A block inside a `def`/`defs` is NOT in macro scope (unless a
-/// class/module/sclass resets scope between the def and the block). This means
-/// access modifiers inside `class_eval do...end` blocks nested inside methods
+/// class/module/sclass or `class_constructor?` resets scope between the def and
+/// the block). `class_constructor?` matches `Class.new`, `Module.new`,
+/// `Struct.new`, and `Data.define` — these act as class-like scope boundaries.
+/// Access modifiers inside non-class-constructor blocks nested inside methods
 /// are not considered "bare" access modifiers by RuboCop, so the cop skips them.
 /// Fixed by adding a `MacroScopeChecker` visitor that walks the AST from the root
 /// to the block node, tracking `in_def` state. Blocks not in macro scope are now
-/// skipped. This matches RuboCop's behavior for both `indent` and `outdent` styles.
+/// skipped. Class constructor blocks reset `in_def` like class/module/sclass.
 pub struct AccessModifierIndentation;
 
 // Uses access_modifier_predicates::is_bare_access_modifier() instead of local constant.
@@ -60,7 +62,9 @@ fn body_statements(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
 ///
 /// RuboCop's `bare_access_modifier?` calls `macro?` → `in_macro_scope?`, which
 /// walks the parent chain. A block inside a `def`/`defs` is NOT in macro scope
-/// (unless a class/module/sclass resets scope between the def and the block).
+/// (unless a class/module/sclass/class_constructor resets scope between the def
+/// and the block). `class_constructor?` matches `Class.new`, `Module.new`,
+/// `Struct.new`, and `Data.define` — these act like class/module nodes for scope.
 /// This means access modifiers inside such blocks are not "bare" access modifiers
 /// and should not be checked by this cop.
 struct MacroScopeChecker {
@@ -81,7 +85,53 @@ impl MacroScopeChecker {
     }
 }
 
+/// RuboCop's `class_constructor?` matches `Class.new`, `Module.new`,
+/// `Struct.new` (with :new), and `Data.define`. These calls with blocks
+/// act as class-like scopes in `in_macro_scope?`.
+fn is_class_constructor_call(node: &ruby_prism::CallNode<'_>) -> bool {
+    let method_name = node.name().as_slice();
+    if let Some(receiver) = node.receiver() {
+        if let Some(cr) = receiver.as_constant_read_node() {
+            let const_name = cr.name().as_slice();
+            return matches!(
+                (const_name, method_name),
+                (b"Class" | b"Module" | b"Struct", b"new") | (b"Data", b"define")
+            );
+        }
+        // Handle ::Class.new (ConstantPathNode with no parent = cbase)
+        if let Some(cp) = receiver.as_constant_path_node() {
+            if cp.parent().is_none() {
+                if let Some(name_node) = cp.name() {
+                    let const_name = name_node.as_slice();
+                    return matches!(
+                        (const_name, method_name),
+                        (b"Class" | b"Module" | b"Struct", b"new") | (b"Data", b"define")
+                    );
+                }
+            }
+        }
+    }
+    false
+}
+
 impl<'pr> Visit<'pr> for MacroScopeChecker {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        // Class.new/Module.new/Struct.new/Data.define blocks act as class-like
+        // scopes (class_constructor? in RuboCop's in_macro_scope?), resetting
+        // the macro scope just like class/module/sclass nodes.
+        if is_class_constructor_call(node) {
+            let prev = self.in_def;
+            self.in_def = false;
+            ruby_prism::visit_call_node(self, node);
+            self.in_def = prev;
+        } else {
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
         if self.result.is_some() {
             return;
@@ -385,6 +435,48 @@ mod tests {
         assert!(
             diags.is_empty(),
             "block inside def is not in macro scope (indent style): {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_checks_class_new_block_inside_def() {
+        // Class.new do...end is a class_constructor? in RuboCop — it resets
+        // macro scope even inside a def. The cop SHOULD check access modifiers here.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"class Foo\n  def setup\n    @klass = Class.new do\n      private\n      def secret; end\n    end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Class.new block is a class constructor (macro scope), should flag: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_checks_module_new_block_inside_def() {
+        // Module.new do...end is also a class_constructor? — resets macro scope.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source =
+            b"def setup\n  @mod = Module.new do\n    private\n    def secret; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Module.new block is a class constructor (macro scope), should flag: {:?}",
             diags
         );
     }
