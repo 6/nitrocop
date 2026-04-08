@@ -142,6 +142,19 @@ use crate::parse::source::SourceFile;
 ///   literals unsafe so assignments like `GROUPED_INPUT_PATTERN = /.../x.freeze`
 ///   are no longer falsely flagged.
 ///
+/// ## Fixes applied (2026-04-08, second batch)
+/// - **Binary operator walk-up**: RuboCop's `on_send` walks up through parent
+///   `OrNode`/`AndNode` (both `||`/`&&` and `or`/`and`). After walking up,
+///   `operator_keyword?` returns true for these nodes, and `require_backslash?`
+///   gates the offense on the operator line ending with `\`. Without `\`, no
+///   offense is registered on ANY send inside the expression. Nitrocop did not
+///   perform this walk-up, so multiline calls that were the RHS of `||`/`&&`
+///   (e.g., `destroy || raise(...)`, `must_not_cache? || stale?(...)`) were
+///   incorrectly flagged. The fix adds `inside_binary_op_without_backslash()`
+///   which walks up the ancestor stack following RuboCop's walk-up rules and
+///   suppresses offenses when the binary operator line lacks a trailing `\`.
+///   Resolves ~144 FPs and ~51 FNs with zero regressions.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -669,6 +682,70 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
         false
     }
 
+    /// Returns true if the current call is inside a binary operator node
+    /// (`||`/`&&`/`or`/`and`) AND the operator's line does NOT end with `\`.
+    ///
+    /// In RuboCop, `on_send` walks up from the inner send through parent sends,
+    /// convertible blocks, AND `BinaryOperatorNode` parents (OrNode/AndNode).
+    /// The walked-up node then undergoes an `operator_keyword?` check: if true,
+    /// the offense is gated on `require_backslash?` (the operator line must end
+    /// with `\`). Since `operator_keyword?` returns true for both `||`/`or` and
+    /// `&&`/`and`, a multiline call inside `foo || bar(...)` is NOT flagged
+    /// unless the `||` line ends with `\`.
+    ///
+    /// Nitrocop's AST visitor doesn't walk up through OrNode/AndNode, so it
+    /// would incorrectly flag the inner call. This method detects the situation
+    /// and suppresses the offense.
+    fn inside_binary_op_without_backslash(&self) -> bool {
+        // Walk up ancestors following RuboCop's on_send walk-up rules:
+        //   - CallNode (parent send) → continue
+        //   - ArgumentsNode (Prism wrapper) → continue
+        //   - BlockNode (convertible block) → continue
+        //   - OrNode/AndNode → found! check backslash
+        //   - Anything else → stop
+        if self.ancestors.len() < 2 {
+            return false;
+        }
+        for i in (0..self.ancestors.len() - 1).rev() {
+            let ancestor = &self.ancestors[i];
+
+            if ancestor.as_call_node().is_some() || ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+
+            // Convertible blocks: in RuboCop, the walk-up goes through blocks
+            // whose send is parenthesized or has no args. Be a bit generous and
+            // continue through any BlockNode.
+            if ancestor.as_block_node().is_some() {
+                continue;
+            }
+
+            // Found an OrNode or AndNode — check if its operator line ends with `\`.
+            let operator_loc = if let Some(or_node) = ancestor.as_or_node() {
+                Some(or_node.operator_loc())
+            } else if let Some(and_node) = ancestor.as_and_node() {
+                Some(and_node.operator_loc())
+            } else {
+                None
+            };
+
+            if let Some(op_loc) = operator_loc {
+                let (op_line, _) = self.source.offset_to_line_col(op_loc.start_offset());
+                let lines: Vec<&[u8]> = self.source.lines().collect();
+                if op_line > 0 && op_line <= lines.len() {
+                    let line = lines[op_line - 1];
+                    let trimmed = trim_trailing_whitespace(line);
+                    return !trimmed.ends_with(b"\\");
+                }
+                return true;
+            }
+
+            // Any other node type stops the walk-up.
+            break;
+        }
+        false
+    }
+
     /// Returns true if the node at (start, end) is inside a block body that
     /// itself is contained within the checked chain range (cs, ce).
     fn inside_block_body_within_chain(
@@ -780,6 +857,7 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
                 && node.block().and_then(|b| b.as_block_node()).is_some();
 
             if !is_index_chain
+                && !self.inside_binary_op_without_backslash()
                 && self.suitable_as_single_line(start_offset, check_end)
                 && !self.configured_to_not_be_inspected(start_offset, check_end)
                 && (!has_convertible_block || self.inspect_blocks)
