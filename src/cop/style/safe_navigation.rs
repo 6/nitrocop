@@ -89,11 +89,20 @@ struct ModifierIfCheckContext<'a> {
     max_chain_length: usize,
     allowed_methods: &'a Option<Vec<String>>,
     skip_direct_receiver_block_body_block_calls: bool,
+    /// Whether the modifier-if is inside an unsafe parent (dotless call, operator, etc.).
+    /// RuboCop's `unsafe_method_used?` ancestor walk escapes the method chain for
+    /// chain-length-1 and finds these parents, suppressing the offense.
+    in_unsafe_parent: bool,
 }
 
 /// Methods that `nil` responds to in vanilla Ruby.
 /// Converting `foo && foo.bar.is_a?(X)` to `foo&.bar&.is_a?(X)` changes behavior
 /// because nil already responds to these methods.
+///
+/// For `&&` patterns, these suppress offenses when found in the method chain after
+/// the checked receiver.  For ternary patterns, these suppress offenses when found
+/// as ancestor calls (e.g. `(x.nil? ? nil : x.to_date) == actual` — `==` is a nil
+/// method, so converting would change behavior since nil already responds to `==`).
 const NIL_METHODS: &[&[u8]] = &[
     b"nil?",
     b"is_a?",
@@ -138,6 +147,17 @@ const NIL_METHODS: &[&[u8]] = &[
     b"instance_variable_defined?",
     b"instance_variables",
     b"remove_instance_variable",
+    // Operators that nil responds to — needed so `in_nil_safe_call_ancestor` correctly
+    // suppresses ternaries used as receivers of these operators (e.g. `(x ? x.y : nil) == z`).
+    // RuboCop uses `nil.methods` at runtime which includes these.
+    b"!",
+    b"==",
+    b"!=",
+    b"===",
+    b"<=>",
+    b"&",
+    b"|",
+    b"^",
 ];
 
 impl SafeNavigation {
@@ -654,14 +674,17 @@ struct SafeNavVisitor<'a> {
 }
 
 impl<'a> SafeNavVisitor<'a> {
+    /// Reset operator-level context when entering multi-branch if/unless/elsif.
+    /// `in_unsafe_parent` is intentionally NOT reset: RuboCop's `unsafe_method_used?`
+    /// ancestor walk crosses if-node boundaries, so an unsafe parent above the if
+    /// (e.g. `cookies[k] = if v && v.to_s; ...; else; ...; end`) still suppresses
+    /// chain-length-1 offenses inside the branches.
     fn with_reset_parent_operator_context<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let saved_in_unsafe_parent = self.in_unsafe_parent;
         let saved_in_ternary_operator_parent = self.in_ternary_operator_parent;
         let saved_in_assignment_or_operator_parent = self.in_assignment_or_operator_parent;
         let saved_dotted_assignment_parent_starts =
             std::mem::take(&mut self.dotted_assignment_parent_starts);
 
-        self.in_unsafe_parent = 0;
         self.in_ternary_operator_parent = 0;
         self.in_assignment_or_operator_parent = 0;
 
@@ -669,7 +692,6 @@ impl<'a> SafeNavVisitor<'a> {
 
         self.in_assignment_or_operator_parent = saved_in_assignment_or_operator_parent;
         self.in_ternary_operator_parent = saved_in_ternary_operator_parent;
-        self.in_unsafe_parent = saved_in_unsafe_parent;
         self.dotted_assignment_parent_starts = saved_dotted_assignment_parent_starts;
 
         result
@@ -1224,12 +1246,13 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         if if_node.if_keyword_loc().is_none() {
             // RuboCop's `unsafe_method?` always returns false for ternary nodes
             // (except negation), so ternaries are NOT suppressed by dotless/unsafe
-            // call ancestors. They are only suppressed by operator parents, nil-safe
-            // ancestors, block-pass arguments, and nil-method call arguments
-            // (where the ancestor walk finds a nil-responding method name).
+            // call ancestors.  They ARE suppressed when a nil-responding method
+            // (like `==`, `!`, `is_a?`) is an ancestor — either as receiver
+            // (`in_nil_safe_call_ancestor`) or as arguments (`in_nil_method_call_arguments`).
+            // `NIL_METHODS` includes operators like `==`, `!`, `&`, `|`, `^` which
+            // nil responds to, so `(x ? x.y : nil) == z` is correctly suppressed.
             if (self.in_block_argument > 0 && self.in_block == 0)
                 || self.in_nil_safe_call_ancestor > 0
-                || self.in_ternary_operator_parent > 0
                 || self.in_nil_method_call_arguments > 0
             {
                 ruby_prism::visit_if_node(self, node);
@@ -1299,6 +1322,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 allowed_methods: &self.allowed_methods,
                 skip_direct_receiver_block_body_block_calls: self
                     .is_direct_receiver_block_body(&node.as_node()),
+                in_unsafe_parent: self.in_unsafe_parent > 0,
             },
         );
         self.diagnostics.extend(diags);
@@ -1409,6 +1433,13 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         }
 
         if SafeNavigation::has_unsafe_method_after_checked_receiver(&chain, &self.allowed_methods) {
+            ruby_prism::visit_unless_node(self, node);
+            return;
+        }
+
+        // RuboCop's `unsafe_method_used?` ancestor walk escapes the method chain
+        // for chain-length-1 and finds unsafe parents above the unless node.
+        if self.in_unsafe_parent > 0 && chain.len() == 1 {
             ruby_prism::visit_unless_node(self, node);
             return;
         }
@@ -1744,6 +1775,13 @@ impl SafeNavigation {
         }
 
         if Self::has_unsafe_method_after_checked_receiver(&chain, context.allowed_methods) {
+            return Vec::new();
+        }
+
+        // RuboCop's `unsafe_method_used?` ancestor walk escapes the method chain
+        // for chain-length-1 and finds unsafe parents (dotless calls, operators, etc.)
+        // above the modifier-if.  For chain ≥ 2, the walk is bounded by the chain.
+        if context.in_unsafe_parent && chain.len() == 1 {
             return Vec::new();
         }
 
