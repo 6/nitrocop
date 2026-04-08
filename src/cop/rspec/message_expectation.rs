@@ -31,6 +31,17 @@ use crate::parse::source::SourceFile;
 /// represents it as a `block` node (not a `send`), so the pattern never matches.
 /// In Prism, `expect { ... }` is a `CallNode` with a `block` field set. Fixed by
 /// returning early when `recv_call.block().is_some()`.
+///
+/// ## Corpus investigation (2026-04-08)
+///
+/// FN=1 (`EnforcedStyle: expect`, dependabot/dependabot-core): RuboCop flags
+/// `allow(...).to receive_messages(...)` when the matcher subtree contains a
+/// descendant `receive(...)` nested inside keyword-hash values and block bodies
+/// (for example a `tap do ... allow(...).to receive(...) end` value). nitrocop's
+/// `subtree_includes_receive` only walked call receivers and arguments, so it
+/// missed the outer offense. Fixed by recursing into call blocks plus hash /
+/// keyword-hash / assoc / statements / begin bodies to mirror RuboCop's
+/// `def_node_search` descendant walk more closely.
 pub struct MessageExpectation;
 
 /// Default style is `allow` — flags `expect(...).to receive` in favor of `allow`.
@@ -164,8 +175,16 @@ impl Cop for MessageExpectation {
 /// receiver). This mirrors RuboCop's `def_node_search :receive_message?` which
 /// searches the entire subtree, not just the receiver chain. This matters for
 /// patterns like `expect(foo).to all(receive(:bar))` where `receive` is nested
-/// inside the argument of `all`, not in the receiver chain.
+/// inside the argument of `all`, and for `allow(...).to receive_messages(...)`
+/// when a hash value block contains a descendant `receive(...)`.
 fn subtree_includes_receive(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(stmts) = node.as_statements_node() {
+        return stmts
+            .body()
+            .iter()
+            .any(|child| subtree_includes_receive(&child));
+    }
+
     if let Some(call) = node.as_call_node() {
         if method_dispatch_predicates::is_command(&call, b"receive") {
             return true;
@@ -184,7 +203,56 @@ fn subtree_includes_receive(node: &ruby_prism::Node<'_>) -> bool {
                 }
             }
         }
+        // Recurse into attached blocks (e.g. `foo.tap { allow(...).to receive(...) }`)
+        if let Some(block) = call.block() {
+            if subtree_includes_receive(&block) {
+                return true;
+            }
+        }
     }
+
+    if let Some(hash) = node.as_hash_node() {
+        return hash
+            .elements()
+            .iter()
+            .any(|element| subtree_includes_receive(&element));
+    }
+
+    if let Some(hash) = node.as_keyword_hash_node() {
+        return hash
+            .elements()
+            .iter()
+            .any(|element| subtree_includes_receive(&element));
+    }
+
+    if let Some(assoc) = node.as_assoc_node() {
+        return subtree_includes_receive(&assoc.key()) || subtree_includes_receive(&assoc.value());
+    }
+
+    if let Some(block) = node.as_block_node() {
+        return block
+            .body()
+            .is_some_and(|body| subtree_includes_receive(&body));
+    }
+
+    if let Some(begin) = node.as_begin_node() {
+        if let Some(stmts) = begin.statements() {
+            if subtree_includes_receive(&stmts.as_node()) {
+                return true;
+            }
+        }
+        if let Some(rescue_clause) = begin.rescue_clause() {
+            if subtree_includes_receive(&rescue_clause.as_node()) {
+                return true;
+            }
+        }
+        if let Some(ensure_clause) = begin.ensure_clause() {
+            if subtree_includes_receive(&ensure_clause.as_node()) {
+                return true;
+            }
+        }
+    }
+
     false
 }
 
@@ -193,38 +261,60 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(MessageExpectation, "cops/rspec/message_expectation");
 
-    #[test]
-    fn expect_style_flags_allow_receive() {
-        use crate::cop::CopConfig;
+    fn expect_style_config() -> CopConfig {
         use std::collections::HashMap;
 
-        let config = CopConfig {
+        CopConfig {
             options: HashMap::from([(
                 "EnforcedStyle".into(),
                 serde_yml::Value::String("expect".into()),
             )]),
             ..CopConfig::default()
-        };
+        }
+    }
+
+    #[test]
+    fn expect_style_flags_allow_receive() {
         let source = b"allow(foo).to receive(:bar)\n";
-        let diags = crate::testutil::run_cop_full_with_config(&MessageExpectation, source, config);
+        let diags = crate::testutil::run_cop_full_with_config(
+            &MessageExpectation,
+            source,
+            expect_style_config(),
+        );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("expect"));
     }
 
     #[test]
     fn expect_style_does_not_flag_expect_receive() {
-        use crate::cop::CopConfig;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("expect".into()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"expect(foo).to receive(:bar)\n";
-        let diags = crate::testutil::run_cop_full_with_config(&MessageExpectation, source, config);
+        let diags = crate::testutil::run_cop_full_with_config(
+            &MessageExpectation,
+            source,
+            expect_style_config(),
+        );
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn expect_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MessageExpectation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/message_expectation/expect_offense.rb"
+            ),
+            expect_style_config(),
+        );
+    }
+
+    #[test]
+    fn expect_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MessageExpectation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/message_expectation/expect_no_offense.rb"
+            ),
+            expect_style_config(),
+        );
     }
 }
