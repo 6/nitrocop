@@ -721,13 +721,10 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
             }
 
             // Found an OrNode or AndNode — check if its operator line ends with `\`.
-            let operator_loc = if let Some(or_node) = ancestor.as_or_node() {
-                Some(or_node.operator_loc())
-            } else if let Some(and_node) = ancestor.as_and_node() {
-                Some(and_node.operator_loc())
-            } else {
-                None
-            };
+            let operator_loc = ancestor
+                .as_or_node()
+                .map(|n| n.operator_loc())
+                .or_else(|| ancestor.as_and_node().map(|n| n.operator_loc()));
 
             if let Some(op_loc) = operator_loc {
                 let (op_line, _) = self.source.offset_to_line_col(op_loc.start_offset());
