@@ -170,3 +170,11 @@ if extra_in_en.any?
 ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
   error_messages << "Missing files"
 end
+
+# FN: comment on previous line ending with `:` should not trigger parenthesization
+def ensure_writes_are_allowed(sql) # :nodoc:
+  if preventing_writes?
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    raise ActiveRecord::ReadOnlyError, "Write query attempted while in readonly mode: #{sql}"
+  end
+end

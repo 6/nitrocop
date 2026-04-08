@@ -236,3 +236,24 @@ Lighthouse::SubmitCareerCounselingJob.trigger_failure_events(msg, claim) if Flip
 # rubocop:disable Layout/LineLength
 pdf.text "\n<b>Veteran, claimant, or representative Email:</b>\n#{form_data.signing_appellant.email}\n", inline_format: true unless short_claimant_email?
 # rubocop:enable Layout/LineLength
+
+# Parenthesized body (begin_type? in RuboCop) — non_eligible_body
+if condition
+  (some_expression)
+end
+
+merged[index] = if first[index] || second[index]
+  (first[index].to_i + second[index].to_i)
+end
+
+if block_given? then (c = yield(c)) end
+
+# Body line has comment after semicolon — RuboCop's contains_comment? checks by line
+if condition
+  rxo = 8; # large data need skip of 8 bytes
+end
+
+# Comment after `then` on condition line makes modifier form too long (indented to exceed 120)
+        if annotation.destroy then # don't need no blank annotations cluttering up the db, this is extra long text here
+          puts "DELETED"
+        end
