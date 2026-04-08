@@ -51,8 +51,9 @@ use ruby_prism::Visit;
 ///      under `always_ignore` / `ignore_explicit` just because `{` did not begin the line;
 ///    - false positives: explicit last-argument hashes on their own line inside
 ///      calls/setters were still inspected, even though RuboCop ignores them.
-///    Fixed by checking the Prism parent chain directly and only ignoring hashes that
-///    are actually the last argument of a `CallNode`, `SuperNode`, or `YieldNode`.
+///      Fixed by checking the Prism parent chain directly and only ignoring hashes
+///      that are actually the last argument of a `CallNode`, `SuperNode`, or
+///      `YieldNode`.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -146,16 +147,16 @@ struct PairInfo {
 }
 
 fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option<PairInfo> {
-    let elem_start = elem.location().start_offset();
     let elem_end = elem.location().end_offset();
-    let (line, col) = source.offset_to_line_col(elem_start);
-    let begins_line = crate::cop::shared::util::begins_its_line(source, elem_start);
 
     if let Some(assoc) = elem.as_assoc_node() {
         let key = assoc.key();
         let value = assoc.value();
         let key_start = key.location().start_offset();
         let key_end = key.location().end_offset();
+        let elem_start = key_start;
+        let (line, col) = source.offset_to_line_col(elem_start);
+        let begins_line = crate::cop::shared::util::begins_its_line(source, elem_start);
         let (_, key_end_col) = source.offset_to_line_col(key_end);
         let key_source_len = key_end - key_start;
 
@@ -203,6 +204,9 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
         })
     } else if elem.as_assoc_splat_node().is_some() {
         // **foo keyword splat
+        let elem_start = elem.location().start_offset();
+        let (line, col) = source.offset_to_line_col(elem_start);
+        let begins_line = crate::cop::shared::util::begins_its_line(source, elem_start);
         Some(PairInfo {
             elem_start,
             elem_end,
@@ -512,7 +516,7 @@ fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffens
 
     // For table style, check all pairs including first
     for pair in pairs {
-        if !pair.begins_line {
+        if !pair.begins_line && !std::ptr::eq(pair, first) {
             continue;
         }
 
@@ -1092,6 +1096,17 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/hash_alignment/explicit_last_arg_no_offense.rb"
             ),
             variant_config("key", "key", "ignore_explicit"),
+        );
+    }
+
+    #[test]
+    fn table_ignore_implicit_flags_first_pair_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_first_pair_offense.rb"
+            ),
+            variant_config("table", "table", "ignore_implicit"),
         );
     }
 
