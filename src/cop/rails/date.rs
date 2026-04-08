@@ -155,4 +155,33 @@ impl Cop for Date {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(Date, "cops/rails/date");
+
+    fn strict_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("strict".into()),
+            )]),
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn strict_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &Date,
+            include_bytes!("../../../tests/fixtures/cops/rails/date/strict_offense.rb"),
+            strict_config(),
+        );
+    }
+
+    #[test]
+    fn strict_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &Date,
+            include_bytes!("../../../tests/fixtures/cops/rails/date/strict_no_offense.rb"),
+            strict_config(),
+        );
+    }
 }
