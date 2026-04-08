@@ -17,8 +17,9 @@ use ruby_prism::Visit;
 ///   Fix: push block context before visiting receiver/arguments/body, keep `lambda`
 ///   as a scope boundary, and only treat regular dot calls with receivers as chained
 ///   sends.
-/// - FN=2 (`EnforcedStyle=return_nil`): `return call(...) && return` was missed.
-///   Prism nests the trailing bare `return` inside the outer return's argument tree,
+/// - FN=2 (`EnforcedStyle=return_nil`): `call(...) && return` was missed, and the
+///   same nested bare return also appears under `return call(...) && return`.
+///   Prism nests the trailing bare `return` inside the surrounding expression tree,
 ///   but this visitor stopped at the outer `ReturnNode`. RuboCop still visits the
 ///   nested return and flags it. Fix: always recurse into return arguments, even when
 ///   the current return is suppressed or already style-correct.
