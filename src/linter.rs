@@ -594,7 +594,6 @@ const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
     "Style/ConditionalAssignment",        // FN=5951
     "Style/Documentation",                // FN=22
     "Style/DocumentationMethod",          // FN=63
-    "Style/DoubleNegation",               // gap masked by disable directives
     "Style/FrozenStringLiteralComment",   // FN=13
     "Style/GlobalStdStream",              // gap masked by disable directives
     "Style/HashLikeCase",                 // gap masked by disable directives
