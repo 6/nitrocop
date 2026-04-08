@@ -224,3 +224,13 @@ return (attributes[key] = value) unless Attributes::STYLES_MERGE.include?(key)
 
 if((ENV['PL_REDIS_URL'.freeze] ||= ENV['REDIS_URL'.freeze]))
    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+end
+
+(self[field] = self[field].kind_of?(Numeric) ? (self[field] || 0) + value : value)
+^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+
+body: ({ cmd: "_notify-validate" }.merge(paypal_event)).to_query,
+      ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+[image_path, (resolve_image_options image_path, image_format, image_attrs, (({ background: true, container_size: [page_width, page_height] }.merge opts)))]
+                                                                            ^ Style/RedundantParentheses: Don't use parentheses around a method call.
