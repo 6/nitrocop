@@ -51,6 +51,14 @@ const MSG: &str = "Use the return of the conditional for variable assignment and
 /// (starting column) to the first line's length, double-counting indentation.
 /// RuboCop's `longest_line` computes each branch line's length independently
 /// of the node's column position. Dropped `node_col` to match.
+///
+/// FN reduction (2026-04-08): `exceeds_line_limit` was including indentation
+/// whitespace before the LHS in the `remaining` line-length calculation.
+/// RuboCop's regex `\s*lhs\s*=\s*` eats leading whitespace before the LHS
+/// when stripping it from each line, so deeply-indented branch lines were
+/// over-counted, suppressing ~40 legitimate offenses. Fixed by trimming
+/// trailing whitespace from the `before` slice (the content before the LHS
+/// match position, which for indented branches is pure whitespace).
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -801,7 +809,10 @@ fn exceeds_line_limit(
         // RuboCop's `line.sub(assignment_regex, '')`. For if/else branches
         // the LHS is at the start; for ternaries it appears mid-line.
         let remaining = if let Some(pos) = line.find(lhs_trimmed) {
-            let before = &line[..pos];
+            // RuboCop's regex `\s*lhs\s*=\s*` eats leading whitespace
+            // before the LHS. Mirror that by trimming trailing whitespace
+            // from `before` (which is the indentation for branch lines).
+            let before = line[..pos].trim_end();
             let after = &line[pos + lhs_trimmed.len()..];
             let after_trimmed = after.trim_start();
             before.len() + after_trimmed.len()

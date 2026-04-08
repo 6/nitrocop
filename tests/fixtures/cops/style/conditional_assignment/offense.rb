@@ -161,3 +161,12 @@ end
 # ternary with local variable assignment (FN case)
 opts[:response_timeout].nil? ? response_timeout = 0.9 : response_timeout = opts[:response_timeout].to_f
 ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+# if/else with local variable assignment near the 120-char line-length limit
+# (branch line is exactly 120 chars of lhs+rhs content; indentation must not inflate the guard)
+if(event.respond_to?(:message))
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  details = "An error occurred in #{self.class.task_type_name}. Error: #{event.try(:message)}\n\n#{event.try(:backtrace)}"
+else
+  details = event.to_s
+end
