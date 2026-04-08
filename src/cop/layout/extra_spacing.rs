@@ -246,6 +246,35 @@ use std::ops::Range;
 ///     heredocs were marked as comment-only, breaking alignment search across
 ///     those lines. Added a check: if `#` is followed by `{`, the line is not
 ///     comment-only. Fixes 1 FP from ManageIQ__manageiq.
+///
+/// ## Investigation findings (2026-04-08)
+///
+/// 29. **`build_comment_only_lines` using Prism comments (fixed)**: The raw
+///     text-based `#{` exception (finding 28) was too broad: it also exempted
+///     commented-out code lines like `#{:name => :find_file, :args => ...}`
+///     at the top level, which ARE real Ruby comments. When `find_nearest_line`
+///     encountered these lines (treated as code), their shifted column positions
+///     (due to the extra `#` character) broke alignment detection for adjacent
+///     lines, producing false positives. Switched `build_comment_only_lines` to
+///     use Prism's parsed comment list instead of raw text scanning. This
+///     correctly classifies `#{...}` inside heredocs as non-comments (Prism
+///     doesn't report them) while treating top-level `#{...}` as comments
+///     (Prism does report them). As a side effect, `#` lines inside heredoc
+///     bodies, regex bodies, and string bodies are also no longer misclassified
+///     as comments, which fixes several FNs where `find_nearest_line` walked
+///     through these non-code regions to find false alignment matches.
+///     Fixes 8+ FPs (OpenVoxProject/openvox, puppetlabs/puppet) and 4 FNs
+///     (octocatalog-diff, rexical, SUSE/machinery, cnab240/shopqi).
+///
+/// 30. **Interpolated string token extraction FPs (fixed)**: `extract_token_at`
+///     returned the full quoted string for `"` delimiters, but RuboCop's
+///     tokenizer splits interpolated strings into `tSTRING_BEG` (`"`) plus
+///     content tokens. This meant Mode 2 alignment compared `"hello #{x}"`
+///     (full string) vs `""` and found no match, while RuboCop compared just
+///     `"` vs `"` and found a match. For double-quoted strings containing
+///     `#{`, now returns just the opening `"` to match RuboCop's tokenization.
+///     Fixes 2 FPs (inspec/inspec-aws) where `x = ""` / `x =  "#{value}"`
+///     alignment was not recognized.
 pub struct ExtraSpacing;
 
 impl Cop for ExtraSpacing {
@@ -300,7 +329,7 @@ impl Cop for ExtraSpacing {
         let aligned_comment_lines = build_aligned_comment_lines(parse_result, source);
 
         // Identify comment-only lines (0-indexed) for skipping during alignment search
-        let comment_only_lines = build_comment_only_lines(&lines);
+        let comment_only_lines = build_comment_only_lines(parse_result, source, &lines);
 
         for (line_idx, &line) in lines.iter().enumerate() {
             let line_num = line_idx + 1;
@@ -745,22 +774,34 @@ fn build_aligned_comment_lines(
 
 // -- Comment-only lines --
 
-fn build_comment_only_lines(lines: &[&[u8]]) -> HashSet<usize> {
+fn build_comment_only_lines(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    source: &SourceFile,
+    lines: &[&[u8]],
+) -> HashSet<usize> {
     let mut set = HashSet::new();
-    for (idx, line) in lines.iter().enumerate() {
+    for comment in parse_result.comments() {
+        let loc = comment.location();
+        let line_num = source.offset_to_line_col(loc.start_offset()).0;
+        let line_idx = line_num - 1;
+        if line_idx >= lines.len() {
+            continue;
+        }
+        let line = lines[line_idx];
+        // Check if this comment starts at the first non-whitespace position
+        // (i.e., this is a comment-only line, not a trailing comment).
         let first_non_ws = line.iter().position(|&b| b != b' ' && b != b'\t');
         if let Some(pos) = first_non_ws {
             if line[pos] == b'#' {
-                // Don't classify `#{` as comment-only — it's string interpolation
-                // syntax (typically inside heredoc bodies). Treating these lines as
-                // comment-only causes them to be skipped in alignment searches,
-                // producing false positives when adjacent interpolation lines are
-                // actually aligned (e.g., two `#{...map { ... }}` lines inside
-                // a heredoc).
-                if pos + 1 < line.len() && line[pos + 1] == b'{' {
-                    continue;
+                // Verify the comment's byte offset matches the `#` position.
+                // This ensures we only mark lines that Prism recognizes as
+                // comments — not `#` inside heredocs, strings, or regex bodies,
+                // and not `#{...}` lines at the top level that are actually
+                // commented-out code (Prism correctly reports these as comments).
+                let line_start = source.line_start_offset(line_num);
+                if loc.start_offset() == line_start + pos {
+                    set.insert(line_idx);
                 }
-                set.insert(idx);
             }
         }
     }
@@ -1012,8 +1053,21 @@ fn extract_token_at(line: &[u8], col: usize) -> &[u8] {
         // String delimiter: extract the full quoted string to avoid coincidental
         // single-character alignment. This matches RuboCop's behavior where
         // `range.source` for a string token is the full string text.
+        //
+        // Exception: for interpolated double-quoted strings (containing `#{`),
+        // RuboCop's tokenizer splits them into tSTRING_BEG (`"`) + contents,
+        // so the opening `"` is a separate token. Return just `"` for these
+        // to match RuboCop's alignment behavior. This allows alignment when
+        // an interpolated string's `"` matches a `"` at the same column on
+        // an adjacent line (e.g., `x = ""` / `x =  "#{value}"`).
         if let Some(close_pos) = line[col + 1..].iter().position(|&b| b == ch) {
-            &line[col..col + 1 + close_pos + 1]
+            let full_string = &line[col..col + 1 + close_pos + 1];
+            if ch == b'"' && full_string.windows(2).any(|w| w == b"#{") {
+                // Interpolated string: return just the opening quote
+                &line[col..col + 1]
+            } else {
+                full_string
+            }
         } else {
             // No closing quote found on same line — return just the quote
             &line[col..col + 1]
