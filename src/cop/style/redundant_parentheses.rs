@@ -183,11 +183,12 @@ use crate::parse::source::SourceFile;
 ///   assignment path, ternary branches like `(cond ? (x |= y) : z)` were incorrectly reported.
 ///   RuboCop keeps assignment parens anywhere inside ternary conditions/branches, so the
 ///   assignment fast-path now bails out when a ternary ancestor is present.
-/// - **Conditional bodies stay exempt:** modifier and block-style conditional bodies like
-///   `(count += 1) unless skip` and `if cond; (count += 1); end` are accepted by RuboCop even
-///   though the immediate Prism parent is still a `StatementsNode`. The assignment path now
-///   recognizes `if`/`unless`/`while`/`until`/`case` statement bodies and skips them instead of
-///   treating every statements wrapper as begin-like.
+/// - **Single-statement conditional bodies stay exempt:** modifier and block-style conditional
+///   bodies like `(count += 1) unless skip` and `if cond; (count += 1); end` are accepted by
+///   RuboCop even though the immediate Prism parent is still a `StatementsNode`. The assignment
+///   path now recognizes one-statement `if`/`unless`/`while`/`until`/`case` bodies and skips
+///   them instead of treating every statements wrapper as begin-like. Multi-statement bodies still
+///   flag because RuboCop treats those like `begin_type?` containers.
 /// - **Modifier-if rescue bodies still flag:** `after { (r.quit rescue nil) if defined?(r) }`
 ///   is a body expression, not a conditional predicate. The one-line-rescue exemption now checks
 ///   whether the parens are actually inside a conditional predicate range instead of skipping any
@@ -716,10 +717,11 @@ impl RedundantParensVisitor<'_> {
             && parent.statements_child_count == 1
     }
 
-    /// Check if the parent (a StatementsNode) is the body of a conditional-like
-    /// construct (`if`/`unless`, `while`/`until`, `case`). RuboCop keeps
-    /// assignment parens in these bodies, including modifier forms like
-    /// `(count += 1) unless skip`.
+    /// Check if the parent (a StatementsNode) is the SINGLE statement body of a
+    /// conditional-like construct (`if`/`unless`, `while`/`until`, `case`).
+    /// RuboCop keeps assignment parens in these bodies, including modifier
+    /// forms like `(count += 1) unless skip`, but multi-statement bodies get a
+    /// `begin` wrapper in Parser AST and are flagged.
     fn is_parent_statements_conditional_body(&self) -> bool {
         if self.parent_stack.len() < 3 {
             return false;
@@ -727,7 +729,10 @@ impl RedundantParensVisitor<'_> {
 
         let parent_index = self.parent_stack.len() - 2;
         let parent = &self.parent_stack[parent_index];
-        if !parent.is_statements_node || parent.is_parentheses_body {
+        if !parent.is_statements_node
+            || parent.is_parentheses_body
+            || parent.statements_child_count != 1
+        {
             return false;
         }
 

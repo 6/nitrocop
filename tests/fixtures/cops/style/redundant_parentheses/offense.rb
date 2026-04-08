@@ -252,3 +252,11 @@ until($stdin.gets).include?("DONE2")
 
 until($stdin.gets).include?("DONE3")
      ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+if other
+  work
+elsif cond
+  (x += 1)
+  ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+  work
+end

@@ -274,9 +274,14 @@ loop { (i = 1) }
 foo { (x = bar) }
 # Assignment in ternary branch — RuboCop keeps these parens
 inject({}) { |hah, err| hah.merge(err) { |key, old_v, new_v| (new_v.is_a?(Array) ? (old_v |= new_v) : old_v.merge(new_v)) } }
-# Assignment in conditional bodies — RuboCop keeps these parens
+# Assignment in single-statement conditional bodies — RuboCop keeps these parens
 (x += 1) unless cond
 if cond
+  (x += 1)
+end
+if other
+  work
+elsif cond
   (x += 1)
 end
 # Non-empty while body — RuboCop only flags the empty-body form
