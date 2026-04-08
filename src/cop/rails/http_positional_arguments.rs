@@ -5,9 +5,48 @@ use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Detects uses of HTTP request methods (get, post, put, patch, delete, head)
+/// with positional hash arguments that should use keyword arguments.
+///
+/// Originally this cop only detected 3+ argument forms like `get :index, {params}, {headers}`
+/// where the second argument was an explicit HashNode. It missed 2-argument forms like
+/// `get :edit, :id => 12` (hash rocket syntax) which Prism parses as KeywordHashNode.
+///
+/// The fix expands detection to any call with 2+ arguments where the second argument
+/// is a HashNode or KeywordHashNode, provided it doesn't contain special keyword args
+/// (params:, session:, headers:, etc.). Uses RuboCop's message format including the
+/// HTTP verb for consistency.
 pub struct HttpPositionalArguments;
 
 const HTTP_METHODS: &[&[u8]] = &[b"get", b"post", b"put", b"patch", b"delete", b"head"];
+
+/// Keys that are valid keyword args for HTTP request methods and should not be flagged.
+const SPECIAL_KEYWORD_ARGS: &[&[u8]] = &[
+    b"method", b"params", b"session", b"body", b"flash", b"xhr", b"as", b"headers", b"env", b"to",
+];
+
+/// Check if a hash or keyword hash has a special keyword arg as a key.
+fn has_special_keyword_arg(node: &ruby_prism::Node<'_>) -> bool {
+    let elements = if let Some(hash) = node.as_hash_node() {
+        hash.elements()
+    } else if let Some(kw_hash) = node.as_keyword_hash_node() {
+        kw_hash.elements()
+    } else {
+        return false;
+    };
+
+    elements.iter().any(|el| {
+        if let Some(assoc) = el.as_assoc_node() {
+            if let Some(key) = assoc.key().as_symbol_node() {
+                SPECIAL_KEYWORD_ARGS.contains(&key.unescaped())
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    })
+}
 
 impl Cop for HttpPositionalArguments {
     fn name(&self) -> &'static str {
@@ -113,18 +152,25 @@ impl<'pr> Visit<'pr> for HttpPosArgsVisitor<'_> {
         if HTTP_METHODS.contains(&method_name) && node.receiver().is_none() {
             if let Some(args) = node.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
-                // Only flag explicit HashNode (old-style positional: `get path, {params}, headers`).
-                // A keyword_hash_node means keyword args (`get path, params: ...`), which is
-                // the correct new-style syntax this cop promotes — don't flag it.
-                if arg_list.len() >= 3 && arg_list[1].as_hash_node().is_some() {
-                    let loc = node.location();
-                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use keyword arguments for HTTP request methods.".to_string(),
-                    ));
+                // Flag old-style positional hash args:
+                // - `get path, {params}, headers` (explicit HashNode braces)
+                // - `get path, :id => 12` (hash rocket syntax, may be KeywordHashNode)
+                // Don't flag if the hash contains special keyword args like params:, session:, etc.
+                if arg_list.len() >= 2 {
+                    let second_arg = &arg_list[1];
+                    let is_hash = second_arg.as_hash_node().is_some()
+                        || second_arg.as_keyword_hash_node().is_some();
+                    if is_hash && !has_special_keyword_arg(second_arg) {
+                        let loc = node.location();
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        let verb = std::str::from_utf8(method_name).unwrap_or("http");
+                        let msg = format!(
+                            "Use keyword arguments instead of positional arguments for http call: `{}`.",
+                            verb
+                        );
+                        self.diagnostics
+                            .push(self.cop.diagnostic(self.source, line, column, msg));
+                    }
                 }
             }
         }
