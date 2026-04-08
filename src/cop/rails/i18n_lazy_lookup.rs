@@ -289,7 +289,7 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        let source = b"# nitrocop-filename: app/controllers/books_controller.rb\nclass BooksController < ApplicationController\n  def create\n    t('.success')\n    ^^^^^^^^^^^^^ Rails/I18nLazyLookup: Use explicit lookup for i18n keys.\n  end\nend\n";
+        let source = b"# nitrocop-filename: app/controllers/books_controller.rb\nclass BooksController < ApplicationController\n  def create\n    t('.success')\n      ^^^^^^^^^ Rails/I18nLazyLookup: Use explicit lookup for i18n keys.\n  end\nend\n";
         assert_cop_offenses_full_with_config(&I18nLazyLookup, source, config);
     }
 
