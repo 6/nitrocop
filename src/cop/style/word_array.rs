@@ -205,6 +205,13 @@ impl Cop for WordArray {
         let word_regex_str = config.get_str("WordRegex", "");
 
         if enforced_style == "brackets" {
+            let mut visitor = BracketsStyleVisitor {
+                cop: self,
+                source,
+                diagnostics: Vec::new(),
+            };
+            visitor.visit(&parse_result.node());
+            diagnostics.extend(visitor.diagnostics);
             return;
         }
 
@@ -392,6 +399,147 @@ impl<'pr> Visit<'pr> for WordArrayVisitor<'_, '_, 'pr> {
     }
 }
 
+/// Visitor for `EnforcedStyle: brackets` — flags `%w`/`%W` arrays for
+/// conversion to bracket syntax.
+struct BracketsStyleVisitor<'a, 'src> {
+    cop: &'a WordArray,
+    source: &'src SourceFile,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl<'pr> BracketsStyleVisitor<'_, '_> {
+    fn check_percent_word_array(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        let opening = match node.opening_loc() {
+            Some(loc) => loc,
+            None => return,
+        };
+
+        let opening_bytes = opening.as_slice();
+        if opening_bytes.len() < 2
+            || opening_bytes[0] != b'%'
+            || (opening_bytes[1] != b'w' && opening_bytes[1] != b'W')
+        {
+            return;
+        }
+
+        let message = self.build_brackets_message(node, &opening);
+
+        let (line, column) = self.source.offset_to_line_col(opening.start_offset());
+        self.diagnostics
+            .push(self.cop.diagnostic(self.source, line, column, message));
+    }
+
+    fn build_brackets_message(
+        &self,
+        node: &ruby_prism::ArrayNode<'pr>,
+        opening: &ruby_prism::Location<'_>,
+    ) -> String {
+        let elements = node.elements();
+
+        if elements.is_empty() {
+            return "Use `[]` for an array of words.".to_string();
+        }
+
+        // Check if single-line
+        let start_line = self.source.offset_to_line_col(opening.start_offset()).0;
+        let end_line = node
+            .closing_loc()
+            .map(|c| self.source.offset_to_line_col(c.start_offset()).0)
+            .unwrap_or(start_line);
+
+        if start_line != end_line {
+            return "Use an array literal `[...]` for an array of words.".to_string();
+        }
+
+        // Single-line: build explicit bracket form from element contents
+        let mut words = Vec::new();
+        for elem in elements.iter() {
+            let string_node = match elem.as_string_node() {
+                Some(s) => s,
+                None => {
+                    // Non-string element (e.g., interpolated %W) — fall back
+                    return "Use an array literal `[...]` for an array of words.".to_string();
+                }
+            };
+            let unescaped = string_node.unescaped();
+            let content = match std::str::from_utf8(unescaped) {
+                Ok(s) => s,
+                Err(_) => {
+                    return "Use an array literal `[...]` for an array of words.".to_string();
+                }
+            };
+            if content.contains('\'') {
+                words.push(format!("\"{}\"", content));
+            } else {
+                words.push(format!("'{}'", content));
+            }
+        }
+
+        // Build bracket form preserving original whitespace
+        let bracket_array =
+            build_bracket_array_with_whitespace(node, &words, self.source.as_bytes());
+        if bracket_array.contains('\n') {
+            "Use an array literal `[...]` for an array of words.".to_string()
+        } else {
+            format!("Use `{}` for an array of words.", bracket_array)
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for BracketsStyleVisitor<'_, '_> {
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        self.check_percent_word_array(node);
+        ruby_prism::visit_array_node(self, node);
+    }
+}
+
+/// Build a bracket array representation preserving the whitespace from the
+/// original `%w`/`%W` source. Mirrors RuboCop's
+/// `build_bracketed_array_with_appropriate_whitespace`.
+fn build_bracket_array_with_whitespace(
+    node: &ruby_prism::ArrayNode<'_>,
+    quoted_elements: &[String],
+    source_bytes: &[u8],
+) -> String {
+    let elements = node.elements();
+    if elements.is_empty() {
+        return "[]".to_string();
+    }
+
+    let opening_end = node.opening_loc().unwrap().end_offset();
+    let closing_start = node
+        .closing_loc()
+        .map(|c| c.start_offset())
+        .unwrap_or(opening_end);
+
+    let first_start = elements.iter().next().unwrap().location().start_offset();
+    let last_end = elements.iter().last().unwrap().location().end_offset();
+
+    let leading = std::str::from_utf8(&source_bytes[opening_end..first_start]).unwrap_or("");
+    let trailing = std::str::from_utf8(&source_bytes[last_end..closing_start]).unwrap_or("");
+
+    let between = if elements.len() >= 2 {
+        let first_end = elements.iter().next().unwrap().location().end_offset();
+        let second_start = elements.iter().nth(1).unwrap().location().start_offset();
+        std::str::from_utf8(&source_bytes[first_end..second_start]).unwrap_or(" ")
+    } else {
+        " "
+    };
+
+    let mut result = String::from("[");
+    result.push_str(leading);
+    for (i, elem) in quoted_elements.iter().enumerate() {
+        if i > 0 {
+            result.push(',');
+            result.push_str(between);
+        }
+        result.push_str(elem);
+    }
+    result.push_str(trailing);
+    result.push(']');
+    result
+}
+
 /// Check if a `%w` or `%W` array has invalid contents for percent syntax:
 /// any string element that contains a space or has invalid encoding.
 /// Matches RuboCop's `invalid_percent_array_contents?` override in WordArray.
@@ -554,6 +702,36 @@ mod tests {
             diags.len(),
             2,
             "Should flag both subarrays in an all-word matrix"
+        );
+    }
+
+    fn brackets_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("brackets".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn brackets_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &WordArray,
+            include_bytes!("../../../tests/fixtures/cops/style/word_array/brackets_offense.rb"),
+            brackets_config(),
+        );
+    }
+
+    #[test]
+    fn brackets_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &WordArray,
+            include_bytes!("../../../tests/fixtures/cops/style/word_array/brackets_no_offense.rb"),
+            brackets_config(),
         );
     }
 
