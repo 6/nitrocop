@@ -505,14 +505,35 @@ fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
     false
 }
 
-/// Check if the previous non-whitespace character (including newlines) before `pos` is `]`.
+/// Check if the previous non-whitespace character (including newlines) before `pos` is `]`
+/// from a real bracket array (not `%w[...]`, `%i[...]`, etc.).
 fn is_adjacent_bracket_backward(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i > 0 {
         i -= 1;
         match bytes[i] {
             b' ' | b'\t' | b'\n' | b'\r' => continue,
-            b']' => return true,
+            b']' => {
+                // Found `]` — find its matching `[` via bracket counting,
+                // then check it's not a %w[/%i[/etc. delimiter.
+                let mut depth: usize = 1;
+                let mut j = i;
+                while j > 0 && depth > 0 {
+                    j -= 1;
+                    match bytes[j] {
+                        b']' => depth += 1,
+                        b'[' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if depth == 0 && j > 0 && bytes[j] == b'[' {
+                    // Check if preceded by %<letter> (e.g. %w[, %i[, %I[, %W[)
+                    if j >= 2 && bytes[j - 2] == b'%' && bytes[j - 1].is_ascii_alphabetic() {
+                        return false;
+                    }
+                }
+                return depth == 0;
+            }
             _ => return false,
         }
     }

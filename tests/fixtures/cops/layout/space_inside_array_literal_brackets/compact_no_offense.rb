@@ -26,3 +26,13 @@ end
 case value
 in ADT[ *head, ADT[ *headhead, tail ]]
 end
+# %w/%i/%W/%I arrays are NOT real bracket arrays — don't collapse
+[ %w[foo bar], %w[baz qux] ]
+[ %i[a b c], %i[d e f] ]
+[
+  %i[annotations annotations resource_id],
+  %i[permissions permissions role_id],
+  %i[role_memberships memberships member_id]
+]
+# Mixed: real array + %w — only left side is multi-dim
+[[ 1, 2 ], %w[a b] ]
