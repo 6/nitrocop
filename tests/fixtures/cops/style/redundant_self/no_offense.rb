@@ -256,3 +256,77 @@ end
 
 # rescue => self.keyword — self is required when method name is a keyword
 rescue => self.retry
+
+# Nested def: outer method local shadows method name in inner def.
+# RuboCop's ancestor walk makes outer locals visible through the inner def node.
+def configure_defaults(klass, defaults)
+  def klass.inherited(child)
+    child.defaults = self.defaults
+  end
+end
+
+# Nested def through block: outer keyword param shadows method name
+def self.of(klass, *klasses, length: nil)
+  Class.new(self) do
+    def do_type_check
+      if static_length and self.length != static_length
+        puts self.length
+      end
+    end
+  end
+end
+
+# Singleton method on variable: enclosing block param shadows method name
+def get_default_media
+  files.each do |path|
+    file = File.new(path)
+  end
+
+  def file.local_path
+    self.path
+  end
+
+  def file.original_filename
+    File.basename(self.path)
+  end
+end
+
+# Destructured block parameter shadows method name
+def test_destructured
+  pairs.each_with_index do |(title, path), i|
+    page_path = remove_trailing_slash(self.path)
+  end
+end
+
+# self.x in value expression of compound assignment is allowed
+def postprocess
+  self.keydir &&= File.expand_path(self.keydir)
+  self.priority ||= compute(self.priority)
+  self.offset += calculate(self.offset)
+end
+
+# class << self inside method: method param visible through singleton class
+def build_model_worker(table_name)
+  Class.new do
+    class << self
+      define_method :search do |q|
+        self.table_name
+      end
+    end
+  end
+end
+
+# Block params propagate through class/module boundaries when enclosing block exists
+describe Foo do
+  module SchemaArgumentTest
+    class Query
+      field :field, String do
+        argument :prepared_by_proc_arg, Int, prepare: ->(val, context) { context[:multiply_by] * val }
+      end
+
+      def context_arg_test(input:)
+        self.context.class
+      end
+    end
+  end
+end
