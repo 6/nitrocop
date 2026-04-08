@@ -63,6 +63,27 @@ use ruby_prism::Visit;
 ///   uses `in_dotless_call_arguments` in modifier-if/unless skip checks. Also saved/restored
 ///   `in_dotless_call_arguments` in `visit_block_node` and `visit_lambda_node` to prevent
 ///   the flag from leaking into nested block bodies.
+/// - `&&` suppression from nil-responding ancestors is now chain-length-aware. RuboCop's
+///   ancestor walk can escape to outer `==` / nil-method ancestors only for chain length 1;
+///   chain length >= 2 stops at the outermost call in the safe-navigation chain. This fixes
+///   FNs such as `((product && product.population_counting.to_sym) == expected ? 1 : 0)`.
+/// - Unary negation wrappers now search nested `&&` descendants inside the `!` receiver,
+///   matching RuboCop's flattened `and` traversal for patterns like
+///   `lat_lng && !(lat_lng.first.zero? && lat_lng.last.zero?)`.
+/// - Modifier `if`/`unless` is no longer blanket-suppressed under assignment/operator
+///   parents before the method chain is known. RuboCop only suppresses those contexts when
+///   the chain length is 1 and the ancestor walk escapes to the outer unsafe parent, so
+///   chain length >= 2 cases like `parts[:scheme] = (scheme.dup.force_encoding(...) if scheme)`
+///   now report.
+/// - `&&` inside `private def` / `private_class_method def` wrappers is no longer skipped
+///   just because the definition itself is a call argument. The existing `in_unsafe_parent`
+///   chain-length check already models RuboCop's real suppression boundary.
+/// - Modifier `if`/`unless` with a block-call body now tracks only OUTER unsafe send ancestry
+///   above the surrounding block. RuboCop's `unsafe_method_used?` walk can escape through the
+///   enclosing block into outer unsafe container sends like `([Builder.new do ... end] + x)` or
+///   `puts(items.map do ... end)`, but safe outer wrappers alone do not suppress. This keeps
+///   the RDF CLI array case skipped while still flagging ordinary nested safe-block cases such as
+///   `outer.wrap { inner.wrap { items.each { ... } if items } }`.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -93,6 +114,14 @@ struct ModifierIfCheckContext<'a> {
     /// RuboCop's `unsafe_method_used?` ancestor walk escapes the method chain for
     /// chain-length-1 and finds these parents, suppressing the offense.
     in_unsafe_parent: bool,
+    /// Whether an outer assignment/operator ancestor remains above the modifier-if.
+    /// Like RuboCop's ancestor walk, this only suppresses chain-length-1 cases.
+    in_assignment_or_operator_parent: bool,
+    /// Whether an unsafe send ancestor remains above the surrounding block node.
+    /// For block-call bodies, RuboCop can escape through the enclosing block and
+    /// reach outer unsafe container sends like `+` / `puts`, but safe outer calls
+    /// alone do not suppress.
+    has_outer_unsafe_parent_above_current_block: bool,
 }
 
 /// Methods that `nil` responds to in vanilla Ruby.
@@ -365,6 +394,18 @@ impl SafeNavigation {
             let Some(chain) =
                 Self::call_chain_from_checked_receiver(&call.as_node(), checked_node, bytes)
             else {
+                if call.name().as_slice() == b"!" {
+                    if let Some(receiver) = call.receiver() {
+                        return Self::first_safe_chain_in_nested_and_descendants(
+                            &receiver,
+                            checked_node,
+                            bytes,
+                            outer_operator,
+                            max_chain_length,
+                            allowed_methods,
+                        );
+                    }
+                }
                 return SafeChainSearchResult::NoneFound;
             };
 
@@ -644,6 +685,7 @@ impl Cop for SafeNavigation {
             in_and_clause_visit: 0,
             in_definition_argument_wrapper: 0,
             in_nil_method_call_arguments: 0,
+            outer_unsafe_parent_above_current_block_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -674,6 +716,7 @@ struct SafeNavVisitor<'a> {
     in_and_clause_visit: usize,
     in_definition_argument_wrapper: usize,
     in_nil_method_call_arguments: usize,
+    outer_unsafe_parent_above_current_block_stack: Vec<bool>,
 }
 
 impl<'a> SafeNavVisitor<'a> {
@@ -742,6 +785,14 @@ impl<'a> SafeNavVisitor<'a> {
         }
 
         if self.in_dynamic_send_args > 0 && chain.len() == 1 {
+            ruby_prism::visit_and_node(self, node);
+            return;
+        }
+
+        // Match RuboCop's nil-method ancestor walk: chain-length-1 can escape to
+        // outer `==`, `instance_of?`, etc., while chain-length >= 2 is bounded by
+        // the safe-navigation chain itself.
+        if self.in_nil_safe_call_ancestor > 0 && chain.len() == 1 {
             ruby_prism::visit_and_node(self, node);
             return;
         }
@@ -1111,8 +1162,10 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         if let Some(arguments) = node.arguments() {
             self.in_call_arguments += 1;
             let saved_in_dotless_call_arguments = self.in_dotless_call_arguments;
-            // Only track dotless calls (no . or &. operator)
-            if node.call_operator_loc().is_none() {
+            // Track only dotless non-operator calls like `scope(...)` / `puts(...)`.
+            // Dotless operator calls (`[]=`, `+`, etc.) are handled separately via
+            // `in_assignment_or_operator_parent` with chain-length-aware suppression.
+            if node.call_operator_loc().is_none() && !SafeNavigation::is_dotless_operator(node) {
                 self.in_dotless_call_arguments = self.in_call_arguments;
             }
             let is_dynamic_send = Self::is_dynamic_send_call(node);
@@ -1145,7 +1198,10 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             if is_unsafe && self.in_and_clause_visit == 0 {
                 self.in_unsafe_parent -= 1;
             }
+            self.outer_unsafe_parent_above_current_block_stack
+                .push(self.in_unsafe_parent > 0);
             self.visit(&block);
+            self.outer_unsafe_parent_above_current_block_stack.pop();
         }
 
         if is_assignment_or_operator_parent {
@@ -1168,14 +1224,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        // Skip if inside an assignment method, operator call, or dotless method call.
-        // RuboCop skips `&&` patterns when any ancestor send node is "unsafe" (dotless,
-        // assignment, or operator method). For example, `scope :bar, ->(user) { user && user.name }`
-        // is not flagged because `scope` is a dotless method call.
-        if self.in_nil_safe_call_ancestor > 0
-            || self.in_double_colon_call_arguments > 0
-            || (self.in_definition_argument_wrapper > 0 && self.in_call_arguments > 0)
-        {
+        if self.in_double_colon_call_arguments > 0 {
             self.visit_flattened_and_clauses(node);
             return;
         }
@@ -1217,6 +1266,13 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             }
 
             if self.in_dynamic_send_args > 0 && chain.len() == 1 {
+                continue;
+            }
+
+            // Match RuboCop's nil-method ancestor walk: chain-length-1 can
+            // escape to outer nil methods, while chain-length >= 2 stops at the
+            // outermost call in the safe-navigation chain.
+            if self.in_nil_safe_call_ancestor > 0 && chain.len() == 1 {
                 continue;
             }
 
@@ -1301,11 +1357,6 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        if self.in_assignment_or_operator_parent > 0 {
-            ruby_prism::visit_if_node(self, node);
-            return;
-        }
-
         if (self.in_block_argument > 0 && self.in_block == 0)
             || self.in_nil_safe_call_ancestor > 0
             || self.in_dotless_call_arguments > 0
@@ -1326,6 +1377,12 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 skip_direct_receiver_block_body_block_calls: self
                     .is_direct_receiver_block_body(&node.as_node()),
                 in_unsafe_parent: self.in_unsafe_parent > 0,
+                in_assignment_or_operator_parent: self.in_assignment_or_operator_parent > 0,
+                has_outer_unsafe_parent_above_current_block: self
+                    .outer_unsafe_parent_above_current_block_stack
+                    .last()
+                    .copied()
+                    .unwrap_or(false),
             },
         );
         self.diagnostics.extend(diags);
@@ -1339,11 +1396,6 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             self.with_reset_parent_operator_context(|this| {
                 ruby_prism::visit_unless_node(this, node);
             });
-            return;
-        }
-
-        if self.in_assignment_or_operator_parent > 0 {
-            ruby_prism::visit_unless_node(self, node);
             return;
         }
 
@@ -1769,6 +1821,13 @@ impl SafeNavigation {
             return Vec::new();
         }
 
+        if body_call.block().is_some()
+            && !context.skip_direct_receiver_block_body_block_calls
+            && context.has_outer_unsafe_parent_above_current_block
+        {
+            return Vec::new();
+        }
+
         if chain.len() > context.max_chain_length {
             return Vec::new();
         }
@@ -1785,6 +1844,10 @@ impl SafeNavigation {
         // for chain-length-1 and finds unsafe parents (dotless calls, operators, etc.)
         // above the modifier-if.  For chain ≥ 2, the walk is bounded by the chain.
         if context.in_unsafe_parent && chain.len() == 1 {
+            return Vec::new();
+        }
+
+        if context.in_assignment_or_operator_parent && chain.len() == 1 {
             return Vec::new();
         }
 

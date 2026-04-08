@@ -203,3 +203,13 @@ puts(items.map { |x| x.bar unless x.nil? })
 
 # && inside else body of !!() — unsafe parent preserved across if branches
 !!(if cached; cached; else; data && data.to_json; end)
+
+# Modifier-if with a block-call body inside a non-direct-receiver block can inherit
+# outer call-chain ancestry through the surrounding container expression.
+([
+  Builder.new do
+    reader.options.each do |cli_opt|
+      cli_opt
+    end if reader
+  end
+] + other).uniq

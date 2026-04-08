@@ -223,3 +223,36 @@ pages << ($1.nil?? nil : $1.to_i)
 
 methods-[extension_modules.last ? extension_modules.last.methods : nil]-self.class.instance_methods
          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+((product && product.population_counting.to_sym) == expected ? 1 : 0)
+  ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+if lat_lng && !(lat_lng.first.zero? && lat_lng.last.zero?)
+   ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  lat_lng
+end
+
+if data && data.notnull.any?
+   ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  data
+end
+
+options && options.each do |option, value|
+^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  option
+end
+
+parts[:scheme] = (scheme.dup.force_encoding(Encoding::UTF_8) if scheme)
+                  ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+parts[:authority] = (authority.dup.force_encoding(Encoding::UTF_8) if authority)
+                     ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+outer.wrap do
+  inner.wrap do
+    items.each do |item|
+    ^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+      item
+    end if items
+  end
+end
