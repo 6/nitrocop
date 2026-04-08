@@ -112,6 +112,31 @@ use ruby_prism::Visit;
 /// which also matches bare `scheme:` (e.g. `https:` at end of line in a regex).
 /// Fixed by adding `scheme:` as an additional search prefix in
 /// `uri_extends_to_end`.
+///
+/// FP root cause (2026-04-08): parenthesized bodies like `if cond; (expr); end`
+/// were flagged. RuboCop's `non_eligible_body?` returns true for `begin_type?`,
+/// which in the parser gem includes parenthesized expressions. In Prism these
+/// are `ParenthesesNode`. Fixed by skipping bodies that are `ParenthesesNode`.
+///
+/// FP root cause (2026-04-08): body EOL comment detection used character offsets
+/// from `offset_to_line_col` to index into a byte slice. Multi-byte UTF-8
+/// characters (Arabic, em-dash, CJK) caused misalignment — the char offset was
+/// smaller than the byte offset, so the `#` search started too early or missed.
+/// Fixed by computing byte offset via `line_start_offset` subtraction, and
+/// searching for `#` anywhere after the body end rather than just as the first
+/// non-whitespace character (handles `body; # comment` patterns).
+///
+/// FP root cause (2026-04-08): `parenthesize_modifier_form` checked the previous
+/// line for trailing `=`, `:`, or `=>` to decide if the modifier form needs
+/// parenthesization. Comments like `# :nodoc:` on the previous line falsely
+/// matched `:`. Fixed by stripping trailing comments before the check.
+///
+/// FN root cause (2026-04-08): `first_line_comment_text` only found comments
+/// that were the first non-whitespace after the condition/predicate end. Comments
+/// after `then` keyword (e.g. `if cond then # comment`) were missed because
+/// `then` appeared first. Fixed by searching for `#` anywhere after the
+/// predicate (skipping `#{` interpolation markers), matching RuboCop's behavior
+/// of finding any comment on the same line as the node.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -380,6 +405,20 @@ impl<'pr> Visit<'pr> for NestedConditionalFinder {
     }
 }
 
+/// Strip trailing comment from a line. Finds the first `#` preceded by
+/// whitespace (or at position 0) and returns the trimmed text before it.
+/// This prevents comment text like `# :nodoc:` from falsely matching
+/// operators like `=`, `:`, or `=>`.
+fn strip_trailing_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#' && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') {
+            return line[..i].trim_end();
+        }
+    }
+    line.trim_end()
+}
+
 fn parenthesize_modifier_form(source: &SourceFile, kw_loc: &ruby_prism::Location<'_>) -> bool {
     let (kw_line, kw_col) = source.offset_to_line_col(kw_loc.start_offset());
     let kw_line_start = kw_loc.start_offset().saturating_sub(kw_col);
@@ -397,9 +436,11 @@ fn parenthesize_modifier_form(source: &SourceFile, kw_loc: &ruby_prism::Location
         let lines: Vec<&[u8]> = source.lines().collect();
         let prev_line = lines[kw_line - 2];
         let prev_trimmed = String::from_utf8_lossy(prev_line).trim_end().to_string();
-        if prev_trimmed.ends_with('=')
-            || prev_trimmed.ends_with(':')
-            || prev_trimmed.ends_with("=>")
+        // Strip trailing comment: find `#` preceded by whitespace (or at line start)
+        // so that `# :nodoc:` or `# = Page =` don't falsely trigger parenthesization.
+        let prev_code = strip_trailing_comment(&prev_trimmed);
+        if !prev_code.is_empty()
+            && (prev_code.ends_with('=') || prev_code.ends_with(':') || prev_code.ends_with("=>"))
         {
             return true;
         }
@@ -864,16 +905,18 @@ fn first_line_comment_text(
     }
 
     let after_predicate = &kw_line_bytes[predicate_end_in_line..];
-    let trimmed = after_predicate
+    // Find `#` anywhere after the predicate (not just as first non-whitespace).
+    // This handles comments after `then` keyword: `if cond then # comment`.
+    // RuboCop's `first_line_comment(node)` uses `processed_source.comments`
+    // which finds any comment on the same line regardless of intervening tokens.
+    // Skip `#{` which is string interpolation, not a comment.
+    let hash_pos = after_predicate
         .iter()
-        .copied()
-        .skip_while(|&b| b == b' ' || b == b'\t')
-        .collect::<Vec<_>>();
-    if !trimmed.starts_with(b"#") {
-        return None;
-    }
+        .enumerate()
+        .position(|(i, &b)| b == b'#' && after_predicate.get(i + 1) != Some(&b'{'))?;
+    let comment_bytes = &after_predicate[hash_pos..];
 
-    let comment = match std::str::from_utf8(&trimmed) {
+    let comment = match std::str::from_utf8(comment_bytes) {
         Ok(comment) => comment,
         Err(_) => return None,
     };
@@ -984,6 +1027,14 @@ impl Cop for IfUnlessModifier {
 
         let modifier_form = kw_loc.start_offset() > body_node.location().start_offset();
 
+        // Skip if the body is a parenthesized expression — RuboCop's
+        // `non_eligible_body?` returns true for `begin_type?`, which in the
+        // parser gem includes parenthesized expressions like `(expr)`.
+        // In Prism, these are `ParenthesesNode`.
+        if body_node.as_parentheses_node().is_some() {
+            return;
+        }
+
         // Skip if the body is an endless method definition — conflict with
         // Style/AmbiguousEndlessMethodDefinition (RuboCop: endless_method?).
         if body_is_endless_method(&body_node) {
@@ -1089,24 +1140,23 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
-        // Skip if body line has an EOL comment — converting to modifier would lose it
+        // Skip if body line has a comment — RuboCop's `non_eligible_body?` checks
+        // `processed_source.contains_comment?(body.source_range)` which returns true
+        // if there's any comment on the same LINE as the body, even after semicolons.
+        // Use byte offset (not char count from offset_to_line_col) so multi-byte
+        // UTF-8 characters don't cause misalignment.
         {
             let lines: Vec<&[u8]> = source.lines().collect();
             if body_start_line > 0 && body_start_line <= lines.len() {
                 let body_line = lines[body_start_line - 1];
-                let body_end_in_line = body_node.location().end_offset();
-                let (_, body_end_col) = source.offset_to_line_col(body_end_in_line);
-                // Check if there's a comment after the body on the same line
-                if body_end_col < body_line.len() {
-                    let after_body = &body_line[body_end_col..];
-                    let trimmed = after_body
-                        .iter()
-                        .skip_while(|&&b| b == b' ' || b == b'\t')
-                        .copied()
-                        .collect::<Vec<_>>();
-                    if trimmed.starts_with(b"#") {
-                        return;
-                    }
+                let body_line_start = source.line_start_offset(body_start_line);
+                let body_end_byte = body_node
+                    .location()
+                    .end_offset()
+                    .saturating_sub(body_line_start);
+                // Search for `#` anywhere after the body end on the same line
+                if body_end_byte < body_line.len() && body_line[body_end_byte..].contains(&b'#') {
+                    return;
                 }
             }
         }
