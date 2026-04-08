@@ -154,3 +154,19 @@ if default_org.in_summary? and default_org.parent_id.present?
 ^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
   ret_orgs = default_org.parent.children - [default_org]
 end
+
+# FN: simple if with single-line body (method call, no special operators)
+if preventing_writes?
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  raise ActiveRecord::ReadOnlyError, "Write query attempted while in readonly mode"
+end
+
+# FN: unless one-liner with modifier if inside — the inner `if` modifier makes the line too long
+unless @settings[:scanlog_dir].nil? then @scanlog_dir_dt.value = @settings[:scanlog_dir] if File.exist?(@settings[:scanlog_dir]); end
+                                         ^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+# FN: simple if with .any? condition
+if extra_in_en.any?
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  error_messages << "Missing files"
+end

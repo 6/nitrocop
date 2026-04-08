@@ -225,3 +225,14 @@ install_win(if parent then parent.path end, widgetname)
 [if condition then value end]
 
 { x: if condition then value end }
+
+# AllowURI: `scheme:` at end of line (RuboCop's URI regex matches scheme: without //)
+logger.warn "#{self.class} posting to plaintext endpoint, which is insecure" if logger unless endpoint.to_s =~ /^https:/
+
+# rubocop:disable Layout/LineLength — modifier form on a disabled line should not trigger "too long"
+Lighthouse::SubmitCareerCounselingJob.trigger_failure_events(msg, claim) if Flipper.enabled?(:pcpg_trigger_action_needed_email) # rubocop:disable Layout/LineLength
+
+# Block-level rubocop:disable Layout/LineLength — modifier form inside a disabled region
+# rubocop:disable Layout/LineLength
+pdf.text "\n<b>Veteran, claimant, or representative Email:</b>\n#{form_data.signing_appellant.email}\n", inline_format: true unless short_claimant_email?
+# rubocop:enable Layout/LineLength
