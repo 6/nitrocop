@@ -30,6 +30,12 @@ def with_block(x, &block)
   yield
 end
 
+# Empty parens are still unwanted
+def empty()
+         ^^ Style/MethodDefParentheses: Use `def` without parentheses.
+  42
+end
+
 # Multiline args without parens: offense (needs parentheses)
 def multi x,
           ^^ Style/MethodDefParentheses: Use `def` with parentheses when there are parameters.

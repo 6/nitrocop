@@ -9,3 +9,8 @@ def bar(x)
        ^^^ Style/MethodDefParentheses: Use `def` without parentheses.
   x
 end
+
+def empty()
+         ^^ Style/MethodDefParentheses: Use `def` without parentheses.
+  42
+end
