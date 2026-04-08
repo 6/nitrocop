@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::node_type::{
     ARRAY_NODE, ASSOC_NODE, BLOCK_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, CONSTANT_PATH_NODE,
     CONSTANT_READ_NODE, FALSE_NODE, FLOAT_NODE, HASH_NODE, IMAGINARY_NODE, INTEGER_NODE,
@@ -276,7 +277,7 @@ fn contains_receive_matcher(node: &ruby_prism::Node<'_>) -> bool {
         None => return false,
     };
 
-    if call.name().as_slice() == b"receive" && call.receiver().is_none() {
+    if method_dispatch_predicates::is_command(&call, b"receive") {
         return true;
     }
 
