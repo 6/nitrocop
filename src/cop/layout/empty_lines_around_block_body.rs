@@ -186,37 +186,23 @@ fn check_empty_lines_style_with_rubocop_edge_cases(
     // effective opening line is the physical `do`/`{` line. When multiline
     // lambda params move the effective opening back to the `->` line, the
     // shared helper still matches RuboCop and may require an end offense too.
-    if keyword_line == opening_line && closing_line == opening_line + 1 {
-        // Body starts on the opening line, closing delimiter is alone on the
-        // next line, e.g. `it { foo.\n  bar }`.
-        if body_start_line == opening_line {
-            let mut diagnostics = Vec::new();
-            if let Some(diag) = missing_beginning_empty_line_diagnostic(
-                cop_name,
-                source,
-                keyword_line + 1,
-                corrections,
-            ) {
-                diagnostics.push(diag);
-            }
-            return diagnostics;
+    // Two-line blocks where exactly one delimiter shares a body line only need
+    // the "beginning" offense. This applies when the effective opening is the
+    // physical `do`/`{` line — either body starts on the opening line
+    // (`it { foo.\n  bar }`) or on the closing line (`items.each { |x|\n  puts x }`).
+    // When multiline lambda params move the effective opening back to `->`,
+    // the shared helper handles it and may require an end offense too.
+    if keyword_line == opening_line
+        && closing_line == opening_line + 1
+        && (body_start_line == opening_line || body_start_line == closing_line)
+    {
+        let mut diagnostics = Vec::new();
+        if let Some(diag) =
+            missing_beginning_empty_line_diagnostic(cop_name, source, keyword_line + 1, corrections)
+        {
+            diagnostics.push(diag);
         }
-
-        // Body starts on the next line and the closing delimiter shares that
-        // line, e.g. `items.each { |x|\n  puts x }` or `items.each do |x|\n
-        //   puts x end`.
-        if body_start_line == closing_line {
-            let mut diagnostics = Vec::new();
-            if let Some(diag) = missing_beginning_empty_line_diagnostic(
-                cop_name,
-                source,
-                keyword_line + 1,
-                corrections,
-            ) {
-                diagnostics.push(diag);
-            }
-            return diagnostics;
-        }
+        return diagnostics;
     }
 
     util::check_missing_empty_lines_around_body_with_corrections(
