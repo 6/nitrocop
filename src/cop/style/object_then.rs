@@ -3,6 +3,23 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Enforces a consistent choice between `then` and `yield_self`.
+///
+/// ## Variant style divergence (2026-04-08)
+///
+/// `EnforcedStyle: yield_self` had 5 false positives in the corpus, all for
+/// `then` calls that passed extra positional arguments alongside a block pass,
+/// such as `future.then(*args, &task)`.
+///
+/// RuboCop only inspects block-pass sends via `on_send` when the send has
+/// exactly one argument and that argument is the block pass. Prism stores
+/// `&block` in `call.block()` as a `BlockArgumentNode`, not in
+/// `call.arguments()`, so treating every `call.block().is_some()` as equivalent
+/// to RuboCop's `on_send` over-reported these multi-argument calls.
+///
+/// Fix: keep flagging literal block forms (`then { ... }`) regardless of
+/// argument count, but only flag block-pass sends when the block pass is the
+/// sole effective argument.
 pub struct ObjectThen;
 
 impl Cop for ObjectThen {
@@ -38,17 +55,21 @@ impl Cop for ObjectThen {
             return;
         }
 
-        // Must have a block or a block_pass argument
-        let has_block = call.block().is_some();
-        let has_block_pass = if let Some(args) = call.arguments() {
-            args.arguments()
-                .iter()
-                .any(|a| a.as_block_argument_node().is_some())
-        } else {
-            false
-        };
+        let has_block_pass = call
+            .block()
+            .is_some_and(|block| block.as_block_argument_node().is_some());
+        let has_literal_block = call.block().is_some() && !has_block_pass;
 
-        if !has_block && !has_block_pass {
+        // RuboCop's on_block path flags literal blocks regardless of argument
+        // count, but its on_send path only flags block-pass sends when the
+        // block pass is the sole effective argument.
+        let has_supported_invocation = has_literal_block
+            || (has_block_pass
+                && call
+                    .arguments()
+                    .is_none_or(|args| args.arguments().is_empty()));
+
+        if !has_supported_invocation {
             return;
         }
 
@@ -84,4 +105,36 @@ impl Cop for ObjectThen {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ObjectThen, "cops/style/object_then");
+
+    fn yield_self_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("yield_self".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn yield_self_style_offense() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ObjectThen,
+            include_bytes!("../../../tests/fixtures/cops/style/object_then/yield_self_offense.rb"),
+            yield_self_config(),
+        );
+    }
+
+    #[test]
+    fn yield_self_style_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ObjectThen,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/object_then/yield_self_no_offense.rb"
+            ),
+            yield_self_config(),
+        );
+    }
 }
