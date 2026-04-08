@@ -63,6 +63,22 @@ use ruby_prism::Visit;
 ///
 /// Fix: changed `has_grouped_defs` to exclude `DefNode`s with receivers (class/singleton
 /// methods), matching RuboCop's behavior where only `:def` nodes are considered.
+///
+/// ## Inline style assignment scope fix (2026-04-08)
+///
+/// The inline variant had 78 FPs because assignment nodes (ConstantWriteNode,
+/// LocalVariableWriteNode, etc.) weren't breaking the macro scope chain. In RuboCop,
+/// `in_macro_scope?` walks up the parent chain and only treats `begin`, `kwbegin`,
+/// `block`, and `if`-body as transparent. Assignment nodes like `casgn` (constant
+/// assignment) are NOT transparent, so `CONST = SomeClass.new do ... private ... end`
+/// puts `private` outside macro scope, and RuboCop skips it. However,
+/// `class_constructor?` blocks (Class.new, Module.new, Struct.new, Data.define)
+/// re-establish macro scope even inside assignments.
+///
+/// Fix: added `visit_*_write_node` overrides for assignment node types that push
+/// `NotMacroScope`, breaking the macro scope chain. For class constructor blocks,
+/// push `InMacroScope` (class-like scope) instead of wrapper scope so they
+/// re-establish macro scope regardless of wrapping assignments.
 pub struct AccessModifierDeclarations;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -99,6 +115,10 @@ struct AccessModifierVisitor<'a> {
     next_block_owner_kind: Option<StatementsOwnerKind>,
     /// Optional group-scope override for the direct block child of the current call node.
     next_block_group_scope: Option<bool>,
+    /// Whether the direct block child of the current call node should use class-like
+    /// macro scope (InMacroScope) instead of inheriting from the parent.
+    /// Set for class constructors (Class.new, Module.new, Struct.new, Data.define).
+    next_block_class_like_macro_scope: bool,
 }
 
 struct ModifierClassification<'a> {
@@ -500,7 +520,14 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
-        access_modifier_predicates::push_wrapper_scope(&mut self.macro_scope_stack);
+        // Class constructor blocks (Class.new, Module.new, etc.) establish macro
+        // scope like class/module nodes. Regular blocks inherit from parent.
+        let is_class_like = std::mem::take(&mut self.next_block_class_like_macro_scope);
+        if is_class_like {
+            access_modifier_predicates::push_class_like_scope(&mut self.macro_scope_stack);
+        } else {
+            access_modifier_predicates::push_wrapper_scope(&mut self.macro_scope_stack);
+        }
         let saved_owner = self.statements_owner_kind;
         let saved_group_scope = self.group_scope_active;
         self.statements_owner_kind = self
@@ -585,9 +612,63 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
         self.group_scope_active = saved_group_scope;
     }
 
+    // Assignment nodes break in_macro_scope? in RuboCop because they are not
+    // "transparent" parents (only begin, kwbegin, block, and if-body are
+    // transparent). Push NotMacroScope so nested blocks inside assignments
+    // correctly inherit non-macro scope.
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_constant_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_constant_path_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_local_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'pr>,
+    ) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_instance_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_class_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_global_variable_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableWriteNode<'pr>,
+    ) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_global_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_multi_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let saved_next_block_owner_kind = self.next_block_owner_kind;
         let saved_next_block_group_scope = self.next_block_group_scope;
+        let saved_next_block_class_like_macro_scope = self.next_block_class_like_macro_scope;
         if node
             .block()
             .and_then(|block| block.as_block_node())
@@ -597,6 +678,9 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
                 self.next_block_owner_kind = Some(StatementsOwnerKind::ProcLikeBlock);
             } else if call_is_class_constructor(node) {
                 self.next_block_group_scope = Some(true);
+                // Class constructors (Class.new, Module.new, etc.) re-establish macro
+                // scope, matching RuboCop's class_constructor? in in_macro_scope?.
+                self.next_block_class_like_macro_scope = true;
             }
         }
 
@@ -606,6 +690,7 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
         ruby_prism::visit_call_node(self, node);
         self.next_block_owner_kind = saved_next_block_owner_kind;
         self.next_block_group_scope = saved_next_block_group_scope;
+        self.next_block_class_like_macro_scope = saved_next_block_class_like_macro_scope;
     }
 }
 
@@ -641,6 +726,7 @@ impl Cop for AccessModifierDeclarations {
             statements_owner_kind: StatementsOwnerKind::Other,
             next_block_owner_kind: None,
             next_block_group_scope: None,
+            next_block_class_like_macro_scope: false,
         };
 
         visitor.visit(&parse_result.node());
@@ -806,6 +892,48 @@ mod tests {
             diags.is_empty(),
             "inline style should NOT flag bare modifier before class method (def self.*), got: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_in_block_under_constant_assignment() {
+        // CONST = SomeClass.new do ... private ... def helper ... end
+        // In RuboCop, casgn (constant assignment) breaks the in_macro_scope? chain,
+        // so the bare modifier is not considered an access modifier and is skipped.
+        let source = b"module Foo\n  Authenticate = CommandClass.new do\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier in block under constant assignment, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_in_block_under_local_var_assignment() {
+        // var = SomeClass.new do ... private ... def helper ... end
+        // Local variable assignment also breaks in_macro_scope? in RuboCop.
+        let source = b"module Foo\n  result = CommandClass.new do\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier in block under local variable assignment, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_flags_in_class_new_block_under_constant_assignment() {
+        // BAR = Class.new do ... private ... def helper ... end
+        // Class.new is a class_constructor in RuboCop, so it re-establishes macro scope
+        // even when wrapped in a constant assignment.
+        let source =
+            b"module Foo\n  Bar = Class.new do\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "inline style SHOULD flag bare modifier in Class.new block even under constant assignment"
         );
     }
 }
