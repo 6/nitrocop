@@ -45,7 +45,9 @@ use ruby_prism::Visit;
 ///   only align to an outer assignment/send when the conditional is the extracted RHS /
 ///   last-argument target after peeling call chains and grouping wrappers. Other same-line
 ///   parents like `return case`, hash pairs, `when ... then case`, and `foo || case`
-///   still fall back to keyword alignment.
+///   still fall back to keyword alignment. `class`/`module` also stay keyword-aligned
+///   under `variable`, while `case`/`case in` only align to an immediate same-line
+///   send/assignment parent when Prism exposes a real `predicate`.
 pub struct EndAlignment;
 
 fn alignment_column(source: &SourceFile, offset: usize) -> usize {
@@ -243,9 +245,17 @@ fn extracted_rhs<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<ruby_prism::No
 }
 
 #[derive(Clone, Copy)]
+enum AncestorKind {
+    Other,
+    Send,
+    AssignmentLike,
+}
+
+#[derive(Clone, Copy)]
 struct AncestorContext {
     start_offset: usize,
     rhs_span: Option<(usize, usize)>,
+    kind: AncestorKind,
 }
 
 #[derive(Clone, Copy)]
@@ -260,6 +270,16 @@ struct AncestorFinder {
     target_span: (usize, usize),
     stack: Vec<AncestorContext>,
     found: Option<Vec<AncestorContext>>,
+}
+
+fn ancestor_kind(node: &ruby_prism::Node<'_>) -> AncestorKind {
+    if node.as_call_node().is_some() {
+        AncestorKind::Send
+    } else if extracted_rhs(node).is_some() {
+        AncestorKind::AssignmentLike
+    } else {
+        AncestorKind::Other
+    }
 }
 
 impl<'pr> ruby_prism::Visit<'pr> for AncestorFinder {
@@ -277,6 +297,7 @@ impl<'pr> ruby_prism::Visit<'pr> for AncestorFinder {
         self.stack.push(AncestorContext {
             start_offset: node.location().start_offset(),
             rhs_span,
+            kind: ancestor_kind(&node),
         });
     }
 
@@ -312,8 +333,51 @@ fn variable_context_start_offset(
     kw_offset: usize,
 ) -> Option<usize> {
     let (kw_line, _) = source.offset_to_line_col(kw_offset);
-    let target_span = (node.location().start_offset(), node.location().end_offset());
+    let immediate_parent_start_offset = |predicate: fn(&AncestorContext) -> bool| {
+        let parent = ancestors.last()?;
+        let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
+        if parent_line == kw_line && predicate(parent) {
+            Some(parent.start_offset)
+        } else {
+            None
+        }
+    };
 
+    if node.as_class_node().is_some() || node.as_module_node().is_some() {
+        return None;
+    }
+
+    if node.as_singleton_class_node().is_some() {
+        return immediate_parent_start_offset(|parent| {
+            matches!(parent.kind, AncestorKind::AssignmentLike)
+        });
+    }
+
+    if let Some(case_node) = node.as_case_node() {
+        if case_node.predicate().is_some() {
+            return immediate_parent_start_offset(|parent| {
+                matches!(
+                    parent.kind,
+                    AncestorKind::Send | AncestorKind::AssignmentLike
+                )
+            });
+        }
+        return None;
+    }
+
+    if let Some(case_match_node) = node.as_case_match_node() {
+        if case_match_node.predicate().is_some() {
+            return immediate_parent_start_offset(|parent| {
+                matches!(
+                    parent.kind,
+                    AncestorKind::Send | AncestorKind::AssignmentLike
+                )
+            });
+        }
+        return None;
+    }
+
+    let target_span = (node.location().start_offset(), node.location().end_offset());
     for parent in ancestors.iter().rev() {
         if parent.rhs_span == Some(target_span) {
             let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
@@ -936,6 +1000,48 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.message.contains("`case`")),
             "variable style should fall back to case keyword under ||: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_case_in_same_line_send_aligns_with_parent() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"_add_rule(case role_checks.size\n          when 0\n            raise ArgumentError, 'allow/deny should have at least 1 argument'\n          when 1 then role_checks.first\n          else\n            _either_of(role_checks)\n          end, condition)\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`case`")),
+            "variable style should align same-line send(case ...) with the send: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_module_under_assignment_stays_keyword_aligned() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"REFINEMENT = module RefineString\n  refine String do\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`module`")),
+            "variable style should keep keyword alignment for module assignment: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_module_under_send_stays_keyword_aligned() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"expect(module LibTest\n  extend FFI::Library\nend).to be_an_instance_of FFI::Function\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`module`")),
+            "variable style should keep keyword alignment for module under send: {:?}",
             diags
         );
     }
