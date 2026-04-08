@@ -1,6 +1,7 @@
 use crate::cop::shared::node_type::{
     ASSOC_NODE, HASH_NODE, IMPLICIT_NODE, KEYWORD_HASH_NODE, LOCAL_VARIABLE_READ_NODE, SYMBOL_NODE,
 };
+use crate::cop::shared::util::{is_modifier_if, is_modifier_unless};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -19,7 +20,34 @@ use crate::parse::source::SourceFile;
 /// `:"key" =>` which has opening `:"`. The `is_acceptable_19_symbol` check
 /// now recognizes both forms, so hashes mixing 1.9-style and rocket-style
 /// quoted symbol keys correctly flag only the rocket entries.
+///
+/// Fixed variant divergence for shorthand syntax and mixed-key styles:
+/// RuboCop evaluates `EnforcedShorthandSyntax` alongside `EnforcedStyle`
+/// rather than as a separate early-exit pass. The previous implementation
+/// short-circuited after shorthand checks, collapsed `consistent` into a
+/// single hash-level offense, and returned early from `ruby19_no_mixed_keys`
+/// when non-symbol keys were present. The cop now classifies each pair the
+/// same way RuboCop does, emits pair-level shorthand diagnostics at the
+/// correct key/value location, flags colon pairs in `ruby19_no_mixed_keys`
+/// when mixed with non-symbol keys, and reports the mixed pair itself for
+/// `no_mixed_keys` instead of the whole hash.
+///
+/// Fixed remaining shorthand divergence: RuboCop treats unbraced keyword hashes
+/// inside modifier-form ancestors (`if`, `unless`, `while`, `until`) as
+/// requiring explicit values unless the enclosing call is parenthesized. That
+/// includes outer wrappers like `end if cond`, so shorthand analysis now runs
+/// in a visitor that can see modifier ancestors before classifying each pair.
 pub struct HashSyntax;
+
+const MSG_19: &str = "Use the new Ruby 1.9 hash syntax.";
+const MSG_NO_MIXED_KEYS: &str = "Don't mix styles in the same hash.";
+const MSG_HASH_ROCKETS: &str = "Use hash rockets syntax.";
+const OMIT_HASH_VALUE_MSG: &str = "Omit the hash value.";
+const INCLUDE_HASH_VALUE_MSG: &str = "Include the hash value.";
+const DO_NOT_MIX_OMIT_VALUE_MSG: &str =
+    "Do not mix explicit and implicit hash values. Omit the hash value.";
+const DO_NOT_MIX_INCLUDE_VALUE_MSG: &str =
+    "Do not mix explicit and implicit hash values. Include the hash value.";
 
 impl Cop for HashSyntax {
     fn name(&self) -> &'static str {
@@ -47,344 +75,475 @@ impl Cop for HashSyntax {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Handle both explicit hashes `{ k: v }` and implicit keyword hashes `foo(k: v)`
-        let elements: Vec<ruby_prism::Node<'_>> = if let Some(hash_node) = node.as_hash_node() {
-            hash_node.elements().iter().collect()
+        let pairs: Vec<ruby_prism::AssocNode<'_>> = if let Some(hash_node) = node.as_hash_node() {
+            hash_node
+                .elements()
+                .iter()
+                .filter_map(|element| element.as_assoc_node())
+                .collect()
         } else if let Some(kw_hash) = node.as_keyword_hash_node() {
-            kw_hash.elements().iter().collect()
+            kw_hash
+                .elements()
+                .iter()
+                .filter_map(|element| element.as_assoc_node())
+                .collect()
         } else {
             return;
         };
 
+        if pairs.is_empty() {
+            return;
+        }
+
         let enforced_style = config.get_str("EnforcedStyle", "ruby19");
-        let enforced_shorthand = config.get_str("EnforcedShorthandSyntax", "either");
         let use_rockets_symbol_vals = config.get_bool("UseHashRocketsWithSymbolValues", false);
         let prefer_rockets_nonalnum =
             config.get_bool("PreferHashRocketsForNonAlnumEndingSymbols", false);
         let target_ruby_version = target_ruby_version(config);
 
-        // EnforcedShorthandSyntax: check Ruby 3.1 hash value omission syntax
-        // This is checked separately from the main EnforcedStyle
-        if enforced_shorthand != "either" {
-            let mut shorthand_diags = Vec::new();
-            check_shorthand_syntax(
-                self,
-                source,
-                &elements,
-                enforced_shorthand,
-                &mut shorthand_diags,
-            );
-            if !shorthand_diags.is_empty() {
-                diagnostics.extend(shorthand_diags);
-                return;
-            }
-        }
-
         match enforced_style {
             "ruby19" => {
-                // UseHashRocketsWithSymbolValues: if any value is a symbol, don't flag rockets
-                if use_rockets_symbol_vals {
-                    let has_symbol_value = elements.iter().any(|elem| {
-                        if let Some(assoc) = elem.as_assoc_node() {
-                            assoc.value().as_symbol_node().is_some()
-                        } else {
-                            false
-                        }
-                    });
-                    if has_symbol_value {
-                        return;
-                    }
-                }
-
-                let has_unconvertible = elements.iter().any(|elem| {
-                    let assoc = match elem.as_assoc_node() {
-                        Some(a) => a,
-                        None => return false,
-                    };
-                    let key = assoc.key();
-                    !is_symbol_like_key(&key)
-                        || !is_acceptable_19_key(&key, prefer_rockets_nonalnum, target_ruby_version)
-                });
-
-                if has_unconvertible {
+                if use_rockets_symbol_vals
+                    && pairs.iter().any(|assoc| is_symbol_node(&assoc.value()))
+                {
                     return;
                 }
 
-                let mut diags = Vec::new();
-                for elem in &elements {
-                    let assoc = match elem.as_assoc_node() {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    let key = assoc.key();
-                    if is_symbol_like_key(&key) {
-                        if let Some(op_loc) = assoc.operator_loc() {
-                            if op_loc.as_slice() == b"=>" {
-                                let (line, column) =
-                                    source.offset_to_line_col(key.location().start_offset());
-                                diags.push(self.diagnostic(
-                                    source,
-                                    line,
-                                    column,
-                                    "Use the new Ruby 1.9 hash syntax.".to_string(),
-                                ));
-                            }
-                        }
-                    }
+                if sym_indices(&pairs, prefer_rockets_nonalnum, target_ruby_version) {
+                    check_pairs_with_delimiter(self, source, &pairs, b"=>", MSG_19, diagnostics);
                 }
-                diagnostics.extend(diags);
             }
             "ruby19_no_mixed_keys" => {
-                // UseHashRocketsWithSymbolValues: if any value is a symbol, don't flag rockets
-                if use_rockets_symbol_vals {
-                    let has_symbol_value = elements.iter().any(|elem| {
-                        if let Some(assoc) = elem.as_assoc_node() {
-                            assoc.value().as_symbol_node().is_some()
-                        } else {
-                            false
-                        }
-                    });
-                    if has_symbol_value {
-                        return;
-                    }
-                }
-
-                // Check if any key is NOT a symbol (non-symbol keys can't use 1.9 at all)
-                let has_non_symbol = elements.iter().any(|elem| {
-                    let assoc = match elem.as_assoc_node() {
-                        Some(a) => a,
-                        None => return false,
-                    };
-                    let key = assoc.key();
-                    !is_symbol_like_key(&key)
-                });
-
-                if has_non_symbol {
-                    // Non-symbol keys make the hash unconvertible to 1.9, return early
+                if use_rockets_symbol_vals
+                    && pairs.iter().any(|assoc| is_symbol_node(&assoc.value()))
+                {
+                    check_pairs_with_delimiter(
+                        self,
+                        source,
+                        &pairs,
+                        b":",
+                        MSG_HASH_ROCKETS,
+                        diagnostics,
+                    );
                     return;
                 }
 
-                // Check if all keys are acceptable 1.9 symbols (sym_indices? equivalent)
-                let all_acceptable = elements.iter().all(|elem| {
-                    let assoc = match elem.as_assoc_node() {
-                        Some(a) => a,
-                        None => return false,
-                    };
-                    let key = assoc.key();
-                    is_symbol_like_key(&key)
-                        && is_acceptable_19_key(&key, prefer_rockets_nonalnum, target_ruby_version)
-                });
-
-                if all_acceptable {
-                    // All keys are acceptable 1.9 symbols - flag rockets
-                    let mut diags = Vec::new();
-                    for elem in &elements {
-                        let assoc = match elem.as_assoc_node() {
-                            Some(a) => a,
-                            None => continue,
-                        };
-                        let key = assoc.key();
-                        if is_symbol_like_key(&key) {
-                            if let Some(op_loc) = assoc.operator_loc() {
-                                if op_loc.as_slice() == b"=>" {
-                                    let (line, column) =
-                                        source.offset_to_line_col(key.location().start_offset());
-                                    diags.push(self.diagnostic(
-                                        source,
-                                        line,
-                                        column,
-                                        "Use the new Ruby 1.9 hash syntax.".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    diagnostics.extend(diags);
+                if sym_indices(&pairs, prefer_rockets_nonalnum, target_ruby_version) {
+                    check_pairs_with_delimiter(self, source, &pairs, b"=>", MSG_19, diagnostics);
                 } else {
-                    // Some keys can't use 1.9 - check for mixed styles (colons)
-                    let mut diags = Vec::new();
-                    for elem in &elements {
-                        let assoc = match elem.as_assoc_node() {
-                            Some(a) => a,
-                            None => continue,
-                        };
-                        let key = assoc.key();
-                        if is_symbol_like_key(&key) {
-                            if let Some(op_loc) = assoc.operator_loc() {
-                                if op_loc.as_slice() != b"=>" {
-                                    // Uses colon, which is mixing styles when some keys can't use 1.9
-                                    let (line, column) =
-                                        source.offset_to_line_col(key.location().start_offset());
-                                    diags.push(self.diagnostic(
-                                        source,
-                                        line,
-                                        column,
-                                        "Don't mix styles in the same hash.".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    diagnostics.extend(diags);
+                    check_pairs_with_delimiter(
+                        self,
+                        source,
+                        &pairs,
+                        b":",
+                        MSG_NO_MIXED_KEYS,
+                        diagnostics,
+                    );
                 }
             }
             "hash_rockets" => {
-                let mut diags = Vec::new();
-                for elem in &elements {
-                    let assoc = match elem.as_assoc_node() {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    let key = assoc.key();
-                    if is_symbol_like_key(&key) {
-                        let uses_rocket = assoc
-                            .operator_loc()
-                            .is_some_and(|op| op.as_slice() == b"=>");
-                        if !uses_rocket {
-                            let (line, column) =
-                                source.offset_to_line_col(key.location().start_offset());
-                            diags.push(self.diagnostic(
-                                source,
-                                line,
-                                column,
-                                "Use hash rockets syntax.".to_string(),
-                            ));
-                        }
-                    }
-                }
-                diagnostics.extend(diags);
+                check_pairs_with_delimiter(
+                    self,
+                    source,
+                    &pairs,
+                    b":",
+                    MSG_HASH_ROCKETS,
+                    diagnostics,
+                );
             }
             "no_mixed_keys" => {
-                // All keys must use the same syntax
-                let mut has_ruby19 = false;
-                let mut has_rockets = false;
-                for elem in &elements {
-                    let assoc = match elem.as_assoc_node() {
-                        Some(a) => a,
-                        None => continue,
-                    };
-                    if let Some(op_loc) = assoc.operator_loc() {
-                        if op_loc.as_slice() == b"=>" {
-                            has_rockets = true;
-                        } else {
-                            has_ruby19 = true;
-                        }
+                let delimiter = if sym_indices(&pairs, prefer_rockets_nonalnum, target_ruby_version)
+                {
+                    if uses_hash_rocket(&pairs[0]) {
+                        b":".as_slice()
                     } else {
-                        has_ruby19 = true;
+                        b"=>".as_slice()
                     }
-                }
-                if has_ruby19 && has_rockets {
-                    let (line, column) = source.offset_to_line_col(node.location().start_offset());
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        line,
-                        column,
-                        "Don't mix styles in the same hash.".to_string(),
-                    ));
-                }
+                } else {
+                    b":".as_slice()
+                };
+
+                check_pairs_with_delimiter(
+                    self,
+                    source,
+                    &pairs,
+                    delimiter,
+                    MSG_NO_MIXED_KEYS,
+                    diagnostics,
+                );
             }
             _ => {}
         }
     }
+
+    fn check_source(
+        &self,
+        source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        let enforced_shorthand = config.get_str("EnforcedShorthandSyntax", "either");
+        let target_ruby_version = target_ruby_version(config);
+
+        if enforced_shorthand == "either" || target_ruby_version <= 3.0 {
+            return;
+        }
+
+        let mut visitor = HashSyntaxShorthandVisitor {
+            cop: self,
+            source,
+            enforced_shorthand,
+            target_ruby_version,
+            diagnostics,
+            ancestors: Vec::new(),
+        };
+        ruby_prism::Visit::visit(&mut visitor, &parse_result.node());
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ShorthandKind {
+    Omitted,
+    Omittable,
+    Needed,
 }
 
 /// Check EnforcedShorthandSyntax for Ruby 3.1 hash value omission.
+#[allow(clippy::too_many_arguments)]
 fn check_shorthand_syntax(
     cop: &HashSyntax,
     source: &SourceFile,
-    elements: &[ruby_prism::Node<'_>],
+    pairs: &[ruby_prism::AssocNode<'_>],
     enforced_shorthand: &str,
+    target_ruby_version: f64,
+    hash_is_braced: bool,
+    ancestors: &[ruby_prism::Node<'_>],
     diags: &mut Vec<Diagnostic>,
 ) {
-    let mut has_shorthand = false;
-    let mut has_explicit = false;
-
-    for elem in elements {
-        let assoc = match elem.as_assoc_node() {
-            Some(a) => a,
-            None => continue,
-        };
-        let key = assoc.key();
-        // Only applies to symbol keys in ruby19 style (key: value)
-        if key.as_symbol_node().is_none() {
-            continue;
-        }
-        // Check if value uses implicit node (shorthand `{x:}`)
-        if assoc.value().as_implicit_node().is_some() {
-            has_shorthand = true;
-        } else {
-            has_explicit = true;
-        }
+    if target_ruby_version <= 3.0 {
+        return;
     }
+
+    let kinds: Vec<ShorthandKind> = pairs
+        .iter()
+        .map(|assoc| shorthand_kind(assoc, hash_is_braced, ancestors))
+        .collect();
 
     match enforced_shorthand {
         "always" => {
-            // Flag explicit pairs that could use shorthand: value is a local variable
-            // read whose name matches the key symbol
-            for elem in elements {
-                let assoc = match elem.as_assoc_node() {
-                    Some(a) => a,
-                    None => continue,
-                };
-                let key = assoc.key();
-                let sym = match key.as_symbol_node() {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let value = assoc.value();
-                if value.as_implicit_node().is_some() {
-                    continue; // Already using shorthand
-                }
-                // Check if value is a local variable read matching the key name
-                if let Some(lvar) = value.as_local_variable_read_node() {
-                    if lvar.name().as_slice() == sym.unescaped() {
-                        let (line, column) =
-                            source.offset_to_line_col(key.location().start_offset());
-                        diags.push(cop.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Omit the hash value.".to_string(),
-                        ));
-                    }
+            for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
+                if *kind == ShorthandKind::Omittable {
+                    push_diagnostic_at_node(
+                        cop,
+                        source,
+                        &assoc.value(),
+                        OMIT_HASH_VALUE_MSG,
+                        diags,
+                    );
                 }
             }
         }
         "never" => {
-            // Flag shorthand pairs (implicit node values)
-            for elem in elements {
-                let assoc = match elem.as_assoc_node() {
-                    Some(a) => a,
-                    None => continue,
-                };
-                if assoc.value().as_implicit_node().is_some() {
-                    let (line, column) =
-                        source.offset_to_line_col(assoc.key().location().start_offset());
-                    diags.push(cop.diagnostic(
+            for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
+                if *kind == ShorthandKind::Omitted {
+                    push_diagnostic_at_node(
+                        cop,
                         source,
-                        line,
-                        column,
-                        "Include the hash value.".to_string(),
-                    ));
+                        &assoc.key(),
+                        INCLUDE_HASH_VALUE_MSG,
+                        diags,
+                    );
                 }
             }
         }
-        "consistent" => {
-            // All pairs must use the same style
-            if has_shorthand && has_explicit {
-                // Flag at the hash level
-                let first_elem = elements.first().unwrap();
-                let (line, column) =
-                    source.offset_to_line_col(first_elem.location().start_offset());
-                diags.push(cop.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Don't mix explicit and shorthand hash values.".to_string(),
-                ));
+        "consistent" | "either_consistent" => {
+            let has_omitted = kinds.contains(&ShorthandKind::Omitted);
+            let has_omittable = kinds.contains(&ShorthandKind::Omittable);
+            let has_needed = kinds.contains(&ShorthandKind::Needed);
+            let kind_count =
+                usize::from(has_omitted) + usize::from(has_omittable) + usize::from(has_needed);
+
+            if kind_count > 1 {
+                if has_needed {
+                    for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
+                        if *kind == ShorthandKind::Omitted {
+                            push_diagnostic_at_node(
+                                cop,
+                                source,
+                                &assoc.key(),
+                                DO_NOT_MIX_INCLUDE_VALUE_MSG,
+                                diags,
+                            );
+                        }
+                    }
+                } else {
+                    for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
+                        if *kind == ShorthandKind::Omittable {
+                            push_diagnostic_at_node(
+                                cop,
+                                source,
+                                &assoc.value(),
+                                DO_NOT_MIX_OMIT_VALUE_MSG,
+                                diags,
+                            );
+                        }
+                    }
+                }
+            } else if enforced_shorthand == "consistent" && has_omittable && !has_needed {
+                for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
+                    if *kind == ShorthandKind::Omittable {
+                        push_diagnostic_at_node(
+                            cop,
+                            source,
+                            &assoc.value(),
+                            OMIT_HASH_VALUE_MSG,
+                            diags,
+                        );
+                    }
+                }
             }
         }
         _ => {}
     }
+}
+
+fn shorthand_kind(
+    assoc: &ruby_prism::AssocNode<'_>,
+    hash_is_braced: bool,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> ShorthandKind {
+    if assoc.value().as_implicit_node().is_some() {
+        return ShorthandKind::Omitted;
+    }
+
+    let key = assoc.key();
+    let key_source = key.location().as_slice();
+    let comparable_key = if uses_hash_rocket(assoc) {
+        key_source
+    } else {
+        key_source.strip_suffix(b":").unwrap_or(key_source)
+    };
+
+    if !is_symbol_like_key(&key)
+        || comparable_key.ends_with(b"!")
+        || comparable_key.ends_with(b"?")
+        || require_hash_value_for_modifier_context(hash_is_braced, ancestors)
+    {
+        return ShorthandKind::Needed;
+    }
+
+    let value = assoc.value();
+    let explicit_value = value.as_local_variable_read_node().is_some()
+        || value.as_call_node().is_some_and(|call| {
+            call.receiver().is_none() && call.arguments().is_none() && call.block().is_none()
+        });
+
+    if explicit_value && value.location().as_slice() == comparable_key {
+        ShorthandKind::Omittable
+    } else {
+        ShorthandKind::Needed
+    }
+}
+
+struct HashSyntaxShorthandVisitor<'a, 'pr> {
+    cop: &'a HashSyntax,
+    source: &'a SourceFile,
+    enforced_shorthand: &'a str,
+    target_ruby_version: f64,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+}
+
+impl<'a, 'pr> HashSyntaxShorthandVisitor<'a, 'pr> {
+    fn check_pairs(&mut self, pairs: Vec<ruby_prism::AssocNode<'pr>>, hash_is_braced: bool) {
+        if pairs.is_empty() {
+            return;
+        }
+
+        check_shorthand_syntax(
+            self.cop,
+            self.source,
+            &pairs,
+            self.enforced_shorthand,
+            self.target_ruby_version,
+            hash_is_braced,
+            &self.ancestors,
+            self.diagnostics,
+        );
+    }
+}
+
+impl<'a, 'pr> ruby_prism::Visit<'pr> for HashSyntaxShorthandVisitor<'a, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        let pairs = node
+            .elements()
+            .iter()
+            .filter_map(|element| element.as_assoc_node())
+            .collect();
+        let hash_is_braced = node.opening_loc().as_slice() == b"{";
+
+        self.check_pairs(pairs, hash_is_braced);
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        let pairs = node
+            .elements()
+            .iter()
+            .filter_map(|element| element.as_assoc_node())
+            .collect();
+
+        self.check_pairs(pairs, false);
+        ruby_prism::visit_keyword_hash_node(self, node);
+    }
+}
+
+fn require_hash_value_for_modifier_context(
+    hash_is_braced: bool,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> bool {
+    !hash_is_braced && modifier_form_without_parenthesized_method_call(ancestors)
+}
+
+fn modifier_form_without_parenthesized_method_call(ancestors: &[ruby_prism::Node<'_>]) -> bool {
+    let Some((dispatch_idx, dispatch)) = enclosing_method_dispatch(ancestors) else {
+        return false;
+    };
+
+    if method_dispatch_is_parenthesized(dispatch) {
+        return false;
+    }
+
+    ancestors[..dispatch_idx]
+        .iter()
+        .any(is_modifier_form_ancestor)
+}
+
+fn is_modifier_form_ancestor(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(if_node) = node.as_if_node() {
+        return is_modifier_if(&if_node);
+    }
+
+    if let Some(unless_node) = node.as_unless_node() {
+        return is_modifier_unless(&unless_node);
+    }
+
+    if let Some(while_node) = node.as_while_node() {
+        return while_node.closing_loc().is_none();
+    }
+
+    node.as_until_node()
+        .is_some_and(|until_node| until_node.closing_loc().is_none())
+}
+
+fn method_dispatch_is_parenthesized(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        return call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
+    }
+
+    if let Some(super_node) = node.as_super_node() {
+        return super_node.lparen_loc().is_some();
+    }
+
+    node.as_yield_node()
+        .is_some_and(|yield_node| yield_node.lparen_loc().is_some())
+}
+
+fn enclosing_method_dispatch<'pr>(
+    ancestors: &'pr [ruby_prism::Node<'pr>],
+) -> Option<(usize, &'pr ruby_prism::Node<'pr>)> {
+    let len = ancestors.len().saturating_sub(1);
+
+    for idx in (0..len).rev() {
+        let node = &ancestors[idx];
+
+        if let Some(call) = node.as_call_node() {
+            let name = call.name().as_slice();
+            if name == b"[]" || name == b"[]=" {
+                return None;
+            }
+            return Some((idx, node));
+        }
+
+        if node.as_super_node().is_some() {
+            return Some((idx, node));
+        }
+
+        if node.as_yield_node().is_some() {
+            return Some((idx, node));
+        }
+    }
+
+    None
+}
+
+fn sym_indices(
+    pairs: &[ruby_prism::AssocNode<'_>],
+    prefer_rockets_nonalnum: bool,
+    target_ruby_version: f64,
+) -> bool {
+    pairs.iter().all(|assoc| {
+        let key = assoc.key();
+        is_symbol_like_key(&key)
+            && is_acceptable_19_key(&key, prefer_rockets_nonalnum, target_ruby_version)
+    })
+}
+
+fn check_pairs_with_delimiter(
+    cop: &HashSyntax,
+    source: &SourceFile,
+    pairs: &[ruby_prism::AssocNode<'_>],
+    delimiter: &[u8],
+    message: &str,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for assoc in pairs {
+        if pair_uses_delimiter(assoc, delimiter) {
+            push_diagnostic_at_node(cop, source, &assoc.key(), message, diags);
+        }
+    }
+}
+
+fn push_diagnostic_at_node(
+    cop: &HashSyntax,
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    message: &str,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let (line, column) = source.offset_to_line_col(node.location().start_offset());
+    diags.push(cop.diagnostic(source, line, column, message.to_string()));
+}
+
+fn pair_uses_delimiter(assoc: &ruby_prism::AssocNode<'_>, delimiter: &[u8]) -> bool {
+    if delimiter == b"=>" {
+        uses_hash_rocket(assoc)
+    } else {
+        !uses_hash_rocket(assoc)
+    }
+}
+
+fn uses_hash_rocket(assoc: &ruby_prism::AssocNode<'_>) -> bool {
+    assoc
+        .operator_loc()
+        .is_some_and(|operator| operator.as_slice() == b"=>")
+}
+
+fn is_symbol_node(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_symbol_node().is_some() || node.as_interpolated_symbol_node().is_some()
 }
 
 fn is_symbol_like_key(key: &ruby_prism::Node<'_>) -> bool {
@@ -485,7 +644,10 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    use crate::testutil::run_cop_full_with_config;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+        run_cop_full_with_config,
+    };
 
     crate::cop_fixture_tests!(HashSyntax, "cops/style/hash_syntax");
 
@@ -534,10 +696,16 @@ mod tests {
     #[test]
     fn shorthand_never_flags_omission() {
         let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedShorthandSyntax".into(),
-                serde_yml::Value::String("never".into()),
-            )]),
+            options: HashMap::from([
+                (
+                    "EnforcedShorthandSyntax".into(),
+                    serde_yml::Value::String("never".into()),
+                ),
+                (
+                    "TargetRubyVersion".into(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(3.1_f64)),
+                ),
+            ]),
             ..CopConfig::default()
         };
         // Ruby 3.1 hash value omission: `{x:}` (shorthand)
@@ -627,6 +795,107 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should allow rockets for non-alnum ending symbols"
+        );
+    }
+
+    fn shorthand_style_config(style: &str, shorthand: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String(style.into()),
+                ),
+                (
+                    "EnforcedShorthandSyntax".into(),
+                    serde_yml::Value::String(shorthand.into()),
+                ),
+                (
+                    "TargetRubyVersion".into(),
+                    serde_yml::Value::Number(serde_yml::value::Number::from(3.1_f64)),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn consistent_ruby19_no_mixed_keys_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/style/hash_syntax/offense.consistent_ruby19_no_mixed_keys.rb"
+        );
+        assert_cop_offenses_full_with_config(
+            &HashSyntax,
+            fixture,
+            shorthand_style_config("ruby19_no_mixed_keys", "consistent"),
+        );
+    }
+
+    #[test]
+    fn always_hash_rockets_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/style/hash_syntax/offense.always_hash_rockets.rb"
+        );
+        assert_cop_offenses_full_with_config(
+            &HashSyntax,
+            fixture,
+            shorthand_style_config("hash_rockets", "always"),
+        );
+    }
+
+    #[test]
+    fn always_hash_rockets_no_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/style/hash_syntax/no_offense.always_hash_rockets.rb"
+        );
+        assert_cop_no_offenses_full_with_config(
+            &HashSyntax,
+            fixture,
+            shorthand_style_config("hash_rockets", "always"),
+        );
+    }
+
+    #[test]
+    fn never_no_mixed_keys_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/style/hash_syntax/offense.never_no_mixed_keys.rb"
+        );
+        assert_cop_offenses_full_with_config(
+            &HashSyntax,
+            fixture,
+            shorthand_style_config("no_mixed_keys", "never"),
+        );
+    }
+
+    #[test]
+    fn consistent_shorthand_flags_unparenthesized_keyword_hash_without_modifier() {
+        let source = b"client_server client: client, server: server\n";
+        let diags = run_cop_full_with_config(
+            &HashSyntax,
+            source,
+            shorthand_style_config("ruby19_no_mixed_keys", "consistent"),
+        );
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().all(|diag| diag.message == OMIT_HASH_VALUE_MSG));
+    }
+
+    #[test]
+    fn consistent_shorthand_skips_keyword_hashes_in_modifier_contexts() {
+        let source = br#"
+return redirect_to destination_url, flash: flash if signed_in?
+
+class TestSSLDhParam < Test::Unit::TestCase
+  def test_dhparam_1_3_supplied
+    client = { client_unbind: true, ssl_version: %w(TLSv1_3) }
+    server = { dhparam: DH_PARAM_FILE, cipher_list: "DHE,EDH", ssl_version: %w(TLSv1_3) }
+    client_server client: client, server: server
+  end
+end if EM.ssl?
+"#;
+
+        assert_cop_no_offenses_full_with_config(
+            &HashSyntax,
+            source,
+            shorthand_style_config("ruby19_no_mixed_keys", "consistent"),
         );
     }
 }
