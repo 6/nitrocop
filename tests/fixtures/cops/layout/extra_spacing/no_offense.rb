@@ -202,3 +202,22 @@ __CODE
   #{unit_settings.compact.map { |key, value| "#{key}=#{value}" }.join("\n")}
   #{environment.compact.map   { |key, value| "Environment=#{key}=#{value}" }.join("\n")}
 UNIT_CONFIG_FILE
+
+# Alignment across commented-out #{...} lines (they ARE comments, not interpolation)
+# RuboCop's alignment search skips these lines and finds real code alignment.
+functions = [
+  {:name => :each,             :args => '[1,2,3]'},
+  {:name => :epp,              :args => '"template"'},
+  {:name => :filter,           :args => '[4,5,6]'},
+  # find_file() called by binary_file
+  #{:name => :find_file,           :args => '[4,5,6]'},
+  {:name => :inline_epp,       :args => '"test"'},
+  #{:name => :lest,             :args => '100'},
+  {:name => :map,              :args => '[7,8,9]'},
+]
+
+# Interpolated string alignment: = aligned with = on adjacent line
+# RuboCop's tokenizer splits interpolated strings into tSTRING_BEG + contents,
+# so the opening " is a separate token that matches the closing " of "" above.
+aws_sqs_queue_url = ""
+aws_sqs_queue_url =  "https://sqs.#{url}.amazonaws.com" if url
