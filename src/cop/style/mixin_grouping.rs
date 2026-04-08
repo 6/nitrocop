@@ -22,18 +22,20 @@ use ruby_prism::Visit;
 /// Previous attempts that also landed at actual=181 likely had a different bug
 /// (e.g., breaking the recursive visit into singleton class children).
 ///
-/// ## Variant style fix (2026-04-07)
+/// ## Variant style fix (2026-04-08)
 ///
-/// The cop only handled `separated` style (multiple args in one statement is bad).
-/// It did not handle `grouped` style (separate statements of the same mixin that
-/// could be grouped into one).
+/// The initial grouped-style implementation diverged from RuboCop in two ways:
 ///
-/// With `EnforcedStyle=grouped`, RuboCop flags when mixins of the same type are
-/// in separate statements and could be combined (e.g., `include Bar` followed by
-/// `include Qux` should be `include Bar, Qux`).
+/// 1. FN=62: it only grouped single-argument mixin calls, so sibling calls like
+///    `include Foo, Bar` followed by `include Baz, Qux` were missed.
+/// 2. FP=25: it treated DSL block calls like `prepend :root do ... end` as
+///    mixin macros, but RuboCop only inspects direct `send` siblings in the
+///    class/module body, so block-form DSL calls are excluded.
 ///
-/// Fix: Added `check_grouped_style` method that collects sibling mixins by method
-/// name and flags all mixins in any group with more than one entry.
+/// Fix: shared mixin-call detection now matches RuboCop's boundary for both
+/// styles: bare `include`/`extend`/`prepend` calls with at least one argument,
+/// excluding calls that carry a real block node. Grouped style now includes
+/// multi-argument sibling mixin calls in the offense set.
 pub struct MixinGrouping;
 
 const MIXIN_METHODS: &[&[u8]] = &[b"include", b"extend", b"prepend"];
@@ -72,6 +74,37 @@ struct MixinGroupingVisitor<'a> {
 }
 
 impl MixinGroupingVisitor<'_> {
+    fn mixin_call<'pr>(&self, stmt: ruby_prism::Node<'pr>) -> Option<ruby_prism::CallNode<'pr>> {
+        let call = stmt.as_call_node()?;
+        let method_bytes = call.name().as_slice();
+
+        if !MIXIN_METHODS.contains(&method_bytes) {
+            return None;
+        }
+
+        // Must not have a receiver (bare include/extend/prepend).
+        if call.receiver().is_some() {
+            return None;
+        }
+
+        // RuboCop checks direct macro sends in the class/module body, not
+        // block-form DSL calls like `prepend :root do ... end`.
+        if call
+            .block()
+            .and_then(|block| block.as_block_node())
+            .is_some()
+        {
+            return None;
+        }
+
+        let args = call.arguments()?;
+        if args.arguments().iter().next().is_none() {
+            return None;
+        }
+
+        Some(call)
+    }
+
     fn check_body_statements(&mut self, stmts: &ruby_prism::StatementsNode<'_>) {
         if self.style == "separated" {
             self.check_separated_style(stmts);
@@ -82,27 +115,13 @@ impl MixinGroupingVisitor<'_> {
 
     fn check_separated_style(&mut self, stmts: &ruby_prism::StatementsNode<'_>) {
         for stmt in stmts.body().iter() {
-            let call = match stmt.as_call_node() {
-                Some(c) => c,
+            let call = match self.mixin_call(stmt) {
+                Some(call) => call,
                 None => continue,
             };
 
             let method_bytes = call.name().as_slice();
-
-            if !MIXIN_METHODS.contains(&method_bytes) {
-                continue;
-            }
-
-            // Must not have a receiver (bare include/extend/prepend)
-            if call.receiver().is_some() {
-                continue;
-            }
-
-            let args = match call.arguments() {
-                Some(a) => a,
-                None => continue,
-            };
-
+            let args = call.arguments().expect("mixin_call requires arguments");
             let arg_list: Vec<_> = args.arguments().iter().collect();
 
             if arg_list.len() > 1 {
@@ -124,32 +143,11 @@ impl MixinGroupingVisitor<'_> {
         let mut mixins_by_method: HashMap<&[u8], Vec<_>> = HashMap::new();
 
         for stmt in stmts.body().iter() {
-            let call = match stmt.as_call_node() {
-                Some(c) => c,
+            let call = match self.mixin_call(stmt) {
+                Some(call) => call,
                 None => continue,
             };
-
             let method_bytes = call.name().as_slice();
-
-            if !MIXIN_METHODS.contains(&method_bytes) {
-                continue;
-            }
-
-            // Must not have a receiver (bare include/extend/prepend)
-            if call.receiver().is_some() {
-                continue;
-            }
-
-            // For grouped style, only consider single-argument calls
-            let args = match call.arguments() {
-                Some(a) => a,
-                None => continue,
-            };
-
-            let arg_list: Vec<_> = args.arguments().iter().collect();
-            if arg_list.len() != 1 {
-                continue;
-            }
 
             mixins_by_method
                 .entry(method_bytes)

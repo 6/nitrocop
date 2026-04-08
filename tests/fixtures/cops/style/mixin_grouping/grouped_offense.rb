@@ -22,3 +22,10 @@ class Quux
   prepend Z
   ^^^^^^^^^ Style/MixinGrouping: Put `prepend` mixins in a single statement.
 end
+
+class MultiArgIncludes
+  include Foo, Bar
+  ^^^^^^^^^^^^^^^^ Style/MixinGrouping: Put `include` mixins in a single statement.
+  include Baz, Qux
+  ^^^^^^^^^^^^^^^^ Style/MixinGrouping: Put `include` mixins in a single statement.
+end
