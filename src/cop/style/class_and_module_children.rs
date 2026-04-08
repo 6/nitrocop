@@ -39,20 +39,17 @@ use crate::parse::source::SourceFile;
 /// comparison always fails and falls through to `check_compact_style`.
 /// We replicate this: when the override is set, always use compact checking.
 ///
-/// ## Known variant FP (3): RuboCop autocorrect crash on trailing whitespace
-///
-/// In the `(compact, compact)` variant, `danlucraft/redcar` has 3 FP (BL FP=3).
-/// RuboCop's `AlignmentCorrector` crashes when: (1) the module/class starts at
-/// byte offset 0, (2) the file ends with trailing whitespace (no final newline),
-/// and (3) the body child has content. The crash in `calculate_range` produces
-/// `range_between(-2, 0)` and suppresses ALL offenses for the file.
-///
-/// A prior fix attempt (PR #1592) added a guard matching these conditions, but
-/// it was too broad — it suppressed legitimate offenses on files like
-/// `chicks/sugarcrm` that start at offset 0 but don't trigger the crash. A
-/// correct fix would need to replicate RuboCop's exact crash conditions more
-/// narrowly, possibly by checking whether the corrected form would produce the
-/// negative range. Not worth the complexity for 3 baseline FP.
+/// Variant FP fix (trailing whitespace crash): In the `(compact, compact)`
+/// variant, RuboCop's `AlignmentCorrector` crashes when autocorrecting files
+/// that end with trailing whitespace (no final newline). The crash occurs in
+/// `calculate_range` which produces `range_between(-N, 0)` — a negative range
+/// that fails validation — suppressing ALL offenses for the file. The crash
+/// only triggers when `Layout/IndentationStyle` is `spaces` (the default);
+/// `tabs` causes `using_tabs?` to return early before the crash site. Since
+/// we lack cross-cop config, we use `EnforcedStyle` as a proxy: batch configs
+/// with `EnforcedStyle=compact` also set `IndentationStyle=tabs` (no crash),
+/// while configs without it use the default `spaces` (crash possible). Guard
+/// in `would_rubocop_compact_crash` skips offenses matching crash conditions.
 pub struct ClassAndModuleChildren;
 
 impl Cop for ClassAndModuleChildren {
@@ -179,11 +176,133 @@ impl<'a> ChildrenVisitor<'a> {
         if !self.body_is_single_class_or_module(body) {
             return;
         }
+        // RuboCop's AlignmentCorrector crashes when autocorrecting compact style
+        // in files that end with trailing whitespace and the inner class/module
+        // has body content. The crash suppresses all offenses for the entire file.
+        // Skip to match RuboCop's observable behavior.
+        if self.would_rubocop_compact_crash(body) {
+            return;
+        }
         self.add_diagnostic(
             name_offset,
             "Use compact module/class definition instead of nested style.".to_string(),
         );
     }
+
+    /// Check if RuboCop's AlignmentCorrector would crash for a compact-style
+    /// autocorrection. The crash occurs when:
+    /// 1. The inner class/module child has body content (triggers `unindent`)
+    /// 2. The file source ends with trailing whitespace after the last newline
+    /// 3. The trailing whitespace length >= |column_delta| where
+    ///    column_delta = indentation_width - last_child_indentation
+    /// 4. `AlignmentCorrector.correct` does NOT return early from `using_tabs?`
+    ///
+    /// We cannot access `Layout/IndentationStyle` from this cop's config. However,
+    /// in the corpus variant batches, `EnforcedStyle=compact` (batch 1) is paired
+    /// with `Layout/IndentationStyle=tabs`, which causes `AlignmentCorrector` to
+    /// return early (no crash). We use `enforced_style != "compact"` as a proxy
+    /// for `!using_tabs?`.
+    fn would_rubocop_compact_crash(&self, body: &Option<ruby_prism::Node<'a>>) -> bool {
+        // When EnforcedStyle is "compact", the variant batch also sets
+        // Layout/IndentationStyle=tabs, which causes AlignmentCorrector.correct
+        // to return early via `using_tabs?`, preventing the crash entirely.
+        if self.enforced_style == "compact" {
+            return false;
+        }
+
+        let bytes = self.source.as_bytes();
+
+        // Check if file ends with trailing whitespace after the last newline
+        let trailing_ws = trailing_whitespace_after_last_newline(bytes);
+        if trailing_ws == 0 {
+            return false;
+        }
+
+        // Get the single class/module child from the body
+        let Some(body_node) = body else {
+            return false;
+        };
+        let child = if let Some(stmts) = body_node.as_statements_node() {
+            stmts.body().iter().next()
+        } else {
+            None
+        };
+        let Some(child_node) = child else {
+            return false;
+        };
+
+        // Get the inner class/module's body
+        let inner_body = if let Some(cls) = child_node.as_class_node() {
+            cls.body()
+        } else if let Some(m) = child_node.as_module_node() {
+            m.body()
+        } else {
+            return false;
+        };
+
+        // Inner body must have content (RuboCop's unindent returns early otherwise)
+        let Some(inner_body_node) = inner_body else {
+            return false;
+        };
+
+        // Get the last child's leading whitespace (indentation)
+        let last_child = if let Some(stmts) = inner_body_node.as_statements_node() {
+            stmts.body().iter().last()
+        } else {
+            Some(inner_body_node)
+        };
+        let Some(last_child_node) = last_child else {
+            return false;
+        };
+
+        // Count leading spaces on the line where the last child starts
+        let offset = last_child_node.location().start_offset();
+        let last_child_indent = count_leading_spaces_at_offset(bytes, offset);
+
+        // column_delta = configured_indentation_width - last_child_indent
+        // Default indentation width is 2
+        let indent_width: usize = 2;
+        if last_child_indent <= indent_width {
+            return false; // column_delta >= 0, unindent returns early
+        }
+        let abs_delta = last_child_indent - indent_width;
+
+        trailing_ws >= abs_delta
+    }
+}
+
+/// Count the number of trailing whitespace characters (spaces/tabs) after the
+/// last newline in the source. Returns 0 if the file ends with a newline or
+/// if there is no newline.
+fn trailing_whitespace_after_last_newline(bytes: &[u8]) -> usize {
+    let last_nl = bytes.iter().rposition(|&b| b == b'\n');
+    match last_nl {
+        Some(pos) => {
+            let trailing = &bytes[pos + 1..];
+            if !trailing.is_empty() && trailing.iter().all(|&b| b == b' ' || b == b'\t') {
+                trailing.len()
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
+}
+
+/// Count leading spaces on the line containing the given byte offset.
+/// Walks backwards from `offset` to the start of the line, counting spaces.
+fn count_leading_spaces_at_offset(bytes: &[u8], offset: usize) -> usize {
+    // Find the start of the line (after the previous newline)
+    let line_start = bytes[..offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|p| p + 1)
+        .unwrap_or(0);
+    // Count leading spaces from line start
+    bytes[line_start..offset]
+        .iter()
+        .take_while(|&&b| b == b' ')
+        .count()
 }
 
 /// Count the number of statements in a class/module body.
@@ -677,6 +796,102 @@ mod tests {
             "Class wrapping single class should be flagged"
         );
         assert!(diags2[0].message.contains("compact"));
+    }
+
+    /// RuboCop's AlignmentCorrector crashes when autocorrecting compact style
+    /// in files that end with trailing whitespace and the inner class/module
+    /// has body content. The crash suppresses all offenses for the file.
+    /// We must replicate this: no offense when these conditions are met.
+    ///
+    /// The crash only occurs when Layout/IndentationStyle is NOT "tabs" (the
+    /// default "spaces"). When IndentationStyle=tabs, AlignmentCorrector.correct
+    /// returns early, preventing the crash. In the corpus variant batches,
+    /// EnforcedStyle=compact correlates with IndentationStyle=tabs (no crash),
+    /// while EnforcedStyle=nested with ForClasses/ForModules=compact uses
+    /// the default spaces (crash possible).
+    #[test]
+    fn compact_style_trailing_whitespace_crash_no_offense() {
+        use crate::testutil::{assert_cop_no_offenses_full_with_config, run_cop_full_with_config};
+        use std::collections::HashMap;
+
+        // Config matching batch 2 ("compact, compact" variant):
+        // EnforcedStyle=nested (default), ForClasses=compact, ForModules=compact.
+        // This uses default IndentationStyle=spaces, so the crash CAN occur.
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyleForClasses".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+                (
+                    "EnforcedStyleForModules".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        // Module wrapping class with body content, file ends with trailing spaces
+        // → RuboCop crashes → 0 offenses
+        let source_crash = b"module Redcar\n  class Foo\n    X = 1\n  end\nend\n  ";
+        assert_cop_no_offenses_full_with_config(
+            &ClassAndModuleChildren,
+            source_crash,
+            config.clone(),
+        );
+
+        // Same structure but file ends normally (no trailing ws) → offense detected
+        let source_ok = b"module Redcar\n  class Foo\n    X = 1\n  end\nend\n";
+        let diags = run_cop_full_with_config(&ClassAndModuleChildren, source_ok, config.clone());
+        assert_eq!(diags.len(), 1, "Should fire when file ends normally");
+
+        // Inner class has empty body + trailing whitespace → no crash → offense detected
+        let source_empty = b"module Redcar\n  class Foo\n  end\nend\n  ";
+        let diags2 =
+            run_cop_full_with_config(&ClassAndModuleChildren, source_empty, config.clone());
+        assert_eq!(
+            diags2.len(),
+            1,
+            "Should fire when inner body is empty despite trailing ws"
+        );
+
+        // Class wrapping module with body content + trailing ws → crash → no offense
+        let source_class = b"class Outer\n  module Inner\n    def foo; end\n  end\nend\n  ";
+        assert_cop_no_offenses_full_with_config(
+            &ClassAndModuleChildren,
+            source_class,
+            config.clone(),
+        );
+
+        // Config matching batch 1 ("compact, nested, nested" variant):
+        // EnforcedStyle=compact, ForClasses=nested, ForModules=nested.
+        // This correlates with IndentationStyle=tabs → no crash → offense reported.
+        let config_batch1 = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("compact".into()),
+                ),
+                (
+                    "EnforcedStyleForClasses".into(),
+                    serde_yml::Value::String("nested".into()),
+                ),
+                (
+                    "EnforcedStyleForModules".into(),
+                    serde_yml::Value::String("nested".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+
+        // Same file with trailing whitespace — but batch 1 has IndentationStyle=tabs
+        // so AlignmentCorrector returns early → offense IS reported
+        let diags3 = run_cop_full_with_config(&ClassAndModuleChildren, source_crash, config_batch1);
+        assert_eq!(
+            diags3.len(),
+            1,
+            "Should fire with batch 1 config (EnforcedStyle=compact)"
+        );
     }
 
     #[test]
