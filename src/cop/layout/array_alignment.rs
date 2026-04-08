@@ -42,6 +42,32 @@ use ruby_prism::Visit;
 /// RuboCop only skips arrays whose immediate parent is the masgn. Fixed by
 /// manually visiting MultiWriteNode children and only setting `in_multi_write`
 /// when the direct value is an ArrayNode, not for non-array values like IfNode.
+///
+/// ## `with_fixed_indentation` variant fixes (2026-04-08)
+///
+/// **FN root cause (3,209 FN):** `check_element_alignment` used `skip(1)` and
+/// initialized `last_checked_line = first_line`, so the first element was never
+/// checked. With `with_first_element` this is correct (first element defines the
+/// expected column), but with `with_fixed_indentation` the expected column is
+/// `indentation_of(bracket_line) + indent_width`, so the first element on its own
+/// line can be misaligned. RuboCop's `each_bad_alignment` starts with
+/// `prev_line = -1` and checks ALL elements. Fixed by introducing `anchor_line`
+/// (the bracket/parent/keyword line) and iterating all elements.
+///
+/// **FP root cause (rescue, 2 FP):** `check_rescue_exceptions` used the first
+/// exception's line for indentation, but RuboCop uses `node.parent.loc.line`
+/// (the rescue keyword's line). Differs when `rescue \` continuation puts the
+/// first exception on a new line. Fixed by using `rescue_node.keyword_loc()`.
+///
+/// **FP root cause (bracketless arrays, ~6 FP):** For non-bracketed arrays with
+/// `with_fixed_indentation`, RuboCop uses `node.parent.loc.line`. We used the
+/// first element's line. Fixed by tracking parent node lines via
+/// `visit_branch_node_enter`/`leave` and using the parent's line.
+///
+/// **Message:** `with_fixed_indentation` uses a different message than the default:
+/// "Use one level of indentation for elements following the first line of a
+/// multi-line array." vs the default "Align the elements of an array literal if
+/// they span more than one line."
 pub struct ArrayAlignment;
 
 impl Cop for ArrayAlignment {
@@ -64,6 +90,7 @@ impl Cop for ArrayAlignment {
             config,
             diagnostics,
             in_multi_write: false,
+            node_line_stack: Vec::new(),
         };
         visitor.visit(&parse_result.node());
     }
@@ -75,9 +102,25 @@ struct AlignmentVisitor<'a> {
     config: &'a CopConfig,
     diagnostics: &'a mut Vec<Diagnostic>,
     in_multi_write: bool,
+    /// Stack of node start lines, maintained via visit_branch_node_enter/leave.
+    /// When visiting an array node, the parent's start line is the second-to-last
+    /// element (the last element is the array itself, pushed by
+    /// visit_branch_node_enter before visit_array_node runs).
+    node_line_stack: Vec<usize>,
 }
 
 impl<'pr> Visit<'pr> for AlignmentVisitor<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let (line, _) = self
+            .source
+            .offset_to_line_col(node.location().start_offset());
+        self.node_line_stack.push(line);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.node_line_stack.pop();
+    }
+
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
         // RuboCop: `return if node.parent&.masgn_type?` — only skips arrays
         // whose IMMEDIATE parent is the multi-write node. We replicate the
@@ -114,8 +157,22 @@ impl<'pr> Visit<'pr> for AlignmentVisitor<'_> {
         // where `[x, y]` is inside the implicit RHS array) ARE checked, since
         // their parent is the implicit array, not the masgn itself.
         if !self.in_multi_write {
-            self.cop
-                .check_array(self.source, node, self.config, self.diagnostics);
+            // For bracketless arrays (implicit), RuboCop's `target_method_lineno`
+            // uses `node.parent.loc.line`. We get the parent's line from the
+            // node_line_stack: the second-to-last entry is the parent (the last
+            // entry is this array node itself, pushed by visit_branch_node_enter).
+            let parent_line = if self.node_line_stack.len() >= 2 {
+                Some(self.node_line_stack[self.node_line_stack.len() - 2])
+            } else {
+                None
+            };
+            self.cop.check_array(
+                self.source,
+                node,
+                self.config,
+                self.diagnostics,
+                parent_line,
+            );
         }
         // Reset in_multi_write before visiting children — only the direct
         // array child of MultiWriteNode is skipped, not nested arrays.
@@ -139,6 +196,7 @@ impl ArrayAlignment {
         array_node: &ruby_prism::ArrayNode<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
+        parent_line: Option<usize>,
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_element");
         let indent_width = config.get_usize("IndentationWidth", 2);
@@ -155,6 +213,8 @@ impl ArrayAlignment {
         };
         let (first_line, first_col) = source.offset_to_line_col(first.location().start_offset());
 
+        let is_fixed = style == "with_fixed_indentation";
+
         let expected_col = match style {
             "with_fixed_indentation" => {
                 if is_bracketed {
@@ -163,16 +223,49 @@ impl ArrayAlignment {
                     let open_line_bytes = source.lines().nth(open_line - 1).unwrap_or(b"");
                     crate::cop::shared::util::indentation_of(open_line_bytes) + indent_width
                 } else {
-                    // For bracketless arrays (trailing comma), use first element's
-                    // line indentation + indent_width
-                    let first_line_bytes = source.lines().nth(first_line - 1).unwrap_or(b"");
-                    crate::cop::shared::util::indentation_of(first_line_bytes) + indent_width
+                    // For bracketless arrays (implicit from trailing comma or method
+                    // args), RuboCop uses node.parent.loc.line to find the base
+                    // indentation. We use the parent_line from the visitor's node
+                    // stack. This is critical for cases like:
+                    //   config.cache_store =
+                    //     :memory_store,
+                    //     { size: 128 }
+                    // where the parent (CallNode at line of `config.cache_store =`)
+                    // has indentation 2, giving expected_col = 4, NOT the first
+                    // element's line indentation (4) + indent_width = 6.
+                    let base_line = parent_line.unwrap_or(first_line);
+                    let base_line_bytes = source.lines().nth(base_line - 1).unwrap_or(b"");
+                    crate::cop::shared::util::indentation_of(base_line_bytes) + indent_width
                 }
             }
             _ => first_col, // "with_first_element" (default)
         };
 
-        self.check_element_alignment(source, &elements, first_line, expected_col, diagnostics);
+        // RuboCop's each_bad_alignment starts with prev_line = -1 and checks ALL
+        // elements. For `with_first_element`, the first element trivially matches
+        // (expected_col == first_col). For `with_fixed_indentation`, the first
+        // element on its own line may be misaligned vs the bracket/parent line.
+        // We use anchor_line as the "already checked" line: for default style it's
+        // first_line (so first element is skipped); for fixed_indentation with
+        // brackets it's the `[` line (so first element on a new line is checked).
+        let anchor_line = if is_fixed && is_bracketed {
+            let open_loc = array_node.opening_loc().unwrap();
+            let (open_line, _) = source.offset_to_line_col(open_loc.start_offset());
+            open_line
+        } else if is_fixed {
+            parent_line.unwrap_or(first_line)
+        } else {
+            first_line
+        };
+
+        self.check_element_alignment(
+            source,
+            &elements,
+            anchor_line,
+            expected_col,
+            is_fixed,
+            diagnostics,
+        );
     }
 
     fn check_rescue_exceptions(
@@ -195,34 +288,80 @@ impl ArrayAlignment {
         };
         let (first_line, first_col) = source.offset_to_line_col(first.location().start_offset());
 
+        let is_fixed = style == "with_fixed_indentation";
+
         let expected_col = match style {
             "with_fixed_indentation" => {
-                // Use the rescue keyword line's indentation + indent_width
-                let rescue_line_bytes = source.lines().nth(first_line - 1).unwrap_or(b"");
-                crate::cop::shared::util::indentation_of(rescue_line_bytes) + indent_width
+                // RuboCop treats rescue exception lists as arrays whose parent is
+                // the resbody. For `with_fixed_indentation`, the base line is the
+                // parent's (resbody's) line — which is the rescue keyword's line.
+                // This is critical for line-continued rescues like:
+                //   rescue \
+                //     FooError,
+                //     BarError => e
+                // where the rescue keyword is on a different line than the first
+                // exception. We must use the keyword's line (indentation 8), not
+                // the first exception's line (indentation 10).
+                let keyword_loc = rescue_node.keyword_loc();
+                let (keyword_line, _) = source.offset_to_line_col(keyword_loc.start_offset());
+                let keyword_line_bytes = source.lines().nth(keyword_line - 1).unwrap_or(b"");
+                crate::cop::shared::util::indentation_of(keyword_line_bytes) + indent_width
             }
             _ => first_col, // "with_first_element" (default)
         };
 
-        self.check_element_alignment(source, &exceptions, first_line, expected_col, diagnostics);
+        // For rescue, the anchor line is the rescue keyword's line for
+        // with_fixed_indentation (so the first exception on its own line
+        // is checked), or first_line for the default style.
+        let anchor_line = if is_fixed {
+            let keyword_loc = rescue_node.keyword_loc();
+            let (keyword_line, _) = source.offset_to_line_col(keyword_loc.start_offset());
+            keyword_line
+        } else {
+            first_line
+        };
+
+        self.check_element_alignment(
+            source,
+            &exceptions,
+            anchor_line,
+            expected_col,
+            is_fixed,
+            diagnostics,
+        );
     }
 
     fn check_element_alignment(
         &self,
         source: &SourceFile,
         elements: &ruby_prism::NodeList<'_>,
-        first_line: usize,
+        anchor_line: usize,
         expected_col: usize,
+        is_fixed_indentation: bool,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
-        let mut last_checked_line = first_line;
+        // RuboCop's each_bad_alignment starts with prev_line = -1 and iterates
+        // ALL elements. We use anchor_line as the "already seen" line:
+        // - For with_first_element: anchor_line = first_line, so the first
+        //   element (same line) is skipped.
+        // - For with_fixed_indentation: anchor_line = bracket/parent/keyword line,
+        //   so the first element on a new line IS checked.
+        let mut last_checked_line = anchor_line;
 
-        for elem in elements.iter().skip(1) {
+        let message = if is_fixed_indentation {
+            "Use one level of indentation for elements following the first line of a multi-line array."
+        } else {
+            "Align the elements of an array literal if they span more than one line."
+        };
+
+        for elem in elements.iter() {
             let start_offset = elem.location().start_offset();
             let (elem_line, elem_col) = source.offset_to_line_col(start_offset);
             // Only check the first element on each new line; subsequent elements
             // on the same line are just comma-separated and not alignment targets.
             if elem_line == last_checked_line {
+                // Update last_checked_line even when skipping, matching RuboCop's
+                // `prev_line = current.loc.line` at the end of each iteration.
                 continue;
             }
             last_checked_line = elem_line;
@@ -232,15 +371,7 @@ impl ArrayAlignment {
                 continue;
             }
             if elem_col != expected_col {
-                diagnostics.push(
-                    self.diagnostic(
-                        source,
-                        elem_line,
-                        elem_col,
-                        "Align the elements of an array literal if they span more than one line."
-                            .to_string(),
-                    ),
-                );
+                diagnostics.push(self.diagnostic(source, elem_line, elem_col, message.to_string()));
             }
         }
     }
@@ -318,6 +449,109 @@ mod tests {
             diags2.len(),
             1,
             "with_fixed_indentation should flag first-element alignment"
+        );
+    }
+
+    #[test]
+    fn with_fixed_indentation_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ArrayAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/array_alignment/with_fixed_indentation_offense.rb"
+            ),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("with_fixed_indentation".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn with_fixed_indentation_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ArrayAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/array_alignment/with_fixed_indentation_no_offense.rb"
+            ),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("with_fixed_indentation".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn with_fixed_indentation_bracketless_array_parent_line() {
+        // Regression test: bracketless arrays (implicit from trailing comma in
+        // assignment) should use the parent statement's line indentation, not the
+        // first element's line. Matches RuboCop's target_method_lineno behavior.
+        //
+        // Source:
+        //   config.cache_store =    <- parent line, indent 2
+        //     :memory_store,        <- first element, indent 4
+        //     { size: 128 }         <- second element, indent 4 (should be OK)
+        //
+        // Expected: parent indent (2) + indent_width (2) = 4. Both elements at col 4.
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("with_fixed_indentation".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"  config.cache_store =\n    :memory_store,\n    { size: 128 }\n";
+        let diags = run_cop_full_with_config(&ArrayAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "bracketless array with elements at parent_indent+2 should not be flagged, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn with_fixed_indentation_rescue_line_continuation() {
+        // Regression test: rescue with line continuation should use the rescue
+        // keyword's line indentation, not the first exception's line indentation.
+        //
+        // Source:
+        //         rescue \              <- keyword line, indent 8
+        //           FooError,           <- first exception, indent 10
+        //           BarError => e       <- second exception, indent 10 (should be OK)
+        //
+        // Expected: keyword indent (8) + indent_width (2) = 10. Both exceptions at col 10.
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("with_fixed_indentation".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"begin\n  run_command\nrescue \\\n  FooError,\n  BarError => e\n  handle\nend\n";
+        let diags = run_cop_full_with_config(&ArrayAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "rescue with line continuation should not flag aligned exceptions, got {:?}",
+            diags
         );
     }
 }
