@@ -17,6 +17,15 @@ pub struct CodeMap {
     /// Sorted, non-overlapping (start, end) byte ranges of regex literal content.
     /// Used by cops that need to skip content inside regex literals specifically.
     regex_ranges: Vec<(usize, usize)>,
+    /// Sorted, non-overlapping (start, end) byte ranges of xstring (backtick)
+    /// literal content. Used by cops like Layout/IndentationStyle that need to
+    /// NOT skip xstring content (RuboCop's string_literal_ranges excludes xstr).
+    xstring_ranges: Vec<(usize, usize)>,
+    /// Sorted (but NOT merged) heredoc ranges for boundary detection.
+    /// When adjacent heredoc ranges merge (stacked heredocs), the merged range
+    /// loses internal boundaries. This field preserves per-heredoc boundaries
+    /// for `heredoc_range_end()` to detect closing delimiters accurately.
+    raw_heredoc_ranges: Vec<(usize, usize)>,
     /// Sorted, non-overlapping (start, end) byte ranges of `#{}` interpolation
     /// content inside heredocs. These regions are marked as non-code by the main
     /// `ranges` (heredocs mark everything non-code), but cops like SpaceAfterComma
@@ -36,6 +45,7 @@ impl CodeMap {
         let mut string_ranges = Vec::new();
         let mut heredoc_ranges = Vec::new();
         let mut regex_ranges = Vec::new();
+        let mut xstring_ranges = Vec::new();
         let mut heredoc_interpolation_ranges = Vec::new();
 
         // Walk AST to collect string/regex/symbol ranges
@@ -43,6 +53,7 @@ impl CodeMap {
             ranges: &mut string_ranges,
             heredoc_ranges: &mut heredoc_ranges,
             regex_ranges: &mut regex_ranges,
+            xstring_ranges: &mut xstring_ranges,
             heredoc_interpolation_ranges: &mut heredoc_interpolation_ranges,
         };
         collector.visit(&parse_result.node());
@@ -83,13 +94,18 @@ impl CodeMap {
         // Now merge string ranges
         let string_ranges = merge_ranges(string_ranges);
 
-        // Sort and merge heredoc ranges
+        // Sort and merge heredoc ranges (keep raw copy for boundary detection)
         heredoc_ranges.sort_unstable();
+        let raw_heredoc_ranges = heredoc_ranges.clone();
         let heredoc_ranges = merge_ranges(heredoc_ranges);
 
         // Sort and merge regex ranges
         regex_ranges.sort_unstable();
         let regex_ranges = merge_ranges(regex_ranges);
+
+        // Sort and merge xstring ranges
+        xstring_ranges.sort_unstable();
+        let xstring_ranges = merge_ranges(xstring_ranges);
 
         // Full non-code ranges include comments + strings + __END__ data section
         let mut ranges = string_ranges.clone();
@@ -104,6 +120,8 @@ impl CodeMap {
             ranges,
             string_ranges,
             heredoc_ranges,
+            xstring_ranges,
+            raw_heredoc_ranges,
             regex_ranges,
             heredoc_interpolation_ranges,
             heredoc_interpolation_non_code_ranges,
@@ -133,10 +151,20 @@ impl CodeMap {
         Self::in_ranges(&self.regex_ranges, offset)
     }
 
+    /// Returns true if the given byte offset is inside an xstring (backtick)
+    /// literal. RuboCop's `string_literal_ranges` excludes `:xstr` nodes, so
+    /// cops that mirror RuboCop's skip logic need this to avoid false negatives.
+    pub fn is_xstring(&self, offset: usize) -> bool {
+        Self::in_ranges(&self.xstring_ranges, offset)
+    }
+
     /// Returns the end offset of the heredoc range containing `offset`, or None
     /// if the offset is not inside a heredoc range.
+    /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
+    /// heredocs, where adjacent ranges would otherwise merge and lose internal
+    /// boundaries.
     pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
-        self.heredoc_ranges
+        self.raw_heredoc_ranges
             .binary_search_by(|&(start, end)| {
                 if offset < start {
                     std::cmp::Ordering::Greater
@@ -147,7 +175,7 @@ impl CodeMap {
                 }
             })
             .ok()
-            .map(|idx| self.heredoc_ranges[idx].1)
+            .map(|idx| self.raw_heredoc_ranges[idx].1)
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation
@@ -184,6 +212,7 @@ struct NonCodeCollector<'a> {
     ranges: &'a mut Vec<(usize, usize)>,
     heredoc_ranges: &'a mut Vec<(usize, usize)>,
     regex_ranges: &'a mut Vec<(usize, usize)>,
+    xstring_ranges: &'a mut Vec<(usize, usize)>,
     heredoc_interpolation_ranges: &'a mut Vec<(usize, usize)>,
 }
 
@@ -291,7 +320,13 @@ impl NonCodeCollector<'_> {
                 self.regex_ranges
                     .push((loc.start_offset(), loc.end_offset()));
             }
-            ruby_prism::Node::XStringNode { .. } | ruby_prism::Node::SymbolNode { .. } => {
+            ruby_prism::Node::XStringNode { .. } => {
+                let loc = node.location();
+                self.ranges.push((loc.start_offset(), loc.end_offset()));
+                self.xstring_ranges
+                    .push((loc.start_offset(), loc.end_offset()));
+            }
+            ruby_prism::Node::SymbolNode { .. } => {
                 let loc = node.location();
                 self.ranges.push((loc.start_offset(), loc.end_offset()));
             }
@@ -319,14 +354,20 @@ impl NonCodeCollector<'_> {
                 let ixn = node.as_interpolated_x_string_node().unwrap();
                 let open = ixn.opening_loc();
                 self.ranges.push((open.start_offset(), open.end_offset()));
+                self.xstring_ranges
+                    .push((open.start_offset(), open.end_offset()));
                 for part in ixn.parts().iter() {
                     if part.as_embedded_statements_node().is_none() {
                         let ploc = part.location();
                         self.ranges.push((ploc.start_offset(), ploc.end_offset()));
+                        self.xstring_ranges
+                            .push((ploc.start_offset(), ploc.end_offset()));
                     }
                 }
                 let close = ixn.closing_loc();
                 self.ranges.push((close.start_offset(), close.end_offset()));
+                self.xstring_ranges
+                    .push((close.start_offset(), close.end_offset()));
             }
             ruby_prism::Node::InterpolatedSymbolNode { .. } => {
                 let isn = node.as_interpolated_symbol_node().unwrap();
