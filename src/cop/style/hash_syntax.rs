@@ -1,6 +1,7 @@
 use crate::cop::shared::node_type::{
     ASSOC_NODE, HASH_NODE, IMPLICIT_NODE, KEYWORD_HASH_NODE, LOCAL_VARIABLE_READ_NODE, SYMBOL_NODE,
 };
+use crate::cop::shared::util::{is_modifier_if, is_modifier_unless};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -30,6 +31,12 @@ use crate::parse::source::SourceFile;
 /// correct key/value location, flags colon pairs in `ruby19_no_mixed_keys`
 /// when mixed with non-symbol keys, and reports the mixed pair itself for
 /// `no_mixed_keys` instead of the whole hash.
+///
+/// Fixed remaining shorthand divergence: RuboCop treats unbraced keyword hashes
+/// inside modifier-form ancestors (`if`, `unless`, `while`, `until`) as
+/// requiring explicit values unless the enclosing call is parenthesized. That
+/// includes outer wrappers like `end if cond`, so shorthand analysis now runs
+/// in a visitor that can see modifier ancestors before classifying each pair.
 pub struct HashSyntax;
 
 const MSG_19: &str = "Use the new Ruby 1.9 hash syntax.";
@@ -89,22 +96,10 @@ impl Cop for HashSyntax {
         }
 
         let enforced_style = config.get_str("EnforcedStyle", "ruby19");
-        let enforced_shorthand = config.get_str("EnforcedShorthandSyntax", "either");
         let use_rockets_symbol_vals = config.get_bool("UseHashRocketsWithSymbolValues", false);
         let prefer_rockets_nonalnum =
             config.get_bool("PreferHashRocketsForNonAlnumEndingSymbols", false);
         let target_ruby_version = target_ruby_version(config);
-
-        if enforced_shorthand != "either" {
-            check_shorthand_syntax(
-                self,
-                source,
-                &pairs,
-                enforced_shorthand,
-                target_ruby_version,
-                diagnostics,
-            );
-        }
 
         match enforced_style {
             "ruby19" => {
@@ -180,6 +175,33 @@ impl Cop for HashSyntax {
             _ => {}
         }
     }
+
+    fn check_source(
+        &self,
+        source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        let enforced_shorthand = config.get_str("EnforcedShorthandSyntax", "either");
+        let target_ruby_version = target_ruby_version(config);
+
+        if enforced_shorthand == "either" || target_ruby_version <= 3.0 {
+            return;
+        }
+
+        let mut visitor = HashSyntaxShorthandVisitor {
+            cop: self,
+            source,
+            enforced_shorthand,
+            target_ruby_version,
+            diagnostics,
+            ancestors: Vec::new(),
+        };
+        ruby_prism::Visit::visit(&mut visitor, &parse_result.node());
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,13 +218,18 @@ fn check_shorthand_syntax(
     pairs: &[ruby_prism::AssocNode<'_>],
     enforced_shorthand: &str,
     target_ruby_version: f64,
+    hash_is_braced: bool,
+    ancestors: &[ruby_prism::Node<'_>],
     diags: &mut Vec<Diagnostic>,
 ) {
     if target_ruby_version <= 3.0 {
         return;
     }
 
-    let kinds: Vec<ShorthandKind> = pairs.iter().map(shorthand_kind).collect();
+    let kinds: Vec<ShorthandKind> = pairs
+        .iter()
+        .map(|assoc| shorthand_kind(assoc, hash_is_braced, ancestors))
+        .collect();
 
     match enforced_shorthand {
         "always" => {
@@ -282,7 +309,11 @@ fn check_shorthand_syntax(
     }
 }
 
-fn shorthand_kind(assoc: &ruby_prism::AssocNode<'_>) -> ShorthandKind {
+fn shorthand_kind(
+    assoc: &ruby_prism::AssocNode<'_>,
+    hash_is_braced: bool,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> ShorthandKind {
     if assoc.value().as_implicit_node().is_some() {
         return ShorthandKind::Omitted;
     }
@@ -295,7 +326,10 @@ fn shorthand_kind(assoc: &ruby_prism::AssocNode<'_>) -> ShorthandKind {
         key_source.strip_suffix(b":").unwrap_or(key_source)
     };
 
-    if !is_symbol_like_key(&key) || comparable_key.ends_with(b"!") || comparable_key.ends_with(b"?")
+    if !is_symbol_like_key(&key)
+        || comparable_key.ends_with(b"!")
+        || comparable_key.ends_with(b"?")
+        || require_hash_value_for_modifier_context(hash_is_braced, ancestors)
     {
         return ShorthandKind::Needed;
     }
@@ -311,6 +345,148 @@ fn shorthand_kind(assoc: &ruby_prism::AssocNode<'_>) -> ShorthandKind {
     } else {
         ShorthandKind::Needed
     }
+}
+
+struct HashSyntaxShorthandVisitor<'a, 'pr> {
+    cop: &'a HashSyntax,
+    source: &'a SourceFile,
+    enforced_shorthand: &'a str,
+    target_ruby_version: f64,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+}
+
+impl<'a, 'pr> HashSyntaxShorthandVisitor<'a, 'pr> {
+    fn check_pairs(&mut self, pairs: Vec<ruby_prism::AssocNode<'pr>>, hash_is_braced: bool) {
+        if pairs.is_empty() {
+            return;
+        }
+
+        check_shorthand_syntax(
+            self.cop,
+            self.source,
+            &pairs,
+            self.enforced_shorthand,
+            self.target_ruby_version,
+            hash_is_braced,
+            &self.ancestors,
+            self.diagnostics,
+        );
+    }
+}
+
+impl<'a, 'pr> ruby_prism::Visit<'pr> for HashSyntaxShorthandVisitor<'a, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        let pairs = node
+            .elements()
+            .iter()
+            .filter_map(|element| element.as_assoc_node())
+            .collect();
+        let hash_is_braced = node.opening_loc().as_slice() == b"{";
+
+        self.check_pairs(pairs, hash_is_braced);
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        let pairs = node
+            .elements()
+            .iter()
+            .filter_map(|element| element.as_assoc_node())
+            .collect();
+
+        self.check_pairs(pairs, false);
+        ruby_prism::visit_keyword_hash_node(self, node);
+    }
+}
+
+fn require_hash_value_for_modifier_context(
+    hash_is_braced: bool,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> bool {
+    !hash_is_braced && modifier_form_without_parenthesized_method_call(ancestors)
+}
+
+fn modifier_form_without_parenthesized_method_call(ancestors: &[ruby_prism::Node<'_>]) -> bool {
+    let Some((dispatch_idx, dispatch)) = enclosing_method_dispatch(ancestors) else {
+        return false;
+    };
+
+    if method_dispatch_is_parenthesized(&dispatch) {
+        return false;
+    }
+
+    ancestors[..dispatch_idx]
+        .iter()
+        .any(is_modifier_form_ancestor)
+}
+
+fn is_modifier_form_ancestor(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(if_node) = node.as_if_node() {
+        return is_modifier_if(&if_node);
+    }
+
+    if let Some(unless_node) = node.as_unless_node() {
+        return is_modifier_unless(&unless_node);
+    }
+
+    if let Some(while_node) = node.as_while_node() {
+        return while_node.closing_loc().is_none();
+    }
+
+    node.as_until_node()
+        .is_some_and(|until_node| until_node.closing_loc().is_none())
+}
+
+fn method_dispatch_is_parenthesized(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(call) = node.as_call_node() {
+        return call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
+    }
+
+    if let Some(super_node) = node.as_super_node() {
+        return super_node.lparen_loc().is_some();
+    }
+
+    node.as_yield_node()
+        .is_some_and(|yield_node| yield_node.lparen_loc().is_some())
+}
+
+fn enclosing_method_dispatch<'pr>(
+    ancestors: &'pr [ruby_prism::Node<'pr>],
+) -> Option<(usize, &'pr ruby_prism::Node<'pr>)> {
+    let len = ancestors.len().saturating_sub(1);
+
+    for idx in (0..len).rev() {
+        let node = &ancestors[idx];
+
+        if let Some(call) = node.as_call_node() {
+            let name = call.name().as_slice();
+            if name == b"[]" || name == b"[]=" {
+                return None;
+            }
+            return Some((idx, node));
+        }
+
+        if node.as_super_node().is_some() {
+            return Some((idx, node));
+        }
+
+        if node.as_yield_node().is_some() {
+            return Some((idx, node));
+        }
+    }
+
+    None
 }
 
 fn sym_indices(
@@ -686,6 +862,39 @@ mod tests {
             &HashSyntax,
             fixture,
             shorthand_style_config("no_mixed_keys", "never"),
+        );
+    }
+
+    #[test]
+    fn consistent_shorthand_flags_unparenthesized_keyword_hash_without_modifier() {
+        let source = b"client_server client: client, server: server\n";
+        let diags = run_cop_full_with_config(
+            &HashSyntax,
+            source,
+            shorthand_style_config("ruby19_no_mixed_keys", "consistent"),
+        );
+        assert_eq!(diags.len(), 2);
+        assert!(diags.iter().all(|diag| diag.message == OMIT_HASH_VALUE_MSG));
+    }
+
+    #[test]
+    fn consistent_shorthand_skips_keyword_hashes_in_modifier_contexts() {
+        let source = br#"
+return redirect_to destination_url, flash: flash if signed_in?
+
+class TestSSLDhParam < Test::Unit::TestCase
+  def test_dhparam_1_3_supplied
+    client = { client_unbind: true, ssl_version: %w(TLSv1_3) }
+    server = { dhparam: DH_PARAM_FILE, cipher_list: "DHE,EDH", ssl_version: %w(TLSv1_3) }
+    client_server client: client, server: server
+  end
+end if EM.ssl?
+"#;
+
+        assert_cop_no_offenses_full_with_config(
+            &HashSyntax,
+            source,
+            shorthand_style_config("ruby19_no_mixed_keys", "consistent"),
         );
     }
 }
