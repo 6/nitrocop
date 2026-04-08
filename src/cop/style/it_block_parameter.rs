@@ -94,6 +94,13 @@ use ruby_prism::Visit;
 ///
 /// Fix: allow `ImplicitRestNode` in the named-parameter gate, while still rejecting
 /// explicit rest parameters like `|arg, *rest|`.
+///
+/// ## Investigation findings (2026-04-08, block locals)
+///
+/// Variant `always` style FP: blocks with semicolon-declared block locals like
+/// `|arg; tmp|` were flagged, but RuboCop does not register an offense. These
+/// blocks cannot be rewritten to implicit `it` without dropping the block-local
+/// declarations, so they must be rejected by the single named-parameter gate.
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -165,8 +172,13 @@ impl ItBlockParameter {
     /// Prism represents `|arg,|` with a `RequiredParameterNode` plus an
     /// `ImplicitRestNode`, but RuboCop still treats that as a single block argument.
     fn single_named_param_name<'pr>(
-        parameters: &ruby_prism::ParametersNode<'pr>,
+        block_params: &ruby_prism::BlockParametersNode<'pr>,
     ) -> Option<&'pr [u8]> {
+        if !block_params.locals().is_empty() {
+            return None;
+        }
+
+        let parameters = block_params.parameters()?;
         let requireds = parameters.requireds();
         if requireds.len() != 1 {
             return None;
@@ -180,9 +192,7 @@ impl ItBlockParameter {
             return None;
         }
         if let Some(rest) = parameters.rest() {
-            if rest.as_implicit_rest_node().is_none() {
-                return None;
-            }
+            rest.as_implicit_rest_node()?;
         }
 
         let param = requireds.iter().next()?;
@@ -376,11 +386,7 @@ impl ItBlockParameter {
             return;
         }
         if let Some(block_params) = params.as_block_parameters_node() {
-            let parameters = match block_params.parameters() {
-                Some(p) => p,
-                None => return,
-            };
-            let param_name = match Self::single_named_param_name(&parameters) {
+            let param_name = match Self::single_named_param_name(&block_params) {
                 Some(name) => name,
                 None => return,
             };
@@ -515,12 +521,7 @@ impl ItBlockParameter {
             return;
         }
 
-        let parameters = match block_params.parameters() {
-            Some(p) => p,
-            None => return,
-        };
-
-        let param_name = match Self::single_named_param_name(&parameters) {
+        let param_name = match Self::single_named_param_name(block_params) {
             Some(name) => name,
             None => return,
         };
