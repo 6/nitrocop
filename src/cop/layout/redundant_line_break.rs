@@ -127,6 +127,15 @@ use crate::parse::source::SourceFile;
 ///   invoked for these node types, enabling detection of redundant line breaks in
 ///   index/call operator write expressions. Resolves ~2 FNs with zero regressions.
 ///
+/// ## Fixes applied (2026-04-08)
+/// - **Direct argument walk-up**: nested multiline calls used as direct arguments
+///   of an outer multiline call are now suppressed when the outer call has already
+///   been checked. RuboCop's `on_send` walks from the inner send to its parent send
+///   even when that parent relation comes from an argument position, not only a
+///   receiver chain. Nitrocop previously only tracked receiver chains, which caused
+///   false positives for cases like `SeedDump.dump(EventInstance\n.where(...), ...)`
+///   and similar backslash-heavy argument lists.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -710,24 +719,22 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
             && !self.part_of_reported_node(start_offset, end_offset)
             && !skip_for_checked_chain
         {
-            // This is the outermost multiline CallNode in its chain (since we
-            // visit top-down and inner calls would be caught by part_of_checked_chain).
-            // Record it so inner CallNodes in the chain are skipped, matching
-            // RuboCop's walk-up-to-outermost behavior.
-            let has_call_receiver = node.receiver().and_then(|r| r.as_call_node()).is_some();
-            if has_call_receiver {
-                // This node has a call chain underneath. Mark the chain range
-                // so inner calls are not individually checked.
-                // Exclude block bodies: in RuboCop, the send node's range does
-                // not include the block (the block is a parent node). Calls
-                // inside block bodies should be checked independently.
-                let effective_end = node
-                    .block()
-                    .and_then(|b| b.as_block_node())
-                    .map_or(end_offset, |block| block.location().start_offset());
-                self.checked_chain_ranges
-                    .push((start_offset, effective_end));
-            }
+            // RuboCop's `on_send` walks up through parent sends even when the
+            // inner send is a direct argument of the outer one, not only when
+            // it is the receiver in a method chain. Record every multiline send
+            // range so nested direct-argument sends are skipped unless another
+            // structural boundary (hash/array/parentheses/block body) breaks
+            // the walk-up.
+            //
+            // Exclude block bodies: in RuboCop, the send node's range does not
+            // include the block (the block is a parent node). Calls inside
+            // block bodies should be checked independently.
+            let effective_end = node
+                .block()
+                .and_then(|b| b.as_block_node())
+                .map_or(end_offset, |block| block.location().start_offset());
+            self.checked_chain_ranges
+                .push((start_offset, effective_end));
 
             // Skip index access chains: hash[:foo][:bar]
             let is_index_chain = if node.name().as_slice() == b"[]" {
