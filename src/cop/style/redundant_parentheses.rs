@@ -194,6 +194,16 @@ use crate::parse::source::SourceFile;
 ///   itself, or a receiver chain rooted at it, is the first argument of an unparenthesized call.
 ///   Fixed by tracking first-argument start offsets and only applying the exemption to true
 ///   first-argument chains.
+///
+/// ### FP root causes fixed:
+/// - **Paren descendants inside a hash first arg were still flagged:** RuboCop treats
+///   `foo :plain => ({...}.to_json)` and `Contract ({...}) => Num` like other
+///   hash-first-argument cases because the containing hash literal is the first argument of an
+///   unparenthesized call. Prism inserts `AssocNode`/hash ancestors between the parens and the
+///   call, so the previous offset walk only saw direct call/receiver chains and missed these
+///   nested cases. The exemption now climbs through pair/hash ancestors before checking the
+///   unparenthesized first-argument call boundary, while still flagging standalone hashes like
+///   `x = { plain: ({...}.to_json) }`.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -226,6 +236,7 @@ enum ParentKind {
     And,
     Or,
     Call,
+    Hash,
     Splat,
     KeywordSplat,
     Return,
@@ -768,6 +779,12 @@ impl RedundantParensVisitor<'_> {
             let info = &self.parent_stack[i];
             match info.kind {
                 ParentKind::Other => continue,
+                // RuboCop's `first_argument?` recurses through ancestors, so a begin node
+                // nested inside an assoc/hash still counts when that containing hash is
+                // the first argument of an unparenthesized call.
+                ParentKind::Pair | ParentKind::Hash => {
+                    current_start = info.node_start_offset;
+                }
                 ParentKind::Call => {
                     if info
                         .call_receiver_start_offset
@@ -1867,6 +1884,20 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.single_child = node.elements().len() == 1;
         }
         ruby_prism::visit_array_node(self, node);
+    }
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Hash;
+        }
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Hash;
+        }
+        ruby_prism::visit_keyword_hash_node(self, node);
     }
 
     fn visit_assoc_node(&mut self, node: &ruby_prism::AssocNode<'pr>) {

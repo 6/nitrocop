@@ -234,3 +234,21 @@ body: ({ cmd: "_notify-validate" }.merge(paypal_event)).to_query,
 
 [image_path, (resolve_image_options image_path, image_format, image_attrs, (({ background: true, container_size: [page_width, page_height] }.merge opts)))]
                                                                             ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+after{(r.quit rescue nil) if defined?(r)}
+^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+smc_v=matrix.inverse.diagonal.map{|ii| 1-(1.quo(ii))}
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+@initial_communalities=@matrix.inverse.diagonal.map{|i| 1-(1.quo(i))}
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+until($stdin.gets).include?("DONE1")
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+until($stdin.gets).include?("DONE2")
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+until($stdin.gets).include?("DONE3")
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
