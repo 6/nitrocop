@@ -249,6 +249,11 @@ struct ParentInfo {
     /// For StatementsNode parents, how many children the StatementsNode has.
     /// Used to distinguish single-statement vs multi-statement block bodies.
     statements_child_count: usize,
+    /// For RescueModifier parents, the start offset of the rescue_expression
+    /// (right side). RuboCop only exempts parens in the rescue body (resbody),
+    /// which corresponds to the rescue_expression in Prism. The expression
+    /// (left side) is still flagged.
+    rescue_expression_start_offset: Option<usize>,
 }
 
 struct RedundantParensVisitor<'a> {
@@ -394,11 +399,15 @@ impl RedundantParensVisitor<'_> {
             }
         }
 
-        // RuboCop's rescue? check: parens inside a rescue modifier expression are
+        // RuboCop's rescue? check: parens inside the rescue body (right side) are
         // always allowed. `x rescue (y || z)` — the `(y || z)` is exempt.
         // RuboCop checks `^resbody ^^resbody` which matches children/grandchildren
-        // of the rescue body node.
-        if parent.is_some_and(|p| matches!(p.kind, ParentKind::RescueModifier)) {
+        // of the rescue body node. The expression (left side) is NOT exempt.
+        if parent.is_some_and(|p| {
+            matches!(p.kind, ParentKind::RescueModifier)
+                && p.rescue_expression_start_offset
+                    .is_some_and(|off| node.location().start_offset() >= off)
+        }) {
             return;
         }
 
@@ -920,6 +929,7 @@ impl RedundantParensVisitor<'_> {
             call_receiver_start_offset: None,
             call_first_arg_is_begin: false,
             statements_child_count: 0,
+            rescue_expression_start_offset: None,
         });
     }
 
@@ -1692,6 +1702,8 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::RescueModifier;
+            top.rescue_expression_start_offset =
+                Some(node.rescue_expression().location().start_offset());
         }
         ruby_prism::visit_rescue_modifier_node(self, node);
     }
