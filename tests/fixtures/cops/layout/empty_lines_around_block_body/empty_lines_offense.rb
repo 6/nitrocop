@@ -22,6 +22,21 @@ items.each { |x|
 }
 ^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body end.
 
+# Two-line brace block with closing delimiter on the body line still needs a blank beginning
+items.each { |x|
+  puts x }
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body beginning.
+
+# Arrow lambda brace block with closing delimiter on the body line still needs a blank beginning
+handler = -> (purchase) {
+  purchase.id }
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body beginning.
+
+# Two-line do/end block with closing delimiter on the body line still needs a blank beginning
+items.each do |x|
+  puts x end
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body beginning.
+
 # Two-line brace block with body starting on the opening line still needs a blank beginning
 it { is_expected.to validate_uniqueness_of(:github_url).
   case_insensitive.with_message('Project has already been suggested.') }
