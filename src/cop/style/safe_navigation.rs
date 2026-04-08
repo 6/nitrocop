@@ -150,7 +150,10 @@ const NIL_METHODS: &[&[u8]] = &[
     // Operators that nil responds to — needed so `in_nil_safe_call_ancestor` correctly
     // suppresses ternaries used as receivers of these operators (e.g. `(x ? x.y : nil) == z`).
     // RuboCop uses `nil.methods` at runtime which includes these.
-    b"!",
+    // NOTE: `!` is intentionally excluded.  It IS a nil method, but including it
+    // here makes `is_nil_safe_call_ancestor` true for `!(...)` calls, which wrongly
+    // suppresses `&&` patterns like `!(x && x.foo.bar)` that RuboCop flags.
+    // `!` is already handled as an unsafe parent via `in_unsafe_parent` (chain-length-1).
     b"==",
     b"!=",
     b"===",
