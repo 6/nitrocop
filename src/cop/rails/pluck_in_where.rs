@@ -170,6 +170,13 @@ impl PluckInWhere {
                 }
             }
         }
+        // Check assoc nodes (e.g., `key: value` in method call arguments)
+        if let Some(assoc) = node.as_assoc_node() {
+            let val = assoc.value();
+            if let Some(result) = self.find_pluck_call(&val, style) {
+                return Some(result);
+            }
+        }
         // Check keyword hash values
         if let Some(kw) = node.as_keyword_hash_node() {
             for elem in kw.elements().iter() {
