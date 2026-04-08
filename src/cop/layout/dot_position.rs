@@ -35,6 +35,19 @@ use crate::parse::source::SourceFile;
 ///    `node.loc.begin` (opening paren) as the selector. Fixed to use `opening_loc()`
 ///    when `message_loc()` is absent.
 ///
+/// ## Variant FP fix: heredoc same-line check (2026-04-08)
+///
+/// The blank-line skip fix introduced FPs in `trailing` mode for heredoc receivers
+/// with inline method calls (e.g. `<<~SQL.squish`). In Parser gem (RuboCop), a
+/// heredoc node's `source_range` covers only the opening tag (`<<~SQL`), so
+/// `same_line?(selector_range, end_range(receiver))` returns true for these calls.
+/// In Prism, the node location spans the full heredoc body including the closing
+/// delimiter, making the selector appear on a different line than the receiver end.
+///
+/// Fixed by adding a same-line check using the receiver's start line: if the
+/// selector is on the same line as the receiver start, the call is always
+/// single-line and no offense should be reported.
+///
 /// Remaining FP (12): caused by `# rubocop:disable Layout:LineLength` using colon
 /// syntax, which RuboCop interprets as a department-level disable (all Layout cops).
 /// This is a disable-comment handling issue, not a DotPosition detection bug.
@@ -106,6 +119,18 @@ impl Cop for DotPosition {
             source.offset_to_line_col(recv_end_offset).0
         };
         let (msg_line, _) = source.offset_to_line_col(msg_loc.start_offset());
+
+        // RuboCop: same_line?(selector_range, end_range(node.receiver))
+        // In Parser gem, heredoc source_range covers only the opening tag,
+        // so `<<~SQL.squish` has receiver end on the opening line. In Prism,
+        // node location spans the full heredoc body. Using receiver start line
+        // as a safe proxy: if selector is on the same line, the call is single-line.
+        let recv_start_line = source
+            .offset_to_line_col(receiver.location().start_offset())
+            .0;
+        if msg_line == recv_start_line {
+            return;
+        }
 
         // Single line call — no issue
         if msg_line == recv_end_line {
