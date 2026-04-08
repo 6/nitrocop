@@ -12,4 +12,11 @@ class BooksController < ApplicationController
     translate("books.edit.name")
               ^^^^^^^^^^^^^^^^^ Rails/I18nLazyLookup: Use lazy lookup for i18n keys.
   end
+  # Multi-line: offense on key argument line, not the t( line
+  def update
+    t(
+      "books.update.title"
+      ^^^^^^^^^^^^^^^^^^^^ Rails/I18nLazyLookup: Use lazy lookup for i18n keys.
+    )
+  end
 end

@@ -143,7 +143,7 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
                     };
 
                     if let Some(key) = key {
-                        self.check_key(node, &key, is_symbol, key_loc);
+                        self.check_key(&key, is_symbol, key_loc);
                     }
                 }
             }
@@ -154,13 +154,7 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
 }
 
 impl I18nLazyLookupVisitor<'_> {
-    fn check_key(
-        &mut self,
-        _node: &ruby_prism::CallNode<'_>,
-        key: &[u8],
-        is_symbol: bool,
-        key_loc: ruby_prism::Location,
-    ) {
+    fn check_key(&mut self, key: &[u8], is_symbol: bool, key_loc: ruby_prism::Location) {
         // Only flag inside Controller classes with public methods
         if !self.in_controller_class {
             return;
