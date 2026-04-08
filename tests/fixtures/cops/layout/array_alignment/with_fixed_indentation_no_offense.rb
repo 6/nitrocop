@@ -33,3 +33,9 @@ end
   config.cache_store =
     :memory_store,
     { size: 128 }
+
+# Tab-indented bracketed array — tabs count as 1 char each (matching RuboCop)
+# Bracket line: 1 tab (indent=1), elements: 1 tab + 2 spaces (col=3, = 1+2)
+	x = [
+	  1,
+	  2]

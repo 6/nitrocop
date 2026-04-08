@@ -4,6 +4,15 @@ use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
+/// Equivalent to RuboCop's `source_line =~ /\S/`. Handles both spaces and tabs,
+/// each counted as 1 character. Unlike `shared::util::indentation_of` which only
+/// counts spaces, this matches RuboCop's behavior for tab-indented code.
+fn first_non_whitespace_column(line: &[u8]) -> usize {
+    line.iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count()
+}
+
 /// Layout/ArrayAlignment checks alignment of multi-line array literal elements
 /// and rescue exception lists.
 ///
@@ -63,6 +72,10 @@ use ruby_prism::Visit;
 /// `with_fixed_indentation`, RuboCop uses `node.parent.loc.line`. We used the
 /// first element's line. Fixed by tracking parent node lines via
 /// `visit_branch_node_enter`/`leave` and using the parent's line.
+///
+/// **FP/FN root cause (tabs):** `indentation_of()` only counts spaces, returning 0
+/// for tab-indented lines. RuboCop uses `/\S/ =~ line` which counts both tabs and
+/// spaces as 1 character each. Fixed by using `first_non_whitespace_column()`.
 ///
 /// **Message:** `with_fixed_indentation` uses a different message than the default:
 /// "Use one level of indentation for elements following the first line of a
@@ -221,7 +234,7 @@ impl ArrayAlignment {
                     let open_loc = array_node.opening_loc().unwrap();
                     let (open_line, _) = source.offset_to_line_col(open_loc.start_offset());
                     let open_line_bytes = source.lines().nth(open_line - 1).unwrap_or(b"");
-                    crate::cop::shared::util::indentation_of(open_line_bytes) + indent_width
+                    first_non_whitespace_column(open_line_bytes) + indent_width
                 } else {
                     // For bracketless arrays (implicit from trailing comma or method
                     // args), RuboCop uses node.parent.loc.line to find the base
@@ -235,7 +248,7 @@ impl ArrayAlignment {
                     // element's line indentation (4) + indent_width = 6.
                     let base_line = parent_line.unwrap_or(first_line);
                     let base_line_bytes = source.lines().nth(base_line - 1).unwrap_or(b"");
-                    crate::cop::shared::util::indentation_of(base_line_bytes) + indent_width
+                    first_non_whitespace_column(base_line_bytes) + indent_width
                 }
             }
             _ => first_col, // "with_first_element" (default)
@@ -305,7 +318,7 @@ impl ArrayAlignment {
                 let keyword_loc = rescue_node.keyword_loc();
                 let (keyword_line, _) = source.offset_to_line_col(keyword_loc.start_offset());
                 let keyword_line_bytes = source.lines().nth(keyword_line - 1).unwrap_or(b"");
-                crate::cop::shared::util::indentation_of(keyword_line_bytes) + indent_width
+                first_non_whitespace_column(keyword_line_bytes) + indent_width
             }
             _ => first_col, // "with_first_element" (default)
         };
