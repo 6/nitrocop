@@ -94,6 +94,15 @@ foo('
   xyz
 ')
 
+# Multiline regexp assignment — RuboCop's safe_to_split? sees regexp body
+# strings in Parser AST, so this is NOT an offense.
+GROUPED_INPUT_PATTERN = /
+  \A
+  (?<key>.+)
+  \((?<index>\d+)i\)
+  \z
+/x.freeze
+
 # Quoted symbol with a single newline
 foo(:"
 ")

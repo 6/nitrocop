@@ -80,15 +80,6 @@ $counter +=
 ^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
   check_flag
 
-# Multiline regex — RuboCop's safe_to_split? does not check :regexp,
-# so assignments containing multiline regexps are still flaggable.
-pattern = /
-^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
-  \A
-  (?<key>.+)
-  \z
-/x
-
 # Multiline %w array — RuboCop's safe_to_split? does not check arrays.
 names = %w[
 ^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.

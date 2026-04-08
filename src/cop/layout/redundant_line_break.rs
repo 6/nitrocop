@@ -135,6 +135,12 @@ use crate::parse::source::SourceFile;
 ///   receiver chain. Nitrocop previously only tracked receiver chains, which caused
 ///   false positives for cases like `SeedDump.dump(EventInstance\n.where(...), ...)`
 ///   and similar backslash-heavy argument lists.
+/// - **Multiline regexp safety**: Prism represents a plain regexp as a single
+///   `RegularExpressionNode`, but Parser exposes newline-containing regexp bodies
+///   through descendant `:str` nodes. RuboCop therefore treats multiline regexps as
+///   unsafe in `safe_to_split?`. Nitrocop now explicitly marks multiline regexp
+///   literals unsafe so assignments like `GROUPED_INPUT_PATTERN = /.../x.freeze`
+///   are no longer falsely flagged.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -236,10 +242,11 @@ impl Cop for RedundantLineBreak {
 ///     node.each_descendant(:dstr, :str).none? { |n| n.heredoc? || n.value.include?("\n") } &&
 ///     node.each_descendant(:begin, :sym).none? { |b| !b.single_line? }
 ///
-/// Notably, RuboCop does NOT check for `:regexp` or array literals (`%w`, `%i`)
-/// in `safe_to_split?`. Even though collapsing a multiline `/x` regex or `%w`
-/// array changes semantics, RuboCop still flags them. We match that behavior
-/// for corpus conformance.
+/// Parser exposes multiline regexp bodies through descendant `:str` nodes, so
+/// RuboCop's `safe_to_split?` implicitly treats multiline regexps as unsafe.
+/// Prism represents a plain regexp as a single `RegularExpressionNode`, so
+/// nitrocop must explicitly mark those ranges unsafe. Arrays (`%w`, `%i`) are
+/// still intentionally left alone because RuboCop does flag those.
 struct UnsafeRangeCollector {
     /// (start_offset, end_offset) of nodes that make their parent unsafe to merge.
     ranges: Vec<(usize, usize)>,
@@ -345,6 +352,25 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         }
         // Still recurse into children to find nested unsafe constructs
         ruby_prism::visit_parentheses_node(self, node);
+    }
+
+    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
+        if node.unescaped().contains(&b'\n') {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
+        ruby_prism::visit_regular_expression_node(self, node);
+    }
+
+    fn visit_interpolated_regular_expression_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
+    ) {
+        if node.location().as_slice().contains(&b'\n') {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
+        ruby_prism::visit_interpolated_regular_expression_node(self, node);
     }
 }
 
