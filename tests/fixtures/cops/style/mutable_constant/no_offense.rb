@@ -49,6 +49,6 @@ CONST21 = "\e[31m"
 THREAD_KEY = :"#{name}.batched_queries".freeze
 ATTRIBUTE_NAMESPACE = :"job.#{base}".freeze
 
-# Range literals are immutable on Ruby 3.0+, including in strict mode
+# Bare range literals are immutable on Ruby 3.0+, including in strict mode
 HTTP_OK_RANGE = 200..299
 DISCARD_BRACES = 0..-3

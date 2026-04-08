@@ -41,14 +41,17 @@ use crate::parse::source::SourceFile;
 ///
 /// ## 2026-04-08 investigation (strict mode variant)
 ///
-/// - FP: range constants (e.g. `200..299`, `MIN..MAX`, `(1..99)`) were
-///   incorrectly flagged in strict mode. RuboCop treats regexp and range
-///   literals as immutable when `TargetRubyVersion >= 3.0`.
+/// - FP: bare range constants (e.g. `200..299`, `MIN..MAX`) were incorrectly
+///   flagged in strict mode. RuboCop treats bare regexp and range literals as
+///   immutable when `TargetRubyVersion >= 3.0`.
 /// - Root cause: a prior strict-mode change removed ranges from the immutable
 ///   path entirely, which matched neither the vendored RuboCop source nor the
 ///   corpus examples.
 /// - Fix: thread `TargetRubyVersion` into strict-mode literal checks and treat
-///   regexps/ranges, including parenthesized ranges, as immutable only on Ruby 3.0+.
+///   bare regexps/ranges as immutable only on Ruby 3.0+.
+/// - RuboCop quirk preserved: parenthesized ranges like `(1..99)` stay
+///   offenses in strict mode because RuboCop does not unwrap the parentheses
+///   before calling `immutable_literal?`.
 pub struct MutableConstant;
 
 impl MutableConstant {
@@ -137,25 +140,9 @@ impl MutableConstant {
     }
 
     /// For `strict` mode: check if the value is an immutable literal.
-    /// Regexp and range literals are frozen only on Ruby 3.0+.
+    /// Bare regexp and range literals are frozen only on Ruby 3.0+.
+    /// Parenthesized ranges stay offenses to match RuboCop's `begin`-node quirk.
     fn is_immutable_literal(node: &ruby_prism::Node<'_>, target_ruby_version: f64) -> bool {
-        if let Some(parentheses) = node.as_parentheses_node() {
-            let Some(body) = parentheses.body() else {
-                return false;
-            };
-
-            if let Some(statements) = body.as_statements_node() {
-                let body = statements.body();
-                if body.len() != 1 {
-                    return false;
-                }
-                let inner = body.iter().next().unwrap();
-                return Self::is_immutable_literal(&inner, target_ruby_version);
-            }
-
-            return Self::is_immutable_literal(&body, target_ruby_version);
-        }
-
         node.as_integer_node().is_some()
             || node.as_float_node().is_some()
             || node.as_symbol_node().is_some()
@@ -616,7 +603,9 @@ fn target_ruby_version(config: &CopConfig) -> f64 {
 mod tests {
     use super::*;
     use crate::cop::CopConfig;
-    use crate::testutil::assert_cop_no_offenses_full_with_config;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+    };
     crate::cop_fixture_tests!(MutableConstant, "cops/style/mutable_constant");
 
     fn strict_config() -> CopConfig {
@@ -642,6 +631,15 @@ mod tests {
             include_bytes!(
                 "../../../tests/fixtures/cops/style/mutable_constant/strict_no_offense.rb"
             ),
+            strict_config(),
+        );
+    }
+
+    #[test]
+    fn strict_parenthesized_range_is_an_offense() {
+        assert_cop_offenses_full_with_config(
+            &MutableConstant,
+            b"PARENTHESIZED_RANGE = (1..99)\n# nitrocop-expect: 1:22 Style/MutableConstant: Freeze mutable objects assigned to constants.\n",
             strict_config(),
         );
     }
