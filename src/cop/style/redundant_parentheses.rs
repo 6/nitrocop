@@ -242,6 +242,13 @@ struct ParentInfo {
     /// For Call parents, the start offset of the receiver node (if any).
     /// Used to implement RuboCop's `begin_node.chained?` check.
     call_receiver_start_offset: Option<usize>,
+    /// For Call parents, whether the first argument is a ParenthesesNode.
+    /// Used to implement RuboCop's `like_method_argument_parentheses?` which
+    /// checks `node.first_argument.begin_type?`.
+    call_first_arg_is_begin: bool,
+    /// For StatementsNode parents, how many children the StatementsNode has.
+    /// Used to distinguish single-statement vs multi-statement block bodies.
+    statements_child_count: usize,
 }
 
 struct RedundantParensVisitor<'a> {
@@ -285,10 +292,16 @@ impl RedundantParensVisitor<'_> {
         let inner = &inner_nodes[0];
 
         // like_method_argument_parentheses? — applies to send, super, yield
+        // RuboCop checks: parent has one arg, not parenthesized, not operator,
+        // and first arg is begin_type?. When true, ALL begin nodes under this
+        // parent are skipped (including the receiver).
         if let Some(p) = parent {
             let is_like_method_arg = match p.kind {
                 ParentKind::Call => {
-                    !p.call_parenthesized && !p.is_operator && p.call_arg_count == 1 && !is_receiver
+                    !p.call_parenthesized
+                        && !p.is_operator
+                        && p.call_arg_count == 1
+                        && p.call_first_arg_is_begin
                 }
                 ParentKind::Super | ParentKind::Yield => {
                     !p.call_parenthesized && p.call_arg_count == 1
@@ -379,6 +392,14 @@ impl RedundantParensVisitor<'_> {
             if matches!(p.kind, ParentKind::Range) {
                 return;
             }
+        }
+
+        // RuboCop's rescue? check: parens inside a rescue modifier expression are
+        // always allowed. `x rescue (y || z)` — the `(y || z)` is exempt.
+        // RuboCop checks `^resbody ^^resbody` which matches children/grandchildren
+        // of the rescue body node.
+        if parent.is_some_and(|p| matches!(p.kind, ParentKind::RescueModifier)) {
+            return;
         }
 
         // Assignment — RuboCop flags `(assignment)` when the immediate parent is nil or
@@ -585,24 +606,27 @@ impl RedundantParensVisitor<'_> {
         matches!(grandparent.kind, ParentKind::Def) && grandparent.is_endless_def
     }
 
-    /// Check if the parent (a StatementsNode) is the body of a block whose
-    /// parent is a CallNode. This happens with `loop { }`, `[1].each { }`, etc.
-    /// In these cases, an assignment inside the block body should not be flagged
-    /// as redundant parens because RuboCop doesn't flag them.
+    /// Check if the parent (a StatementsNode) is the body of a SINGLE-statement
+    /// block. In RuboCop AST, a single-statement block body has the begin node's
+    /// parent as the `:block` node (not begin_type), so `assignment?` checks fail.
+    /// A multi-statement block body wraps children in a `:begin` node, so the
+    /// begin node's parent IS begin_type and the assignment IS flagged.
     ///
-    /// Note: visit_block_node changes the CallNode entry's kind to Block when
-    /// visiting the block. So for `loop { }`, the grandparent has kind=Block,
-    /// not kind=Call.
+    /// We replicate this by checking: the grandparent is a Block/Call, AND the
+    /// parent StatementsNode has exactly one child (single-statement block).
     fn is_parent_statements_block_body(&self) -> bool {
         // parent_stack structure for `(assignment)` inside a block:
         // [..., CallNode/BlockEntry, OuterStatements, ParenthesesNode, InnerStatements]
-        // We need to check if OuterStatements' parent (grandparent) is a CallNode or Block.
         // grandparent = parent_stack[len - 3]
         if self.parent_stack.len() < 3 {
             return false;
         }
+        let parent = &self.parent_stack[self.parent_stack.len() - 2];
         let grandparent = &self.parent_stack[self.parent_stack.len() - 3];
+        // Only suppress for single-statement block bodies. Multi-statement block
+        // bodies correspond to RuboCop's begin wrapper where assignments ARE flagged.
         matches!(grandparent.kind, ParentKind::Call | ParentKind::Block)
+            && parent.statements_child_count == 1
     }
 
     /// RuboCop's first_arg_begins_with_hash_literal?: when the inner expression
@@ -894,6 +918,8 @@ impl RedundantParensVisitor<'_> {
             is_endless_def: false,
             is_assignment_parent: false,
             call_receiver_start_offset: None,
+            call_first_arg_is_begin: false,
+            statements_child_count: 0,
         });
     }
 
@@ -1343,12 +1369,38 @@ fn is_assignment(node: &ruby_prism::Node<'_>) -> bool {
     {
         return true;
     }
-    // []= calls (index assignment)
-    if let Some(call) = node.as_call_node() {
-        if call.name().as_slice() == b"[]=" {
-            return true;
-        }
+    // Compound assignment operators (||=, &&=, +=, etc.) on variables
+    if node.as_local_variable_or_write_node().is_some()
+        || node.as_local_variable_and_write_node().is_some()
+        || node.as_local_variable_operator_write_node().is_some()
+        || node.as_instance_variable_or_write_node().is_some()
+        || node.as_instance_variable_and_write_node().is_some()
+        || node.as_instance_variable_operator_write_node().is_some()
+        || node.as_class_variable_or_write_node().is_some()
+        || node.as_class_variable_and_write_node().is_some()
+        || node.as_class_variable_operator_write_node().is_some()
+        || node.as_global_variable_or_write_node().is_some()
+        || node.as_global_variable_and_write_node().is_some()
+        || node.as_global_variable_operator_write_node().is_some()
+        || node.as_constant_or_write_node().is_some()
+        || node.as_constant_and_write_node().is_some()
+        || node.as_constant_operator_write_node().is_some()
+        || node.as_constant_path_or_write_node().is_some()
+        || node.as_constant_path_and_write_node().is_some()
+        || node.as_constant_path_operator_write_node().is_some()
+    {
+        return true;
     }
+    // Index compound assignment: a[b] ||=, a[b] &&=, a[b] +=
+    if node.as_index_or_write_node().is_some()
+        || node.as_index_and_write_node().is_some()
+        || node.as_index_operator_write_node().is_some()
+    {
+        return true;
+    }
+    // Note: a[b] = c (plain index assignment) is a CallNode with name `[]=`.
+    // RuboCop treats it as a method call (send node), NOT as assignment,
+    // so check_send handles it. We intentionally do NOT include it here.
     false
 }
 
@@ -1453,6 +1505,7 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.is_statements_node = true;
             top.single_child = node.body().len() == 1 && is_parentheses_body;
             top.is_parentheses_body = is_parentheses_body;
+            top.statements_child_count = node.body().len();
         }
         ruby_prism::visit_statements_node(self, node);
     }
@@ -1483,6 +1536,11 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.is_operator = is_operator_method(node);
             top.is_match_operator = node.name().as_slice() == b"=~";
             top.call_receiver_start_offset = node.receiver().map(|r| r.location().start_offset());
+            // RuboCop's like_method_argument_parentheses? checks node.first_argument.begin_type?
+            top.call_first_arg_is_begin = node
+                .arguments()
+                .and_then(|args| args.arguments().iter().next())
+                .is_some_and(|first| first.as_parentheses_node().is_some());
         }
         ruby_prism::visit_call_node(self, node);
     }

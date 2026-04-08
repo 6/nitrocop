@@ -215,3 +215,12 @@ foo(&(bar))
 # Block argument with redundant parens around a literal
 m(&(:symbol))
    ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+body: ({ cmd: "_notify-validate" }.merge(paypal_event)).to_query,
+      ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+return (attributes[key] = value) unless Attributes::STYLES_MERGE.include?(key)
+       ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+if((ENV['PL_REDIS_URL'.freeze] ||= ENV['REDIS_URL'.freeze]))
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
