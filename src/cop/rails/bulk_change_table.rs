@@ -1,15 +1,18 @@
 use crate::cop::shared::method_dispatch_predicates;
-use crate::cop::shared::node_type::DEF_NODE;
+use crate::cop::shared::node_type::{CALL_NODE, DEF_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// Mirrors RuboCop's adapter-aware bulk ALTER detection for Rails migrations.
+/// Mirrors RuboCop's adapter resolution and migration-node coverage for
+/// `Rails/BulkChangeTable`.
 ///
-/// Fixed corpus false negatives from `config/database.yml` files that inherit
-/// `adapter:` through YAML merge keys like `<<: *default`. The affected repos
-/// used both duplicated `development` sections and nested `development.primary`
-/// entries, so the cop now resolves merged YAML before reading the adapter.
+/// Fixed false positives where nitrocop walked up from a migration file and
+/// treated nested app configs like `spec/dummy/config/database.yml` as the
+/// active adapter; RuboCop only reads `config/database.yml` from the current
+/// working directory. Also fixed false negatives for `change_table` calls
+/// outside instance `def change/up/down` bodies, such as class-body migrations
+/// and `def self.up` / `def self.down`.
 pub struct BulkChangeTable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,28 +88,22 @@ fn extract_table_name(call: &ruby_prism::CallNode<'_>) -> Option<Vec<u8>> {
     None
 }
 
-fn database_kind(config: &CopConfig, source: &SourceFile) -> Option<DatabaseKind> {
+fn database_kind(config: &CopConfig) -> Option<DatabaseKind> {
     match config.get_str("Database", "") {
         "mysql" => Some(DatabaseKind::Mysql),
         "postgresql" => Some(DatabaseKind::PostgreSQL),
-        "" => database_kind_from_yaml(source).or_else(database_kind_from_env),
+        "" => database_kind_from_yaml().or_else(database_kind_from_env),
         _ => None,
     }
 }
 
-fn database_kind_from_yaml(source: &SourceFile) -> Option<DatabaseKind> {
-    let file_parent = source.path.parent()?;
-
-    for ancestor in file_parent.ancestors() {
-        let database_yml = ancestor.join("config/database.yml");
-        if !database_yml.is_file() {
-            continue;
-        }
-
-        return parse_database_yml(&database_yml);
+fn database_kind_from_yaml() -> Option<DatabaseKind> {
+    let database_yml = std::env::current_dir().ok()?.join("config/database.yml");
+    if !database_yml.is_file() {
+        return None;
     }
 
-    None
+    parse_database_yml(&database_yml)
 }
 
 fn parse_database_yml(path: &std::path::Path) -> Option<DatabaseKind> {
@@ -349,7 +346,7 @@ impl Cop for BulkChangeTable {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[DEF_NODE]
+        &[CALL_NODE, DEF_NODE]
     }
 
     fn check_node(
@@ -361,10 +358,35 @@ impl Cop for BulkChangeTable {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let database = match database_kind(config, source) {
+        let database = match database_kind(config) {
             Some(database) if supports_bulk_alter(database, config) => database,
             _ => return,
         };
+
+        if let Some(call) = node.as_call_node() {
+            if method_dispatch_predicates::is_command(&call, b"change_table")
+                && !has_bulk_option(&call)
+            {
+                if let Some(block_node) = call.block().and_then(|block| block.as_block_node()) {
+                    if let Some(block_body) = block_node.body() {
+                        if count_combinable_in_block(&block_body, database, config) > 1 {
+                            let loc = call.location();
+                            let (line, column) = source.offset_to_line_col(loc.start_offset());
+                            diagnostics.push(
+                                self.diagnostic(
+                                    source,
+                                    line,
+                                    column,
+                                    "You can combine alter queries using `bulk: true` options."
+                                        .to_string(),
+                                ),
+                            );
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -389,37 +411,6 @@ impl Cop for BulkChangeTable {
             Some(s) => s,
             None => return,
         };
-
-        // Check for change_table without bulk: true that has multiple transformations
-        for stmt in stmts.body().iter() {
-            if let Some(call) = stmt.as_call_node() {
-                if method_dispatch_predicates::is_command(&call, b"change_table") {
-                    if has_bulk_option(&call) {
-                        continue;
-                    }
-                    if let Some(block) = call.block() {
-                        if let Some(block_node) = block.as_block_node() {
-                            if let Some(block_body) = block_node.body() {
-                                let count =
-                                    count_combinable_in_block(&block_body, database, config);
-                                if count > 1 {
-                                    let loc = call.location();
-                                    let (line, column) =
-                                        source.offset_to_line_col(loc.start_offset());
-                                    diagnostics.push(self.diagnostic(
-                                        source,
-                                        line,
-                                        column,
-                                        "You can combine alter queries using `bulk: true` options."
-                                            .to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
 
         // Check for consecutive combinable alter methods targeting the same table.
         let mut current_table: Option<Vec<u8>> = None;
@@ -476,6 +467,30 @@ mod tests {
     use crate::cop::CopConfig;
     use std::collections::HashMap;
     use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, OnceLock};
+
+    struct CurrentDirGuard {
+        previous: PathBuf,
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.previous);
+        }
+    }
+
+    fn with_current_dir<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _lock = CWD_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("cwd lock");
+        let previous = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(dir).expect("set current dir");
+        let _guard = CurrentDirGuard { previous };
+        f()
+    }
 
     fn mysql_config() -> CopConfig {
         let mut options = HashMap::new();
@@ -518,12 +533,14 @@ mod tests {
         }
 
         let path = migrate_dir.join("001_test.rb");
-        crate::testutil::run_cop_full_internal(
-            &BulkChangeTable,
-            source,
-            config,
-            path.to_str().unwrap(),
-        )
+        with_current_dir(tempdir.path(), || {
+            crate::testutil::run_cop_full_internal(
+                &BulkChangeTable,
+                source,
+                config,
+                path.to_str().unwrap(),
+            )
+        })
     }
 
     #[test]
@@ -632,6 +649,37 @@ mod tests {
             diagnostics.len(),
             1,
             "Nested development databases that inherit the adapter via << should resolve"
+        );
+    }
+
+    #[test]
+    fn ignores_nested_app_database_yml_outside_project_root() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let nested_config_dir = tempdir.path().join("spec/dummy/config");
+        let nested_migrate_dir = tempdir.path().join("spec/dummy/db/migrate");
+
+        fs::create_dir_all(&nested_config_dir).expect("nested config dir");
+        fs::create_dir_all(&nested_migrate_dir).expect("nested migrate dir");
+        fs::write(
+            nested_config_dir.join("database.yml"),
+            "development:\n  adapter: mysql2\n",
+        )
+        .expect("nested database.yml");
+
+        let path = nested_migrate_dir.join("001_test.rb");
+        let source = b"class AddCountryAndCityToCourses < ActiveRecord::Migration[6.0]\n  def change\n    add_column :courses, :country, :string\n    add_column :courses, :city, :string\n  end\nend\n";
+        let diagnostics = with_current_dir(tempdir.path(), || {
+            crate::testutil::run_cop_full_internal(
+                &BulkChangeTable,
+                source,
+                CopConfig::default(),
+                path.to_str().unwrap(),
+            )
+        });
+
+        assert!(
+            diagnostics.is_empty(),
+            "Nested app config/database.yml should not be used when the project root has no config/database.yml"
         );
     }
 
