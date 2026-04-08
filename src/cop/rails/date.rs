@@ -4,6 +4,26 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Variant style divergence (2026-04-08)
+///
+/// Variant oracle reported FN=1,426 for `EnforcedStyle=strict` (0 FP).
+///
+/// FN=1,426: `Date.yesterday`, `Date.tomorrow`, and `Date.current` were not flagged in strict
+/// mode. RuboCop's `strict` mode flags all four methods (`today`, `yesterday`, `tomorrow`,
+/// `current`). Fixed by branching on `EnforcedStyle`: flexible mode only flags `Date.today`,
+/// while strict mode flags all four. Messages also differ: flexible uses "Use `Date.current`
+/// instead of `Date.today`" while strict uses "Do not use `Date.<method>` without zone."
+///
+/// ## Corpus investigation (2026-03-26)
+///
+/// Corpus oracle reported FP=5, FN=0.
+///
+/// FP=5: All 5 FPs from cjstewart88/Tubalr — `to_time_in_current_zone` called without an
+/// explicit receiver (implicit `self`) inside ActiveSupport's own core_ext/date/ files.
+/// RuboCop's `on_send` starts with `return unless node.receiver && ...`, so implicit-self
+/// calls are never flagged. Fixed by adding a `call.receiver().is_some()` check before
+/// flagging `to_time_in_current_zone` (and `to_time` for the same reason).
+///
 /// ## Corpus investigation (2026-03-19)
 ///
 /// Corpus oracle reported FP=4, FN=1.
@@ -16,16 +36,6 @@ use crate::parse::source::SourceFile;
 /// FN=1: netzke/netzke-basepack — `to_time_in_current_zone` deprecated method was not detected.
 /// Fixed by adding an explicit check for `to_time_in_current_zone` that fires regardless of
 /// EnforcedStyle, matching RuboCop's DEPRECATED_METHODS behavior.
-///
-/// ## Corpus investigation (2026-03-26)
-///
-/// Corpus oracle reported FP=5, FN=0.
-///
-/// FP=5: All 5 FPs from cjstewart88/Tubalr — `to_time_in_current_zone` called without an
-/// explicit receiver (implicit `self`) inside ActiveSupport's own core_ext/date/ files.
-/// RuboCop's `on_send` starts with `return unless node.receiver && ...`, so implicit-self
-/// calls are never flagged. Fixed by adding a `call.receiver().is_some()` check before
-/// flagging `to_time_in_current_zone` (and `to_time` for the same reason).
 pub struct Date;
 
 impl Cop for Date {
@@ -94,7 +104,15 @@ impl Cop for Date {
             ));
         }
 
-        if method != b"today" {
+        // In flexible mode, only `Date.today` is flagged.
+        // In strict mode, `Date.today`, `Date.yesterday`, `Date.tomorrow`, and `Date.current`
+        // are all flagged.
+        let is_bad_date_method = match method {
+            b"today" => true,
+            b"yesterday" | b"tomorrow" | b"current" => style == "strict",
+            _ => false,
+        };
+        if !is_bad_date_method {
             return;
         }
 
@@ -113,12 +131,23 @@ impl Cop for Date {
             None => return,
         };
         let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-        diagnostics.push(self.diagnostic(
-            source,
-            line,
-            column,
-            "Use `Date.current` instead of `Date.today`.".to_string(),
-        ));
+
+        // `method` is `&[u8]` - convert to &str for message formatting
+        let method_str = std::str::from_utf8(method).unwrap_or("");
+        // In strict mode, `Date.current` is flagged with a different message
+        // ("Use Time.zone.today instead") while the others use their own method name.
+        let msg = if style == "strict" && method == b"current" {
+            "Do not use `Date.current` without zone. Use `Time.zone.today` instead.".to_string()
+        } else if style == "strict" {
+            format!(
+                "Do not use `Date.{}` without zone. Use `Time.zone.{}` instead.",
+                method_str, method_str
+            )
+        } else {
+            "Use `Date.current` instead of `Date.today`.".to_string()
+        };
+
+        diagnostics.push(self.diagnostic(source, line, column, msg));
     }
 }
 
