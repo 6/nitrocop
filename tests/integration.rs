@@ -5037,6 +5037,44 @@ fn no_redundant_disable_for_all_wildcard() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn no_redundant_disable_for_malformed_cop_name() {
+    // Cop names that don't start with an uppercase letter (e.g. "/BlockLength")
+    // are malformed and should be silently ignored, matching RuboCop behavior.
+    let dir = temp_dir("no_redundant_disable_malformed");
+    let file = write_file(
+        &dir,
+        "test.rb",
+        b"# frozen_string_literal: true\n# rubocop:disable /BlockLength, Metrics/\nx = 1\n# rubocop:enable /BlockLength, Metrics/\n",
+    );
+    let config = load_config(None, Some(&dir), None).unwrap();
+    let registry = CopRegistry::default_registry();
+    let args = default_args();
+
+    let result = run_linter(
+        &discovered(&[file]),
+        &config,
+        &registry,
+        &args,
+        &TierMap::load(),
+        &AutocorrectAllowlist::load(),
+    );
+    let redundant: Vec<_> = result
+        .diagnostics
+        .iter()
+        .filter(|d| d.cop_name == "Lint/RedundantCopDisableDirective")
+        .collect();
+
+    assert_eq!(
+        redundant.len(),
+        0,
+        "Malformed cop name should NOT be flagged: {:?}",
+        redundant
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 // ---------- -L / --list-target-files CLI tests ----------
 
 #[test]
