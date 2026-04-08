@@ -1,22 +1,17 @@
-use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::MODULE_NODE;
 use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
 
-/// Investigation: `empty_lines`, `empty_lines_except_namespace`, and
-/// `empty_lines_special` diverged from RuboCop for module bodies with no AST
-/// body (`module X` containing only comments) and for the special-style branch
-/// where the first child is not a def/class/module/visibility modifier.
+/// Investigation: `empty_lines_special` still diverged from RuboCop in two
+/// narrow module-only cases after the earlier comment-body fix.
 ///
 /// Fixed behavior:
-/// - `body.nil?` now short-circuits non-default styles, matching RuboCop's
-///   `valid_body_style?` behavior for comment-only/empty bodies.
-/// - `empty_lines_special` now checks `no_empty_lines` at the beginning when
-///   the first child does not require a blank line, emits the deferred
-///   "before first <type> definition" offense on RuboCop's line, and reports
-///   missing end blanks on the `end` line instead of the previous body line.
+/// - bare `module_function` does NOT count as RuboCop's special-style
+///   `empty_line_required?` trigger, so it no longer forces a beginning offense
+/// - the deferred scan now treats only literally empty lines as separators;
+///   whitespace-only lines still offend, matching `processed_source[line].empty?`
 pub struct EmptyLinesAroundModuleBody;
 
 impl Cop for EmptyLinesAroundModuleBody {
@@ -123,7 +118,8 @@ impl EmptyLinesAroundModuleBody {
     }
 
     /// Check if the first child of the body requires an empty line.
-    /// Matches: def, class, module, or visibility modifier (private/protected/public)
+    /// Matches RuboCop's special-style trigger set:
+    /// def, class, module, or bare private/protected/public.
     fn first_child_requires_empty_line(body: &Option<ruby_prism::Node<'_>>) -> bool {
         let Some(body_node) = body else {
             return false;
@@ -195,7 +191,10 @@ impl EmptyLinesAroundModuleBody {
             call.receiver().is_none()
                 && call.arguments().is_none()
                 && call.block().is_none()
-                && access_modifier_predicates::is_access_modifier_name(call.name().as_slice())
+                && matches!(
+                    call.name().as_slice(),
+                    b"private" | b"protected" | b"public"
+                )
         } else {
             false
         }
@@ -235,7 +234,7 @@ impl EmptyLinesAroundModuleBody {
         let previous_line = Self::previous_line_ignoring_comments(source, child_line);
         let line_content = util::line_at(source, previous_line + 1)?;
 
-        if util::is_blank_or_whitespace_line(line_content) {
+        if util::is_blank_line(line_content) {
             return None;
         }
 
