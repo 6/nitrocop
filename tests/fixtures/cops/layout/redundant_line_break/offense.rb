@@ -257,3 +257,26 @@ failures, successes = repository
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
   .search_tests(input.split)
   .partition { |k, v| v.nil? }
+
+validates :campaign, uniqueness: { scope: :user,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  message: "The same user may not join the same campaign twice" }
+
+raise ArgumentError,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+      "can't inherit configuration from the rubocop gem"
+
+RUMOR_TYPES = {
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "RUMOR" => "this is rumor",
+  "NOT_RUMOR" => "this is true",
+}
+
+it 'fails to resolve a dependency with an explicit source even if it can be ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+   'resolved using the global sources' do
+end
+
+results.add_warning('summary', 'The summary should be a short ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'version of `description` (max 140 characters).')

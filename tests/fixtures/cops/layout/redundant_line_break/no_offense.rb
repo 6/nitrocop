@@ -177,6 +177,12 @@ result = items.select do |item|
   item.active?
 end
 
+# Direct multiline call argument: RuboCop walks up from `.where` to the
+# outer `SeedDump.dump(...)` send, so the inner call is not checked alone.
+SeedDump.dump(EventInstance
+              .where('created_at >= :start_date', { start_date: 1.month.ago }),
+              file: 'db/seeds/event_instances.rb')
+
 # Assignment with a multiline brace block
 handler = proc { |x|
   process(x)
