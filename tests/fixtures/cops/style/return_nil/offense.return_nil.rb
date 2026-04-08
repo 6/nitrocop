@@ -3,3 +3,8 @@ def update_state
   return redirect_back_or_to(path) && return
                                       ^^^^^^ Style/ReturnNil: Use `return nil` instead of `return`.
 end
+
+def update_state_without_outer_return
+  redirect_back_or_to(path) && return
+                               ^^^^^^ Style/ReturnNil: Use `return nil` instead of `return`.
+end
