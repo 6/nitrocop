@@ -56,23 +56,8 @@ impl Cop for MethodDefParentheses {
 
         let has_parens = def_node.lparen_loc().is_some();
 
-        // For require_no_parentheses_except_multiline: only require parens if args span multiple lines
-        if enforced_style == "require_no_parentheses_except_multiline" && !has_parens {
-            let is_multiline = source
-                .byte_slice(
-                    params.location().start_offset(),
-                    params.location().end_offset(),
-                    "",
-                )
-                .contains('\n');
-            if !is_multiline {
-                return;
-            }
-        }
-
         match enforced_style {
-            "require_parentheses" | "require_no_parentheses_except_multiline" if !has_parens => {
-                // RuboCop points at the arguments (parameters), not the `def` keyword
+            "require_parentheses" if !has_parens => {
                 let params_loc = params.location();
                 let (line, column) = source.offset_to_line_col(params_loc.start_offset());
                 diagnostics.push(self.diagnostic(
@@ -83,7 +68,6 @@ impl Cop for MethodDefParentheses {
                 ));
             }
             "require_no_parentheses" if has_parens => {
-                // RuboCop points at the args node including parens — use lparen_loc
                 let start = def_node
                     .lparen_loc()
                     .map_or_else(|| params.location().start_offset(), |lp| lp.start_offset());
@@ -95,9 +79,89 @@ impl Cop for MethodDefParentheses {
                     "Use `def` without parentheses.".to_string(),
                 ));
             }
+            "require_no_parentheses_except_multiline" => {
+                // RuboCop's `args.multiline?` checks the arguments node which
+                // includes parentheses. In Prism, ParametersNode excludes parens,
+                // so when parens are present we must check the lparen..rparen span.
+                // Without this, defs like `def foo(\n  x:\n)` where ParametersNode
+                // covers only `x:` (one line) would be falsely considered single-line.
+                let is_multiline = if has_parens {
+                    let start = def_node
+                        .lparen_loc()
+                        .map(|lp| lp.start_offset())
+                        .unwrap_or_else(|| params.location().start_offset());
+                    let end = def_node
+                        .rparen_loc()
+                        .map(|rp| rp.end_offset())
+                        .unwrap_or_else(|| params.location().end_offset());
+                    source.byte_slice(start, end, "").contains('\n')
+                } else {
+                    source
+                        .byte_slice(
+                            params.location().start_offset(),
+                            params.location().end_offset(),
+                            "",
+                        )
+                        .contains('\n')
+                };
+
+                if is_multiline && !has_parens {
+                    // Multiline args need parentheses
+                    let params_loc = params.location();
+                    let (line, column) = source.offset_to_line_col(params_loc.start_offset());
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `def` with parentheses when there are parameters.".to_string(),
+                    ));
+                } else if !is_multiline && has_parens && !is_forced_parentheses(&def_node, &params)
+                {
+                    // Single-line args should not have parentheses (unless forced)
+                    let start = def_node
+                        .lparen_loc()
+                        .map_or_else(|| params.location().start_offset(), |lp| lp.start_offset());
+                    let (line, column) = source.offset_to_line_col(start);
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Use `def` without parentheses.".to_string(),
+                    ));
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// Checks if parentheses are syntactically required and cannot be removed.
+/// Matches RuboCop's `forced_parentheses?` logic: endless methods, forwarding
+/// parameters (`...`), any rest arg (`*`/`*args`), any keyword rest (`**`/`**opts`),
+/// and anonymous block forwarding (`&`).
+fn is_forced_parentheses(
+    def_node: &ruby_prism::DefNode<'_>,
+    params: &ruby_prism::ParametersNode<'_>,
+) -> bool {
+    // Endless method (def foo(x) = ...)
+    if def_node.equal_loc().is_some() {
+        return true;
+    }
+    // Any rest arg (*args or *)
+    if params.rest().is_some() {
+        return true;
+    }
+    // Any keyword rest (**opts, **) or forwarding parameter (...)
+    if params.keyword_rest().is_some() {
+        return true;
+    }
+    // Anonymous block forwarding (&)
+    if let Some(block) = params.block() {
+        if block.name().is_none() {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
