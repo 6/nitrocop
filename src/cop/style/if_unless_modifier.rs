@@ -113,10 +113,18 @@ use ruby_prism::Visit;
 /// Fixed by adding `scheme:` as an additional search prefix in
 /// `uri_extends_to_end`.
 ///
-/// FP root cause (2026-04-08): parenthesized bodies like `if cond; (expr); end`
-/// were flagged. RuboCop's `non_eligible_body?` returns true for `begin_type?`,
-/// which in the parser gem includes parenthesized expressions. In Prism these
-/// are `ParenthesesNode`. Fixed by skipping bodies that are `ParenthesesNode`.
+/// FP root cause (2026-04-08): multiline parenthesized bodies like
+/// `if cond\n  (expr)\nend` were flagged. RuboCop's `non_eligible_body?`
+/// returns true for `begin_type?`, which in the parser gem includes
+/// parenthesized expressions. In Prism these are `ParenthesesNode`. Fixed by
+/// skipping `ParenthesesNode` bodies for normal-form `if`/`unless`.
+///
+/// FN root cause (2026-04-08): that same `ParenthesesNode` skip also
+/// suppressed real modifier-form offenses like `(raise '...') if condition`.
+/// RuboCop still flags modifier-form nodes here; only the multiline
+/// `if ... (expr) end` form is exempt. Fixed by applying the parenthesized-body
+/// skip only to normal-form nodes and still evaluating modifier-form nodes for
+/// `MSG_USE_NORMAL`.
 ///
 /// FP root cause (2026-04-08): body EOL comment detection used character offsets
 /// from `offset_to_line_col` to index into a byte slice. Multi-byte UTF-8
@@ -1027,11 +1035,10 @@ impl Cop for IfUnlessModifier {
 
         let modifier_form = kw_loc.start_offset() > body_node.location().start_offset();
 
-        // Skip if the body is a parenthesized expression — RuboCop's
-        // `non_eligible_body?` returns true for `begin_type?`, which in the
-        // parser gem includes parenthesized expressions like `(expr)`.
-        // In Prism, these are `ParenthesesNode`.
-        if body_node.as_parentheses_node().is_some() {
+        // Skip parenthesized bodies only for normal-form nodes. RuboCop still
+        // checks modifier-form lines like `(raise '...') if condition` for the
+        // "modifier form makes the line too long" branch.
+        if !modifier_form && body_node.as_parentheses_node().is_some() {
             return;
         }
 
