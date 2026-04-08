@@ -98,9 +98,7 @@ impl MixinGroupingVisitor<'_> {
         }
 
         let args = call.arguments()?;
-        if args.arguments().iter().next().is_none() {
-            return None;
-        }
+        args.arguments().iter().next()?;
 
         Some(call)
     }
