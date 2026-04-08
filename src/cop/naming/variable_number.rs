@@ -149,6 +149,16 @@ use crate::parse::source::SourceFile;
 /// so RuboCop's `on_sym` never fires. Non-empty `%s(foo)` is `:sym` and
 /// IS checked. Fix: in `visit_symbol_node`, also skip empty symbols whose
 /// opening starts with `%s` (not just `:`-prefixed standalone symbols).
+///
+/// ## Variant fix (2026-04-08) — all variants, US-ASCII encoding
+///
+/// All three variants (default 4 FN, snake_case 14 FN, non_integer 1,317 FN)
+/// had FNs from files with `# encoding: US-ASCII` or `# coding: us-ascii`
+/// magic comments. The `has_non_utf8_encoding_comment` function was skipping
+/// these files, but US-ASCII is a strict 7-bit subset of UTF-8. RuboCop's
+/// `Prism::Translation::Parser` handles US-ASCII files without crashing and
+/// reports offenses normally. Fix: add US-ASCII to the allow-list alongside
+/// UTF-8 and binary/ASCII-8BIT.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -221,6 +231,12 @@ fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
                     || enc_name.starts_with(b"ascii-8bit")
                     || enc_name.starts_with(b"ascii_8bit")
                 {
+                    return false;
+                }
+                // US-ASCII is fine — it's a strict subset of UTF-8, so
+                // Translation::Parser handles it without crashing. RuboCop
+                // reports offenses normally for US-ASCII files.
+                if enc_name == b"us-ascii" || enc_name == b"ascii" {
                     return false;
                 }
                 // Other non-UTF-8 encodings (us-ascii, windows-1252,
@@ -1127,10 +1143,6 @@ mod tests {
         // Files with non-UTF-8 encoding comments should be skipped entirely.
         // RuboCop's Translation::Parser crashes on these, resulting in 0 offenses.
         let diags =
-            crate::testutil::run_cop_full(&VariableNumber, b"# coding: US-ASCII\nfoo_1 = 1\n");
-        assert_eq!(diags.len(), 0, "expected US-ASCII file to be skipped");
-
-        let diags =
             crate::testutil::run_cop_full(&VariableNumber, b"# encoding:windows-1252\nfoo_1 = 1\n");
         assert_eq!(diags.len(), 0, "expected windows-1252 file to be skipped");
 
@@ -1149,13 +1161,29 @@ mod tests {
         let diags =
             crate::testutil::run_cop_full(&VariableNumber, b"# encoding: ASCII-8BIT\nfoo_1 = 1\n");
         assert_eq!(diags.len(), 1, "expected ASCII-8BIT file to NOT be skipped");
+
+        // US-ASCII should NOT be skipped — it's a strict subset of UTF-8,
+        // RuboCop's Parser handles it without crashing.
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# coding: US-ASCII\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected US-ASCII file to NOT be skipped");
+
+        let diags = crate::testutil::run_cop_full(
+            &VariableNumber,
+            b"# -*- coding: us-ascii -*-\nfoo_1 = 1\n",
+        );
+        assert_eq!(diags.len(), 1, "expected us-ascii file to NOT be skipped");
     }
 
     // --- has_non_utf8_encoding_comment unit tests ---
 
     #[test]
-    fn encoding_detect_us_ascii() {
-        assert!(has_non_utf8_encoding_comment(b"# coding: US-ASCII\nfoo\n"));
+    fn encoding_us_ascii_not_skipped() {
+        // US-ASCII is a subset of UTF-8 — RuboCop handles it fine
+        assert!(!has_non_utf8_encoding_comment(b"# coding: US-ASCII\nfoo\n"));
+        assert!(!has_non_utf8_encoding_comment(
+            b"# -*- coding: us-ascii -*-\nfoo\n"
+        ));
     }
 
     #[test]
@@ -1167,7 +1195,12 @@ mod tests {
 
     #[test]
     fn encoding_detect_after_shebang() {
+        // Non-UTF-8 encoding after shebang should still be detected
         assert!(has_non_utf8_encoding_comment(
+            b"#!/usr/bin/env ruby\n# coding: ISO-8859-1\nfoo\n"
+        ));
+        // US-ASCII after shebang should NOT be detected (it's UTF-8 compatible)
+        assert!(!has_non_utf8_encoding_comment(
             b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo\n"
         ));
     }
