@@ -386,6 +386,7 @@ impl SafeNavigation {
     /// does at the top level.  Inside blocks, `flatten_and` must be false
     /// because RuboCop's `concat_nodes` skips `and` nodes with a `:block`
     /// ancestor.
+    #[allow(clippy::too_many_arguments)]
     fn first_safe_chain_in_expression<'a>(
         node: &ruby_prism::Node<'a>,
         checked_node: &ruby_prism::Node<'a>,
@@ -495,6 +496,7 @@ impl SafeNavigation {
         SafeChainSearchResult::NoneFound
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn first_safe_chain_in_nested_and_descendants<'a>(
         node: &ruby_prism::Node<'a>,
         checked_node: &ruby_prism::Node<'a>,
