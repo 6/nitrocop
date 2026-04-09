@@ -82,6 +82,22 @@ use crate::parse::source::SourceFile;
 /// the trailing whitespace starts with spaces/tabs before the final line ending,
 /// but still reports on the phantom next line for a pure final `\n` or `\r\n`.
 /// Nitrocop was sending every `blank_lines == 0` case to the phantom line.
+///
+/// ## Corpus investigation (2026-04-09, syntax-error follow-up)
+///
+/// Variant gate still had 1 FP on `ruby-formatter/rufo`'s `retry.rb.spec`
+/// under `EnforcedStyle: final_blank_line`. With the corpus RuboCop wrapper
+/// (`--require bench/corpus/rescue_parser_crashes.rb`), files that make
+/// RuboCop's `valid_syntax?` return false only emit `Lint/Syntax`, so
+/// `Layout/TrailingEmptyLines` is suppressed for fatal semantic errors like
+/// `Invalid retry without rescue`.
+///
+/// Nitrocop's linter intentionally keeps other cops running on most semantic
+/// parse errors to avoid false negatives elsewhere (`break`/`next`/`redo`
+/// should still reach this cop). This cop therefore reparses only when it
+/// would otherwise report and returns early only for the narrow semantic
+/// errors that RuboCop also treats as fatal (`retry`, `return in
+/// class/module body`).
 pub struct TrailingEmptyLines;
 
 /// Check if the source contains `__END__` (with optional leading whitespace).
@@ -155,6 +171,12 @@ fn has_magic_encoding_comment(source: &[u8]) -> bool {
     false
 }
 
+fn has_rubocop_fatal_semantic_parse_error(bytes: &[u8]) -> bool {
+    crate::parse::parse_source(bytes)
+        .errors()
+        .any(|err| crate::cop::lint::syntax::is_rubocop_reported_semantic_error(err.message()))
+}
+
 impl Cop for TrailingEmptyLines {
     fn name(&self) -> &'static str {
         "Layout/TrailingEmptyLines"
@@ -198,6 +220,13 @@ impl Cop for TrailingEmptyLines {
         let wanted_blank_lines: isize = if style == "final_blank_line" { 1 } else { 0 };
 
         if blank_lines == wanted_blank_lines {
+            return;
+        }
+
+        // Structural parse errors never reach this cop through the real linter
+        // pipeline, but fatal semantic errors like bare `retry` still do.
+        // RuboCop suppresses non-syntax cops for those two cases, so match it.
+        if has_rubocop_fatal_semantic_parse_error(bytes) {
             return;
         }
 
@@ -486,6 +515,62 @@ mod tests {
             diags[0].message,
             "2 trailing blank lines instead of 1 detected."
         );
+    }
+
+    #[test]
+    fn final_blank_line_style_syntax_error_fixture_no_offense() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/trailing_empty_lines/no_offense.final_blank_line.rb"
+        );
+        let fixture = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture
+            .strip_prefix("# nitrocop-config: EnforcedStyle: final_blank_line\n")
+            .expect("fixture should start with final_blank_line config directive");
+        let parsed = crate::testutil::parse_fixture(source.as_bytes());
+        let filename = parsed.filename.as_deref().unwrap_or("test.rb");
+        let source = SourceFile::from_bytes(filename, parsed.source);
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "syntax-error fixture should not trigger TrailingEmptyLines: got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn final_blank_line_style_invalid_break_still_reports_offense() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        for source_bytes in [
+            b"break\n".as_slice(),
+            b"next\n".as_slice(),
+            b"redo\n".as_slice(),
+        ] {
+            let source = SourceFile::from_bytes("test.rb", source_bytes.to_vec());
+            let mut diags = Vec::new();
+            TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+            assert_eq!(diags.len(), 1, "expected offense for {:?}", source_bytes);
+            assert_eq!(diags[0].message, "Trailing blank line missing.");
+        }
     }
 
     #[test]
