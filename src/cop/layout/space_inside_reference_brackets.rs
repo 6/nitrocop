@@ -70,6 +70,21 @@ use ruby_prism::Visit;
 /// adding `INDEX_TARGET_NODE` support and reusing first-bracket selection for
 /// target nodes. Also report missing leading space for `EnforcedStyle: space`
 /// at `[` to match RuboCop's offense location.
+///
+/// ## Corpus investigation (2026-04-09, follow-up)
+///
+/// Variant `EnforcedStyle: space` still diverged after the multi-write fix:
+///
+/// 1. `Try[StandardError] do ... end` was an FN because Prism's `CallNode`
+///    location spans the trailing block, while RuboCop's `SendNode#multiline?`
+///    does not. Block-attached `[]` reads must still be checked.
+/// 2. Multiline receiver chains such as `sort { ... }.reverse[0..49]` were FPs
+///    once the guard was removed entirely. RuboCop still skips those because
+///    the `[]` send itself is multiline when the receiver spans multiple lines.
+///
+/// Match both behaviors by applying the whole-node multiline skip to `[]=`
+/// calls and to `[]` reads without an attached block, while still checking
+/// `[]` reads that own their trailing `do ... end`.
 pub struct SpaceInsideReferenceBrackets;
 
 impl Cop for SpaceInsideReferenceBrackets {
@@ -176,16 +191,24 @@ impl Cop for SpaceInsideReferenceBrackets {
             return;
         }
 
-        // RuboCop skips when the entire send node is multiline (e.g. `obj[key] = if\n...\nend`),
-        // not just when the brackets span multiple lines. This only applies to CallNode
-        // (where `[]`/`[]=` is the send). For IndexOperatorWriteNode/IndexAndWriteNode/
-        // IndexOrWriteNode, the node includes the RHS value expression (which can be on a
-        // different line), but RuboCop's `on_send` only sees the inner `[]` send node.
-        if node.as_call_node().is_some() {
-            let node_start_line = source.offset_to_line_col(node.location().start_offset()).0;
-            let node_end_line = source.offset_to_line_col(node.location().end_offset()).0;
-            if node_start_line != node_end_line {
-                return;
+        // RuboCop skips multiline `[]=` sends such as `obj[key] = if\n...\nend`
+        // and multiline `[]` reads whose receiver chain spans lines, but not
+        // block-attached reads like `Try[StandardError] do ... end`. Prism's
+        // CallNode location includes the trailing block, so distinguish whether
+        // the current `[]` call owns an attached BlockNode.
+        if let Some(call) = node.as_call_node() {
+            let has_attached_block = call
+                .block()
+                .is_some_and(|block| block.as_block_node().is_some());
+            let should_skip_multiline = call.name().as_slice() == b"[]="
+                || (call.name().as_slice() == b"[]" && !has_attached_block);
+
+            if should_skip_multiline {
+                let node_start_line = source.offset_to_line_col(node.location().start_offset()).0;
+                let node_end_line = source.offset_to_line_col(node.location().end_offset()).0;
+                if node_start_line != node_end_line {
+                    return;
+                }
             }
         }
 
