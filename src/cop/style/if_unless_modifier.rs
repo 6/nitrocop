@@ -862,6 +862,96 @@ fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::No
         return true;
     }
 
+    // Also check through closing tokens (like `}`, `]`, `)`) for semicolons
+    // that indicate sibling statements in enclosing scopes. RuboCop's AST-based
+    // `another_statement_on_same_line?` traverses upward to find `begin` nodes
+    // with siblings; we detect this textually.
+    // Example: `{ |fn| bool = true if cond } ; bool`
+    //   After the if-node: ` } ; bool` — the `}` closes the block, and `; bool`
+    //   is a sibling statement in the enclosing parenthesized expression.
+    {
+        let mut remaining = &trimmed[..];
+        // Skip closing tokens and whitespace
+        while let Some(&b) = remaining.first() {
+            if b == b'}' || b == b']' || b == b')' || b == b' ' || b == b'\t' {
+                remaining = &remaining[1..];
+            } else {
+                break;
+            }
+        }
+        if remaining.first() == Some(&b';') {
+            let after_semi: Vec<_> = remaining[1..]
+                .iter()
+                .copied()
+                .skip_while(|&b| b == b' ' || b == b'\t')
+                .collect();
+            if !after_semi.is_empty() && !is_only_closing_tokens(&after_semi) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if the if/unless keyword is at the start of a line and the previous
+/// non-empty, non-comment line ends with an operator that would make the
+/// if-expression an operand (e.g., `- \n if foo ... end`).
+///
+/// RuboCop catches this via `node.chained?` which returns true when the node
+/// is the receiver of a method call. Without AST parent access, we detect it
+/// by text: when the previous line ends with an operator character that isn't
+/// `=`, `:`, or `=>` (which are handled by parenthesization), the if-node is
+/// part of a larger expression and cannot be converted to modifier form.
+fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location<'_>) -> bool {
+    let (kw_line, kw_col) = source.offset_to_line_col(kw_loc.start_offset());
+    let kw_line_start = kw_loc.start_offset().saturating_sub(kw_col);
+    let before_kw = &source.as_bytes()[kw_line_start..kw_loc.start_offset()];
+
+    // Only applies when the if/unless keyword is at the start of the line
+    if !before_kw.iter().all(|&b| b == b' ' || b == b'\t') {
+        return false;
+    }
+    if kw_line < 2 {
+        return false;
+    }
+
+    let lines: Vec<&[u8]> = source.lines().collect();
+    // Find the previous non-empty, non-comment line
+    for prev_idx in (0..kw_line - 1).rev() {
+        let prev_line = lines[prev_idx];
+        let prev_str = String::from_utf8_lossy(prev_line);
+        let prev_trimmed = prev_str.trim();
+        let prev_trimmed = prev_trimmed.strip_suffix('\r').unwrap_or(prev_trimmed);
+        if prev_trimmed.is_empty() {
+            continue;
+        }
+        let prev_code = strip_trailing_comment(prev_trimmed);
+        if prev_code.is_empty() {
+            continue;
+        }
+        let code_bytes = prev_code.as_bytes();
+        let last_byte = match code_bytes.last() {
+            Some(&b) => b,
+            None => return false,
+        };
+        // Symbol literals like `:+`, `:-`, `:*` end with an operator char
+        // but are not operators — the preceding `:` marks a symbol.
+        if code_bytes.len() >= 2 && code_bytes[code_bytes.len() - 2] == b':' {
+            return false;
+        }
+        // These operators bind to the if-expression, making it a receiver/operand.
+        // Exclude `=`, `:`, `>` (part of `=>`) which are handled by parenthesization.
+        // Exclude `)`, `]`, `}` which are closing delimiters, not operators.
+        // Exclude `|` because block parameter delimiters `{ |x, y|` end with `|`
+        // and are far more common than binary `|` chaining to the next line.
+        // Exclude `/` because regexp closers like `when /pattern/` are far more
+        // common at end of line than division chaining to the next line.
+        return matches!(
+            last_byte,
+            b'.' | b'+' | b'-' | b'*' | b'%' | b'!' | b'~' | b'^' | b'&' | b'<'
+        );
+    }
     false
 }
 
@@ -960,7 +1050,9 @@ fn code_after_end(source: &SourceFile, end_loc: ruby_prism::Location<'_>) -> Opt
         return None;
     }
 
-    let end_line_bytes = lines[end_line - 1];
+    let raw_line = lines[end_line - 1];
+    // Strip CRLF: \r at end of line inflates modifier form length by 1 character
+    let end_line_bytes = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
     let after_end_col = end_col + end_loc.as_slice().len();
     if after_end_col >= end_line_bytes.len() {
         return None;
@@ -1130,6 +1222,13 @@ impl Cop for IfUnlessModifier {
         }
 
         if single_line_direct_collection_context(source, node, &kw_loc) {
+            return;
+        }
+
+        // Skip if the if/unless is "chained" from the previous line — an operator
+        // on the previous line makes the if-expression its operand (e.g., `- \n if foo
+        // ... end`). RuboCop catches this via `node.chained?`.
+        if previous_line_chains_to_if(source, &kw_loc) {
             return;
         }
 
