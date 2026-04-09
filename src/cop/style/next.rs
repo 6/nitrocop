@@ -46,6 +46,12 @@ use crate::parse::source::SourceFile;
 ///   RuboCop reports the offense at the wrapped statement start (`raise(`,
 ///   `indent do`, etc.), not at the trailing modifier keyword line. The corpus
 ///   FP/FN pairs were the same offense detected on different lines.
+/// - Fixed `EnforcedStyle: always` parenthesized modifier if/unless:
+///   `(expr if cond)` creates a ParenthesesNode wrapping the IfNode in Prism.
+///   RuboCop's `ends_with_condition?` unwraps `begin_type?` (paren) nodes
+///   when the paren IS the sole body statement. Nitrocop now does the same
+///   unwrap for single-statement bodies only, matching RuboCop's behavior of
+///   not flagging parenthesized conditionals in multi-statement bodies.
 pub struct Next;
 
 /// Check if a method name is an iteration method for Style/Next.
@@ -212,6 +218,27 @@ impl NextVisitor<'_> {
         }
     }
 
+    /// Unwrap a ParenthesesNode to reach the inner if/unless.
+    /// Returns Some(inner_node) if the node is a ParenthesesNode containing
+    /// exactly one statement that is an if or unless node.
+    fn unwrap_paren_to_conditional<'a>(
+        node: &ruby_prism::Node<'a>,
+    ) -> Option<ruby_prism::Node<'a>> {
+        let paren = node.as_parentheses_node()?;
+        let body = paren.body()?;
+        let stmts = body.as_statements_node()?;
+        let mut iter = stmts.body().iter();
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        if first.as_if_node().is_some() || first.as_unless_node().is_some() {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
     fn check_block_body(&mut self, body: &ruby_prism::Node<'_>) {
         let stmts = match body.as_statements_node() {
             Some(s) => s,
@@ -226,6 +253,18 @@ impl NextVisitor<'_> {
 
         // RuboCop checks if the LAST statement is an if/unless (ends_with_condition?)
         let stmt = &body_stmts[body_stmts.len() - 1];
+
+        // RuboCop's ends_with_condition? unwraps begin-type (paren) nodes when
+        // the paren IS the sole body statement. In Prism, `(expr if cond)`
+        // creates a ParenthesesNode wrapping the IfNode. Only unwrap for
+        // single-statement bodies — multi-statement bodies with a parenthesized
+        // last statement are NOT flagged by RuboCop.
+        let paren_inner = if single_statement_body {
+            Self::unwrap_paren_to_conditional(stmt)
+        } else {
+            None
+        };
+        let stmt = paren_inner.as_ref().unwrap_or(stmt);
 
         // Check for if/unless that wraps the entire block body
         if let Some(if_node) = stmt.as_if_node() {
