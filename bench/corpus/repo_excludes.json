@@ -4,8 +4,7 @@
     "comment": "Lint/LiteralAsCondition crash on bench_compilation.rb; Prism::Translation::Parser crashes on invalid multibyte regex escapes in test files, killing ~1000 files as collateral",
     "exclude": [
       "bench/compiler/bench_compilation.rb",
-      "test/jruby/test_regexp.rb",
-      "test/mri/logger/test_logger.rb"
+      "test/jruby/test_regexp.rb"
     ]
   },
   "ruby__logger__00796ec": {
