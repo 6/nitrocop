@@ -20,13 +20,14 @@ User runs `/review-agent-prs` (optionally with filters like `--cop Style/*`).
 gh pr list --repo 6/nitrocop --label type:cop-fix --state open \
   --json number,title,headRefName,statusCheckRollup,labels,createdAt \
   --jq '[.[] | select(
+    (.labels | map(.name) | index("needs-investigation") | not) and
     (.statusCheckRollup | length > 0) and
     (.statusCheckRollup | all(.status == "COMPLETED")) and
-    (.statusCheckRollup | all(.conclusion == "SUCCESS"))
+    (.statusCheckRollup | all(.conclusion == "SUCCESS" or .conclusion == "SKIPPED"))
   )] | .[] | "\(.number)\t\(.title)\t\(.labels | map(.name) | join(","))"'
 ```
 
-This filters to only PRs where all CI checks have passed, skipping drafts with no checks, PRs with pending checks, and PRs with failures — no need to run `gh pr checks` per PR. Exclude any PRs that have the `needs-investigation` label from the results.
+This filters to only PRs where all CI checks have passed, excluding `needs-investigation` PRs, drafts with no checks, PRs with pending checks, and PRs with failures.
 
 Also list PRs with `validation-failed` label separately so they can be closed:
 
@@ -127,7 +128,6 @@ Show a table of actions taken:
   - Label PRs that don't impact FP/FN counts with `needs-investigation` instead of closing
   - Close doc-only or doc+test-only PRs only if the code is clearly wrong; otherwise label for investigation
   - Verify the change has a real behavioral impact — refactors that rewrite logic without changing corpus results should be labeled for investigation
-- **Skip PRs with `needs-investigation` label** — these require manual corpus investigation before review. Do not review, approve, or close them.
 - **Flag changes to global/infrastructure files**: If the diff touches files outside `src/cop/` and `tests/fixtures/cops/` that affect the broader corpus or build pipeline, **stop and flag to the user** before approving. These files require human judgment because they can mask bugs or have repo-wide side effects. Examples:
   - `bench/corpus/repo_excludes.json` — adding file exclusions can hide real FPs instead of fixing them in code. Verify the exclusion is justified (e.g., RuboCop parser crash on the file, not just inconvenient offenses).
   - `bench/corpus/*.py`, `scripts/*.py` — changes to corpus tooling or CI scripts are out of scope for cop-fix PRs.
