@@ -70,6 +70,28 @@ use crate::parse::source::SourceFile;
 /// these because both offenses target the same source range (`args.first == args.last`).
 /// Fix: track `top_level_arg_count` in BlockInfo; when it's 1 and "before first" already
 /// fired, suppress "after last" to match RuboCop's dedup behavior.
+///
+/// ## Multiline closing delimiter indentation fix (2026-04-09)
+///
+/// The remaining `space`-style FN came from multiline block parameters whose
+/// closing delimiter sits on its own indented line:
+///
+/// ```ruby
+/// shared_examples do |
+///   a:,
+///   b:
+///   |
+/// end
+/// ```
+///
+/// RuboCop accepts a multiline closing delimiter only when it starts the line
+/// immediately after the line break. If that delimiter line is indented,
+/// RuboCop reports "Extra space after last block parameter detected." on the
+/// indentation itself. nitrocop previously skipped every newline-containing
+/// gap before the closing delimiter, which also skipped this indentation-only
+/// offense. Fix: keep the multiline fast-path for aligned closing delimiters,
+/// but in `space` style emit the extra-space offense when the delimiter line
+/// contains only spaces or tabs before the closing `|`/`)`.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
@@ -307,8 +329,12 @@ impl Cop for SpaceAroundBlockParameters {
                     diagnostics.push(diag);
                 }
 
-                if !closing_has_newline && inner_end > trailing_start + 1 {
-                    let extra_start = trailing_start + 1;
+                let extra_after_last = if !closing_has_newline && inner_end > trailing_start + 1 {
+                    Some((trailing_start + 1, inner_end))
+                } else {
+                    multiline_closing_indent_range(bytes, trailing_start, inner_end)
+                };
+                if let Some((extra_start, extra_end)) = extra_after_last {
                     let (line, col) = source.offset_to_line_col(extra_start);
                     let mut diag = self.diagnostic(
                         source,
@@ -319,7 +345,7 @@ impl Cop for SpaceAroundBlockParameters {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: extra_start,
-                            end: inner_end,
+                            end: extra_end,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -643,6 +669,29 @@ fn contains_line_break(bytes: &[u8], start: usize, end: usize) -> bool {
     bytes[start..end]
         .iter()
         .any(|&b| matches!(b, b'\n' | b'\r'))
+}
+
+fn multiline_closing_indent_range(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+
+    let last_line_break = bytes[start..end]
+        .iter()
+        .rposition(|&b| matches!(b, b'\n' | b'\r'))?;
+    let indent_start = start + last_line_break + 1;
+    if indent_start >= end {
+        return None;
+    }
+
+    bytes[indent_start..end]
+        .iter()
+        .all(|&b| matches!(b, b' ' | b'\t'))
+        .then_some((indent_start, end))
 }
 
 #[cfg(test)]
