@@ -528,29 +528,33 @@ fn check_missing_empty_lines_around_body_with_legacy_layout_disable(
     diagnostics
 }
 
-fn check_empty_lines_style_with_rubocop_edge_cases(
-    cop_name: &'static str,
-    source: &SourceFile,
-    parse_result: &ruby_prism::ParseResult<'_>,
+struct EmptyLinesStyleCheckContext {
     effective_opening: usize,
     opening_offset: usize,
     closing_offset: usize,
     body_start_offset: Option<usize>,
+}
+
+fn check_empty_lines_style_with_rubocop_edge_cases(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    context: EmptyLinesStyleCheckContext,
     corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
-    if body_start_offset.is_none() {
+    if context.body_start_offset.is_none() {
         return Vec::new();
     }
 
-    let (keyword_line, _) = source.offset_to_line_col(effective_opening);
-    let (opening_line, _) = source.offset_to_line_col(opening_offset);
-    let (closing_line, _) = source.offset_to_line_col(closing_offset);
+    let (keyword_line, _) = source.offset_to_line_col(context.effective_opening);
+    let (opening_line, _) = source.offset_to_line_col(context.opening_offset);
+    let (closing_line, _) = source.offset_to_line_col(context.closing_offset);
 
     if keyword_line == closing_line {
         return Vec::new();
     }
 
-    let Some(body_start_offset) = body_start_offset else {
+    let Some(body_start_offset) = context.body_start_offset else {
         return Vec::new();
     };
     let (body_start_line, _) = source.offset_to_line_col(body_start_offset);
@@ -587,8 +591,8 @@ fn check_empty_lines_style_with_rubocop_edge_cases(
         cop_name,
         source,
         parse_result,
-        effective_opening,
-        closing_offset,
+        context.effective_opening,
+        context.closing_offset,
         corrections,
     )
 }
@@ -694,10 +698,12 @@ impl Cop for EmptyLinesAroundBlockBody {
                     self.name(),
                     source,
                     parse_result,
-                    effective_opening,
-                    opening_offset,
-                    closing_offset,
-                    body_start_offset,
+                    EmptyLinesStyleCheckContext {
+                        effective_opening,
+                        opening_offset,
+                        closing_offset,
+                        body_start_offset,
+                    },
                     corrections,
                 ));
             }
