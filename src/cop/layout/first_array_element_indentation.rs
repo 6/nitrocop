@@ -1,3 +1,8 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+use crate::cop::registry::CopRegistry;
 use crate::cop::shared::node_type::ARRAY_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -21,6 +26,74 @@ fn byte_col_to_char_col(line_bytes: &[u8], byte_col: usize) -> usize {
         .iter()
         .filter(|&&b| (b & 0xC0) != 0x80)
         .count()
+}
+
+fn nearest_project_config(path: &Path) -> Option<PathBuf> {
+    let start = if path.is_dir() { path } else { path.parent()? };
+    for dir in start.ancestors() {
+        for name in [".rubocop.yml", ".standard.yml"] {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn repo_uses_fixed_array_alignment(source: &SourceFile) -> bool {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
+
+    let path = &source.path;
+    if !path.is_absolute() || !path.exists() {
+        return false;
+    }
+
+    let Some(config_path) = nearest_project_config(path) else {
+        return false;
+    };
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(cached) = cache
+        .lock()
+        .ok()
+        .and_then(|entries| entries.get(&config_path).copied())
+    {
+        return cached;
+    }
+
+    let fixed = crate::config::load_config(Some(&config_path), Some(path), None)
+        .ok()
+        .map(|resolved| {
+            let registry = CopRegistry::default_registry();
+            let configs = resolved.precompute_cop_configs(&registry);
+            let array_alignment_idx = registry
+                .names()
+                .iter()
+                .position(|name| *name == "Layout/ArrayAlignment");
+
+            array_alignment_idx.is_some_and(|idx| {
+                configs.get(idx).is_some_and(|cfg| {
+                    cfg.get_str("EnforcedStyle", "with_first_element") == "with_fixed_indentation"
+                })
+            })
+        })
+        .unwrap_or(false);
+
+    if let Ok(mut entries) = cache.lock() {
+        entries.insert(config_path, fixed);
+    }
+
+    fixed
+}
+
+fn enforce_first_argument_with_fixed_indentation(config: &CopConfig, source: &SourceFile) -> bool {
+    config
+        .options
+        .get("ArrayAlignmentStyle")
+        .and_then(|value| value.as_str())
+        .is_some_and(|style| style == "with_fixed_indentation")
+        || repo_uses_fixed_array_alignment(source)
 }
 
 /// Layout/FirstArrayElementIndentation cop.
@@ -209,6 +282,14 @@ fn byte_col_to_char_col(line_bytes: &[u8], byte_col: usize) -> usize {
 ///    line indent instead of the hash pair start because the backward scan only
 ///    stopped at `{` or `,`. Fix: treat an enclosing top-level `(` as a valid
 ///    boundary and return the first token after it.
+///
+/// **Variant divergence fix (2026-04-09, `align_brackets` 2 FP):** RuboCop
+/// skips this cop for non-`consistent` styles when sibling
+/// `Layout/ArrayAlignment` uses `with_fixed_indentation`. nitrocop only read
+/// this cop's own config, so variant runs still flagged repo-configured cases
+/// that RuboCop delegated to `Layout/ArrayAlignment`. Fix: check that sibling
+/// style here too, using a cached repo-config lookup when no injected override
+/// is available.
 pub struct FirstArrayElementIndentation;
 
 /// Describes what the expected indentation is relative to.
@@ -939,6 +1020,10 @@ impl Cop for FirstArrayElementIndentation {
         let style = config.get_str("EnforcedStyle", "special_inside_parentheses");
         let width = config.get_usize("IndentationWidth", 2);
 
+        if style != "consistent" && enforce_first_argument_with_fixed_indentation(config, source) {
+            return;
+        }
+
         // Get the indentation of the line where `[` appears
         let open_line_bytes = source.lines().nth(open_line - 1).unwrap_or(b"");
         let open_line_indent = first_non_whitespace_column(open_line_bytes);
@@ -1177,6 +1262,48 @@ mod tests {
             1,
             "align_brackets should flag bracket not at opening bracket column: {:?}",
             diags3
+        );
+    }
+
+    #[test]
+    fn align_brackets_ignored_when_array_alignment_is_with_fixed_indentation() {
+        use std::fs;
+
+        let tempdir = tempfile::tempdir().unwrap();
+        fs::write(
+            tempdir.path().join(".rubocop.yml"),
+            "Layout/ArrayAlignment:\n  EnforcedStyle: with_fixed_indentation\nLayout/FirstArrayElementIndentation:\n  EnforcedStyle: align_brackets\n",
+        )
+        .unwrap();
+
+        let src_path = tempdir.path().join("test.rb");
+        fs::write(
+            &src_path,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_array_element_indentation/align_brackets_with_fixed_indentation_no_offense.rb"
+            ),
+        )
+        .unwrap();
+
+        let resolved = crate::config::load_config(None, Some(src_path.as_path()), None).unwrap();
+        let registry = CopRegistry::default_registry();
+        let configs = resolved.precompute_cop_configs(&registry);
+        let idx = registry
+            .names()
+            .iter()
+            .position(|name| *name == "Layout/FirstArrayElementIndentation")
+            .unwrap();
+
+        let diags = crate::testutil::run_cop_full_internal(
+            &FirstArrayElementIndentation,
+            &fs::read(&src_path).unwrap(),
+            configs[idx].clone(),
+            src_path.to_str().unwrap(),
+        );
+        assert!(
+            diags.is_empty(),
+            "with_fixed_indentation should disable FirstArrayElementIndentation for align_brackets: {:?}",
+            diags
         );
     }
 
