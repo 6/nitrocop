@@ -13,3 +13,8 @@ it do
   bar = 42
   allow(service).to receive(:url).and_return("#{bar}/test-url")
 end
+
+# Parenthesized dynamic values stay dynamic
+it do
+  allow(Foo).to receive(:bar).and_return (value)
+end
