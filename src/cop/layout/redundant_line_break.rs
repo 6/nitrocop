@@ -171,6 +171,22 @@ use crate::parse::source::SourceFile;
 ///   sends such as `!foo.\n  bar` and `!checks.values.\n  find { ... }`, but
 ///   nitrocop was skipping every unary-`!` wrapper and missing those offenses.
 ///
+/// ## Fixes applied (2026-04-09, second batch)
+/// - **UTF-8 character counting**: `too_long()` and Phase 2's combined-line check
+///   now measure character length instead of byte length, matching RuboCop's
+///   `String#length` which counts characters. Previously, multi-byte characters
+///   (CJK, accented, etc.) inflated the measured length, causing FNs for lines
+///   that fit within 120 characters but exceeded 120 bytes. Fixed by adding
+///   `utf8_char_count()` which counts non-continuation bytes. Resolves ~92 FNs
+///   (e.g., BCDice repo with Japanese text).
+/// - **Phase 2 unsafe range overlap**: Phase 2's `has_unsafe` check now detects
+///   unsafe ranges that START within the backslash group but extend beyond it
+///   (e.g., case/until/while expressions on the continuation line). Previously
+///   only ranges fully contained within the group were detected, causing FPs for
+///   patterns like `foo || \ case @mode ... end` and `parent \ until cond`.
+///   Resolves ~41 FPs (e.g., ruby2js repo). Added `UntilNode`, `WhileNode`, and
+///   `ForNode` visitors to `UnsafeRangeCollector` to support modifier keywords.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -383,6 +399,24 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         ruby_prism::visit_parentheses_node(self, node);
     }
 
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+        let loc = node.location();
+        self.ranges.push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_until_node(self, node);
+    }
+
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+        let loc = node.location();
+        self.ranges.push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_while_node(self, node);
+    }
+
+    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+        let loc = node.location();
+        self.ranges.push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_for_node(self, node);
+    }
+
     fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
         if node.unescaped().contains(&b'\n') {
             let loc = node.location();
@@ -587,7 +621,7 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
             }
         }
 
-        combined.len() > self.max_line_length
+        utf8_char_count(&combined) > self.max_line_length
     }
 
     fn comment_within(&self, start_offset: usize, end_offset: usize) -> bool {
@@ -1257,9 +1291,17 @@ fn check_backslash_continuations(
             content.len()
         };
 
+        // Check if any unsafe range is fully contained within the group OR
+        // starts within the group but extends beyond it. The latter catches
+        // backslash continuations followed by case/if(ternary)/until/while
+        // expressions: the construct starts in the continuation line but
+        // extends far past the group, so it can't be collapsed to one line.
+        // We intentionally don't check for unsafe ranges that merely CONTAIN
+        // the group (like def bodies) — those are legitimate contexts for
+        // backslash continuation offenses.
         let has_unsafe = unsafe_ranges
             .iter()
-            .any(|&(us, ue)| us >= group_byte_start && ue <= group_byte_end);
+            .any(|&(us, _ue)| us >= group_byte_start && us < group_byte_end);
         if has_unsafe {
             i = final_line_idx + 1;
             continue;
@@ -1306,7 +1348,7 @@ fn check_backslash_continuations(
             combined.extend_from_slice(trim_trailing_whitespace(final_content));
         }
 
-        if combined.len() > max_line_length {
+        if utf8_char_count(&combined) > max_line_length {
             i = final_line_idx + 1;
             continue;
         }
@@ -1420,6 +1462,16 @@ fn leading_whitespace_len(line: &[u8]) -> usize {
         }
     }
     count
+}
+
+/// Count the number of Unicode characters (code points) in a UTF-8 byte slice.
+/// RuboCop measures line length in characters, not bytes. For multi-byte UTF-8
+/// (e.g. CJK characters), byte length > char length, causing FNs when using
+/// byte length.
+fn utf8_char_count(bytes: &[u8]) -> usize {
+    // UTF-8 continuation bytes match the pattern 10xxxxxx (0x80..0xBF).
+    // Every other byte is the start of a new character.
+    bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
 }
 
 #[cfg(test)]

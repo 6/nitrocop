@@ -283,3 +283,12 @@ raise "[Xcodeproj] unsupported key `#{key}` " \
 return if !checks.values.
           ^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
   find { |c| c.check? page, [Element::Form::DOM, Element::Cookie::DOM], true }
+
+# CJK characters: combined line is under 120 chars but over 120 bytes.
+# RuboCop measures character length, not byte length.
+DiceTable::Table.new(
+^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  "奇跡の触媒（エレメント）",
+  "1D6",
+  ["ワンド", "水晶玉", "カード", "ステッキ", "手鏡", "宝石"]
+)

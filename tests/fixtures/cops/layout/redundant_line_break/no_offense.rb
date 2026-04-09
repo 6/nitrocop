@@ -340,3 +340,17 @@ module FPTest
     end
   end
 end
+
+# Backslash continuation followed by case expression — the case extends
+# beyond the backslash group and can't be collapsed to one line.
+@parlour = options[:parlour] || \
+  case @mode
+  when :rbi
+    "rbi"
+  when :rbs
+    "rbs"
+  end
+
+# Backslash continuation followed by modifier `until`
+current_context = current_context.parent \
+  until current_context.is_a?(NamespaceObject)
