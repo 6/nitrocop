@@ -20,3 +20,13 @@ mysql_query(<<-SQL).first["pagetext"]
                                     ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
   SELECT 1
 SQL
+
+mysql_query(<<-SQL).first["pagetext"]
+                         ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+                                    ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+  SELECT #{mapping[post.id][0]}
+                  ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+                          ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+                           ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+                             ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+SQL
