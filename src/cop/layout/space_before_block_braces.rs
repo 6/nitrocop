@@ -19,6 +19,13 @@ use crate::parse::source::SourceFile;
 ///   is visited via `visit_block_node()` (named method) rather than `visit()` (generic
 ///   dispatch), so `visit_branch_node_enter` is never called for the inner BlockNode.
 ///   Fixed by registering for `FORWARDING_SUPER_NODE` and extracting the block.
+/// - **No-space variant whitespace-range mismatches (7 FP, 24 FN):** RuboCop's
+///   `range_with_surrounding_space(left_brace)` reports the start of the entire
+///   left whitespace span, not just the byte immediately before `{`. That matters
+///   for tab-aligned blocks (`foo\t\t{ ... }`) and backslash continuations
+///   where `call \` ends one line and `{ ... }` starts the next. RuboCop flags
+///   the first tab or the end of the previous line. Fixed by scanning the same
+///   left whitespace range for `no_space`.
 pub struct SpaceBeforeBlockBraces;
 
 impl Cop for SpaceBeforeBlockBraces {
@@ -81,8 +88,8 @@ impl Cop for SpaceBeforeBlockBraces {
 
         match effective_style {
             "no_space" => {
-                if before > 0 && bytes[before - 1] == b' ' {
-                    let (line, column) = source.offset_to_line_col(before - 1);
+                if let Some(space_start) = no_space_whitespace_range_start(bytes, before) {
+                    let (line, column) = source.offset_to_line_col(space_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -91,7 +98,7 @@ impl Cop for SpaceBeforeBlockBraces {
                     );
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
-                            start: before - 1,
+                            start: space_start,
                             end: before,
                             replacement: String::new(),
                             cop_name: self.name(),
@@ -129,6 +136,24 @@ impl Cop for SpaceBeforeBlockBraces {
             }
         }
     }
+}
+
+fn no_space_whitespace_range_start(bytes: &[u8], brace_start: usize) -> Option<usize> {
+    if brace_start == 0 {
+        return None;
+    }
+
+    let mut start = brace_start;
+
+    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+
+    while start > 0 && bytes[start - 1] == b'\n' {
+        start -= 1;
+    }
+
+    (start < brace_start).then_some(start)
 }
 
 #[cfg(test)]
