@@ -288,8 +288,5 @@ end
 while (pop_messages(queue_url, 10).length > 0)
   work
 end
-# Standalone unary ! — RuboCop exempts all (!expr) from check_unary
-(!x arg)
-(!x.m arg)
 # Single-line def body with assignment — not a multi-statement begin
 def start_handlers; (@start_handlers ||= {}); end

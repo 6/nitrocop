@@ -232,10 +232,6 @@ use crate::parse::source::SourceFile;
 ///   for multi-statement bodies. Single-statement non-paren bodies map to the containing node
 ///   directly, which is NOT begin_type. The `begin_like_parent` condition now correctly requires
 ///   either parentheses body, multi-statement body, or top-level context.
-/// - **Prefix `!` (prefix_not) exempt from unary check (~7+ FPs from norikra):** RuboCop's
-///   `method_call_with_redundant_parentheses?` returns false for `prefix_not?` nodes. All
-///   `(!expr)` patterns are exempt: `suspect_unary?` doesn't unwrap through `!`, and then
-///   `prefix_not?` causes an early return. Added the same exemption.
 /// - **Method call with unparenthesized block argument:** `(method_args.map &:to_json).join(',')`
 ///   — Prism puts block arguments in `block()` not `arguments()`, so the cop didn't count them
 ///   as "has args". Removing the outer parens would change parsing. Now counts block_argument
@@ -1280,12 +1276,49 @@ fn check_unary<'a>(
     let call = inner.as_call_node()?;
     let name = call.name().as_slice();
 
-    // RuboCop's method_call_with_redundant_parentheses? returns false for
-    // prefix_not? nodes. This means ALL (!expr) patterns are exempt from
-    // the unary check, because `suspect_unary?` doesn't unwrap through `!`
-    // and then `prefix_not?` causes an early return.
+    // prefix_not: !expr — don't flag (!x) as unary if no arguments
+    // But DO flag it as "a unary operation" per RuboCop
     if name == b"!" {
-        return None;
+        // Check if the inner of ! is a call with unparenthesized args
+        // (!x arg) — only flag when it's the sole expression (no parent boolean)
+        if let Some(recv) = call.receiver() {
+            if let Some(inner_call) = recv.as_call_node() {
+                if inner_call.arguments().is_some() && inner_call.opening_loc().is_none() {
+                    // (!x arg) — has unparenthesized call with args inside
+                    // Only flag as unary if it's standalone (no parent or parent is Other)
+                    if let Some(p) = parent {
+                        if !matches!(p.kind, ParentKind::Other) || p.is_operator {
+                            return None;
+                        }
+                    }
+                    return Some("a unary operation");
+                }
+            }
+            // Check if inner of ! is a super/yield/defined? with unparenthesized args
+            if recv.as_super_node().is_some()
+                || recv.as_yield_node().is_some()
+                || recv.as_defined_node().is_some()
+            {
+                // Check if it has space-separated args by looking at source
+                let recv_loc = recv.location();
+                let recv_src = &content[recv_loc.start_offset()..recv_loc.end_offset()];
+                // If it looks like `super arg` or `yield arg` or `defined? arg` (has space)
+                let keyword_len = if recv.as_defined_node().is_some() {
+                    8 // defined?
+                } else {
+                    5 // super or yield
+                };
+                if recv_src.len() > keyword_len && recv_src[keyword_len] == b' ' {
+                    // (!super arg) — only flag standalone
+                    if let Some(p) = parent {
+                        if !matches!(p.kind, ParentKind::Other) || p.is_operator {
+                            return None;
+                        }
+                    }
+                    return Some("a unary operation");
+                }
+            }
+        }
     }
 
     // For unary -/+ on method chain starting with int: -(1.foo) is plausible

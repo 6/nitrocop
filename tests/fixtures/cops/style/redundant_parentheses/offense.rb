@@ -92,6 +92,12 @@ return (foo + bar)
 return (42)
        ^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
 
+(!x arg)
+^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a unary operation.
+
+(!x.m arg)
+^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a unary operation.
+
 x.y((a..b))
     ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
 
