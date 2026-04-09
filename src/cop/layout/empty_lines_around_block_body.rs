@@ -57,6 +57,25 @@ use crate::parse::source::SourceFile;
 ///    the beginning offense only. Multiline `->` params are different because
 ///    RuboCop still uses the earlier `->` line as the opening reference, so
 ///    those cases continue through the normal missing-beginning/end checks.
+///
+/// ## Corpus investigation (2026-04-08, variant `empty_lines`)
+///
+/// FN=4, FP=4: backslash continuation before `do` (e.g.
+/// `it "str" \ "str" \ do\n body\n end`) with `empty_lines` style.
+/// `adjusted_keyword_offset` walked ALL the way back through `\` continuations
+/// to the `it` line, making the check flag the continuation string line instead
+/// of the `do` line. RuboCop uses `send_node.last_line` (the last argument
+/// line, one line before `do`) as the reference. Fix: for `empty_lines` style,
+/// only step back one line instead of walking all the way through `\`.
+///
+/// Remaining FP=18: `# rubocop:disable Layout:LineLength` (colon syntax)
+/// is treated by RuboCop as a department-level disable (suppressing ALL
+/// `Layout/*` cops including this one), but nitrocop's directive parser
+/// in `src/parse/directives.rs` does not recognize single-colon department
+/// syntax. This is a directive-parsing issue, not a cop detection bug.
+/// Fix requires updating `normalize_directive_cop_name()` to treat
+/// `Dept:CopName` → `Dept` (department disable), matching RuboCop's
+/// `COP_NAME_PATTERN` which excludes `:` from `\w`.
 pub struct EmptyLinesAroundBlockBody;
 
 /// Compute the effective opening offset for empty-line checks.
@@ -73,7 +92,23 @@ pub struct EmptyLinesAroundBlockBody;
 ///   continuation line (e.g. `run_command(arg) \ \n  do |x|`). Walk
 ///   backward through `\` continuations to find the method-call line and
 ///   use that as the reference.
-fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize {
+///
+/// Compute the effective opening offset for empty-line checks.
+///
+/// When `full_walkback` is true (used for `no_empty_lines` style), walk all
+/// the way back through `\` continuations to the method-call line. This makes
+/// the "line after effective opening" be the next continuation string, which is
+/// never blank, so no false extra-blank-line offense.
+///
+/// When `full_walkback` is false (used for `empty_lines` style), only step
+/// back one line. This matches RuboCop's `send_node.last_line`, which is the
+/// last argument line — the line immediately before `do`/`{`. The helper then
+/// checks the `do` line itself for emptiness, matching RuboCop exactly.
+fn adjusted_keyword_offset(
+    source: &SourceFile,
+    opening_offset: usize,
+    full_walkback: bool,
+) -> usize {
     let (opening_line, opening_col) = source.offset_to_line_col(opening_offset);
 
     // Check if there is non-whitespace content before `do`/`{` on its line.
@@ -91,24 +126,41 @@ fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize 
         return opening_offset;
     }
 
-    // `do`/`{` is at the start of its line. Walk backward through `\`
-    // continuations to find the method-call line.
+    // Helper: check if a line (by 1-indexed number) ends with `\`.
+    let line_ends_with_backslash = |line_num: usize| -> bool {
+        if let Some(bytes) = util::line_at(source, line_num) {
+            let mut end = bytes.len();
+            while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
+                end -= 1;
+            }
+            end > 0 && bytes[end - 1] == b'\\'
+        } else {
+            false
+        }
+    };
+
+    if !full_walkback {
+        // For `empty_lines` style: step back exactly one line when the
+        // previous line ends with `\`. This matches `send_node.last_line`
+        // in RuboCop (the last argument line, not the first continuation).
+        if opening_line > 1 && line_ends_with_backslash(opening_line - 1) {
+            if let Some(off) = source.line_col_to_offset(opening_line - 1, 0) {
+                return off;
+            }
+        }
+        return opening_offset;
+    }
+
+    // Full walkback for `no_empty_lines` style: walk backward through all
+    // `\` continuations to find the method-call line.
     let mut line = opening_line;
     loop {
         if line <= 1 {
             break;
         }
-        let prev_line = line - 1;
-        if let Some(prev_bytes) = util::line_at(source, prev_line) {
-            // Strip trailing newline/carriage-return, then check for `\`
-            let mut end = prev_bytes.len();
-            while end > 0 && (prev_bytes[end - 1] == b'\n' || prev_bytes[end - 1] == b'\r') {
-                end -= 1;
-            }
-            if end > 0 && prev_bytes[end - 1] == b'\\' {
-                line = prev_line;
-                continue;
-            }
+        if line_ends_with_backslash(line - 1) {
+            line -= 1;
+            continue;
         }
         break;
     }
@@ -289,6 +341,12 @@ impl Cop for EmptyLinesAroundBlockBody {
         // When a lambda has multiline params (`-> (a,\n b) do`), the `->` is
         // on an earlier line than `do`/`{`. Using `->` as the reference means
         // the line after `->` is a param continuation, not blank, so no FP.
+        //
+        // For `no_empty_lines`, we walk ALL the way back through `\` so the
+        // next line after the reference is a continuation string (never blank).
+        // For `empty_lines`, we step back only one line (matching
+        // `send_node.last_line`) so the `do` line is what gets checked.
+        let full_walkback = style != "empty_lines";
         let effective_opening = if let Some(op_offset) = lambda_operator_offset {
             let (op_line, _) = source.offset_to_line_col(op_offset);
             let (opening_line, _) = source.offset_to_line_col(opening_offset);
@@ -297,11 +355,11 @@ impl Cop for EmptyLinesAroundBlockBody {
                 op_offset
             } else {
                 // Single-line: -> and do/{ on same line, use normal logic
-                adjusted_keyword_offset(source, opening_offset)
+                adjusted_keyword_offset(source, opening_offset, full_walkback)
             }
         } else {
             // Regular block: walk backward through backslash continuations
-            adjusted_keyword_offset(source, opening_offset)
+            adjusted_keyword_offset(source, opening_offset, full_walkback)
         };
 
         match style {
