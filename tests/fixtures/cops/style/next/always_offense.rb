@@ -15,3 +15,9 @@ items.each do |item|
     step_two
   end if condition
 end
+
+# parenthesized modifier if as sole block body
+AppConfig.providers.fetch('identity', []).map do |provider|
+  ({ name: provider, href: send("#{provider}_oauth_path") } if ENV["#{provider.upcase}_APP_KEY"])
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/Next: Use `next` to skip iteration.
+end.compact
