@@ -25,3 +25,25 @@ in ADT[*head, tail]
       ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets missing.
                   ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets missing.
 end
+# Multiline nested arrays — brackets on different lines ARE collapsed in compact
+[
+^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+  [ :A, :D, false ],
+  [ :N, :A, true ]
+]
+^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+[
+^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+  [ 1, 2, 3 ],
+  [ 4, 5, 6 ]
+]
+^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+# Element reference brackets count as adjacent (right side only)
+[ foo[:bar] ]
+            ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+# Multiline with element reference — right side adjacent across lines
+[
+  attr[:name],
+  attr[:type]
+]
+^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
