@@ -13,3 +13,11 @@ items.each { |x| puts x }
 items.each { |a, b| puts a }
               ^ Layout/SpaceAroundBlockParameters: No space before first block parameter detected.
                   ^ Layout/SpaceAroundBlockParameters: No space after last block parameter detected.
+
+shared_examples 'with extra space before multiline closing pipe' do |
+  index:,
+  other_index:
+  |
+^^ Layout/SpaceAroundBlockParameters: Extra space after last block parameter detected.
+  puts index
+end
