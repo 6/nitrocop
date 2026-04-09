@@ -1106,6 +1106,11 @@ def main():
                              "If not specified, generates them into a temp directory.")
     args = parser.parse_args()
 
+    if not os.environ.get("CI"):
+        print("ERROR: check_cop.py is intended for CI only.", file=sys.stderr)
+        print("Use docs/corpus.md, CI cop-check comments/logs, or gh api for local investigation.", file=sys.stderr)
+        sys.exit(1)
+
     # Declare all globals used in this function up front (Python requires
     # global declarations before any assignment to the name in the function).
     global _USE_REPO_CWD, _STYLE_CONFIG_OVERRIDE, _CLONE_DIR
