@@ -8,3 +8,15 @@ data['stdout'], data['stderr'], status =
 rt[col], message = normalize_value(value, counter)
   ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
       ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+
+Try[StandardError] do
+   ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+                 ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+  call(1)
+end
+
+mysql_query(<<-SQL).first["pagetext"]
+                         ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+                                    ^ Layout/SpaceInsideReferenceBrackets: Use space inside reference brackets.
+  SELECT 1
+SQL
