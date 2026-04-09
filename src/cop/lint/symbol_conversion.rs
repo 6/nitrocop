@@ -263,7 +263,7 @@ use crate::parse::source::SourceFile;
 /// `is_in_undef` byte-scan found the text "undef" inside a `%i` array and
 /// falsely treated `unless` as a `undef` argument. Fix: added
 /// `is_undef_at_statement_start` check — after finding `undef`, verify it's
-/// preceded (past whitespace) by `\n`, `;`, or start of file.
+/// preceded (past whitespace) by `\n`, `;`, `{`, or start of file.
 ///
 /// FN=2 (:~@ symbols): Bare symbols with `:` opening were hitting `_ => return`
 /// in consistent mode. RuboCop's `properly_quoted?` doesn't short-circuit for
@@ -508,7 +508,8 @@ fn value_starts_with_identifier(value: &[u8]) -> bool {
 
 /// Check if `undef` at a given position is actually a keyword (at statement start),
 /// not just the text "undef" inside a `%i` array or similar context.
-/// Returns true if preceded (after skipping whitespace) by newline, `;`, or start of file.
+/// Returns true if preceded (after skipping whitespace) by a statement boundary:
+/// newline, `;`, `{` (block opening), or start of file.
 fn is_undef_at_statement_start(src: &[u8], undef_start: usize) -> bool {
     if undef_start == 0 {
         return true;
@@ -517,7 +518,7 @@ fn is_undef_at_statement_start(src: &[u8], undef_start: usize) -> bool {
     while p > 0 && matches!(src[p - 1], b' ' | b'\t') {
         p -= 1;
     }
-    p == 0 || matches!(src[p - 1], b'\n' | b'\r' | b';')
+    p == 0 || matches!(src[p - 1], b'\n' | b'\r' | b';' | b'{')
 }
 
 /// Check if a symbol node is inside a `undef` statement.

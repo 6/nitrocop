@@ -17,6 +17,11 @@ undef foo, bar
       ^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:foo` instead.
            ^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:bar` instead.
 
+# FN fix: undef inside a block body (preceded by {)
+# fastlane pattern
+FeatureHelper.instance_eval { undef test_method }
+                                    ^^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:test_method` instead.
+
 # FN fix: bare symbols whose source doesn't match correction should be flagged
 # in consistent mode. Prism gives value "~" for :~@ (source :~@, correction :~).
 # bloom-lang/bud and rubyworks/facets patterns.
