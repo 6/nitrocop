@@ -16,6 +16,12 @@ use crate::parse::source::SourceFile;
 ///   be checked even with the default config. Only skip multiline `StringNode`s
 ///   when they are the broader multi-line-body form RuboCop still accepts by
 ///   default.
+/// - 2026-04-09: `double_quotes` variant had 973 FP on single-quoted strings
+///   like `'\\d+'` and `'\\\\boot.ini'`. Root cause: `has_meaningful_backslash_escape`
+///   paired `\\` and skipped both chars, missing that the second `\` + next
+///   char (e.g. `\d`, `\b`) would become an escape in double quotes. RuboCop's
+///   regex `\\[^'\\]` scans every position independently without pairing. Fixed
+///   by replacing the pair-skipping loop with a simple `windows(2)` scan.
 pub struct StringLiterals;
 
 impl Cop for StringLiterals {
@@ -196,21 +202,16 @@ impl<'pr> Visit<'pr> for StringLiteralsVisitor<'_> {
 /// `\n`, `\t`, `\s`, etc. are literal (two characters), but in double-quoted
 /// strings they'd become real escape sequences. Only `\\` and `\'` are safe
 /// to convert. Matches RuboCop's `\\[^'\\]` regex.
+///
+/// Important: this intentionally does NOT pair backslashes. RuboCop's regex
+/// scans every position independently, so `'\\d+'` (source: `\\d+`) matches
+/// because the second `\` followed by `d` triggers the regex, even though
+/// the first `\\` is an escape pair. This prevents unsafe conversion of
+/// e.g. `'\\n'` → `"\\n"` (which would change `\n` literal to a newline).
 fn has_meaningful_backslash_escape(content: &[u8]) -> bool {
-    let mut i = 0;
-    while i < content.len() {
-        if content[i] == b'\\' && i + 1 < content.len() {
-            let next = content[i + 1];
-            if next != b'\'' && next != b'\\' {
-                return true;
-            }
-            // Skip the pair
-            i += 2;
-            continue;
-        }
-        i += 1;
-    }
-    false
+    content
+        .windows(2)
+        .any(|w| w[0] == b'\\' && w[1] != b'\'' && w[1] != b'\\')
 }
 
 /// Check if a double-quoted string's raw source content contains escape
