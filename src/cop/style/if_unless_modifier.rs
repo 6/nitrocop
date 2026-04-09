@@ -162,6 +162,14 @@ use ruby_prism::Visit;
 /// `node.chained?` only skips real operator/receiver chaining, so the fix keeps
 /// standalone `!` chaining but ignores `!` when it is just method-name
 /// punctuation.
+///
+/// FN root cause (2026-04-09): the broader previous-line punctuation heuristic
+/// was still skipping real offenses after percent-string delimiters (`%!...!`),
+/// exception globals (`$!`), character literals (`?!` / `?-`), `def !`, and
+/// binary operators where the `if` is the ARGUMENT (`foo +\nif cond`) rather
+/// than the receiver. RuboCop's `node.chained?` only skips true receiver
+/// chains, so the fix narrows the heuristic to receiver-looking previous-line
+/// shapes only: bare unary-operator lines and explicit `.` / `&.` continuations.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -903,29 +911,28 @@ fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::No
 }
 
 /// Check if the if/unless keyword is at the start of a line and the previous
-/// non-empty, non-comment line ends with an operator that would make the
-/// if-expression an operand (e.g., `- \n if foo ... end`).
+/// non-empty, non-comment line looks like a true receiver continuation:
+/// a bare unary operator (`-`, `+`, `!`, `~`) or an explicit call chain
+/// continuation (`foo.` / `foo&.`).
 ///
-/// RuboCop catches this via `node.chained?` which returns true when the node
-/// is the receiver of a method call. Without AST parent access, we detect it
-/// by text: when the previous line ends with an operator character that isn't
-/// `=`, `:`, or `=>` (which are handled by parenthesization), the if-node is
-/// part of a larger expression and cannot be converted to modifier form.
+/// This intentionally does NOT treat generic trailing punctuation as chaining.
+/// Examples RuboCop still flags:
+/// - `%!...!` percent-string delimiters
+/// - `$!` exception globals
+/// - `?!` / `?-` character literals
+/// - `def !`
+/// - `foo +` where the if-expression is an argument, not the receiver
 fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location<'_>) -> bool {
     let (kw_line, kw_col) = source.offset_to_line_col(kw_loc.start_offset());
     let kw_line_start = kw_loc.start_offset().saturating_sub(kw_col);
     let before_kw = &source.as_bytes()[kw_line_start..kw_loc.start_offset()];
 
-    // Only applies when the if/unless keyword is at the start of the line
-    if !before_kw.iter().all(|&b| b == b' ' || b == b'\t') {
-        return false;
-    }
-    if kw_line < 2 {
+    // Only applies when the if/unless keyword is at the start of the line.
+    if !before_kw.iter().all(|&b| b == b' ' || b == b'\t') || kw_line < 2 {
         return false;
     }
 
     let lines: Vec<&[u8]> = source.lines().collect();
-    // Find the previous non-empty, non-comment line
     for prev_idx in (0..kw_line - 1).rev() {
         let prev_line = lines[prev_idx];
         let prev_str = String::from_utf8_lossy(prev_line);
@@ -934,42 +941,18 @@ fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location
         if prev_trimmed.is_empty() {
             continue;
         }
+
         let prev_code = strip_trailing_comment(prev_trimmed);
         if prev_code.is_empty() {
             continue;
         }
-        let code_bytes = prev_code.as_bytes();
-        let last_byte = match code_bytes.last() {
-            Some(&b) => b,
-            None => return false,
-        };
-        // Symbol literals like `:+`, `:-`, `:*` end with an operator char
-        // but are not operators — the preceding `:` marks a symbol.
-        if code_bytes.len() >= 2 && code_bytes[code_bytes.len() - 2] == b':' {
-            return false;
-        }
-        if last_byte == b'!' && trailing_bang_is_method_suffix(code_bytes) {
-            return false;
-        }
-        // These operators bind to the if-expression, making it a receiver/operand.
-        // Exclude `=`, `:`, `>` (part of `=>`) which are handled by parenthesization.
-        // Exclude `)`, `]`, `}` which are closing delimiters, not operators.
-        // Exclude `|` because block parameter delimiters `{ |x, y|` end with `|`
-        // and are far more common than binary `|` chaining to the next line.
-        // Exclude `/` because regexp closers like `when /pattern/` are far more
-        // common at end of line than division chaining to the next line.
-        return matches!(
-            last_byte,
-            b'.' | b'+' | b'-' | b'*' | b'%' | b'!' | b'~' | b'^' | b'&' | b'<'
-        );
-    }
-    false
-}
 
-fn trailing_bang_is_method_suffix(code_bytes: &[u8]) -> bool {
-    code_bytes
-        .get(code_bytes.len().saturating_sub(2))
-        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        return matches!(prev_code, "-" | "+" | "!" | "~")
+            || prev_code.ends_with('.')
+            || prev_code.ends_with("&.");
+    }
+
+    false
 }
 
 /// Check if an IfNode or UnlessNode is a pattern matching guard (e.g., `in "a" if cond`).
@@ -1242,9 +1225,8 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
-        // Skip if the if/unless is "chained" from the previous line — an operator
-        // on the previous line makes the if-expression its operand (e.g., `- \n if foo
-        // ... end`). RuboCop catches this via `node.chained?`.
+        // Skip if the if/unless is chained from the previous line, matching
+        // the narrow receiver cases RuboCop covers via `node.chained?`.
         if previous_line_chains_to_if(source, &kw_loc) {
             return;
         }
@@ -1499,6 +1481,18 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "Bang method names on the previous line should not suppress modifier suggestion"
+        );
+    }
+
+    #[test]
+    fn previous_line_binary_operator_argument_is_not_treated_as_chaining() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"list = a +\nif foo\n  bar\nend\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Binary operators on the previous line should not suppress modifier suggestion"
         );
     }
 }
