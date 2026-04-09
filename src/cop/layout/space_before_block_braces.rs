@@ -19,12 +19,6 @@ use crate::parse::source::SourceFile;
 ///   is visited via `visit_block_node()` (named method) rather than `visit()` (generic
 ///   dispatch), so `visit_branch_node_enter` is never called for the inner BlockNode.
 ///   Fixed by registering for `FORWARDING_SUPER_NODE` and extracting the block.
-/// - **Multiline block FPs (7 FPs, no_space variant):** RuboCop's
-///   `conflict_with_block_delimiters?` skips multiline `{ }` blocks when
-///   `Style/BlockDelimiters` is `line_count_based` (the default) and style is
-///   `no_space`, to avoid conflicting autocorrections. RuboCop defines multiline for
-///   blocks as `loc.begin.line != loc.end.line` (brace-to-brace, not expression-wide).
-///   Fixed by skipping `no_space` checks when `{` and `}` are on different lines.
 pub struct SpaceBeforeBlockBraces;
 
 impl Cop for SpaceBeforeBlockBraces {
@@ -87,16 +81,6 @@ impl Cop for SpaceBeforeBlockBraces {
 
         match effective_style {
             "no_space" => {
-                // RuboCop's conflict_with_block_delimiters?: skip multiline { } blocks
-                // in no_space mode when Style/BlockDelimiters is line_count_based (default).
-                // RuboCop defines block multiline? as loc.begin.line != loc.end.line
-                // (brace-to-brace, not the full expression).
-                let opening_line = source.offset_to_line_col(opening.start_offset()).0;
-                let closing_line = source.offset_to_line_col(closing.start_offset()).0;
-                if opening_line != closing_line {
-                    return;
-                }
-
                 if before > 0 && bytes[before - 1] == b' ' {
                     let (line, column) = source.offset_to_line_col(before - 1);
                     let mut diag = self.diagnostic(
