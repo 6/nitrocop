@@ -151,6 +151,18 @@ use ruby_prism::Visit;
 ///   looked for `;`, scope closers, and later lines, so it missed same-line
 ///   `rescue` tails and suppressed valid offenses. Fixed by treating a same-line
 ///   `rescue` tail after the predicate as a right sibling.
+///
+/// **FP root causes (round 9, 10 FP in diagnosis packet):**
+/// - Prism excludes a trailing line-continuation backslash from the predicate
+///   range. For `next if cond \` with the blank line after the continued
+///   condition, the tail check saw `\` after the parsed predicate and treated it
+///   as real same-line content, causing a false offense. Fixed by treating a
+///   tail of only `\` plus whitespace as continuation syntax, not content.
+/// - Modifier conditions wrapped in a parenthesized or indexed expression can
+///   be followed by a line that starts with `)`/`],`/`),`. That line closes the
+///   enclosing expression; it is not a `right_sibling` in RuboCop's Parser AST.
+///   Fixed by treating lines that start with `)` or `]` like other scope
+///   closers in the sibling heuristic.
 pub struct EmptyLineAfterMultilineCondition;
 
 impl Cop for EmptyLineAfterMultilineCondition {
@@ -423,7 +435,7 @@ fn has_right_sibling(
         }
         let trimmed = line.iter().position(|&b| b != b' ' && b != b'\t');
         if let Some(pos) = trimmed {
-            let rest = &line[pos..];
+            let rest = strip_trailing_cr(&line[pos..]);
             // Skip comment lines — comments are not AST siblings
             if rest.starts_with(b"#") {
                 continue;
@@ -454,8 +466,14 @@ fn has_right_sibling(
     false
 }
 
+/// Strip a trailing `\r` from a line fragment produced by `split('\n')`.
+fn strip_trailing_cr(rest: &[u8]) -> &[u8] {
+    rest.strip_suffix(b"\r").unwrap_or(rest)
+}
+
 /// Check if a line starts with `end` or `}` (scope closers).
 fn is_line_scope_closer(rest: &[u8]) -> bool {
+    let rest = strip_trailing_cr(rest);
     rest == b"end"
         || rest.starts_with(b"end ")
         || rest.starts_with(b"end\t")
@@ -464,6 +482,8 @@ fn is_line_scope_closer(rest: &[u8]) -> bool {
         || rest.starts_with(b"end;")
         || rest == b"}"
         || rest.starts_with(b"};")
+        || rest.starts_with(b")")
+        || rest.starts_with(b"]")
 }
 
 /// Result of checking the tail of a line for scope closers and right siblings.
@@ -515,6 +535,7 @@ fn tail_scope_closer_check(tail: &[u8]) -> TailResult {
 
 /// Check if a line starts with a branch keyword (`else`, `elsif`, `rescue`, `ensure`).
 fn is_branch_keyword(rest: &[u8]) -> bool {
+    let rest = strip_trailing_cr(rest);
     rest == b"else"
         || rest.starts_with(b"else ")
         || rest.starts_with(b"else\t")
@@ -528,6 +549,7 @@ fn is_branch_keyword(rest: &[u8]) -> bool {
 
 /// Check if a line starts with `rescue` or `ensure`.
 fn is_rescue_keyword(rest: &[u8]) -> bool {
+    let rest = strip_trailing_cr(rest);
     rest.starts_with(b"rescue")
         && (rest.len() == 6 || rest[6] == b' ' || rest[6] == b'\t' || rest[6] == b'\n')
         || rest.starts_with(b"ensure")
@@ -569,7 +591,7 @@ fn is_sole_body_statement(
             // `case` is never a right sibling of content inside `when`.
             let trimmed_pos = line.iter().position(|&b| b != b' ' && b != b'\t');
             if let Some(pos) = trimmed_pos {
-                let rest = &line[pos..];
+                let rest = strip_trailing_cr(&line[pos..]);
                 if rest.starts_with(b"when ") || rest.starts_with(b"when\t") || rest == b"when" {
                     return false;
                 }
@@ -615,6 +637,20 @@ fn is_then_keyword(rest: &[u8]) -> bool {
             || rest[4] == b'\n'
             || rest[4] == b'\r'
             || rest[4] == b';')
+}
+
+/// Check if the tail after a parsed predicate is only a line-continuation
+/// backslash plus optional trailing whitespace.
+///
+/// Prism excludes the trailing `\` from the predicate range, but RuboCop's
+/// `condition.last_line` semantics still treat the following physical line as
+/// part of the condition. The `\` is syntax, not real content after the
+/// condition, so it must not trigger a same-line offense.
+fn is_line_continuation_tail(rest: &[u8]) -> bool {
+    rest.starts_with(b"\\")
+        && rest[1..]
+            .iter()
+            .all(|&b| b == b' ' || b == b'\t' || b == b'\r')
 }
 
 /// Count the number of leading whitespace characters in a line.
@@ -706,7 +742,8 @@ impl EmptyLineAfterMultilineCondition {
                     // Skip comments and `then` keyword — both are not real
                     // content after the condition. `then` is a syntactic keyword
                     // of `if`/`elsif`/`unless` and should be ignored.
-                    if rest[0] != b'#' && !is_then_keyword(rest) {
+                    if rest[0] != b'#' && !is_then_keyword(rest) && !is_line_continuation_tail(rest)
+                    {
                         let (line, col) =
                             source.offset_to_line_col(predicate.location().start_offset());
                         return vec![self.diagnostic(source, line, col, MSG.to_string())];
@@ -1006,6 +1043,20 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not fire when CRLF blank line follows multiline condition: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn fp_modifier_unless_no_right_sibling_with_crlf_scope_closer() {
+        // In CRLF files, line-based right-sibling checks must still recognize
+        // `end\r` as a scope closer. Otherwise the scan looks past the closing
+        // `end` and treats the next outer statement as a sibling.
+        let source = b"def m\r\n  if outer\r\n    return false unless catch :found do\r\n      p = self\r\n    end\r\n  end\r\n  next_stmt\r\nend\r\n";
+        let diags = crate::testutil::run_cop_full(&EmptyLineAfterMultilineCondition, source);
+        assert!(
+            diags.is_empty(),
+            "Should not fire when CRLF `end` closes the modifier scope: {:?}",
             diags
         );
     }
