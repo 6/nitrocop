@@ -155,6 +155,18 @@ use crate::parse::source::SourceFile;
 ///   suppresses offenses when the binary operator line lacks a trailing `\`.
 ///   Resolves ~144 FPs and ~51 FNs with zero regressions.
 ///
+/// ## Fixes applied (2026-04-09)
+/// - **Trailing `&.` join length**: RuboCop's single-line suitability
+///   check collapses safe-navigation chains split after a trailing `&.` like
+///   `foo&.\n  bar` without inserting a space. Nitrocop only handled the
+///   leading-dot form (`foo\n  .bar`), so it overestimated joined length for
+///   these safe-navigation chains and skipped real offenses when the true
+///   joined line fit under the configured maximum.
+/// - **Unary `!` wrapper anchoring**: Prism exposes `!foo&.\n  bar` as an
+///   outer unary-`!` call wrapped around the multiline send, but RuboCop
+///   reports the underlying send start (`foo`, not `!`). Nitrocop now skips
+///   that wrapper so the inner call is checked and anchored like RuboCop.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -559,7 +571,10 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 combined.extend_from_slice(without_continuation);
             } else {
                 let trimmed = trim_leading_whitespace(without_continuation);
-                if starts_with_method_chain_dot(trimmed) {
+                if starts_with_method_chain_dot(trimmed)
+                    || (ends_with_safe_navigation_operator(&combined)
+                        && trimmed.first().is_some_and(|b| is_word_char(*b)))
+                {
                     combined.extend_from_slice(trimmed);
                 } else {
                     combined.push(b' ');
@@ -814,6 +829,15 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
         };
 
         let skip_for_checked_chain = self.part_of_checked_chain(start_offset, end_offset);
+        let unary_bang_wrapper = node.name().as_slice() == b"!"
+            && node.arguments().is_none()
+            && node.block().is_none()
+            && node.receiver().and_then(|r| r.as_call_node()).is_some();
+
+        if unary_bang_wrapper {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        }
 
         if self.is_multiline(start_offset, check_end)
             && !self.part_of_reported_node(start_offset, end_offset)
@@ -1360,6 +1384,10 @@ fn starts_with_method_chain_dot(trimmed: &[u8]) -> bool {
     }
 }
 
+fn ends_with_safe_navigation_operator(trimmed: &[u8]) -> bool {
+    trimmed.ends_with(b"&.")
+}
+
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
@@ -1379,6 +1407,26 @@ fn leading_whitespace_len(line: &[u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(RedundantLineBreak, "cops/layout/redundant_line_break");
+
+    #[test]
+    fn safe_navigation_chain_with_trailing_operator_uses_exact_joined_length() {
+        let source = b"!current_course_user&.\n  email_unsubscriptions&.\n  where(course_settings_email_id: email_setting_enabled(component, setting).id)&.exists?\n";
+        let config = CopConfig {
+            options: HashMap::from([(
+                "MaxLineLength".to_string(),
+                serde_yml::Value::Number(serde_yml::Number::from(132)),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, config);
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 1);
+        assert_eq!(diagnostics[0].location.column, 1);
+    }
 }
