@@ -42,6 +42,15 @@ use crate::parse::source::SourceFile;
 ///    false negatives for the `no_space, space` variant. Fixed by porting that
 ///    alignment logic only for the `no_space` multiline right-brace path, so
 ///    the default `space` behavior remains unchanged.
+/// 8. That first port was still incomplete for multiline `no_space` blocks.
+///    RuboCop suppresses some same-line ` ... ] }` closers when the total
+///    number of spaces on the last inner line happens to equal the block's
+///    starting column, and it still registers a zero-width `}` offense when a
+///    multiline body ends immediately before `}`. The cop missed both quirks,
+///    causing 3 false positives and 94 false negatives in the `no_space, space`
+///    variant. Fixed by mirroring RuboCop's `aligned_braces?` guard and
+///    `space_inside_right_brace` range calculation exactly for multiline
+///    `EnforcedStyle: no_space`.
 pub struct SpaceInsideBlockBraces;
 
 impl SpaceInsideBlockBraces {
@@ -55,6 +64,26 @@ impl SpaceInsideBlockBraces {
             .iter()
             .filter(|&&b| b == b' ')
             .count()
+    }
+
+    fn surrounding_right_brace_range_start(bytes: &[u8], close_start: usize) -> (usize, bool) {
+        let mut start = close_start;
+
+        while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+            start -= 1;
+        }
+
+        let mut has_newline = false;
+        while start > 0 && matches!(bytes[start - 1], b'\n' | b'\r') {
+            start -= 1;
+            has_newline = true;
+        }
+
+        while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+            start -= 1;
+        }
+
+        (start, has_newline)
     }
 }
 
@@ -373,28 +402,33 @@ impl Cop for SpaceInsideBlockBraces {
                 if is_multiline {
                     let inner = &bytes[open_end..close_start];
                     let node_column = source.offset_to_line_col(node_start_offset).1;
+                    let close_column = source.offset_to_line_col(closing.start_offset()).1;
+                    let last_inner_space_count = Self::last_inner_line_space_count(inner);
 
-                    if inner.ends_with(b"]") {
-                        let last_inner_space_count = Self::last_inner_line_space_count(inner);
-                        let extra_spaces = last_inner_space_count.saturating_sub(node_column);
+                    // RuboCop exempts multiline right braces when the brace is
+                    // aligned with the block start column, or when the total
+                    // number of spaces on the last inner line happens to equal
+                    // that same column.
+                    if node_column != close_column && node_column != last_inner_space_count {
+                        let (mut start, has_newline) =
+                            Self::surrounding_right_brace_range_start(bytes, close_start);
+                        let mut end = close_start;
 
-                        if extra_spaces > 0 {
-                            let end = close_start - 1;
-                            range = Some((end - extra_spaces, end));
+                        if has_newline {
+                            let start_signed =
+                                end as isize - (close_column as isize - node_column as isize);
+                            start = start_signed.max(0) as usize;
                         }
-                    } else if trailing_whitespace_len > 0 {
-                        let whitespace_start = close_start - trailing_whitespace_len;
-                        let whitespace = &bytes[whitespace_start..close_start];
 
-                        if whitespace.iter().any(|&b| matches!(b, b'\n' | b'\r')) {
-                            let close_column = source.offset_to_line_col(closing.start_offset()).1;
-                            let extra_spaces = close_column.saturating_sub(node_column);
+                        if inner.ends_with(b"]") {
+                            end -= 1;
+                            let start_signed = end as isize
+                                - (last_inner_space_count as isize - node_column as isize);
+                            start = start_signed.max(0) as usize;
+                        }
 
-                            if extra_spaces > 0 {
-                                range = Some((close_start - extra_spaces, close_start));
-                            }
-                        } else {
-                            range = Some((whitespace_start, close_start));
+                        if start <= end {
+                            range = Some((start, end));
                         }
                     }
                 } else if trailing_whitespace_len > 0 {

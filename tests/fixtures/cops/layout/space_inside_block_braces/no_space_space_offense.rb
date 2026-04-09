@@ -9,3 +9,7 @@ foo {[
   bar
   ]}
 ^^ Layout/SpaceInsideBlockBraces: Space inside } detected.
+
+foo.select { |v|
+  v.url}
+       ^ Layout/SpaceInsideBlockBraces: Space inside } detected.
