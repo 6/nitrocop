@@ -30,6 +30,15 @@ use super::trailing_comma;
 /// `end_offset()` and the outer `]`. The `any_heredoc` check must recurse into
 /// sub-arrays to detect these nested heredocs, otherwise heredoc content gets
 /// scanned for commas producing false positives. Seen in zeitwerk, rufo, thredded.
+///
+/// ## Variant config alias handling (2026-04)
+/// Corpus variant runs pass `EnforcedStyle=diff_comma`, but RuboCop's trailing
+/// comma mixin reads `EnforcedStyleForMultiline`. This cop's direct tests were
+/// correct because they set `EnforcedStyleForMultiline`, while corpus variant
+/// checks silently fell back to the default `no_comma` style. That produced one
+/// FP on a `:key => [],` array item and two FNs on multiline arrays missing the
+/// last comma. Accept both keys here, preferring `EnforcedStyle` when present,
+/// so variant overrides match RuboCop without changing default behavior.
 pub struct TrailingCommaInArrayLiteral;
 
 impl Cop for TrailingCommaInArrayLiteral {
@@ -81,7 +90,10 @@ impl Cop for TrailingCommaInArrayLiteral {
         let has_comma =
             trailing_comma::detect_trailing_comma(bytes, last_end, closing_start, has_heredoc);
 
-        let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
+        let style = config.get_str(
+            "EnforcedStyle",
+            config.get_str("EnforcedStyleForMultiline", "no_comma"),
+        );
 
         // Check if array is multiline: the opening `[` and closing `]` are on different lines.
         let open_line = if let Some(opening) = array_node.opening_loc() {
@@ -332,6 +344,18 @@ mod tests {
         );
     }
 
+    fn diff_comma_alias_config() -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("diff_comma".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn offense_comma_fixture() {
         assert_cop_offenses_full_with_config(
@@ -351,6 +375,28 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/no_offense.comma.rb"
             ),
             comma_config(),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma_alias_fixture() {
+        assert_cop_offenses_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/offense.diff_comma.rb"
+            ),
+            diff_comma_alias_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_alias_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/no_offense.diff_comma.rb"
+            ),
+            diff_comma_alias_config(),
         );
     }
 }
