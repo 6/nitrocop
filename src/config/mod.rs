@@ -2329,6 +2329,17 @@ impl ResolvedConfig {
                 .entry("ArgumentAlignmentStyle".to_string())
                 .or_insert_with(|| Value::String(aa_style.to_string()));
         }
+        if name == "Layout/FirstArrayElementIndentation" {
+            let array_alignment_config = self.cop_configs.get("Layout/ArrayAlignment");
+            let array_alignment_style = array_alignment_config
+                .and_then(|cc| cc.options.get("EnforcedStyle"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("with_first_element");
+            config
+                .options
+                .entry("ArrayAlignmentStyle".to_string())
+                .or_insert_with(|| Value::String(array_alignment_style.to_string()));
+        }
         // Inject sibling Layout cop styles that other cops consult at runtime.
         if name == "Layout/FirstHashElementIndentation" {
             let hash_alignment_config = self.cop_configs.get("Layout/HashAlignment");
@@ -3343,6 +3354,24 @@ mod tests {
         assert_eq!(rocket_styles.len(), 2);
         assert_eq!(rocket_styles[0].as_str(), Some("key"));
         assert_eq!(rocket_styles[1].as_str(), Some("separator"));
+    }
+
+    #[test]
+    fn first_array_element_indentation_inherits_array_alignment_style() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+        let path = write_config(
+            dir,
+            "Layout/ArrayAlignment:\n  EnforcedStyle: with_fixed_indentation\n",
+        );
+        let config = load_config(Some(&path), None, None).unwrap();
+        let cc = config.cop_config("Layout/FirstArrayElementIndentation");
+        assert_eq!(
+            cc.options
+                .get("ArrayAlignmentStyle")
+                .and_then(|v| v.as_str()),
+            Some("with_fixed_indentation")
+        );
     }
 
     #[test]

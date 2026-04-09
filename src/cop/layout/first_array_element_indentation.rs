@@ -1,8 +1,3 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
-
-use crate::cop::registry::CopRegistry;
 use crate::cop::shared::node_type::ARRAY_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -28,72 +23,12 @@ fn byte_col_to_char_col(line_bytes: &[u8], byte_col: usize) -> usize {
         .count()
 }
 
-fn nearest_project_config(path: &Path) -> Option<PathBuf> {
-    let start = if path.is_dir() { path } else { path.parent()? };
-    for dir in start.ancestors() {
-        for name in [".rubocop.yml", ".standard.yml"] {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-fn repo_uses_fixed_array_alignment(source: &SourceFile) -> bool {
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, bool>>> = OnceLock::new();
-
-    let path = &source.path;
-    if !path.is_absolute() || !path.exists() {
-        return false;
-    }
-
-    let Some(config_path) = nearest_project_config(path) else {
-        return false;
-    };
-
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(cached) = cache
-        .lock()
-        .ok()
-        .and_then(|entries| entries.get(&config_path).copied())
-    {
-        return cached;
-    }
-
-    let fixed = crate::config::load_config(Some(&config_path), Some(path), None)
-        .ok()
-        .map(|resolved| {
-            let registry = CopRegistry::default_registry();
-            let configs = resolved.precompute_cop_configs(&registry);
-            let array_alignment_idx = registry
-                .names()
-                .iter()
-                .position(|name| *name == "Layout/ArrayAlignment");
-
-            array_alignment_idx.is_some_and(|idx| {
-                configs.get(idx).is_some_and(|cfg| {
-                    cfg.get_str("EnforcedStyle", "with_first_element") == "with_fixed_indentation"
-                })
-            })
-        })
-        .unwrap_or(false);
-
-    if let Ok(mut entries) = cache.lock() {
-        entries.insert(config_path, fixed);
-    }
-
-    fixed
-}
-
-fn enforce_first_argument_with_fixed_indentation(config: &CopConfig, source: &SourceFile) -> bool {
+fn enforce_first_argument_with_fixed_indentation(config: &CopConfig) -> bool {
     config
         .options
         .get("ArrayAlignmentStyle")
         .and_then(|value| value.as_str())
         .is_some_and(|style| style == "with_fixed_indentation")
-        || repo_uses_fixed_array_alignment(source)
 }
 
 /// Layout/FirstArrayElementIndentation cop.
@@ -288,8 +223,8 @@ fn enforce_first_argument_with_fixed_indentation(config: &CopConfig, source: &So
 /// `Layout/ArrayAlignment` uses `with_fixed_indentation`. nitrocop only read
 /// this cop's own config, so variant runs still flagged repo-configured cases
 /// that RuboCop delegated to `Layout/ArrayAlignment`. Fix: check that sibling
-/// style here too, using a cached repo-config lookup when no injected override
-/// is available.
+/// style here too, by injecting `Layout/ArrayAlignment`'s effective
+/// `EnforcedStyle` into this cop's config during config resolution.
 pub struct FirstArrayElementIndentation;
 
 /// Describes what the expected indentation is relative to.
@@ -1020,7 +955,7 @@ impl Cop for FirstArrayElementIndentation {
         let style = config.get_str("EnforcedStyle", "special_inside_parentheses");
         let width = config.get_usize("IndentationWidth", 2);
 
-        if style != "consistent" && enforce_first_argument_with_fixed_indentation(config, source) {
+        if style != "consistent" && enforce_first_argument_with_fixed_indentation(config) {
             return;
         }
 
@@ -1210,6 +1145,7 @@ impl Cop for FirstArrayElementIndentation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::registry::CopRegistry;
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
