@@ -216,3 +216,20 @@ puts(items.map { |x| x.bar unless x.nil? })
     end if reader
   end
 ] + other).uniq
+
+# `private def` with `and` keyword — `private` is a dotless call, making it an
+# unsafe parent. RuboCop's ancestor walk escapes chains whose last call has a
+# block because the block node is not a :call type.
+private def argumentable?(method_obj)
+  method_obj and method_obj.parameters.any? { |param| param[0] == :key and param[1] == :arg }
+end
+
+private def process(method_obj)
+  method_obj && method_obj.parameters.each { |param| param }
+end
+
+# Parenthesized `&&` inside block — RuboCop's find_matching_receiver_invocation
+# follows receiver chain but cannot descend into `and` nodes inside parentheses.
+items.each do |item|
+  errors && (errors.is_a?(Array) && errors != EMPTY_ARRAY) || (errors.is_a?(String))
+end
