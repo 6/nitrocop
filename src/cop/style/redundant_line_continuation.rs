@@ -114,6 +114,16 @@ use ruby_prism::Visit;
 ///   treating Prism `BlockArgumentNode` (`&:sym`, `&block`) as a parser-style
 ///   argument during recursive `argument_newline?` checks.
 ///
+/// - **Parser-token parity for `tFID` and `(` arguments**: RuboCop's
+///   `method_with_argument?` uses parser token classes, so bang/predicate method
+///   names like `foo!` and `valid?` are `tFID`, not `tIDENTIFIER`, and a next
+///   line starting with `(` is only `tLPAREN_ARG` after plain methods, `super`,
+///   or `yield`, not after `return`, `break`, or `next`. Our broader byte-based
+///   heuristic caused FNs for corpus cases like `return \` + `(expr)` and for
+///   bang-method continuations like `foo! \` + `bar`. Fixed by classifying the
+///   trailing token more narrowly before accepting `(` or any unparenthesized
+///   argument exemption.
+///
 /// ## Remaining gaps
 ///
 /// - **CRLF reparse compat**: `trim_end` strips `\r` so CRLF files are
@@ -541,19 +551,39 @@ fn method_with_argument(before_backslash: &[u8], next_trimmed: &[u8]) -> bool {
         return false;
     }
 
-    last_token_can_take_argument(before_backslash) && next_line_starts_with_argument(next_trimmed)
+    trailing_argument_taking_token(before_backslash)
+        .is_some_and(|token_kind| next_line_starts_with_argument(next_trimmed, token_kind))
 }
 
-fn last_token_can_take_argument(before_backslash: &[u8]) -> bool {
-    let Some(token) = trailing_identifier(before_backslash) else {
-        return false;
-    };
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgumentTakingTokenKind {
+    Method,
+    Break,
+    Next,
+    Return,
+    Super,
+    Yield,
+}
 
-    matches!(token, b"break" | b"next" | b"return" | b"super" | b"yield")
-        || (token
+fn trailing_argument_taking_token(before_backslash: &[u8]) -> Option<ArgumentTakingTokenKind> {
+    let token = trailing_identifier(before_backslash)?;
+
+    match token {
+        b"break" => Some(ArgumentTakingTokenKind::Break),
+        b"next" => Some(ArgumentTakingTokenKind::Next),
+        b"return" => Some(ArgumentTakingTokenKind::Return),
+        b"super" => Some(ArgumentTakingTokenKind::Super),
+        b"yield" => Some(ArgumentTakingTokenKind::Yield),
+        _ if token
             .first()
             .is_some_and(|b| b.is_ascii_lowercase() || *b == b'_')
-            && !is_keyword_not_method(before_backslash, token))
+            && !matches!(token.last(), Some(b'!' | b'?'))
+            && !is_keyword_not_method(before_backslash, token) =>
+        {
+            Some(ArgumentTakingTokenKind::Method)
+        }
+        _ => None,
+    }
 }
 
 /// Check if a trailing token is a Ruby keyword used as a keyword (not a method call).
@@ -640,7 +670,10 @@ fn leading_identifier(bytes: &[u8]) -> Option<&[u8]> {
     Some(&bytes[..end])
 }
 
-fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
+fn next_line_starts_with_argument(
+    next_trimmed: &[u8],
+    token_kind: ArgumentTakingTokenKind,
+) -> bool {
     if next_trimmed.is_empty() {
         return false;
     }
@@ -670,6 +703,15 @@ fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
         return true;
     }
 
+    if next_trimmed.starts_with(b"(") {
+        return matches!(
+            token_kind,
+            ArgumentTakingTokenKind::Method
+                | ArgumentTakingTokenKind::Super
+                | ArgumentTakingTokenKind::Yield
+        );
+    }
+
     matches!(
         next_trimmed[0],
         b'"'
@@ -681,7 +723,6 @@ fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
             | b'~'
             | b'['
             | b'{'
-            | b'('
             | b'|'
             | b'/'
             | b'*'
