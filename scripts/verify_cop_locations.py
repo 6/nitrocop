@@ -189,6 +189,11 @@ def main():
                              "Generates a temporary config inheriting from the baseline.")
     args = parser.parse_args()
 
+    if not os.environ.get("CI"):
+        print("ERROR: verify_cop_locations.py is intended for CI only.", file=sys.stderr)
+        print("Use docs/corpus.md, CI cop-check comments/logs, or gh api for local investigation.", file=sys.stderr)
+        sys.exit(1)
+
     project_root = find_project_root()
     corpus_dir = project_root / "vendor" / "corpus"
     config_path = project_root / "bench" / "corpus" / "baseline_rubocop.yml"

@@ -20,6 +20,7 @@ Usage:
 import argparse
 import json
 import math
+import os
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -104,6 +105,11 @@ def main():
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit number of examples shown (0 = all)")
     args = parser.parse_args()
+
+    if not os.environ.get("CI"):
+        print("ERROR: investigate_cop.py is intended for CI only.", file=sys.stderr)
+        print("Use docs/corpus.md, CI cop-check comments/logs, or gh api for local investigation.", file=sys.stderr)
+        sys.exit(1)
 
     if args.fp_only and args.fn_only:
         print("Cannot use both --fp-only and --fn-only", file=sys.stderr)
