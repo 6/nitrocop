@@ -306,6 +306,26 @@ def kind
   result
 end
 
+# Multiline call inside `||` without backslash — RuboCop walks up from
+# the inner send through the BinaryOperatorNode (OrNode). operator_keyword?
+# returns true, but the operator line does NOT end with `\`, so
+# require_backslash? returns false and there is no offense.
+foo || bar(
+  1, 2
+)
+
+# Same with `&&`
+foo && bar(
+  1, 2
+)
+
+# Assignment with || — the assignment is flagged separately if it fits on
+# one line, but the inner call `bar(1, 2)` should NOT be flagged because
+# it is inside the OrNode without backslash.
+destroy || raise(
+  ActiveRecord::RecordNotDestroyed.new("Failed to destroy the record", self)
+)
+
 # Chain with backslash content in regex — combined line exceeds 120 chars
 # when backslashes are preserved. The \1_\2 and \d are regex content,
 # not line continuations.
