@@ -12,6 +12,9 @@ use crate::parse::source::SourceFile;
 /// - treats non-default styles as no-ops for empty/comment-only bodies (`body: nil`)
 /// - preserves RuboCop's 2-line-body behavior, where a body starting on the
 ///   header line yields a single `beginning` offense
+/// - skips invalid UTF-8 files whose only encoding hint is a Vim
+///   `fileencoding=` modeline; RuboCop treats those as `Lint/Syntax`, so this
+///   cop must not report layout offenses from Prism's partial recovery
 /// - matches `empty_lines_special`'s deferred scan exactly: skip comment lines
 ///   when searching upward, but only a literally empty line satisfies the
 ///   separator, so whitespace-only lines still offend
@@ -39,6 +42,10 @@ impl Cop for EmptyLinesAroundClassBody {
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        if rubocop_skips_invalid_utf8_source(source) {
+            return;
+        }
+
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
         let (kw_offset, end_offset, body) = if let Some(class_node) = node.as_class_node() {
             // For multiline class declarations (class Foo <\n  Bar), use the
@@ -410,6 +417,89 @@ fn is_comment_line(line: &[u8]) -> bool {
         index += 1;
     }
     line.get(index) == Some(&b'#')
+}
+
+fn rubocop_skips_invalid_utf8_source(source: &SourceFile) -> bool {
+    let bytes = source.as_bytes();
+    std::str::from_utf8(bytes).is_err() && !has_ruby_encoding_magic_comment(bytes)
+}
+
+fn has_ruby_encoding_magic_comment(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+
+    let mut start = 0;
+    let mut line = 0;
+
+    while start <= bytes.len() && line < 2 {
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|pos| start + pos)
+            .unwrap_or(bytes.len());
+        let raw_line = &bytes[start..end];
+        let trimmed = trim_magic_comment_line(raw_line, line == 0);
+
+        if trimmed.starts_with(b"#!") {
+            if line != 0 {
+                return false;
+            }
+        } else {
+            return trimmed.starts_with(b"#") && line_has_ruby_encoding_keyword(trimmed);
+        }
+
+        if end == bytes.len() {
+            break;
+        }
+        start = end + 1;
+        line += 1;
+    }
+
+    false
+}
+
+fn trim_magic_comment_line(mut line: &[u8], first_line: bool) -> &[u8] {
+    if first_line && line.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        line = &line[3..];
+    }
+
+    while matches!(line.first(), Some(b' ' | b'\t')) {
+        line = &line[1..];
+    }
+
+    line
+}
+
+fn line_has_ruby_encoding_keyword(line: &[u8]) -> bool {
+    let lower: Vec<u8> = line.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+    has_encoding_keyword(&lower, b"coding") || has_encoding_keyword(&lower, b"encoding")
+}
+
+fn has_encoding_keyword(line: &[u8], keyword: &[u8]) -> bool {
+    if line.len() < keyword.len() {
+        return false;
+    }
+
+    for index in 0..=line.len() - keyword.len() {
+        if &line[index..index + keyword.len()] != keyword {
+            continue;
+        }
+        if index > 0 && line[index - 1].is_ascii_alphabetic() {
+            continue;
+        }
+
+        let mut delimiter_index = index + keyword.len();
+        while delimiter_index < line.len() && matches!(line[delimiter_index], b' ' | b'\t') {
+            delimiter_index += 1;
+        }
+
+        if matches!(line.get(delimiter_index), Some(b':' | b'=')) {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Check if the body is a "namespace" for `empty_lines_except_namespace` purposes.
@@ -862,6 +952,38 @@ mod tests {
         assert!(
             diags.is_empty(),
             "empty_lines_special namespace should use no_empty_lines (no offenses), got: {:?}",
+            diags
+        );
+    }
+
+    fn invalid_utf8_vim_fileencoding_source() -> &'static [u8] {
+        b"# vim: set fileencoding=euc-jp\nclass TestEUCJP < Test::Unit::TestCase\n  def test_mbc_case_fold\n    assert_match(/(\xA3\xE1)(a)\\1\\2/i, \"\xA3\xE1a\xA3\xE1A\")\n  end\nend\n"
+    }
+
+    #[test]
+    fn empty_lines_except_namespace_ignores_invalid_utf8_vim_fileencoding_source() {
+        let diags = run_cop_full_with_config(
+            &EmptyLinesAroundClassBody,
+            invalid_utf8_vim_fileencoding_source(),
+            style_config("empty_lines_except_namespace"),
+        );
+        assert!(
+            diags.is_empty(),
+            "RuboCop skips invalid UTF-8 files with only a vim fileencoding comment, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn empty_lines_special_ignores_invalid_utf8_vim_fileencoding_source() {
+        let diags = run_cop_full_with_config(
+            &EmptyLinesAroundClassBody,
+            invalid_utf8_vim_fileencoding_source(),
+            style_config("empty_lines_special"),
+        );
+        assert!(
+            diags.is_empty(),
+            "RuboCop skips invalid UTF-8 files with only a vim fileencoding comment, got: {:?}",
             diags
         );
     }
