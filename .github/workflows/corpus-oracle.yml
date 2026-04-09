@@ -208,7 +208,7 @@ jobs:
 
             # Skip repos that failed to clone
             if [ ! -d "repos/${REPO_ID}" ]; then
-              echo "Skipping ${REPO_ID} (clone failed)"
+              echo "::warning::Skipping ${REPO_ID} (clone failed — repo may be deleted or private)"
               echo "::endgroup::"
               continue
             fi
