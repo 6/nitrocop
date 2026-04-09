@@ -29,20 +29,40 @@ use super::trailing_comma;
 ///
 /// ## Variant divergence (2026-04)
 ///
-/// The default `no_comma` style was already correct, but the non-default
-/// variants diverged from RuboCop:
-/// - `diff_comma` was falling through to `no_comma`, so hashes like
-///   `added_from_path: true,` followed by an immediate newline were reported as
-///   offenses instead of accepted, and missing commas in that layout were
-///   missed.
-/// - `consistent_comma` required commas for multiline hashes but failed to
-///   reject trailing commas on single-line hashes such as
-///   `{ access_token: 'x', }`.
+/// The remaining `diff_comma` corpus drift came from Windows line endings.
+/// Those repos use `\r\n`, but the newline predicate only accepted `\n`, so a
+/// last item followed by `,\r\n` was treated as an illegal trailing comma and a
+/// missing comma before `\r\n}` was missed entirely. The corpus examples from
+/// timetrap and canine reproduced both sides of that split.
 ///
-/// Fix: mirror RuboCop's style matrix. `diff_comma` keys off whether the last
-/// item immediately precedes a newline, and `consistent_comma` still reports
-/// trailing commas whenever the hash does not qualify as multiline.
+/// Fix: keep RuboCop's `diff_comma` behavior, but accept either `\n` or
+/// `\r\n` as the newline immediately following the last item. Also fall back to
+/// `EnforcedStyle` when `EnforcedStyleForMultiline` is absent so the local
+/// variant harness can still exercise the non-default style through a generic
+/// override.
 pub struct TrailingCommaInHashLiteral;
+
+fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: usize) -> bool {
+    let region = &bytes[last_end..closing_start];
+    let mut i = 0;
+
+    if i < region.len() && region[i] == b',' {
+        i += 1;
+    }
+
+    while i < region.len() && matches!(region[i], b' ' | b'\t') {
+        i += 1;
+    }
+
+    if i < region.len() && region[i] == b'#' {
+        while i < region.len() && !matches!(region[i], b'\n' | b'\r') {
+            i += 1;
+        }
+    }
+
+    matches!(region.get(i), Some(b'\n'))
+        || (matches!(region.get(i), Some(b'\r')) && matches!(region.get(i + 1), Some(b'\n')))
+}
 
 impl Cop for TrailingCommaInHashLiteral {
     fn name(&self) -> &'static str {
@@ -84,7 +104,10 @@ impl Cop for TrailingCommaInHashLiteral {
         let has_comma =
             trailing_comma::detect_trailing_comma(bytes, last_end, closing_start, has_heredoc);
 
-        let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
 
         // Multiline check: the hash node spans multiple lines. For single-element
         // hashes, use the allowed_multiline_argument exception (closing bracket on
@@ -156,8 +179,8 @@ impl Cop for TrailingCommaInHashLiteral {
                 }
             }
             "diff_comma" => {
-                let last_precedes_newline = is_multiline
-                    && trailing_comma::last_item_precedes_newline(bytes, last_end, closing_start);
+                let last_precedes_newline =
+                    is_multiline && last_item_precedes_newline(bytes, last_end, closing_start);
                 if has_comma && !last_precedes_newline {
                     if let Some(abs_offset) = find_comma_offset() {
                         let (line, column) = source.offset_to_line_col(abs_offset);
@@ -209,6 +232,18 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert(
             "EnforcedStyleForMultiline".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    fn alias_style_config(style: &str) -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
             serde_yml::Value::String(style.to_string()),
         );
         crate::cop::CopConfig {
@@ -269,6 +304,63 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/no_offense.diff_comma.rb"
             ),
             multiline_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma_via_enforced_style_alias() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_via_enforced_style_alias() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/no_offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn diff_comma_accepts_crlf_trailing_comma_before_newline() {
+        let source = b"CodeblockDelimiters = {\r\n  '{'     => '}',\r\n  'begin' => 'end',\r\n  'do'    => 'end',\r\n}\r\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &TrailingCommaInHashLiteral,
+            source,
+            multiline_config("diff_comma"),
+        );
+        assert!(
+            diags.is_empty(),
+            "CRLF diff_comma hash should accept trailing comma before newline"
+        );
+    }
+
+    #[test]
+    fn diff_comma_flags_missing_comma_before_crlf_newline() {
+        let source = b"auth_data = {\r\n  provider: auth.provider,\r\n  uid: auth.uid,\r\n  auth: auth_hash.to_json,\r\n  expires_at: expires_at,\r\n  access_token: auth.credentials.token,\r\n  access_token_secret: auth.credentials.secret\r\n}\r\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &TrailingCommaInHashLiteral,
+            source,
+            multiline_config("diff_comma"),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "CRLF diff_comma hash should require the trailing comma"
+        );
+        assert_eq!(diags[0].location.line, 7);
+        assert_eq!(diags[0].location.column, 46);
+        assert_eq!(
+            diags[0].message,
+            "Put a comma after the last item of a multiline hash."
         );
     }
 }
