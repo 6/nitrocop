@@ -19,6 +19,7 @@ Every offense is compared by file path, line number, and cop name.
 | FN (nitrocop missing) | 30,819 |
 | Registered cops | 915 |
 | Cops with exact match | 855 |
+| Cops with exact match (incl. synthetic) | 882 |
 | Cops with divergence | 32 |
 | Cops with no corpus data | 28 |
 | **Match rate (default config)** | **99.86%** |
