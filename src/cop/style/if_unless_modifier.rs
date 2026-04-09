@@ -154,6 +154,14 @@ use ruby_prism::Visit;
 /// `then` appeared first. Fixed by searching for `#` anywhere after the
 /// predicate (skipping `#{` interpolation markers), matching RuboCop's behavior
 /// of finding any comment on the same line as the node.
+///
+/// FN root cause (2026-04-09): `previous_line_chains_to_if` treated any
+/// previous line ending in `!` as an operator continuation. That falsely
+/// skipped ordinary offenses after bang method names like `def unlock!`,
+/// `parser.parse!`, `m.load_bundler!`, and `item.strip!`. RuboCop's
+/// `node.chained?` only skips real operator/receiver chaining, so the fix keeps
+/// standalone `!` chaining but ignores `!` when it is just method-name
+/// punctuation.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -940,6 +948,9 @@ fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location
         if code_bytes.len() >= 2 && code_bytes[code_bytes.len() - 2] == b':' {
             return false;
         }
+        if last_byte == b'!' && trailing_bang_is_method_suffix(code_bytes) {
+            return false;
+        }
         // These operators bind to the if-expression, making it a receiver/operand.
         // Exclude `=`, `:`, `>` (part of `=>`) which are handled by parenthesization.
         // Exclude `)`, `]`, `}` which are closing delimiters, not operators.
@@ -953,6 +964,12 @@ fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location
         );
     }
     false
+}
+
+fn trailing_bang_is_method_suffix(code_bytes: &[u8]) -> bool {
+    code_bytes
+        .get(code_bytes.len().saturating_sub(2))
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
 }
 
 /// Check if an IfNode or UnlessNode is a pattern matching guard (e.g., `in "a" if cond`).
@@ -1470,6 +1487,18 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "Semicolon before closing brace should not suppress modifier suggestion"
+        );
+    }
+
+    #[test]
+    fn previous_line_bang_method_is_not_treated_as_chaining() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"m.load_bundler!\nif m.invoked_as_script?\n  load Gem.bin_path(\"bundler\", \"bundle\")\nend\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Bang method names on the previous line should not suppress modifier suggestion"
         );
     }
 }

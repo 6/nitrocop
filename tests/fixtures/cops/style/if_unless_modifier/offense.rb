@@ -231,3 +231,28 @@ end
             ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
               notification.instance_exec(exception, &config[:error_handler])
             end
+
+def unlock!
+  if update_columns(locked_at: nil, locked_by: nil)
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    Current.preview_page = nil
+  end
+end
+
+parser.parse!
+unless options.key?(:extensions)
+^^^^^^ Style/IfUnlessModifier: Favor modifier `unless` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  raise ArgumentError, 'must provide the files extensions to watch for'
+end
+
+m.load_bundler!
+if m.invoked_as_script?
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  load Gem.bin_path("bundler", "bundle")
+end
+
+item.strip!
+if (item[0] == "'" || item[0] == '"') && (item[-1] == "'" || item[-1] == '"')
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  @src_keywords << item[1..-2]
+end
