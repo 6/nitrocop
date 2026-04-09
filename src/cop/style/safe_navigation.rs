@@ -620,19 +620,6 @@ impl SafeNavigation {
         chain.iter().any(Self::is_dotless_operator)
     }
 
-    fn call_has_literal_block(call: &ruby_prism::CallNode<'_>) -> bool {
-        call.block()
-            .is_some_and(|block| block.as_block_node().is_some())
-    }
-
-    fn chain_has_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
-        chain.iter().any(Self::call_has_literal_block)
-    }
-
-    fn chain_ends_with_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
-        chain.last().is_some_and(Self::call_has_literal_block)
-    }
-
     fn is_double_colon_call(call: &ruby_prism::CallNode<'_>) -> bool {
         call.call_operator_loc()
             .is_some_and(|operator| operator.as_slice() == b"::")
@@ -844,7 +831,7 @@ impl<'a> SafeNavVisitor<'a> {
         };
 
         if self.is_direct_receiver_block_body(&node.as_node())
-            && Self::chain_has_literal_block(&chain)
+            && chain_has_literal_block(&chain)
             && chain.len() >= self.max_chain_length
         {
             ruby_prism::visit_and_node(self, node);
@@ -871,8 +858,7 @@ impl<'a> SafeNavVisitor<'a> {
         // bounded by the outermost call in the chain — but if that call has a
         // block, the block node is not a :call type so the walk escapes past it
         // and finds the unsafe parent.
-        if self.in_unsafe_parent > 0
-            && (chain.len() == 1 || Self::chain_ends_with_literal_block(&chain))
+        if self.in_unsafe_parent > 0 && (chain.len() == 1 || chain_ends_with_literal_block(&chain))
         {
             ruby_prism::visit_and_node(self, node);
             return;
@@ -1028,19 +1014,6 @@ impl<'a> SafeNavVisitor<'a> {
 
     fn is_nil_safe_call_ancestor(call: &ruby_prism::CallNode<'_>) -> bool {
         NIL_METHODS.contains(&call.name().as_slice())
-    }
-
-    fn call_has_literal_block(call: &ruby_prism::CallNode<'_>) -> bool {
-        call.block()
-            .is_some_and(|block| block.as_block_node().is_some())
-    }
-
-    fn chain_has_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
-        chain.iter().any(Self::call_has_literal_block)
-    }
-
-    fn chain_ends_with_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
-        chain.last().is_some_and(Self::call_has_literal_block)
     }
 
     fn collect_direct_receiver_block_bodies(
@@ -1358,7 +1331,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             // when the chain is already at max length (chain_length + at_least_1
             // outer call > max).  Chain length 1 still fits: 1 + 1 = 2 ≤ 2.
             if self.is_direct_receiver_block_body(&node.as_node())
-                && Self::chain_has_literal_block(&chain)
+                && chain_has_literal_block(&chain)
                 && chain.len() >= self.max_chain_length
             {
                 continue;
@@ -1380,7 +1353,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             // It also escapes for chain length ≥ 2 when the outermost call has
             // a block, because the block node is not a :call type.
             if self.in_unsafe_parent > 0
-                && (chain.len() == 1 || Self::chain_ends_with_literal_block(&chain))
+                && (chain.len() == 1 || chain_ends_with_literal_block(&chain))
             {
                 continue;
             }
@@ -1590,7 +1563,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        if Self::chain_ends_with_literal_block(&chain)
+        if chain_ends_with_literal_block(&chain)
             && chain.len() + self.receiver_call_depth > self.max_chain_length
         {
             ruby_prism::visit_unless_node(self, node);
@@ -1614,9 +1587,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        if self.is_direct_receiver_block_body(&node.as_node())
-            && Self::chain_has_literal_block(&chain)
-        {
+        if self.is_direct_receiver_block_body(&node.as_node()) && chain_has_literal_block(&chain) {
             ruby_prism::visit_unless_node(self, node);
             return;
         }
@@ -1767,7 +1738,7 @@ impl SafeNavigation {
             None => return Vec::new(),
         };
 
-        if context.skip_nested_block_call_args && Self::call_has_literal_block(&body_call) {
+        if context.skip_nested_block_call_args && call_has_literal_block(&body_call) {
             return Vec::new();
         }
 
@@ -1781,9 +1752,7 @@ impl SafeNavigation {
             None => return Vec::new(),
         };
 
-        if context.skip_direct_receiver_block_body_block_calls
-            && Self::chain_has_literal_block(&chain)
-        {
+        if context.skip_direct_receiver_block_body_block_calls && chain_has_literal_block(&chain) {
             return Vec::new();
         }
 
@@ -1791,7 +1760,7 @@ impl SafeNavigation {
             return Vec::new();
         }
 
-        if Self::chain_ends_with_literal_block(&chain)
+        if chain_ends_with_literal_block(&chain)
             && chain.len() + context.receiver_call_depth > context.max_chain_length
         {
             return Vec::new();
@@ -1936,13 +1905,11 @@ impl SafeNavigation {
             None => return Vec::new(),
         };
 
-        if context.skip_direct_receiver_block_body_block_calls
-            && Self::chain_has_literal_block(&chain)
-        {
+        if context.skip_direct_receiver_block_body_block_calls && chain_has_literal_block(&chain) {
             return Vec::new();
         }
 
-        if Self::call_has_literal_block(&body_call)
+        if call_has_literal_block(&body_call)
             && !context.skip_direct_receiver_block_body_block_calls
             && context.has_outer_unsafe_parent_above_current_block
         {
@@ -1953,7 +1920,7 @@ impl SafeNavigation {
             return Vec::new();
         }
 
-        if Self::chain_ends_with_literal_block(&chain)
+        if chain_ends_with_literal_block(&chain)
             && chain.len() + context.receiver_call_depth > context.max_chain_length
         {
             return Vec::new();
@@ -2002,6 +1969,19 @@ impl SafeNavigation {
         }
         false
     }
+}
+
+fn call_has_literal_block(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.block()
+        .is_some_and(|block| block.as_block_node().is_some())
+}
+
+fn chain_has_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
+    chain.iter().any(call_has_literal_block)
+}
+
+fn chain_ends_with_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
+    chain.last().is_some_and(call_has_literal_block)
 }
 
 #[cfg(test)]
