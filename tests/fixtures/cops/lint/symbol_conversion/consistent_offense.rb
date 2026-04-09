@@ -16,3 +16,17 @@ undef clock_gettime
 undef foo, bar
       ^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:foo` instead.
            ^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:bar` instead.
+
+# FN fix: bare symbols whose source doesn't match correction should be flagged
+# in consistent mode. Prism gives value "~" for :~@ (source :~@, correction :~).
+# bloom-lang/bud and rubyworks/facets patterns.
+method :~@
+       ^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:~` instead.
+
+# FN fix: hash pattern in case/in should be processed like regular hash
+# ruby-formatter/rufo pattern
+case x
+in { "a": 1 }
+     ^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `a:` instead.
+  1
+end
