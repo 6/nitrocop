@@ -55,6 +55,7 @@ foo && (foo.bar).to_s
 
 # Negated wrappers make safe navigation unsafe
 !!(foo && foo.bar)
+foo && !(foo.respond_to?(:empty?) && foo.empty?)
 obj.do_something if !obj
 
 # Outer operator/assignment parents make modifier `if` unsafe
@@ -112,6 +113,8 @@ end
 # Mixed `and` / `&&` chains are not flattened across precedence groups
 raise Interrupt if status and status.signaled? && status.termsig == 1
 foo && (foo.bar? || foo.baz?)
+foo && (cond && foo.bar?)
+foo && ((cond && foo.bar?) || (other && foo.baz?))
 purchase && (purchase.stripe_refunded || (purchase.chargeback_date.present? && !purchase.chargeback_reversed))
 corporation and (corporation.operated? or corporation_sold_out?(corporation))
 foo && (foo.admin? || (foo == owner && foo.pro?))

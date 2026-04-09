@@ -70,6 +70,10 @@ use ruby_prism::Visit;
 /// - Unary negation wrappers now search nested `&&` descendants inside the `!` receiver,
 ///   matching RuboCop's flattened `and` traversal for patterns like
 ///   `lat_lng && !(lat_lng.first.zero? && lat_lng.last.zero?)`.
+/// - Nested `&&` searches now only consider the FIRST clause of an inner chain, matching
+///   RuboCop's source-ordered `collect_and_clauses` pairing. This avoids false positives
+///   when the guarded receiver appears only after another condition, such as
+///   `foo && (cond && foo.bar?)` or `store_response && ((action == :tokens && store_response.match(...)) || ...)`.
 /// - Modifier `if`/`unless` is no longer blanket-suppressed under assignment/operator
 ///   parents before the method chain is known. RuboCop only suppresses those contexts when
 ///   the chain length is 1 and the ancestor walk escapes to the outer unsafe parent, so
@@ -84,6 +88,10 @@ use ruby_prism::Visit;
 ///   `puts(items.map do ... end)`, but safe outer wrappers alone do not suppress. This keeps
 ///   the RDF CLI array case skipped while still flagging ordinary nested safe-block cases such as
 ///   `outer.wrap { inner.wrap { items.each { ... } if items } }`.
+/// - Chain-length-1 matches found under a local `!` wrapper are treated as unsafe, matching
+///   RuboCop's `unsafe_method_used?` walk for patterns like
+///   `foo && !(foo.respond_to?(:empty?) && foo.empty?)` while preserving longer-chain
+///   offenses such as `lat_lng && !(lat_lng.first.zero? && lat_lng.last.zero?)`.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -378,6 +386,7 @@ impl SafeNavigation {
         outer_operator: AndOperatorKind,
         max_chain_length: usize,
         allowed_methods: &Option<Vec<String>>,
+        local_unsafe_parent_depth: usize,
     ) -> SafeChainSearchResult<'a> {
         if let Some(inner) = Self::unwrapped_parenthesized_node(node) {
             return Self::first_safe_chain_in_expression(
@@ -387,6 +396,7 @@ impl SafeNavigation {
                 outer_operator,
                 max_chain_length,
                 allowed_methods,
+                local_unsafe_parent_depth,
             );
         }
 
@@ -403,11 +413,16 @@ impl SafeNavigation {
                             outer_operator,
                             max_chain_length,
                             allowed_methods,
+                            local_unsafe_parent_depth + 1,
                         );
                     }
                 }
                 return SafeChainSearchResult::NoneFound;
             };
+
+            if local_unsafe_parent_depth > 0 && chain.len() == 1 {
+                return SafeChainSearchResult::UnsafeMatch;
+            }
 
             if chain.len() > max_chain_length
                 || Self::chain_has_dotless_operator(&chain)
@@ -424,26 +439,15 @@ impl SafeNavigation {
                 return SafeChainSearchResult::NoneFound;
             }
 
-            let left_result = Self::first_safe_chain_in_expression(
+            return Self::first_safe_chain_in_expression(
                 &and.left(),
                 checked_node,
                 bytes,
                 outer_operator,
                 max_chain_length,
                 allowed_methods,
+                local_unsafe_parent_depth,
             );
-
-            return match left_result {
-                SafeChainSearchResult::NoneFound => Self::first_safe_chain_in_expression(
-                    &and.right(),
-                    checked_node,
-                    bytes,
-                    outer_operator,
-                    max_chain_length,
-                    allowed_methods,
-                ),
-                result => result,
-            };
         }
 
         if let Some(or) = node.as_or_node() {
@@ -454,6 +458,7 @@ impl SafeNavigation {
                 outer_operator,
                 max_chain_length,
                 allowed_methods,
+                local_unsafe_parent_depth,
             );
 
             return match left_result {
@@ -465,6 +470,7 @@ impl SafeNavigation {
                         outer_operator,
                         max_chain_length,
                         allowed_methods,
+                        local_unsafe_parent_depth,
                     )
                 }
                 result => result,
@@ -481,6 +487,7 @@ impl SafeNavigation {
         outer_operator: AndOperatorKind,
         max_chain_length: usize,
         allowed_methods: &Option<Vec<String>>,
+        local_unsafe_parent_depth: usize,
     ) -> SafeChainSearchResult<'a> {
         if let Some(inner) = Self::unwrapped_parenthesized_node(node) {
             return Self::first_safe_chain_in_nested_and_descendants(
@@ -490,6 +497,7 @@ impl SafeNavigation {
                 outer_operator,
                 max_chain_length,
                 allowed_methods,
+                local_unsafe_parent_depth,
             );
         }
 
@@ -505,6 +513,7 @@ impl SafeNavigation {
                 outer_operator,
                 max_chain_length,
                 allowed_methods,
+                local_unsafe_parent_depth,
             );
         }
 
@@ -516,6 +525,7 @@ impl SafeNavigation {
                 outer_operator,
                 max_chain_length,
                 allowed_methods,
+                local_unsafe_parent_depth,
             );
 
             return match left_result {
@@ -527,6 +537,7 @@ impl SafeNavigation {
                         outer_operator,
                         max_chain_length,
                         allowed_methods,
+                        local_unsafe_parent_depth,
                     )
                 }
                 result => result,
@@ -769,6 +780,7 @@ impl<'a> SafeNavVisitor<'a> {
             operator,
             self.max_chain_length,
             &self.allowed_methods,
+            0,
         ) {
             SafeChainSearchResult::Safe(chain) => chain,
             _ => {
@@ -1047,16 +1059,21 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         // Reset operator-level context for hash values, but preserve in_unsafe_parent
         // so that `&&` inside hash values of dotless calls remains suppressed.
         // RuboCop walks all send ancestors, so a dotless call like `before_save`
-        // suppresses `&&` even inside hash-value lambdas.
+        // suppresses `&&` even inside hash-value lambdas. Modifier-if/unless
+        // should NOT inherit dotless-argument suppression through hash pairs,
+        // so reset `in_dotless_call_arguments` while visiting the value.
         let saved_ternary = self.in_ternary_operator_parent;
         let saved_assignment = self.in_assignment_or_operator_parent;
         let saved_dotted = std::mem::take(&mut self.dotted_assignment_parent_starts);
+        let saved_dotless_call_arguments = self.in_dotless_call_arguments;
         self.in_ternary_operator_parent = 0;
         self.in_assignment_or_operator_parent = 0;
+        self.in_dotless_call_arguments = 0;
         self.visit(&node.value());
         self.in_ternary_operator_parent = saved_ternary;
         self.in_assignment_or_operator_parent = saved_assignment;
         self.dotted_assignment_parent_starts = saved_dotted;
+        self.in_dotless_call_arguments = saved_dotless_call_arguments;
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
@@ -1254,6 +1271,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 operator,
                 self.max_chain_length,
                 &self.allowed_methods,
+                0,
             ) {
                 SafeChainSearchResult::Safe(chain) => chain,
                 _ => continue,
