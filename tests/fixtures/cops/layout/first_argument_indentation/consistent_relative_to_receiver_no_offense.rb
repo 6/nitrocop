@@ -10,3 +10,8 @@ puts x.
   merge(
     b: 2
   )
+
+# Block argument only — correct indentation relative to receiver
+@hash['key'].map(
+  &method(:parse)
+)
