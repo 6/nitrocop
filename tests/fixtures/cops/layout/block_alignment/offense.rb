@@ -185,3 +185,10 @@ end
              select(time)
           end
           ^^^ Layout/BlockAlignment: Align `end` with the start of the line where the block is defined.
+
+# FN: lambda brace block in keyword arg should not align with assignment lhs
+s = read_from_minibuffer("prompt",
+                         completion_proc: ->(value) {
+  value
+})
+^ Layout/BlockAlignment: Align `}` with the start of the line where the block is defined.

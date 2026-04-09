@@ -1,4 +1,8 @@
-use crate::cop::shared::node_type::{CALL_NODE, LAMBDA_NODE};
+use crate::cop::shared::node_type::{
+    BEGIN_NODE, CALL_NODE, LAMBDA_NODE, PARENTHESES_NODE, RESCUE_MODIFIER_NODE, STATEMENTS_NODE,
+    node_type_tag,
+};
+use crate::cop::shared::node_type_groups::is_assignment_type;
 use crate::cop::shared::util::begins_its_line;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -253,7 +257,75 @@ use crate::parse::source::SourceFile;
 /// Fix applied:
 /// - Ignore `&&`/`||`/`<<` wrapper candidates when the would-be same-line LHS
 ///   starts with a line-leading closer (`end`, `}`, `)`, or `]`)
+///
+/// ## Corpus investigation findings (2026-04-09)
+///
+/// Root causes of the remaining 8 FP:
+/// 1. **Multiline assignment chains lost the assignment line** — Prism can
+///    report the block call start on the chained segment line (`.map do`,
+///    `group_by do`, keyword-arg continuation lines), so the old assignment
+///    walk only checked the current line or the immediately preceding `=` line.
+///    That missed valid LHS targets in chained RHS expressions such as
+///    `a = source.zip(...).map do`, `Parallel.map(... ) do ... end.transpose`,
+///    and multiline call args like `File.open(... ) { ... }`.
+/// 2. **Default parameter values looked like assignments** — `block = lambda { }`
+///    inside a `def(...)` parameter list is an `OptionalParameterNode`, not an
+///    assignment target in RuboCop. The text-only `=` scan incorrectly aligned
+///    the closer with the parameter name.
+/// 3. **`call_expr_col` was still assignment-biased** — for chained closers like
+///    `end.keys[0]`, RuboCop can stop at the intermediate chained send before an
+///    index access, but nitrocop's `find_call_expression_col` walked through `=`
+///    and lost the inner call start.
+/// 4. **Brace/operator wrappers need both targets** — brace blocks on same-line
+///    `||` / `&&` wrappers may align with either the wrapper LHS or the brace
+///    call start, while `do..end` operator wrappers should still reject the
+///    inner call target.
+/// 5. **Lambda `||` wrappers were missing** — `-> { ... }` inside a same-line
+///    `||` expression should align with the wrapper LHS, but lambda alignment
+///    only considered the lambda start and assignments.
+/// 6. **Nested expressions inherited outer assignments** — the text-only
+///    assignment walk treated any earlier `=` as a valid alignment target,
+///    even when the block/lambda lived inside an argument list, keyword pair,
+///    or `if` predicate. RuboCop only keeps walking through transparent
+///    receiver-chain wrappers before it reaches an assignment.
+/// 7. **Indexed/call op-assign wrappers were missed** — Prism uses dedicated
+///    `IndexOrWriteNode` / `CallOrWriteNode` / `...OperatorWriteNode` parents
+///    for `foo[:bar] ||= ...` and `foo.bar ||= ...`, so a generic assignment
+///    predicate that only covered variable/constant writes dropped legitimate
+///    assignment targets.
+///
+/// Fixes applied:
+/// - Walk backward across chained continuation lines to recover assignment LHS
+/// - Ignore `=` inside `def(...)` / stabby-lambda parameter default context
+/// - Keep raw inner call alignment for brace wrappers and `end.keys[0]`-style
+///   indexed chains, while preserving the existing `.to_json` offense behavior
+/// - Let lambda alignment reuse same-line `||` / `&&` / `<<` wrapper targets
+/// - Only reuse assignment LHS targets when the Prism parent chain stays within
+///   transparent wrappers (receiver calls, parens/begin/rescue, statements)
+/// - Treat Prism's call/index assignment wrapper nodes as assignment parents too
 pub struct BlockAlignment;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SameLineOperatorKind {
+    Logical,
+    Shovel,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct NodeSpan {
+    start: usize,
+    end: usize,
+}
+
+impl NodeSpan {
+    fn from_node(node: &ruby_prism::Node<'_>) -> Self {
+        let loc = node.location();
+        Self {
+            start: loc.start_offset(),
+            end: loc.end_offset(),
+        }
+    }
+}
 
 impl Cop for BlockAlignment {
     fn name(&self) -> &'static str {
@@ -268,18 +340,18 @@ impl Cop for BlockAlignment {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         if let Some(lambda_node) = node.as_lambda_node() {
-            self.check_lambda_alignment(source, &lambda_node, config, diagnostics);
+            self.check_lambda_alignment(source, &lambda_node, parse_result, config, diagnostics);
             return;
         }
 
         if let Some(call_node) = node.as_call_node() {
-            self.check_call_alignment(source, &call_node, config, diagnostics);
+            self.check_call_alignment(source, &call_node, parse_result, config, diagnostics);
         }
     }
 }
@@ -289,6 +361,7 @@ impl BlockAlignment {
         &self,
         source: &SourceFile,
         call_node: &ruby_prism::CallNode<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
@@ -333,7 +406,8 @@ impl BlockAlignment {
         // walk backward from the call start to find the LHS variable.
         // When there's an assignment, the alignment target is the LHS (matching RuboCop's
         // behavior where `block_end_align_target` walks past assignment nodes).
-        let assignment_col = find_assignment_lhs_col(bytes, call_start_offset);
+        let assignment_col = find_assignment_lhs_col(bytes, call_start_offset)
+            .filter(|_| assignment_alignment_allowed(parse_result, &call_node.as_node()));
         let accept_call_start = assignment_col.is_some()
             && accept_intermediate_call_start(
                 bytes,
@@ -341,8 +415,11 @@ impl BlockAlignment {
                 closing_loc.as_slice().len(),
             );
         let splat_col = find_same_line_splat_col(bytes, call_start_offset);
-        let same_line_operator_col = find_same_line_operator_lhs(bytes, opening_loc.start_offset())
-            .or_else(|| find_same_line_operator_lhs(bytes, call_start_offset));
+        let same_line_operator = find_same_line_operator(bytes, opening_loc.start_offset())
+            .or_else(|| find_same_line_operator(bytes, call_start_offset));
+        let same_line_operator_col = same_line_operator.map(|(col, _)| col);
+        let same_line_operator_is_logical =
+            same_line_operator.is_some_and(|(_, kind)| kind == SameLineOperatorKind::Logical);
 
         // The expression start column: if there's an assignment on the same line as
         // the call start, use the LHS column. If the block call is wrapped in a
@@ -359,7 +436,14 @@ impl BlockAlignment {
 
         // Find the column of the call expression on the do-line (for hash-value blocks).
         let call_expr_col = find_call_expression_col(bytes, opening_loc.start_offset());
-        let accept_call_expr_col = splat_col.is_none() && same_line_operator_col.is_none();
+        let accept_call_expr_col = splat_col.is_none()
+            && (same_line_operator_col.is_none() || (is_brace && same_line_operator_is_logical))
+            && (assignment_col.is_none()
+                || chained_call_followed_by_index(
+                    bytes,
+                    closing_loc.start_offset(),
+                    closing_loc.as_slice().len(),
+                ));
 
         let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
 
@@ -461,6 +545,7 @@ impl BlockAlignment {
         &self,
         source: &SourceFile,
         lambda_node: &ruby_prism::LambdaNode<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
     ) {
@@ -489,8 +574,14 @@ impl BlockAlignment {
         let lambda_start_offset = lambda_node.operator_loc().start_offset();
         let (_, lambda_start_col) = source.offset_to_line_col(lambda_start_offset);
 
-        let assignment_col = find_assignment_lhs_col(bytes, lambda_start_offset);
-        let expression_start_col = assignment_col.unwrap_or(lambda_start_col);
+        let assignment_col = find_assignment_lhs_col(bytes, lambda_start_offset)
+            .filter(|_| assignment_alignment_allowed(parse_result, &lambda_node.as_node()));
+        let same_line_operator_col = find_same_line_operator(bytes, opening_loc.start_offset())
+            .or_else(|| find_same_line_operator(bytes, lambda_start_offset))
+            .map(|(col, _)| col);
+        let expression_start_col = same_line_operator_col
+            .or(assignment_col)
+            .unwrap_or(lambda_start_col);
         let expression_start_indent = line_indent(bytes, lambda_start_offset);
 
         let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
@@ -571,78 +662,133 @@ fn line_indent(bytes: &[u8], offset: usize) -> usize {
     indent
 }
 
+fn assignment_alignment_allowed(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    node: &ruby_prism::Node<'_>,
+) -> bool {
+    struct Finder<'pr> {
+        target_span: NodeSpan,
+        target_tag: u8,
+        stack: Vec<ruby_prism::Node<'pr>>,
+        allowed: Option<bool>,
+    }
+
+    impl<'pr> Finder<'pr> {
+        fn matches_target(&self, node: &ruby_prism::Node<'pr>) -> bool {
+            node_type_tag(node) == self.target_tag && NodeSpan::from_node(node) == self.target_span
+        }
+
+        fn inspect_target(&self, node: &ruby_prism::Node<'pr>) -> bool {
+            let mut current_span = NodeSpan::from_node(node);
+
+            for parent in self.stack.iter().rev() {
+                if alignment_assignment_parent(parent) {
+                    return true;
+                }
+
+                if !transparent_alignment_parent(parent, current_span) {
+                    return false;
+                }
+
+                current_span = NodeSpan::from_node(parent);
+            }
+
+            false
+        }
+    }
+
+    impl<'pr> ruby_prism::Visit<'pr> for Finder<'pr> {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            if self.allowed.is_none() && self.matches_target(&node) {
+                self.allowed = Some(self.inspect_target(&node));
+            }
+
+            self.stack.push(node);
+        }
+
+        fn visit_branch_node_leave(&mut self) {
+            self.stack.pop();
+        }
+
+        fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            if self.allowed.is_none() && self.matches_target(&node) {
+                self.allowed = Some(self.inspect_target(&node));
+            }
+        }
+    }
+
+    let mut finder = Finder {
+        target_span: NodeSpan::from_node(node),
+        target_tag: node_type_tag(node),
+        stack: Vec::new(),
+        allowed: None,
+    };
+    ruby_prism::Visit::visit(&mut finder, &parse_result.node());
+    finder.allowed.unwrap_or(false)
+}
+
+fn alignment_assignment_parent(node: &ruby_prism::Node<'_>) -> bool {
+    is_assignment_type(node_type_tag(node))
+        || node
+            .as_call_node()
+            .is_some_and(|call| call.equal_loc().is_some())
+        || node.as_call_or_write_node().is_some()
+        || node.as_call_and_write_node().is_some()
+        || node.as_call_operator_write_node().is_some()
+        || node.as_index_or_write_node().is_some()
+        || node.as_index_and_write_node().is_some()
+        || node.as_index_operator_write_node().is_some()
+}
+
+fn transparent_alignment_parent(parent: &ruby_prism::Node<'_>, current_span: NodeSpan) -> bool {
+    if let Some(call) = parent.as_call_node() {
+        return call
+            .receiver()
+            .is_some_and(|receiver| NodeSpan::from_node(&receiver) == current_span);
+    }
+
+    matches!(
+        node_type_tag(parent),
+        BEGIN_NODE | PARENTHESES_NODE | RESCUE_MODIFIER_NODE | STATEMENTS_NODE
+    )
+}
+
 /// Check if the call expression at `call_start_offset` is the RHS of an assignment.
 /// If so, return the column of the LHS variable (the assignment target).
 /// This matches RuboCop's `find_lhs_node` which walks through op_asgn/masgn nodes.
 ///
-/// Also checks the previous line when the call starts at (or near) the beginning of
-/// its line. This handles multiline assignments like:
-///   packages_lines, last_package_lines =
-///     stdout
-///     .each_line
-///     .reduce([[], []]) do ...
-///     end
-/// where `end` should align with `packages_lines` on the preceding assignment line.
 fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
-    let mut line_start = call_start_offset;
-    while line_start > 0 && bytes[line_start - 1] != b'\n' {
-        line_start -= 1;
+    if in_parameter_default_context(bytes, call_start_offset) {
+        return None;
     }
 
-    let call_col = call_start_offset - line_start;
+    let mut current_line_start = line_start(bytes, call_start_offset);
+    let mut current_line_end = line_end(bytes, current_line_start);
 
-    // First, check on the same line
-    if call_col > 0 {
-        let result = skip_assignment_backward(bytes, line_start, call_start_offset);
-        if result != call_start_offset {
-            return Some(result - line_start);
-        }
+    if let Some(col) =
+        find_assignment_lhs_col_on_line(bytes, current_line_start, current_line_end, false)
+    {
+        return Some(col);
     }
 
-    // If the call starts at the beginning of its line (or very close to it),
-    // check if the previous line ends with `=` (possibly with trailing whitespace).
-    // This handles multiline multi-assignment (masgn) RHS patterns like:
-    //   packages_lines, last_package_lines =
-    //     stdout.each_line.reduce([[], []]) do ...
-    //     end
-    //
-    // NOTE: Only walk through cross-line assignments for multi-assignment (masgn),
-    // not single assignments. RuboCop's `disqualified_parent?` stops at cross-line
-    // parents EXCEPT for masgn. We detect masgn by checking for a comma in the LHS.
-    let indent = line_indent(bytes, call_start_offset);
-    if call_col == indent && line_start > 0 {
-        // Find the previous line
-        let prev_line_end = line_start - 1; // the \n
-        let mut prev_line_start = prev_line_end;
-        while prev_line_start > 0 && bytes[prev_line_start - 1] != b'\n' {
-            prev_line_start -= 1;
+    while let Some(prev_line_start) = previous_line_start(bytes, current_line_start) {
+        let prev_line_end = current_line_start - 1;
+        let current_starts_continuation =
+            line_starts_with_continuation(bytes, current_line_start, current_line_end);
+        let prev_continues = trimmed_line_last_byte(bytes, prev_line_start, prev_line_end)
+            .is_some_and(|b| matches!(b, b'.' | b',' | b'(' | b'[' | b'\\' | b'='));
+
+        if !current_starts_continuation && !prev_continues {
+            break;
         }
 
-        let prev_line = &bytes[prev_line_start..prev_line_end];
-        // Check if previous line ends with `=` (after trimming whitespace)
-        let trimmed_end = prev_line
-            .iter()
-            .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r');
-        if let Some(last_idx) = trimmed_end {
-            if prev_line[last_idx] == b'=' {
-                // Check it's an assignment (not ==, !=, <=, >=)
-                let is_comparison =
-                    last_idx > 0 && matches!(prev_line[last_idx - 1], b'=' | b'!' | b'<' | b'>');
-                if !is_comparison {
-                    // Only accept cross-line assignment for multi-assignment (masgn).
-                    // Check for comma in the LHS portion (before `=`).
-                    let lhs_portion = &prev_line[..last_idx];
-                    let has_comma = lhs_portion.contains(&b',');
-                    if has_comma {
-                        // Find the LHS on the previous line: walk to first non-ws
-                        let prev_indent = prev_line
-                            .iter()
-                            .position(|&b| b != b' ' && b != b'\t')
-                            .unwrap_or(0);
-                        return Some(prev_indent);
-                    }
-                }
-            }
+        current_line_start = prev_line_start;
+        current_line_end = prev_line_end;
+
+        if let Some(col) =
+            find_assignment_lhs_col_on_line(bytes, current_line_start, current_line_end, true)
+        {
+            return Some(col);
         }
     }
 
@@ -653,11 +799,6 @@ fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usi
 /// the call expression starts. This handles cases like:
 ///   key: value.map do |x|
 ///        ^--- call_expr_col (aligned with value.map)
-///
-/// When the block is on the RHS of an assignment (=, +=, <<=, etc.), this
-/// continues walking backward through the assignment operator to find the LHS
-/// variable, matching RuboCop's behavior of aligning with the assignment target.
-/// Logical assignments like `||=`/`&&=` are intentionally excluded.
 /// Returns the column of the first character of the call expression.
 fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
     // Find start of current line
@@ -723,16 +864,6 @@ fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
                 pos -= 2;
             }
             _ => break,
-        }
-    }
-
-    // Check if we stopped at an assignment operator. If so, continue backward
-    // through it to find the LHS variable (RuboCop aligns with the assignment target).
-    let call_pos = pos;
-    if call_pos > line_start {
-        let after_call = skip_assignment_backward(bytes, line_start, call_pos);
-        if after_call != call_pos {
-            return after_call - line_start;
         }
     }
 
@@ -855,6 +986,22 @@ fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usiz
                 while lhs_pos > line_start && bytes[lhs_pos - 1] == b' ' {
                     lhs_pos -= 1;
                 }
+            } else if ch == b' ' || ch == b'\t' {
+                let mut gap_start = lhs_pos;
+                while gap_start > line_start
+                    && (bytes[gap_start - 1] == b' ' || bytes[gap_start - 1] == b'\t')
+                {
+                    gap_start -= 1;
+                }
+
+                if gap_start > line_start && bytes[gap_start - 1] == b',' {
+                    lhs_pos = gap_start - 1;
+                    while lhs_pos > line_start && bytes[lhs_pos - 1] == b' ' {
+                        lhs_pos -= 1;
+                    }
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -884,6 +1031,27 @@ fn find_same_line_splat_col(bytes: &[u8], call_start_offset: usize) -> Option<us
     }
 
     None
+}
+
+fn chained_call_followed_by_index(bytes: &[u8], closer_offset: usize, closer_len: usize) -> bool {
+    let mut pos = closer_offset + closer_len;
+    while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t' || bytes[pos] == b'\r') {
+        pos += 1;
+    }
+
+    while pos < bytes.len() && bytes[pos] != b'\n' {
+        match bytes[pos] {
+            b'[' => return true,
+            b'.' => {
+                pos += 1;
+            }
+            _ => {
+                pos += 1;
+            }
+        }
+    }
+
+    false
 }
 
 /// When the block sits on the RHS of an assignment, accept the inner call start
@@ -980,6 +1148,13 @@ fn chained_call_opens_block(bytes: &[u8], mut pos: usize) -> bool {
 ///
 /// Returns the column of the first non-whitespace token of the LHS expression.
 fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usize> {
+    find_same_line_operator(bytes, opener_offset).map(|(col, _)| col)
+}
+
+fn find_same_line_operator(
+    bytes: &[u8],
+    opener_offset: usize,
+) -> Option<(usize, SameLineOperatorKind)> {
     let mut line_start = opener_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
         line_start -= 1;
@@ -1053,10 +1228,17 @@ fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usi
     if pos >= 2 + line_start {
         let op1 = bytes[pos - 2];
         let op2 = bytes[pos - 1];
-        if (op1 == b'&' && op2 == b'&')
-            || (op1 == b'|' && op2 == b'|')
-            || (op1 == b'<' && op2 == b'<')
-        {
+        let kind = if op1 == b'&' && op2 == b'&' {
+            Some(SameLineOperatorKind::Logical)
+        } else if op1 == b'|' && op2 == b'|' {
+            Some(SameLineOperatorKind::Logical)
+        } else if op1 == b'<' && op2 == b'<' {
+            Some(SameLineOperatorKind::Shovel)
+        } else {
+            None
+        };
+
+        if let Some(kind) = kind {
             pos -= 2;
             // Skip whitespace before the operator
             while pos > line_start && bytes[pos - 1] == b' ' {
@@ -1165,7 +1347,7 @@ fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usi
                 if starts_with_line_leading_closer(bytes, pos, lhs_end) {
                     return None;
                 }
-                return Some(pos - line_start);
+                return Some((pos - line_start, kind));
             }
         }
     }
@@ -1183,6 +1365,154 @@ fn starts_with_line_leading_closer(bytes: &[u8], start: usize, end: usize) -> bo
         b'e' => keyword_at(bytes, start, b"end"),
         _ => false,
     }
+}
+
+fn line_start(bytes: &[u8], offset: usize) -> usize {
+    let mut line_start = offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    line_start
+}
+
+fn line_end(bytes: &[u8], line_start: usize) -> usize {
+    let mut line_end = line_start;
+    while line_end < bytes.len() && bytes[line_end] != b'\n' {
+        line_end += 1;
+    }
+    line_end
+}
+
+fn previous_line_start(bytes: &[u8], line_start: usize) -> Option<usize> {
+    if line_start == 0 {
+        return None;
+    }
+
+    let mut prev_line_start = line_start - 1;
+    while prev_line_start > 0 && bytes[prev_line_start - 1] != b'\n' {
+        prev_line_start -= 1;
+    }
+    Some(prev_line_start)
+}
+
+fn first_non_ws(bytes: &[u8], line_start: usize, line_end: usize) -> Option<usize> {
+    let mut pos = line_start;
+    while pos < line_end && (bytes[pos] == b' ' || bytes[pos] == b'\t' || bytes[pos] == b'\r') {
+        pos += 1;
+    }
+    (pos < line_end).then_some(pos)
+}
+
+fn trimmed_line_last_byte(bytes: &[u8], line_start: usize, line_end: usize) -> Option<u8> {
+    let mut pos = line_end;
+    while pos > line_start && matches!(bytes[pos - 1], b' ' | b'\t' | b'\r') {
+        pos -= 1;
+    }
+    (pos > line_start).then_some(bytes[pos - 1])
+}
+
+fn line_starts_with_continuation(bytes: &[u8], line_start: usize, line_end: usize) -> bool {
+    let Some(pos) = first_non_ws(bytes, line_start, line_end) else {
+        return false;
+    };
+
+    bytes[pos] == b'.' || (bytes[pos] == b'&' && pos + 1 < line_end && bytes[pos + 1] == b'.')
+}
+
+fn rightmost_assignment_eq(bytes: &[u8], line_start: usize, line_end: usize) -> Option<usize> {
+    let mut pos = line_end;
+    while pos > line_start {
+        pos -= 1;
+        if bytes[pos] != b'=' {
+            continue;
+        }
+
+        let prev = (pos > line_start).then_some(bytes[pos - 1]);
+        let next = (pos + 1 < line_end).then_some(bytes[pos + 1]);
+        if matches!(prev, Some(b'=' | b'!' | b'<' | b'>')) || next == Some(b'~') {
+            continue;
+        }
+
+        return Some(pos);
+    }
+
+    None
+}
+
+fn find_assignment_lhs_col_on_line(
+    bytes: &[u8],
+    line_start: usize,
+    line_end: usize,
+    allow_empty_rhs: bool,
+) -> Option<usize> {
+    let eq_pos = rightmost_assignment_eq(bytes, line_start, line_end)?;
+
+    let mut rhs_start = eq_pos + 1;
+    while rhs_start < line_end
+        && (bytes[rhs_start] == b' ' || bytes[rhs_start] == b'\t' || bytes[rhs_start] == b'\r')
+    {
+        rhs_start += 1;
+    }
+
+    if rhs_start < line_end {
+        let lhs_start = skip_assignment_backward(bytes, line_start, rhs_start);
+        return (lhs_start != rhs_start).then_some(lhs_start - line_start);
+    }
+
+    if !allow_empty_rhs {
+        return None;
+    }
+
+    let lhs_portion = &bytes[line_start..eq_pos];
+    if !lhs_portion.contains(&b',') {
+        return None;
+    }
+
+    lhs_portion
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r')
+}
+
+fn in_parameter_default_context(bytes: &[u8], offset: usize) -> bool {
+    let mut pos = offset;
+    let mut paren_depth: usize = 0;
+
+    while pos > 0 {
+        pos -= 1;
+        match bytes[pos] {
+            b')' => paren_depth += 1,
+            b'(' => {
+                if paren_depth == 0 {
+                    let line_start = line_start(bytes, pos);
+                    let mut prefix = &bytes[line_start..pos];
+
+                    while let Some(last) = prefix.last() {
+                        if matches!(last, b' ' | b'\t' | b'\r') {
+                            prefix = &prefix[..prefix.len() - 1];
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let mut trimmed_start = 0;
+                    while trimmed_start < prefix.len()
+                        && matches!(prefix[trimmed_start], b' ' | b'\t' | b'\r')
+                    {
+                        trimmed_start += 1;
+                    }
+                    let trimmed = &prefix[trimmed_start..];
+
+                    return trimmed.starts_with(b"def ")
+                        || trimmed.starts_with(b"defs ")
+                        || trimmed.ends_with(b"->");
+                }
+                paren_depth -= 1;
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -1583,6 +1913,52 @@ mod tests {
             "FP: end at col 6 matches multiline assignment LHS. Got: {:?}",
             diags
         );
+    }
+
+    #[test]
+    fn helper_multiline_chain_assignment_lhs_col() {
+        struct Finder {
+            offset: Option<usize>,
+        }
+
+        impl<'pr> ruby_prism::Visit<'pr> for Finder {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                if self.offset.is_none() && node.block().and_then(|b| b.as_block_node()).is_some() {
+                    self.offset = Some(node.location().start_offset());
+                }
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+
+        let source = b"changed_playlist, new, changed_position, unchanged = playlist.items.\n  sort_by(&:position).\n  group_by do |item|\n    item\nend.values_at(:changed_playlist, :new, :changed_position, :unchanged).map(&:to_a)\n";
+        let parse = ruby_prism::parse(source);
+        let mut finder = Finder { offset: None };
+        ruby_prism::Visit::visit(&mut finder, &parse.node());
+        let offset = finder.offset.expect("block call offset");
+        assert_eq!(find_assignment_lhs_col(source, offset), Some(0));
+    }
+
+    #[test]
+    fn helper_multiline_zip_map_assignment_lhs_col() {
+        struct Finder {
+            offset: Option<usize>,
+        }
+
+        impl<'pr> ruby_prism::Visit<'pr> for Finder {
+            fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+                if self.offset.is_none() && node.block().and_then(|b| b.as_block_node()).is_some() {
+                    self.offset = Some(node.location().start_offset());
+                }
+                ruby_prism::visit_call_node(self, node);
+            }
+        }
+
+        let source = b"@fsa, @fsb, @fsc = create_list(:form_submission, 3, user_account: user_account)\n                   .zip(%w[FORM-A FORM-B FORM-C])\n                   .map do |submission, form_type|\n                     submission.update(form_type: form_type)\n                     submission\nend\n";
+        let parse = ruby_prism::parse(source);
+        let mut finder = Finder { offset: None };
+        ruby_prism::Visit::visit(&mut finder, &parse.node());
+        let offset = finder.offset.expect("block call offset");
+        assert_eq!(find_assignment_lhs_col(source, offset), Some(0));
     }
 
     // FN: end misaligned in multi-arg call with do block (Arachni pattern)

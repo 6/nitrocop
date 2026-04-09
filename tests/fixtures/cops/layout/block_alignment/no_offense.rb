@@ -221,9 +221,73 @@ wrap *items.map { |item|
   conn.request :json
 end
 
+# FP fix: indexed ||= memoization on a wrapped call still aligns end with the assignment lhs
+def connection(server_url: base_path)
+  @__conn_pool__ ||= {}
+  @__conn_pool__[server_url] ||= Faraday.new(url: server_url, headers: base_request_headers,
+                                             request: request_options) do |conn|
+    conn.request :json
+  end
+end
+
 # FP fix: if the line starts with a previous closer before ||, keep the RHS block target
 left_side.find {
   it
 } || right_side.any? do |item|
   item
      end
+
+# FP fix: multiline assignment chain should still align with the assignment lhs
+changed_playlist, new, changed_position, unchanged = playlist.items.
+  sort_by(&:position).
+  group_by do |item|
+    item
+end.values_at(:changed_playlist, :new, :changed_position, :unchanged).map(&:to_a)
+
+# FP fix: multiline chained assignment ending in .map do
+@fsa, @fsb, @fsc = create_list(:form_submission, 3, user_account: user_account)
+                   .zip(%w[FORM-A FORM-B FORM-C])
+                   .map do |submission, form_type|
+                     submission.update(form_type: form_type)
+                     submission
+end
+
+# FP fix: default parameter values are not assignment targets
+def print_tree(level = node_depth, max_depth = nil,
+               block = lambda { |node, prefix|
+                         puts "#{prefix} #{node.name}"
+                       })
+end
+
+# FP fix: brace block on a logical-operator continuation line still accepts the call start
+outer &&
+  lhs || items.any? { |item|
+           item
+         }
+
+# FP fix: end.keys[0] accepts the chained call start as well as the assignment lhs
+entity_type = HBW::Widget.config[:entities].fetch(entity_class.to_sym)[:bp_toolbar][:entity_type_buttons].select do |_key, value|
+                value.any? do |bp|
+                  bp[:bp_code] == bp_code
+                end
+              end.keys[0]
+
+# FP fix: lambda in same-line || wrapper aligns with the lhs of the || expression
+auth.provided? && auth.basic? && auth.credentials &&
+  (conf.auth[:logic] || ->(data, u, p) {
+    %w(admin password) == [u, p]
+   }).(data, *auth.credentials)
+
+# FP fix: assignment with a nested block argument should align with the inner call
+value = sum_values(items.select do |item|
+                     item.ok?
+                   end, 'amount').to_f
+
+# FP fix: if-assignment predicate should keep the inner block target
+value = if items.select do |item|
+             item.ok?
+           end.count.positive?
+          'YES'
+        else
+          'NO'
+        end
