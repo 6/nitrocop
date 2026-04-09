@@ -216,6 +216,30 @@ use crate::parse::source::SourceFile;
 ///   nested cases. The exemption now climbs through pair/hash ancestors before checking the
 ///   unparenthesized first-argument call boundary, while still flagging standalone hashes like
 ///   `x = { plain: ({...}.to_json) }`.
+///
+/// ## Investigation findings (2026-04-09)
+///
+/// ### FN root causes fixed:
+/// - **Rescue inside assignment in conditional predicate:** `if (var = (expr rescue nil))` — the
+///   inner `(expr rescue nil)` was not flagged because `is_in_conditional_predicate` used a
+///   containment check (any parens within the predicate range). RuboCop checks exact identity
+///   (`parent.condition == begin_node`), so only the direct predicate is exempt. Changed to
+///   exact range match so nested rescue-in-assignment is correctly flagged.
+///
+/// ### FP root causes fixed:
+/// - **Assignment in single-statement def body (~6+ FPs from ebnf):** `def foo; (@var ||= {}); end`
+///   — Prism always wraps bodies in StatementsNode, but Parser AST only adds a `begin` wrapper
+///   for multi-statement bodies. Single-statement non-paren bodies map to the containing node
+///   directly, which is NOT begin_type. The `begin_like_parent` condition now correctly requires
+///   either parentheses body, multi-statement body, or top-level context.
+/// - **Prefix `!` (prefix_not) exempt from unary check (~7+ FPs from norikra):** RuboCop's
+///   `method_call_with_redundant_parentheses?` returns false for `prefix_not?` nodes. All
+///   `(!expr)` patterns are exempt: `suspect_unary?` doesn't unwrap through `!`, and then
+///   `prefix_not?` causes an early return. Added the same exemption.
+/// - **Method call with unparenthesized block argument:** `(method_args.map &:to_json).join(',')`
+///   — Prism puts block arguments in `block()` not `arguments()`, so the cop didn't count them
+///   as "has args". Removing the outer parens would change parsing. Now counts block_argument
+///   nodes for the singular-parent check.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -491,9 +515,13 @@ impl RedundantParensVisitor<'_> {
             let should_flag = match parent {
                 None => true,
                 Some(p) => {
+                    // In Parser AST, single-statement bodies (def, if, etc.) do NOT
+                    // get a `begin` wrapper — only multi-statement bodies do.
+                    // Parentheses nodes inside parens always map to begin_type.
+                    // Top-level (program body) is always begin-like.
                     let begin_like_parent = p.is_statements_node
-                        && (!p.is_parentheses_body
-                            || matches!(p.kind, ParentKind::Other)
+                        && (p.is_parentheses_body
+                            || p.statements_child_count > 1
                             || self.parent_stack.len() <= 2);
                     begin_like_parent
                         && !p.is_assignment_parent
@@ -1087,8 +1115,11 @@ impl RedundantParensVisitor<'_> {
             match info.kind {
                 ParentKind::Other => continue,
                 ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
+                    // RuboCop checks `parent.condition == begin_node` — exact identity,
+                    // not containment. A rescue nested INSIDE the predicate (e.g.,
+                    // `if (var = (expr rescue nil))`) should still be flagged.
                     return info.conditional_predicate_range.is_some_and(
-                        |(pred_start, pred_end)| start >= pred_start && end <= pred_end,
+                        |(pred_start, pred_end)| start == pred_start && end == pred_end,
                     );
                 }
                 _ => return false,
@@ -1188,6 +1219,11 @@ fn check_method_call<'a>(
     }
 
     let has_args = call.arguments().is_some();
+    // Block arguments (&block) count as args for the singular-parent check.
+    // `(method_args.map &:to_json).join(',')` — removing parens changes parsing.
+    let has_block_arg = call
+        .block()
+        .is_some_and(|b| b.as_block_argument_node().is_some());
     let call_has_parens = call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
     let is_square_brackets = call.name().as_slice() == b"[]" && call.call_operator_loc().is_none();
 
@@ -1208,7 +1244,7 @@ fn check_method_call<'a>(
     // exactly one child. For Return/Next/Break/Super/Yield, this means the
     // keyword has a single argument. `[]` calls are handled like RuboCop's
     // `square_brackets?` matcher and don't need the singular-parent check.
-    if has_args
+    if (has_args || has_block_arg)
         && !call_has_parens
         && !is_square_brackets
         && !has_singular_parenthesized_parent(parent)
@@ -1244,49 +1280,12 @@ fn check_unary<'a>(
     let call = inner.as_call_node()?;
     let name = call.name().as_slice();
 
-    // prefix_not: !expr — don't flag (!x) as unary if no arguments
-    // But DO flag it as "a unary operation" per RuboCop
+    // RuboCop's method_call_with_redundant_parentheses? returns false for
+    // prefix_not? nodes. This means ALL (!expr) patterns are exempt from
+    // the unary check, because `suspect_unary?` doesn't unwrap through `!`
+    // and then `prefix_not?` causes an early return.
     if name == b"!" {
-        // Check if the inner of ! is a call with unparenthesized args
-        // (!x arg) — only flag when it's the sole expression (no parent boolean)
-        if let Some(recv) = call.receiver() {
-            if let Some(inner_call) = recv.as_call_node() {
-                if inner_call.arguments().is_some() && inner_call.opening_loc().is_none() {
-                    // (!x arg) — has unparenthesized call with args inside
-                    // Only flag as unary if it's standalone (no parent or parent is Other)
-                    if let Some(p) = parent {
-                        if !matches!(p.kind, ParentKind::Other) || p.is_operator {
-                            return None;
-                        }
-                    }
-                    return Some("a unary operation");
-                }
-            }
-            // Check if inner of ! is a super/yield/defined? with unparenthesized args
-            if recv.as_super_node().is_some()
-                || recv.as_yield_node().is_some()
-                || recv.as_defined_node().is_some()
-            {
-                // Check if it has space-separated args by looking at source
-                let recv_loc = recv.location();
-                let recv_src = &content[recv_loc.start_offset()..recv_loc.end_offset()];
-                // If it looks like `super arg` or `yield arg` or `defined? arg` (has space)
-                let keyword_len = if recv.as_defined_node().is_some() {
-                    8 // defined?
-                } else {
-                    5 // super or yield
-                };
-                if recv_src.len() > keyword_len && recv_src[keyword_len] == b' ' {
-                    // (!super arg) — only flag standalone
-                    if let Some(p) = parent {
-                        if !matches!(p.kind, ParentKind::Other) || p.is_operator {
-                            return None;
-                        }
-                    }
-                    return Some("a unary operation");
-                }
-            }
-        }
+        return None;
     }
 
     // For unary -/+ on method chain starting with int: -(1.foo) is plausible

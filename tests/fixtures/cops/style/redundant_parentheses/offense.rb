@@ -92,12 +92,6 @@ return (foo + bar)
 return (42)
        ^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
 
-(!x arg)
-^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a unary operation.
-
-(!x.m arg)
-^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a unary operation.
-
 x.y((a..b))
     ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
 
@@ -260,3 +254,18 @@ elsif cond
   ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
   work
 end
+
+if (obj = (obj.reload rescue nil))
+          ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if (obj = (obj.reload rescue nil))
+          ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if hlp = (send("hlp_#{c}") rescue nil)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if value = (m[name] rescue nil)
+           ^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if client = (UNIXSocket.open(socket) rescue nil)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
