@@ -566,9 +566,7 @@ enum ArgumentTakingTokenKind {
 }
 
 fn trailing_argument_taking_token(before_backslash: &[u8]) -> Option<ArgumentTakingTokenKind> {
-    let Some(token) = trailing_identifier(before_backslash) else {
-        return None;
-    };
+    let token = trailing_identifier(before_backslash)?;
 
     match token {
         b"break" => Some(ArgumentTakingTokenKind::Break),
