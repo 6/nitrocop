@@ -260,7 +260,8 @@ jobs:
 
             if [ "$rc" -eq 124 ]; then
               echo "::error::nitrocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
-            elif [ "$rc" -ne 0 ]; then
+            elif [ "$rc" -gt 1 ]; then
+              # Exit code 1 = offenses found (normal). Only warn on actual failures.
               echo "::warning::nitrocop exited with code ${rc} for ${REPO_ID}"
               cat "$WORKSPACE/results/nitrocop/${REPO_ID}.err" 2>/dev/null || true
             fi
@@ -295,16 +296,9 @@ jobs:
 
               if [ "$rc" -eq 124 ]; then
                 echo "::error::rubocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
-              elif [ "$rc" -ne 0 ]; then
-                # TODO(corpus): Rubocop exits non-zero on jruby__jruby__0303464 every
-                # cold-cache run, producing empty JSON (0 bytes). Suspected OOM on
-                # 7,445 .rb files. The empty JSON then fails validate_rubocop_result.py,
-                # which misleadingly warns "out-of-repo paths — not caching".
-                # Need to confirm whether this is OOM (rc=137), a specific file crashing
-                # the formatter, or something else. Once diagnosed: either shard jruby
-                # into smaller file-list halves, increase runner memory, or exclude the
-                # offending files.
-                # See: https://github.com/6/nitrocop/actions/runs/24136648300
+              elif [ "$rc" -gt 1 ]; then
+                # Exit code 1 = offenses found (normal for corpus repos).
+                # Only warn on actual failures (OOM=137, crashes, etc.).
                 echo "::warning::rubocop exited with code ${rc} for ${REPO_ID}"
                 cat "$WORKSPACE/results/rubocop/${REPO_ID}.err" 2>/dev/null || true
               fi
