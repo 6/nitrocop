@@ -503,3 +503,25 @@ def check_package(name, opts)
   result = execute("zypper se #{name}", opts) { |result| result }
   result.stdout.include?('found')
 end
+
+# FP fix: variable in if-branch, block deep in else-branch nested in case/when
+# (corpus: blue_hydra parser.rb:284 — `line` in if, `grp.map do |line|` in else/case/when)
+def handle_grouped_chunk(grouped_chunk)
+  grouped_chunk.each do |grp|
+    if grp.count == 1
+      line = grp[0]
+      parse(line)
+    else
+      case
+      when grp[0] =~ /Class:/
+        grp.each do |line|
+          process(line)
+        end
+      when grp[0] =~ /Manufacturer/
+        grp.map do |line|
+          format(line)
+        end
+      end
+    end
+  end
+end

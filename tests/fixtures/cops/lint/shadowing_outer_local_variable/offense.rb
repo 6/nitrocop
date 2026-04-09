@@ -521,3 +521,29 @@ def complete_text(text, pos)
                                                              ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `pos`.
   end
 end
+
+# FN fix: method param shadowed by block param in simple iteration
+# (corpus: appoxy/aws require_relative.rb:10)
+def require_relative(path)
+  desired_path = File.expand_path(path)
+  shortest = desired_path
+  $:.each do |path|
+              ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `path`.
+    shortest = path if path.size < shortest.size
+  end
+  require shortest
+end
+
+# FN fix: local var shadowed by block param in method-call block
+# (corpus: braintree spec_helper.rb:182)
+class SpecHelper
+  def self.simulate_form_post(url)
+    http = Net::HTTP.new("localhost", 80)
+    http.use_ssl = true
+    http.start do |http|
+                   ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `http`.
+      request = Net::HTTP::Post.new(url)
+      http.request(request)
+    end
+  end
+end

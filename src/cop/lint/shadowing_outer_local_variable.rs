@@ -1229,12 +1229,19 @@ impl<'pr> Visit<'pr> for ContextCollector {
         // Record conditional parent info for blocks at statement level.
         // This enables RuboCop's check 5/6 suppression for blocks that are
         // direct children of conditional branch bodies.
+        //
+        // Propagate through single-statement ancestor chains: when a block is
+        // the sole statement in a when body, its "variable_node" in RuboCop
+        // terms is the case node (one level up). If that case is the sole
+        // statement in an else-branch, the variable_node IS the else-branch.
+        // Record entries for each ancestor body level as long as the chain
+        // remains single-statement (each intermediate branch has ≤1 statement).
         if self.expression_depth == 0 {
-            if let Some(entry) = self
+            for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
-                .find(|e| e.is_body)
+                .filter(|e| e.is_body)
             {
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
@@ -1242,6 +1249,11 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     is_single_stmt_branch: entry.single_stmt,
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
+                // Stop propagating at multi-statement boundaries — the block
+                // no longer "represents" the branch at the next level.
+                if !entry.single_stmt {
+                    break;
+                }
             }
         }
 
@@ -1298,12 +1310,13 @@ impl<'pr> Visit<'pr> for ContextCollector {
         }
 
         // Record conditional parent info for lambdas at statement level.
+        // Same propagation logic as visit_block_node.
         if self.expression_depth == 0 {
-            if let Some(entry) = self
+            for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
-                .find(|e| e.is_body)
+                .filter(|e| e.is_body)
             {
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
@@ -1311,6 +1324,9 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     is_single_stmt_branch: entry.single_stmt,
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
+                if !entry.single_stmt {
+                    break;
+                }
             }
         }
 
