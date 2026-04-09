@@ -85,6 +85,19 @@ use ruby_prism::Visit;
 /// Match both behaviors by applying the whole-node multiline skip to `[]=`
 /// calls and to `[]` reads without an attached block, while still checking
 /// `[]` reads that own their trailing `do ... end`.
+///
+/// ## Corpus investigation (2026-04-09, heredoc interpolation)
+///
+/// Variant `EnforcedStyle: space` had 2 FN on
+/// `mysql_query(<<-SQL).first["pagetext"]` where the heredoc body contains
+/// interpolation with brackets like `#{mapping[post.id][0]}`. Prism includes
+/// the heredoc content in the `CallNode` subtree, so `reference_bracket_pairs`
+/// collected brackets from inside the heredoc interpolation. The bracket
+/// selection logic then picked an inner bracket pair instead of the outer
+/// `["pagetext"]` brackets. RuboCop's `tokens_within(node)` excludes heredoc
+/// body tokens, so it always picks the correct brackets. Fixed by making
+/// `ReferenceBracketCollector` skip `InterpolatedStringNode`s whose opening
+/// delimiter starts with `<<` (i.e., heredocs).
 pub struct SpaceInsideReferenceBrackets;
 
 impl Cop for SpaceInsideReferenceBrackets {
@@ -467,6 +480,19 @@ impl<'pr> Visit<'pr> for ReferenceBracketCollector {
         }
 
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        // Don't descend into heredoc content. RuboCop's `tokens_within(node)`
+        // excludes heredoc body tokens, so bracket pairs inside heredoc
+        // interpolation must not influence the outer bracket selection.
+        if node
+            .opening_loc()
+            .is_some_and(|o| o.as_slice().starts_with(b"<<"))
+        {
+            return;
+        }
+        ruby_prism::visit_interpolated_string_node(self, node);
     }
 
     fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
