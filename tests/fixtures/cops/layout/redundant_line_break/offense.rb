@@ -271,3 +271,11 @@ end
 results.add_warning('summary', 'The summary should be a short ' \
 ^ Layout/RedundantLineBreak: Redundant line break detected.
   'version of `description` (max 140 characters).')
+
+raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "for attribute: #{inspect}" unless acceptable
+
+raise "[Xcodeproj] unsupported key `#{key}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
