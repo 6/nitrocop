@@ -18,6 +18,16 @@ use crate::parse::source::SourceFile;
 ///   That hid offenses when the first parameter started its own continuation
 ///   line (for example `def method(\n      a,\n      b)`). Fixed by only
 ///   skipping the first parameter in `with_first_parameter` mode.
+/// - `with_fixed_indentation` variant divergence: Prism stores required params
+///   that come after an optional (`def f(a = nil, b)`) in `params.posts()`,
+///   so they were never checked and only showed up as FNs in the non-default
+///   style where those continuation lines can be offenses. Fixed by collecting
+///   `posts()` in source order.
+/// - `with_fixed_indentation` tabbed defs: the base column used spaces-only
+///   indentation from the `def` line, but RuboCop counts all leading
+///   indentation characters before adding `IndentationWidth`. That made
+///   tab-indented definitions under-report offenses. Fixed by counting tabs in
+///   the `def` line indentation for this style.
 pub struct ParameterAlignment;
 
 impl Cop for ParameterAlignment {
@@ -64,6 +74,9 @@ impl Cop for ParameterAlignment {
         if let Some(rest) = params.rest() {
             param_offsets.push(rest.location().start_offset());
         }
+        for p in params.posts().iter() {
+            param_offsets.push(p.location().start_offset());
+        }
         for kw in params.keywords().iter() {
             param_offsets.push(kw.location().start_offset());
         }
@@ -85,7 +98,11 @@ impl Cop for ParameterAlignment {
                 let def_keyword_loc = def_node.def_keyword_loc();
                 let (def_line, _) = source.offset_to_line_col(def_keyword_loc.start_offset());
                 let def_line_bytes = util::line_at(source, def_line).unwrap_or(b"");
-                util::indentation_of(def_line_bytes) + indent_width
+                def_line_bytes
+                    .iter()
+                    .take_while(|&&b| b == b' ' || b == b'\t')
+                    .count()
+                    + indent_width
             }
             _ => first_col, // with_first_parameter
         };
