@@ -25,7 +25,7 @@ gh pr list --repo 6/nitrocop --label type:cop-fix --state open \
   )] | .[] | "\(.number)\t\(.title)\t\(.labels | map(.name) | join(","))"'
 ```
 
-This filters to only PRs where all CI checks have passed, skipping drafts with no checks, PRs with pending checks, and PRs with failures — no need to run `gh pr checks` per PR.
+This filters to only PRs where all CI checks have passed, skipping drafts with no checks, PRs with pending checks, and PRs with failures — no need to run `gh pr checks` per PR. Exclude any PRs that have the `needs-investigation` label from the results.
 
 Also list PRs with `validation-failed` label separately so they can be closed:
 
@@ -42,7 +42,11 @@ Before reviewing code, fetch the PR comments to check actual corpus impact:
 gh pr view <number> --repo 6/nitrocop --json comments --jq '.comments[] | select(.author.login == "github-actions") | .body' | head -40
 ```
 
-The CI workflow posts cop-check results with FP/FN deltas. Look for the table with `FP Δ` and `FN Δ` columns. If the PR has **zero net FP/FN change** (all deltas are 0), **close it** — the code change adds complexity without improving conformance. Do not trust doc comment claims like "resolves ~N FPs" without verifying against the actual CI comment data.
+The CI workflow posts cop-check results with FP/FN deltas. Look for the table with `FP Δ` and `FN Δ` columns. If the PR has **zero net FP/FN change** (all deltas are 0), add the `needs-investigation` label and skip it — the code change may need further corpus investigation. Do not trust doc comment claims like "resolves ~N FPs" without verifying against the actual CI comment data.
+
+```bash
+gh pr edit <number> --repo 6/nitrocop --add-label needs-investigation
+```
 
 ### 3. Review each PR
 
@@ -81,10 +85,17 @@ The workflow enables squash auto-merge, so approval is enough.
 gh pr review <number> --approve --body "Reviewed: fixed [description of nits]. Logic correct."
 ```
 
-**Close** — code is wrong, too complex, or not worth fixing:
+**Label for investigation** — zero FP/FN impact, doc-only, or unclear value:
+```bash
+gh pr edit <number> --repo 6/nitrocop --add-label needs-investigation
+```
+Add a comment explaining why it needs investigation. The PR stays open for a human or future agent to revisit.
+
+**Close** — code is obviously wrong or broken (typically from lower-quality models like minimax):
 ```bash
 gh pr close <number> --comment "Closing: [reason]. [Specific issues found.]" --delete-branch
 ```
+Only close when the code is clearly incorrect — wrong logic, broken fixtures, or harmful changes. Do not close PRs just because they have zero FP/FN impact; label those for investigation instead.
 
 ### 5. Present summary
 
@@ -108,12 +119,14 @@ Show a table of actions taken:
 - When fixing, commit with a clear message explaining what was changed
 - When closing, always leave a comment with the specific reason so the dispatch system can learn
 - If the diff contains changes to Python files (`.py`), treat this as suspicious — agent cop-fix should only touch Rust code and test fixtures. Flag it to the user before approving.
-- If the diff contains only `///` doc comment changes in `.rs` files and no code logic or fixture changes, close the PR. Doc-only PRs indicate the agent couldn't find a code fix — they add git noise without closing any FP/FN gap. The agent should have exited without committing.
+- If the diff contains only `///` doc comment changes in `.rs` files and no code logic or fixture changes, add the `needs-investigation` label. Doc-only PRs indicate the agent couldn't find a code fix — they need investigation to determine if the cop has a real issue.
 - **Model-aware review rigor**: Check the PR labels for `model:*` tags. PRs from lower-quality models (e.g., `model:minimax`) require extra scrutiny:
   - Fix any bad code, bad fixtures (missing trailing newlines, duplicates), or dead code before approving
-  - Close PRs that don't actually impact FP/FN counts — if the code change adds complexity without moving the needle, it's not worth merging
-  - Close doc-only or doc+test-only PRs (tests that verify already-working behavior without a code fix are not a contribution)
-  - Verify the change has a real behavioral impact — refactors that rewrite logic without changing corpus results are noise
+  - Close PRs with obviously wrong code — broken logic, nonsensical changes, or harmful modifications
+  - Label PRs that don't impact FP/FN counts with `needs-investigation` instead of closing
+  - Close doc-only or doc+test-only PRs only if the code is clearly wrong; otherwise label for investigation
+  - Verify the change has a real behavioral impact — refactors that rewrite logic without changing corpus results should be labeled for investigation
+- **Skip PRs with `needs-investigation` label** — these require manual corpus investigation before review. Do not review, approve, or close them.
 - **Flag changes to global/infrastructure files**: If the diff touches files outside `src/cop/` and `tests/fixtures/cops/` that affect the broader corpus or build pipeline, **stop and flag to the user** before approving. These files require human judgment because they can mask bugs or have repo-wide side effects. Examples:
   - `bench/corpus/repo_excludes.json` — adding file exclusions can hide real FPs instead of fixing them in code. Verify the exclusion is justified (e.g., RuboCop parser crash on the file, not just inconvenient offenses).
   - `bench/corpus/*.py`, `scripts/*.py` — changes to corpus tooling or CI scripts are out of scope for cop-fix PRs.
@@ -121,4 +134,5 @@ Show a table of actions taken:
   - `src/resources/tiers.json` — tier changes affect which cops run by default.
   - `bench/corpus/baseline_rubocop.yml` — baseline config changes affect all cops.
   - `.github/workflows/*.yml` — CI workflow changes are never in scope.
+  - **Exception — `bench/corpus/smoke_baseline.json`**: Changes to this file are expected when a cop improves. If every changed number is moving in the right direction (FP decreasing, FN decreasing, matches increasing, rate increasing), this is safe to approve without flagging. Only flag if any number moves in the wrong direction or if the change looks unrelated to the cop being fixed.
 - Check for **reimplemented shared infrastructure**: the diff should not add local helper functions that duplicate code in `src/cop/shared/` modules. The shared modules include: `util.rs` (node helpers like `begins_its_line`, `indentation_of`, `is_modifier_if`, `unwrap_parentheses`, etc.), `node_type.rs` (node type constants), `method_identifier_predicates.rs` (method name classification), `literal_predicates.rs` (literal node classification), `access_modifier_predicates.rs` (access modifier detection), `predicate_operator_predicates.rs` (semantic operator checks), `numeric_predicates.rs`, `constant_predicates.rs`, and per-department shared modules (e.g., `style/trailing_comma.rs`, `layout/multiline_literal_brace_layout.rs`). If the agent reimplements any of these locally instead of importing the shared version, this is a "fix then approve" case — deduplicate before approving. The `tests/integration.rs` `shared_module_usage_lint` test enforces this at CI level for known patterns, but reviewers should catch new duplications that CI doesn't yet lint for.
