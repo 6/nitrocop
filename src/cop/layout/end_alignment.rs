@@ -48,6 +48,27 @@ use ruby_prism::Visit;
 ///   still fall back to keyword alignment. `class`/`module` also stay keyword-aligned
 ///   under `variable`, while `case`/`case in` only align to an immediate same-line
 ///   send/assignment parent when Prism exposes a real `predicate`.
+///
+/// ## Variant fix round 2 (2026-04-08)
+///
+/// **variable style — 23 FP, 63 FN:**
+/// - FPs: case nodes under `!!` (double-not) were treated as arguments of the `!`
+///   send, causing alignment with the `!` position instead of keyword. Root cause:
+///   the case-with-predicate check used `AncestorKind::Send` broadly but didn't
+///   distinguish argument-of-send from receiver-of-send. Fixed by adding
+///   `arguments_span` to `AncestorContext` and only aligning with parent sends when
+///   the case's start offset falls within the arguments span.
+/// - FNs: bare `case` (no predicate) under assignment (`var = case when ...`) was
+///   always falling back to keyword alignment because `variable_context_start_offset`
+///   returned `None` early for bare case. Fixed by removing the early return and
+///   letting bare case fall through to the general rhs-matching logic, which correctly
+///   detects the assignment parent via `extracted_rhs`.
+///
+/// **start_of_line style — 5 FN:**
+/// - All from BOM (U+FEFF) at file start. RuboCop's `effective_column` subtracts 1
+///   from columns on line 1 with BOM, making the start-of-line alignment position
+///   effectively -1 (unreachable). Fixed by detecting when the alignment offset falls
+///   within the BOM (offset < 3 on line 1 with BOM) and forcing a mismatch.
 pub struct EndAlignment;
 
 fn alignment_column(source: &SourceFile, offset: usize) -> usize {
@@ -256,6 +277,9 @@ struct AncestorContext {
     start_offset: usize,
     rhs_span: Option<(usize, usize)>,
     kind: AncestorKind,
+    /// For Send (CallNode) ancestors, the span of the arguments list.
+    /// Used to distinguish "case is argument of send" from "case is receiver of send".
+    arguments_span: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -294,10 +318,16 @@ impl<'pr> ruby_prism::Visit<'pr> for AncestorFinder {
             (rhs.location().start_offset(), rhs.location().end_offset())
         });
 
+        let arguments_span = node.as_call_node().and_then(|call| {
+            let args = call.arguments()?;
+            Some((args.location().start_offset(), args.location().end_offset()))
+        });
+
         self.stack.push(AncestorContext {
             start_offset: node.location().start_offset(),
             rhs_span,
             kind: ancestor_kind(&node),
+            arguments_span,
         });
     }
 
@@ -353,28 +383,30 @@ fn variable_context_start_offset(
         });
     }
 
-    if let Some(case_node) = node.as_case_node() {
-        if case_node.predicate().is_some() {
-            return immediate_parent_start_offset(|parent| {
-                matches!(
-                    parent.kind,
-                    AncestorKind::Send | AncestorKind::AssignmentLike
-                )
-            });
+    // For case/case_match nodes:
+    // 1. If case is an argument of a parent send (not the receiver) on the same line,
+    //    align with the parent send (matches RuboCop's `node.argument?` check).
+    // 2. Otherwise, fall through to the general rhs-matching logic, which handles
+    //    case as RHS of assignments (both bare case and case-with-predicate).
+    // 3. If no parent matches, returns None → keyword alignment.
+    let is_case = node.as_case_node().is_some() || node.as_case_match_node().is_some();
+    if is_case {
+        if let Some(parent) = ancestors.last() {
+            if matches!(parent.kind, AncestorKind::Send) {
+                let node_start = node.location().start_offset();
+                let is_argument = parent.arguments_span.is_some_and(|(arg_start, arg_end)| {
+                    node_start >= arg_start && node_start < arg_end
+                });
+                if is_argument {
+                    let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
+                    if parent_line == kw_line {
+                        return Some(parent.start_offset);
+                    }
+                    return None; // line break before keyword → keyword alignment
+                }
+            }
         }
-        return None;
-    }
-
-    if let Some(case_match_node) = node.as_case_match_node() {
-        if case_match_node.predicate().is_some() {
-            return immediate_parent_start_offset(|parent| {
-                matches!(
-                    parent.kind,
-                    AncestorKind::Send | AncestorKind::AssignmentLike
-                )
-            });
-        }
-        return None;
+        // Fall through to general rhs-matching logic (handles assignments, etc.)
     }
 
     let target_span = (node.location().start_offset(), node.location().end_offset());
@@ -618,7 +650,22 @@ impl EndAlignment {
         };
         let expected_col = alignment_column(source, expected_offset);
 
-        if end_col != expected_col {
+        // RuboCop's effective_column subtracts 1 from all columns on line 1 when
+        // there's a BOM. When the alignment target is the BOM itself (offset < 3
+        // on line 1), this produces -1, which can never match an `end` on another
+        // line. Replicate this by forcing a mismatch.
+        let bom_forces_mismatch = {
+            let bytes = source.as_bytes();
+            let (exp_line, _) = source.offset_to_line_col(expected_offset);
+            exp_line == 1
+                && expected_offset < 3
+                && bytes.len() >= 3
+                && bytes[0] == 0xEF
+                && bytes[1] == 0xBB
+                && bytes[2] == 0xBF
+        };
+
+        if end_col != expected_col || bom_forces_mismatch {
             let msg = format!("Align `end` with `{keyword}`.");
             return vec![self.diagnostic(source, end_line, end_col, msg)];
         }
@@ -1042,6 +1089,67 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.message.contains("`module`")),
             "variable style should keep keyword alignment for module under send: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn start_of_line_bom_flags_end() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("start_of_line");
+        // BOM at file start + module/end both at col 0 — RuboCop flags because
+        // effective_column is -1 for line 1 with BOM.
+        let src = b"\xEF\xBB\xBFmodule Dryrun\n  VERSION = '1.0'\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`module`")),
+            "start_of_line should flag end on BOM-prefixed file: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_bare_case_under_assignment_aligns_with_var() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        // `field_class = case` (bare case) with `end` at keyword col — should flag
+        let src = b"def test\n  field_class = case\n                when :a then 1\n                else 2\n                end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`case`")),
+            "variable style should flag bare case end at keyword col: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_bare_case_under_assignment_no_offense_at_var_col() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        // `field_class = case` (bare case) with `end` at variable col — no offense
+        let src = b"def test\n  field_class = case\n  when :a then 1\n  else 2\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should accept bare case end at variable col: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_bang_bang_case_no_offense() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        // `!! case x` — case is receiver, not argument. Keyword alignment.
+        let src = b"def test\n  !! case destroy_option\n     when Symbol, String\n       1\n     else\n       2\n     end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should not flag !! case end at keyword col: {:?}",
             diags
         );
     }
