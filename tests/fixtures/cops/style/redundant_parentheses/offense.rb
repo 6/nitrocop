@@ -104,6 +104,9 @@ x.y((a..b))
 x.y((1..42))
     ^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
 
+(0..10).send(@method, (3..7)).should be_true
+                      ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
+
 "#{(foo)}"
    ^^^^^ Style/RedundantParentheses: Don't use parentheses around an interpolated expression.
 
@@ -279,3 +282,26 @@ if client = (UNIXSocket.open(socket) rescue nil)
 # Assignment inside string interpolation — Parser AST wraps interpolation in begin
 "value is #{(x = compute)}"
             ^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+
+accumulator << ({ bar: element }.merge!(ORIGINAL_HASH){ |_key, left, _right| left })
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+yield ("Decompressing sparse image #{item.name}"), :percent, (i * 100) / sparse.count_chunks if block_given?
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+var = 0
+foo in { bar: ^(var) }
+               ^^^^^ Style/RedundantParentheses: Don't use parentheses around a variable.
+
+args = m ((0; 1))
+          ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+args = m ((0; 1)), ((2; 3))
+          ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+                    ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+assert_eq(false, (not true))
+                 ^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
+
+(not(true)).should be_false
+^ Style/RedundantParentheses: Don't use parentheses around a keyword.
