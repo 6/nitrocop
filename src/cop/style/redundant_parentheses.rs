@@ -515,10 +515,13 @@ impl RedundantParensVisitor<'_> {
                     // get a `begin` wrapper — only multi-statement bodies do.
                     // Parentheses nodes inside parens always map to begin_type.
                     // Top-level (program body) is always begin-like.
+                    // In Parser AST, string interpolation wraps content in
+                    // `begin` nodes — treat Interpolation like parentheses body.
                     let begin_like_parent = p.is_statements_node
                         && (p.is_parentheses_body
                             || p.statements_child_count > 1
-                            || self.parent_stack.len() <= 2);
+                            || self.parent_stack.len() <= 2
+                            || matches!(p.kind, ParentKind::Interpolation));
                     begin_like_parent
                         && !p.is_assignment_parent
                         && !self.is_endless_def_body_parent()

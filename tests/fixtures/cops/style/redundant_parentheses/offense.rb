@@ -275,3 +275,7 @@ if value = (m[name] rescue nil)
 
 if client = (UNIXSocket.open(socket) rescue nil)
             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+# Assignment inside string interpolation — Parser AST wraps interpolation in begin
+"value is #{(x = compute)}"
+            ^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
