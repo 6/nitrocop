@@ -5,8 +5,8 @@ a = 4
 b = 5
 c = 6
 
-# Renamed cops whose new name has known detection gaps (in REDUNDANT_DISABLE_SKIP_COPS)
-# should not be flagged — the directive might legitimately suppress an offense nitrocop missed.
+# Renamed cop (Metrics/LineLength → Layout/LineLength) with an offense on the
+# disabled line — the directive suppresses a real offense, so it is not redundant.
 # rubocop:disable Metrics/LineLength
 this_is_a_very_long_line_that_should_trigger_line_length_cop_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa = 1
 # rubocop:enable Metrics/LineLength
