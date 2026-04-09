@@ -279,3 +279,7 @@ raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
 raise "[Xcodeproj] unsupported key `#{key}` " \
 ^ Layout/RedundantLineBreak: Redundant line break detected.
   "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
+
+return if !checks.values.
+          ^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  find { |c| c.check? page, [Element::Form::DOM, Element::Cookie::DOM], true }
