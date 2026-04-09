@@ -1,6 +1,6 @@
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
-    HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
+    FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
     PINNED_EXPRESSION_NODE, SUPER_NODE, YIELD_NODE,
 };
 use crate::cop::{Cop, CopConfig};
@@ -107,6 +107,27 @@ use crate::parse::source::SourceFile;
 /// checking for a `:` immediately preceded by an identifier character
 /// (excluding `::` constant resolution). This feeds into
 /// `ignores_open_side()` alongside the existing command-form check.
+///
+/// ## Corpus investigation (2026-04-09)
+///
+/// Variant style divergence was isolated to three narrow cases:
+///
+/// 1. `space`/`compact` missed constant find patterns like
+///    `Point(*,  1,*a)` because Prism stores those parens on
+///    `FindPatternNode`, which we were not visiting.
+/// 2. `compact` treated any trailing `)` byte as a consecutive right paren,
+///    so it missed `) )` offenses for real nested parens while also
+///    suppressing required close-side inserts after percent literals like
+///    `warning(%(...))`.
+/// 3. `space`/`compact` added a spurious close-side offense when the last
+///    argument was a multiline plain string continued with `\`, e.g.
+///    `select( "x \\\n  y")`. RuboCop sees that as a single multiline string
+///    token, so there is no same-line right-paren pair to check.
+///
+/// Fix: add `FindPatternNode`, treat compact consecutive-paren handling as an
+/// exact-token case (`((`, `))`, or a single separating space) only when the
+/// inner node itself uses real `(`...`)` delimiters, and exempt only trailing
+/// multiline plain-string literals from the close-side missing-space check.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -128,6 +149,7 @@ impl Cop for SpaceInsideParens {
             CALL_NODE,
             DEF_NODE,
             DEFINED_NODE,
+            FIND_PATTERN_NODE,
             HASH_PATTERN_NODE,
             MULTI_TARGET_NODE,
             MULTI_WRITE_NODE,
@@ -196,6 +218,7 @@ impl Cop for SpaceInsideParens {
                         source,
                         diagnostics,
                         &mut corrections,
+                        open_end,
                         bytes,
                         open_side,
                         false,
@@ -206,6 +229,7 @@ impl Cop for SpaceInsideParens {
                     source,
                     diagnostics,
                     &mut corrections,
+                    node,
                     bytes,
                     close_side,
                     close_start,
@@ -219,6 +243,7 @@ impl Cop for SpaceInsideParens {
                         source,
                         diagnostics,
                         &mut corrections,
+                        open_end,
                         bytes,
                         open_side,
                         true,
@@ -229,6 +254,7 @@ impl Cop for SpaceInsideParens {
                     source,
                     diagnostics,
                     &mut corrections,
+                    node,
                     bytes,
                     close_side,
                     close_start,
@@ -306,6 +332,14 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
         }
     }
 
+    if let Some(find_pattern) = node.as_find_pattern_node() {
+        let open = find_pattern.opening_loc()?;
+        let close = find_pattern.closing_loc()?;
+        if open.as_slice() == b"(" && close.as_slice() == b")" {
+            return Some((open.start_offset(), open.end_offset(), close.start_offset()));
+        }
+    }
+
     if let Some(hash_pattern) = node.as_hash_pattern_node() {
         let open = hash_pattern.opening_loc()?;
         let close = hash_pattern.closing_loc()?;
@@ -358,6 +392,99 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
     }
 
     None
+}
+
+fn trailing_inner_node<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(parentheses) = node.as_parentheses_node() {
+        return parentheses.body();
+    }
+
+    if let Some(call) = node.as_call_node() {
+        return call.arguments()?.arguments().iter().last();
+    }
+
+    if let Some(yield_node) = node.as_yield_node() {
+        return yield_node.arguments()?.arguments().iter().last();
+    }
+
+    if let Some(super_node) = node.as_super_node() {
+        return super_node.arguments()?.arguments().iter().last();
+    }
+
+    if let Some(array_pattern) = node.as_array_pattern_node() {
+        return array_pattern
+            .posts()
+            .iter()
+            .last()
+            .or_else(|| array_pattern.rest())
+            .or_else(|| array_pattern.requireds().iter().last());
+    }
+
+    if let Some(find_pattern) = node.as_find_pattern_node() {
+        return Some(find_pattern.right());
+    }
+
+    if let Some(hash_pattern) = node.as_hash_pattern_node() {
+        return hash_pattern
+            .rest()
+            .or_else(|| hash_pattern.elements().iter().last());
+    }
+
+    if let Some(multi_target) = node.as_multi_target_node() {
+        return multi_target
+            .rights()
+            .iter()
+            .last()
+            .or_else(|| multi_target.rest())
+            .or_else(|| multi_target.lefts().iter().last());
+    }
+
+    if let Some(multi_write) = node.as_multi_write_node() {
+        return multi_write
+            .rights()
+            .iter()
+            .last()
+            .or_else(|| multi_write.rest())
+            .or_else(|| multi_write.lefts().iter().last());
+    }
+
+    if let Some(pinned_expression) = node.as_pinned_expression_node() {
+        return Some(pinned_expression.expression());
+    }
+
+    None
+}
+
+fn trailing_real_rparen_offset(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<usize> {
+    trailing_inner_node(node)
+        .and_then(|inner| paren_offsets(&inner, bytes).map(|(_, _, close)| close))
+}
+
+fn trailing_multiline_plain_string(node: &ruby_prism::Node<'_>, close_start: usize) -> bool {
+    let Some(inner) = trailing_inner_node(node) else {
+        return false;
+    };
+
+    let Some(string) = inner.as_string_node() else {
+        return false;
+    };
+
+    if !string.location().as_slice().contains(&b'\n') {
+        return false;
+    }
+
+    if string.location().end_offset() != close_start {
+        return false;
+    }
+
+    let Some(open) = string.opening_loc() else {
+        return false;
+    };
+    let Some(close) = string.closing_loc() else {
+        return false;
+    };
+
+    matches!(open.as_slice(), b"\"" | b"'") && matches!(close.as_slice(), b"\"" | b"'")
 }
 
 fn ignores_open_side(node: &ruby_prism::Node<'_>, bytes: &[u8], open_start: usize) -> bool {
@@ -612,6 +739,7 @@ fn check_missing_open_space(
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
     corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    open_end: usize,
     bytes: &[u8],
     open_side: NextSameLineItem,
     allow_consecutive_left_parens: bool,
@@ -620,6 +748,17 @@ fn check_missing_open_space(
         return;
     };
     if allow_consecutive_left_parens && bytes.get(code_start) == Some(&b'(') {
+        if code_start == open_end + 1 && bytes.get(open_end) == Some(&b' ') {
+            push_remove_offense(
+                cop,
+                source,
+                diagnostics,
+                corrections,
+                open_end,
+                code_start,
+                MSG,
+            );
+        }
         return;
     }
     if code_start == 0 {
@@ -644,6 +783,7 @@ fn check_missing_close_space(
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
     corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node: &ruby_prism::Node<'_>,
     bytes: &[u8],
     close_side: Option<usize>,
     close_start: usize,
@@ -652,7 +792,26 @@ fn check_missing_close_space(
     let Some(prev_code) = close_side else {
         return;
     };
-    if allow_consecutive_right_parens && bytes.get(prev_code) == Some(&b')') {
+    if allow_consecutive_right_parens && trailing_real_rparen_offset(node, bytes) == Some(prev_code)
+    {
+        let space_start = prev_code + 1;
+        if space_start == close_start {
+            return;
+        }
+        if space_start + 1 == close_start && bytes.get(space_start) == Some(&b' ') {
+            push_remove_offense(
+                cop,
+                source,
+                diagnostics,
+                corrections,
+                space_start,
+                close_start,
+                MSG,
+            );
+        }
+        return;
+    }
+    if trailing_multiline_plain_string(node, close_start) {
         return;
     }
     if prev_code + 1 != close_start {
@@ -722,22 +881,26 @@ fn is_paren_whitespace(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
 
+    fn style_config(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn space_style_flags_missing_spaces() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("space".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = style_config("space");
         let src = b"x = (1 + 2)\n";
         let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
         assert_eq!(
@@ -751,15 +914,8 @@ mod tests {
     #[test]
     fn space_style_accepts_spaces() {
         use crate::testutil::assert_cop_no_offenses_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("space".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = style_config("space");
         let src = b"x = ( 1 + 2 )\n";
         assert_cop_no_offenses_full_with_config(&SpaceInsideParens, src, config);
     }
@@ -767,15 +923,8 @@ mod tests {
     #[test]
     fn space_style_command_form_only_requires_closing_space() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("space".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = style_config("space");
         let src = b"check ( value)\n";
         let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
         assert_eq!(
@@ -785,5 +934,49 @@ mod tests {
         );
         assert_eq!(diags[0].location.column, 13);
         assert!(diags[0].message.contains("No space"));
+    }
+
+    #[test]
+    fn compact_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideParens,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_parens/compact_offense.rb"
+            ),
+            style_config("compact"),
+        );
+    }
+
+    #[test]
+    fn compact_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideParens,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_parens/compact_no_offense.rb"
+            ),
+            style_config("compact"),
+        );
+    }
+
+    #[test]
+    fn space_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideParens,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_parens/space_offense.rb"
+            ),
+            style_config("space"),
+        );
+    }
+
+    #[test]
+    fn space_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideParens,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_parens/space_no_offense.rb"
+            ),
+            style_config("space"),
+        );
     }
 }
