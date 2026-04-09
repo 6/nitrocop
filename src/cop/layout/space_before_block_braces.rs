@@ -1,4 +1,4 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, LAMBDA_NODE};
+use crate::cop::shared::node_type::{BLOCK_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -14,6 +14,17 @@ use crate::parse::source::SourceFile;
 ///   `LambdaNode`. In Prism, `-> { }` parses as a `LambdaNode`, not a `BlockNode`.
 ///   RuboCop's `on_block` also handles lambdas via `on_numblock`/`on_itblock` aliases,
 ///   since in Parser AST lambdas are block nodes. Fixed by also handling `LambdaNode`.
+/// - **ForwardingSuperNode FNs (51 FNs, no_space variant):** `super { ... }` (without
+///   explicit arguments) parses as `ForwardingSuperNode` in Prism, whose block child
+///   is visited via `visit_block_node()` (named method) rather than `visit()` (generic
+///   dispatch), so `visit_branch_node_enter` is never called for the inner BlockNode.
+///   Fixed by registering for `FORWARDING_SUPER_NODE` and extracting the block.
+/// - **Multiline block FPs (7 FPs, no_space variant):** RuboCop's
+///   `conflict_with_block_delimiters?` skips multiline `{ }` blocks when
+///   `Style/BlockDelimiters` is `line_count_based` (the default) and style is
+///   `no_space`, to avoid conflicting autocorrections. RuboCop defines multiline for
+///   blocks as `loc.begin.line != loc.end.line` (brace-to-brace, not expression-wide).
+///   Fixed by skipping `no_space` checks when `{` and `}` are on different lines.
 pub struct SpaceBeforeBlockBraces;
 
 impl Cop for SpaceBeforeBlockBraces {
@@ -22,7 +33,11 @@ impl Cop for SpaceBeforeBlockBraces {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, LAMBDA_NODE]
+        // ForwardingSuperNode is needed because Prism's generated visitor calls
+        // visit_block_node() (named method) instead of visit() (generic dispatch)
+        // for its block child, so BlockNode inside ForwardingSuperNode never triggers
+        // visit_branch_node_enter. We register for it and extract the block manually.
+        &[BLOCK_NODE, LAMBDA_NODE, FORWARDING_SUPER_NODE]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -41,11 +56,17 @@ impl Cop for SpaceBeforeBlockBraces {
         let style = config.get_str("EnforcedStyle", "space");
         let empty_style = config.get_str("EnforcedStyleForEmptyBraces", "space");
 
-        // Extract opening/closing from either BlockNode or LambdaNode
+        // Extract opening/closing from BlockNode, LambdaNode, or ForwardingSuperNode's block
         let (opening, closing) = if let Some(block) = node.as_block_node() {
             (block.opening_loc(), block.closing_loc())
         } else if let Some(lambda) = node.as_lambda_node() {
             (lambda.opening_loc(), lambda.closing_loc())
+        } else if let Some(fwd_super) = node.as_forwarding_super_node() {
+            if let Some(block) = fwd_super.block() {
+                (block.opening_loc(), block.closing_loc())
+            } else {
+                return;
+            }
         } else {
             return;
         };
@@ -66,6 +87,16 @@ impl Cop for SpaceBeforeBlockBraces {
 
         match effective_style {
             "no_space" => {
+                // RuboCop's conflict_with_block_delimiters?: skip multiline { } blocks
+                // in no_space mode when Style/BlockDelimiters is line_count_based (default).
+                // RuboCop defines block multiline? as loc.begin.line != loc.end.line
+                // (brace-to-brace, not the full expression).
+                let opening_line = source.offset_to_line_col(opening.start_offset()).0;
+                let closing_line = source.offset_to_line_col(closing.start_offset()).0;
+                if opening_line != closing_line {
+                    return;
+                }
+
                 if before > 0 && bytes[before - 1] == b' ' {
                     let (line, column) = source.offset_to_line_col(before - 1);
                     let mut diag = self.diagnostic(
@@ -165,6 +196,60 @@ mod tests {
         };
         let src = b"items.each{ |x| puts x }\n";
         assert_cop_no_offenses_full_with_config(&SpaceBeforeBlockBraces, src, config);
+    }
+
+    #[test]
+    fn no_space_offense_fixture() {
+        use crate::testutil::assert_cop_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+                (
+                    "EnforcedStyleForEmptyBraces".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        assert_cop_offenses_full_with_config(
+            &SpaceBeforeBlockBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_before_block_braces/no_space_offense.rb"
+            ),
+            config,
+        );
+    }
+
+    #[test]
+    fn no_space_no_offense_fixture() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+                (
+                    "EnforcedStyleForEmptyBraces".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        assert_cop_no_offenses_full_with_config(
+            &SpaceBeforeBlockBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_before_block_braces/no_space_no_offense.rb"
+            ),
+            config,
+        );
     }
 
     #[test]
