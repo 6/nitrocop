@@ -256,3 +256,55 @@ if (item[0] == "'" || item[0] == '"') && (item[-1] == "'" || item[-1] == '"')
 ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
   @src_keywords << item[1..-2]
 end
+
+# FN: previous line ends with a percent string delimiter, not a chained receiver
+execute %!CREATE STATISTICS my_stats ON "Id", "UserId" FROM "Posts"!
+if !trigger_based
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  execute %!ALTER TABLE "Posts" ADD COLUMN "Gen" INTEGER GENERATED ALWAYS AS ("Id" * 10) STORED!
+end
+
+# FN: previous line ending in `def !` is not operator chaining
+def !
+  if dtype == Boolean
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    return Utils.wrap_s(_s.not_)
+  end
+  raise NotImplementedError
+end
+
+# FN: previous line ending in `$!` is not operator chaining
+def initialize(template)
+  super($!.message)
+  @cause = $!
+  if @cause.is_a?(SyntaxError)
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    @cause = ActiveSupport::SyntaxErrorProxy.new(@cause)
+  end
+  @template, @sub_templates = template, nil
+end
+
+# FN: previous line ending in a character literal `?!` should still allow inner if
+if safe_channel?(ch) && ch[1] != ?!
+  if @config.channel_info[ch] && @config.channel_info[ch][:auto_create]
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    @manager.join_to_channel("!" + ch)
+  end
+end
+
+# FN: previous line ending in `+` makes the if an argument, not a chained receiver
+list = (data[:title_popular] || []) + (data[:title_exact] || []) + (data[:title_substring] || []) +
+if !list # as a last resort
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  list = (data[:title_approximate] || []) + (data[:title_approx] || [])
+end
+
+# FN: previous line ending in a character literal `?-` should still allow inner if
+if order
+  order = order.to_s
+  order = '-' << order if order[0] != ?-
+  if order.length < 2
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    order = nil
+  end
+end
