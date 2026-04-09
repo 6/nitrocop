@@ -42,6 +42,10 @@ use crate::parse::source::SourceFile;
 ///   In `always`, `exit_body_type?` is consulted for all forms - modifier forms
 ///   with exit bodies are not flagged, non-modifier forms with exit bodies are
 ///   not flagged (matching RuboCop behavior).
+/// - Fixed `EnforcedStyle: always` multiline modifier offense anchoring:
+///   RuboCop reports the offense at the wrapped statement start (`raise(`,
+///   `indent do`, etc.), not at the trailing modifier keyword line. The corpus
+///   FP/FN pairs were the same offense detected on different lines.
 pub struct Next;
 
 /// Check if a method name is an iteration method for Style/Next.
@@ -193,6 +197,21 @@ impl NextVisitor<'_> {
             .is_some_and(|nested| nested.has_keyword_else())
     }
 
+    fn offense_start_offset(
+        &self,
+        keyword_loc: &ruby_prism::Location<'_>,
+        statements: Option<ruby_prism::StatementsNode<'_>>,
+        is_modifier: bool,
+    ) -> usize {
+        if is_modifier {
+            statements
+                .map(|stmts| stmts.location().start_offset())
+                .unwrap_or_else(|| keyword_loc.start_offset())
+        } else {
+            keyword_loc.start_offset()
+        }
+    }
+
     fn check_block_body(&mut self, body: &ruby_prism::Node<'_>) {
         let stmts = match body.as_statements_node() {
             Some(s) => s,
@@ -242,7 +261,9 @@ impl NextVisitor<'_> {
                 return;
             }
 
-            let (line, column) = self.source.offset_to_line_col(kw_loc.start_offset());
+            let start_offset =
+                self.offense_start_offset(&kw_loc, if_node.statements(), is_modifier);
+            let (line, column) = self.source.offset_to_line_col(start_offset);
             self.diagnostics.push(self.cop.diagnostic(
                 self.source,
                 line,
@@ -284,7 +305,9 @@ impl NextVisitor<'_> {
             // the outer `unless` is the ENTIRE iteration body. If other
             // top-level statements precede the terminal `unless`, keep the
             // offense on the outer guard.
-            let start_offset = if single_statement_body {
+            let start_offset = if is_modifier {
+                self.offense_start_offset(&kw_loc, unless_node.statements(), true)
+            } else if single_statement_body {
                 self.single_nested_conditional(unless_node.statements())
                     .filter(|nested| !nested.has_else())
                     .map_or_else(
@@ -368,11 +391,11 @@ impl<'pr> Visit<'pr> for NextVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
     crate::cop_fixture_tests!(Next, "cops/style/next");
 
     #[test]
     fn always_style_skips_modifier_if_with_exit_body() {
-        use crate::cop::CopConfig;
         use crate::testutil::run_cop_full_with_config;
         use std::collections::HashMap;
 
@@ -391,6 +414,25 @@ mod tests {
             diags.is_empty(),
             "Modifier if with exit body should not be flagged in always style, got: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn always_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &Next,
+            include_bytes!("../../../tests/fixtures/cops/style/next/always_offense.rb"),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("always".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
         );
     }
 }
