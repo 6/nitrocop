@@ -166,6 +166,10 @@ use crate::parse::source::SourceFile;
 ///   outer unary-`!` call wrapped around the multiline send, but RuboCop
 ///   reports the underlying send start (`foo`, not `!`). Nitrocop now skips
 ///   that wrapper so the inner call is checked and anchored like RuboCop.
+/// - **Unary `!` wrapper narrowing**: that skip only applies to safe-navigation
+///   receiver chains. RuboCop still reports ordinary unary-negated multiline
+///   sends such as `!foo.\n  bar` and `!checks.values.\n  find { ... }`, but
+///   nitrocop was skipping every unary-`!` wrapper and missing those offenses.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -790,6 +794,15 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
             corrected: false,
         });
     }
+
+    fn receiver_chain_contains_safe_navigation(&self, node: &ruby_prism::CallNode<'pr>) -> bool {
+        node.call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b"&.")
+            || node
+                .receiver()
+                .and_then(|receiver| receiver.as_call_node())
+                .is_some_and(|receiver| self.receiver_chain_contains_safe_navigation(&receiver))
+    }
 }
 
 impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
@@ -833,8 +846,13 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
             && node.arguments().is_none()
             && node.block().is_none()
             && node.receiver().and_then(|r| r.as_call_node()).is_some();
+        let safe_navigation_unary_wrapper = unary_bang_wrapper
+            && node
+                .receiver()
+                .and_then(|receiver| receiver.as_call_node())
+                .is_some_and(|receiver| self.receiver_chain_contains_safe_navigation(&receiver));
 
-        if unary_bang_wrapper {
+        if safe_navigation_unary_wrapper {
             ruby_prism::visit_call_node(self, node);
             return;
         }
