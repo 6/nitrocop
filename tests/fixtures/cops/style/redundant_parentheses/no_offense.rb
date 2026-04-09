@@ -106,6 +106,13 @@ end while(bar)
 begin
   do_something
 end until(bar)
+# post-condition loops with spaced parens
+begin
+  do_something
+end while (current_issue)
+begin
+  do_something
+end while ((a && b) || c)
 # Parens touching keyword
 if x; y else(1) end
 if x; y else (1)end
