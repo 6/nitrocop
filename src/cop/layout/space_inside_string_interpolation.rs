@@ -3,7 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// RuboCop accepts any horizontal ASCII whitespace for `EnforcedStyle: space`
+/// inside `#{...}`, not just a literal `' '`. The variant divergence came from
+/// nitrocop flagging tab-padded interpolations as missing spaces.
 pub struct SpaceInsideStringInterpolation;
+
+fn is_horizontal_ascii_whitespace(byte: u8) -> bool {
+    byte.is_ascii_whitespace() && !matches!(byte, b'\n' | b'\r')
+}
 
 impl Cop for SpaceInsideStringInterpolation {
     fn name(&self) -> &'static str {
@@ -55,8 +62,13 @@ impl Cop for SpaceInsideStringInterpolation {
             return;
         }
 
-        let space_after_open = bytes.get(open_end) == Some(&b' ');
-        let space_before_close = close_start > 0 && bytes.get(close_start - 1) == Some(&b' ');
+        let space_after_open = bytes
+            .get(open_end)
+            .is_some_and(|byte| is_horizontal_ascii_whitespace(*byte));
+        let space_before_close = close_start > 0
+            && bytes
+                .get(close_start - 1)
+                .is_some_and(|byte| is_horizontal_ascii_whitespace(*byte));
 
         match style {
             "space" => {
@@ -152,6 +164,7 @@ impl Cop for SpaceInsideStringInterpolation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         SpaceInsideStringInterpolation,
@@ -161,4 +174,41 @@ mod tests {
         SpaceInsideStringInterpolation,
         "cops/layout/space_inside_string_interpolation"
     );
+
+    fn space_config() -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("space".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn space_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideStringInterpolation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_string_interpolation/space_no_offense.rb"
+            ),
+            space_config(),
+        );
+    }
+
+    #[test]
+    fn space_style_still_flags_missing_spaces() {
+        let diags = crate::testutil::run_cop_full_with_config(
+            &SpaceInsideStringInterpolation,
+            b"x = \"#{value}\"\n",
+            space_config(),
+        );
+
+        assert_eq!(diags.len(), 2);
+        assert!(
+            diags
+                .iter()
+                .all(|diag| diag.message == "Missing space inside string interpolation.")
+        );
+    }
 }
