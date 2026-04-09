@@ -238,3 +238,40 @@ greek_chr = ['&Psi;', '&Omega;']\
 math_chr = ['&exist;', '&forall;', '&rArr;']\
                                             ^ Style/RedundantLineContinuation: Redundant line continuation.
   .zip(%w[exist forall rarr])
+
+describe SellerMobileAnalyticsService do
+  describe "#process" do
+    it "returns the proper purchase data for all time" do
+      valid_purchases = []
+
+      result = described_class.new(@user, range: "all").process
+
+      expected_revenue_in_cents = \
+                                  ^ Style/RedundantLineContinuation: Redundant line continuation.
+        valid_purchases.sum(&:price_cents) - \
+                                             ^ Style/RedundantLineContinuation: Redundant line continuation.
+        valid_purchases.select(&:stripe_partially_refunded?).flat_map(&:refunds).sum(&:amount_cents) - \
+                                                                                                       ^ Style/RedundantLineContinuation: Redundant line continuation.
+        valid_purchases.select(&:refunded?).sum(&:price_cents) - \
+                                                                 ^ Style/RedundantLineContinuation: Redundant line continuation.
+        valid_purchases.select(&:chargedback_not_reversed?).sum(&:price_cents)
+      expect(result[:revenue]).to eq expected_revenue_in_cents
+    end
+  end
+end
+
+context "script contents" do
+  [:before_install, :after_install, :before_remove, :after_remove,
+   :before_upgrade, :after_upgrade].each do |script|
+    it "should be the same both with input as with original for #{script.to_s}" do
+      expect( \
+              ^ Style/RedundantLineContinuation: Redundant line continuation.
+             (input.scripts[script] =~ \
+                                       ^ Style/RedundantLineContinuation: Redundant line continuation.
+              /[\n :]+#{Regexp.quote(original.scripts[script])}/m \
+                                                                  ^ Style/RedundantLineContinuation: Redundant line continuation.
+             )
+            ).to(be_truthy)
+    end
+  end
+end

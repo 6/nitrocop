@@ -105,6 +105,15 @@ use ruby_prism::Visit;
 ///   first `CallNode` that starts on each line and mirroring RuboCop's
 ///   `argument_newline?` logic on that node.
 ///
+/// - **First-node-only argument newline**: RuboCop's `find_node_for_line` checks
+///   only the first AST node that starts on the line after `\`. Our previous
+///   pre-scan marked a whole line if any nested `CallNode` there had multiline
+///   arguments, causing FNs for reductions like `expected_revenue_in_cents = \`
+///   and `expect( \` where a later nested call qualified but the selected first
+///   node did not. Fixed by recording just the first node per line and by
+///   treating Prism `BlockArgumentNode` (`&:sym`, `&block`) as a parser-style
+///   argument during recursive `argument_newline?` checks.
+///
 /// ## Remaining gaps
 ///
 /// - **CRLF reparse compat**: `trim_end` strips `\r` so CRLF files are
@@ -693,7 +702,7 @@ fn argument_newline_lines(
     source: &SourceFile,
     parse_result: &ruby_prism::ParseResult<'_>,
 ) -> HashSet<usize> {
-    let mut collector = ArgumentNewlineLineCollector {
+    let mut collector = FirstNodeArgumentNewlineLineCollector {
         source,
         seen_lines: HashSet::new(),
         argument_newline_lines: HashSet::new(),
@@ -707,12 +716,12 @@ fn call_argument_newline(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -
         return false;
     }
 
-    let Some(first_argument) = first_call_argument(call) else {
+    let Some(first_argument) = first_parser_argument(call) else {
         return false;
     };
 
     if let Some(inner_call) = first_argument.as_call_node() {
-        if first_call_argument(&inner_call).is_some() {
+        if call_has_parser_arguments(&inner_call) {
             return call_argument_newline(&inner_call, source);
         }
     }
@@ -728,27 +737,54 @@ fn call_argument_newline(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -
     selector_line != first_argument_line
 }
 
-fn first_call_argument<'pr>(call: &'pr ruby_prism::CallNode<'pr>) -> Option<ruby_prism::Node<'pr>> {
-    call.arguments()?.arguments().iter().next()
+fn call_has_parser_arguments(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.arguments()
+        .is_some_and(|arguments| !arguments.arguments().is_empty())
+        || call
+            .block()
+            .is_some_and(|block| block.as_block_argument_node().is_some())
 }
 
-struct ArgumentNewlineLineCollector<'a> {
+fn first_parser_argument<'pr>(
+    call: &'pr ruby_prism::CallNode<'pr>,
+) -> Option<ruby_prism::Node<'pr>> {
+    call.arguments()
+        .and_then(|arguments| arguments.arguments().iter().next())
+        .or_else(|| {
+            call.block()
+                .filter(|block| block.as_block_argument_node().is_some())
+        })
+}
+
+struct FirstNodeArgumentNewlineLineCollector<'a> {
     source: &'a SourceFile,
     seen_lines: HashSet<usize>,
     argument_newline_lines: HashSet<usize>,
 }
 
-impl<'pr> Visit<'pr> for ArgumentNewlineLineCollector<'_> {
-    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+impl FirstNodeArgumentNewlineLineCollector<'_> {
+    fn record_node<'pr>(&mut self, node: ruby_prism::Node<'pr>) {
         let line = self
             .source
             .offset_to_line_col(node.location().start_offset())
             .0;
-        if self.seen_lines.insert(line) && call_argument_newline(node, self.source) {
+        if self.seen_lines.insert(line)
+            && node
+                .as_call_node()
+                .is_some_and(|call| call_argument_newline(&call, self.source))
+        {
             self.argument_newline_lines.insert(line);
         }
+    }
+}
 
-        ruby_prism::visit_call_node(self, node);
+impl<'pr> Visit<'pr> for FirstNodeArgumentNewlineLineCollector<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.record_node(node);
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.record_node(node);
     }
 }
 
