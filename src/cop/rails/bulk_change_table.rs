@@ -7,19 +7,17 @@ use crate::parse::source::SourceFile;
 /// Mirrors RuboCop's adapter resolution and migration-node coverage for
 /// `Rails/BulkChangeTable`.
 ///
-/// Fixed false positives where nitrocop walked up from a migration file and
-/// treated nested app configs like `spec/dummy/config/database.yml` as the
-/// active adapter. RuboCop reads `config/database.yml` from the project root
-/// (its working directory); corpus runs invoke nitrocop from `/tmp`, so we
-/// check the current directory first and then fall back to the enclosing git
-/// checkout of the analyzed file. Also fixed false negatives for
-/// `change_table` calls outside instance `def change/up/down` bodies, such as
-/// class-body migrations and `def self.up` / `def self.down`.
+/// Adapter discovery first checks the current project root, then falls back to
+/// the enclosing git checkout of the analyzed file to match RuboCop when corpus
+/// runs execute from `/tmp`.
 ///
-/// Also fixed false positives for ERB-heavy `config/database.yml` files that
-/// RuboCop ignores after Psych syntax errors. We only fall back to text
-/// scanning when the YAML parse failed without standalone ERB control-flow
-/// lines like `<% ... %>`.
+/// This update fixes false negatives from `config/database.yml` files that are
+/// recoverable for RuboCop but fail our strict YAML parse because of duplicate
+/// keys/sections or inline ERB values. The text fallback now resolves adapters
+/// from merged `development: <<: *default` sections and from the first nested
+/// development database entry, while still skipping files with standalone
+/// top-level ERB control-flow lines like `<% ... %>` that RuboCop ignores after
+/// a Psych syntax error.
 pub struct BulkChangeTable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -147,8 +145,22 @@ fn parse_database_yml(path: &std::path::Path) -> Option<DatabaseKind> {
 fn has_top_level_erb_control_flow(contents: &str) -> bool {
     contents.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("<%") || trimmed.starts_with("%>")
+        trimmed.starts_with("%>")
+            || trimmed.starts_with("-%>")
+            || ((trimmed.starts_with("<%") || trimmed.starts_with("<%-"))
+                && !trimmed.starts_with("<%=")
+                && !trimmed.starts_with("<%-=")
+                && !trimmed.starts_with("<%#")
+                && !trimmed.starts_with("<%-#"))
     })
+}
+
+#[derive(Default)]
+struct TextDatabaseSection {
+    adapter: Option<String>,
+    merge_anchor: Option<String>,
+    first_nested_name: Option<String>,
+    nested: std::collections::HashMap<String, TextDatabaseSection>,
 }
 
 fn database_kind_from_parsed_yaml(yaml: &serde_yml::Value) -> Option<DatabaseKind> {
@@ -161,37 +173,169 @@ fn database_kind_from_parsed_yaml(yaml: &serde_yml::Value) -> Option<DatabaseKin
 }
 
 fn database_kind_from_text(contents: &str) -> Option<DatabaseKind> {
-    let mut in_development = false;
+    let mut sections = std::collections::HashMap::<String, TextDatabaseSection>::new();
+    let mut anchors = std::collections::HashMap::<String, String>::new();
+    let mut current_top: Option<String> = None;
+    let mut current_nested: Option<String> = None;
 
     for line in contents.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
+        if trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed.starts_with("<%")
+            || trimmed.starts_with("%>")
+        {
             continue;
         }
 
         let indent = line.chars().take_while(|ch| ch.is_whitespace()).count();
         if indent == 0 {
-            in_development = trimmed.starts_with("development:");
+            current_nested = None;
+            let Some((section_name, section_value)) = parse_yaml_mapping_entry(trimmed) else {
+                current_top = None;
+                continue;
+            };
+
+            current_top = Some(section_name.to_string());
+
+            if let Some(anchor) = extract_anchor_name(section_value) {
+                anchors.insert(anchor.to_string(), section_name.to_string());
+            }
+
+            sections.entry(section_name.to_string()).or_default();
             continue;
         }
 
-        if !in_development {
-            continue;
-        }
-
-        let Some(adapter) = trimmed.strip_prefix("adapter:") else {
+        let Some(top_name) = current_top.as_deref() else {
             continue;
         };
 
-        let adapter = adapter
-            .split('#')
-            .next()
-            .map(str::trim)
-            .unwrap_or_default()
-            .trim_matches(['"', '\'']);
+        if indent == 2 {
+            current_nested = None;
 
+            let Some((key, value)) = parse_yaml_mapping_entry(trimmed) else {
+                continue;
+            };
+
+            let section = sections.entry(top_name.to_string()).or_default();
+
+            match key {
+                "adapter" => section.adapter = Some(clean_yaml_scalar(value).to_string()),
+                "<<" => {
+                    section.merge_anchor = extract_anchor_reference(value).map(str::to_string);
+                }
+                _ if is_nested_mapping(value) => {
+                    let nested_name = key.to_string();
+                    if section.first_nested_name.is_none() {
+                        section.first_nested_name = Some(nested_name.clone());
+                    }
+                    section.nested.entry(nested_name.clone()).or_default();
+                    current_nested = Some(nested_name);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        if indent < 4 {
+            continue;
+        }
+
+        let Some(nested_name) = current_nested.as_deref() else {
+            continue;
+        };
+        let Some((key, value)) = parse_yaml_mapping_entry(trimmed) else {
+            continue;
+        };
+        let Some(nested_section) = sections
+            .get_mut(top_name)
+            .and_then(|section| section.nested.get_mut(nested_name))
+        else {
+            continue;
+        };
+
+        match key {
+            "adapter" => nested_section.adapter = Some(clean_yaml_scalar(value).to_string()),
+            "<<" => {
+                nested_section.merge_anchor = extract_anchor_reference(value).map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+
+    sections
+        .get("development")
+        .and_then(|section| resolve_text_section_database_kind(section, &sections, &anchors, 0))
+}
+
+fn parse_yaml_mapping_entry(line: &str) -> Option<(&str, &str)> {
+    let (key, value) = line.split_once(':')?;
+    Some((key.trim(), value.trim()))
+}
+
+fn clean_yaml_scalar(value: &str) -> &str {
+    value
+        .split('#')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default()
+        .trim_matches(['"', '\''])
+}
+
+fn extract_anchor_name(value: &str) -> Option<&str> {
+    clean_yaml_scalar(value)
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.strip_prefix('&'))
+}
+
+fn extract_anchor_reference(value: &str) -> Option<&str> {
+    clean_yaml_scalar(value)
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.strip_prefix('*'))
+}
+
+fn is_nested_mapping(value: &str) -> bool {
+    value.is_empty() || value.trim_start().starts_with('&')
+}
+
+fn resolve_text_section_database_kind(
+    section: &TextDatabaseSection,
+    sections: &std::collections::HashMap<String, TextDatabaseSection>,
+    anchors: &std::collections::HashMap<String, String>,
+    depth: usize,
+) -> Option<DatabaseKind> {
+    if depth > 8 {
+        return None;
+    }
+
+    if let Some(adapter) = section.adapter.as_deref() {
         if let Some(database) = database_kind_from_adapter(adapter) {
             return Some(database);
+        }
+    }
+
+    if let Some(anchor) = section.merge_anchor.as_deref() {
+        if let Some(section_name) = anchors.get(anchor) {
+            if let Some(merged_section) = sections.get(section_name) {
+                if let Some(database) =
+                    resolve_text_section_database_kind(merged_section, sections, anchors, depth + 1)
+                {
+                    return Some(database);
+                }
+            }
+        }
+    }
+
+    if let Some(nested_name) = section.first_nested_name.as_deref() {
+        if let Some(nested_section) = section.nested.get(nested_name) {
+            return resolve_text_section_database_kind(
+                nested_section,
+                sections,
+                anchors,
+                depth + 1,
+            );
         }
     }
 
@@ -625,6 +769,57 @@ mod tests {
             diagnostics.len(),
             1,
             "postgresql database.yml should enable PostgreSQL-specific methods on Rails 5.2+"
+        );
+    }
+
+    #[test]
+    fn detects_duplicate_default_keys_after_yaml_parse_failure() {
+        let source = b"class AddLatitudeAndLongitudeToUser < ActiveRecord::Migration[5.0]\n  def change\n    add_column :users, :latitude, :float\n    add_column :users, :longitude, :float\n  end\nend\n";
+        let diagnostics = run_in_temp_project(
+            source,
+            rails_config(7.0),
+            Some(
+                "default: &default\n  adapter: postgresql\n  encoding: unicode\n  pool: 5\n  pool: <%= ENV.fetch(\"RAILS_MAX_THREADS\") { 5 } %>\n\ndevelopment:\n  <<: *default\n  database: registration_development\n",
+            ),
+        );
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Duplicate keys that break strict YAML parsing should still resolve the development adapter from the merged default"
+        );
+    }
+
+    #[test]
+    fn detects_duplicate_development_sections_after_yaml_parse_failure() {
+        let source = b"class AddImapSettingsToMailSetting < ActiveRecord::Migration[5.0]\n  def change\n    add_column :mail_settings, :imap_address,  :string\n    add_column :mail_settings, :imap_port,     :string\n    add_column :mail_settings, :imap_password, :string\n    add_column :mail_settings, :imap_username, :string\n  end\nend\n";
+        let diagnostics = run_in_temp_project(
+            source,
+            rails_config(7.0),
+            Some(
+                "default: &default\n  adapter: postgresql\n  encoding: unicode\n  pool: <%= ENV.fetch(\"RAILS_MAX_THREADS\") { 5 } %>\n  host: localhost\n\ndevelopment:\n  <<: *default\n  database: marketing_development\n\ndevelopment:\n  <<: *default\n  database: marketing_test\n",
+            ),
+        );
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Duplicate development sections should still resolve the merged adapter when strict YAML parsing fails"
+        );
+    }
+
+    #[test]
+    fn detects_merged_defaults_with_inline_erb_control_flow() {
+        let source = b"class RemoveFeaturesFromCategories < ActiveRecord::Migration\n  def change\n    remove_column :categories, :parent_id\n    remove_column :categories, :organization_id\n    remove_column :categories, :name_translations\n    remove_column :categories, :fqn_translations\n    remove_column :categories, :children_count\n    add_column :categories, :name, :string\n  end\nend\n";
+        let diagnostics = run_in_temp_project(
+            source,
+            rails_config(7.0),
+            Some(
+                "defaults: &defaults\n  adapter: postgresql\n  username: <%= ENV['DATABASE_USER'] || ENV[\"POSTGRES_USER\"] || ENV[\"DATABASE_USERNAME\"] %>\n  password: <%= ENV['DATABASE_PASSWORD'] || ENV[\"POSTGRES_PASSWORD\"] %>\n  pool: <%= ENV.fetch(\"RAILS_MAX_THREADS\") { 5 } %>\n  host: <%= ENV.fetch(\"DATABASE_HOST\") { \"localhost\" } %>\n  port: <%= ENV.fetch(\"DATABASE_PORT\") { \"5432\" } %>\n  template: 'template0'\n  encoding: unicode\n\ndevelopment:\n  <<: *defaults\n  database: <%= ENV.fetch('DATABASE_NAME', 'timeoverflow_development') %>\n\ntest:\n  <<: *defaults\n  database: timeoverflow_test\n\nproduction:\n  <<: *defaults\n  <%= \"url: #{ENV['DATABASE_URL']}\" if ENV['DATABASE_URL'].present? %>\n  <%= \"database: #{ENV.fetch('DATABASE_NAME', 'timeoverflow_production')}\" unless ENV['DATABASE_URL'].present? %>\n",
+            ),
+        );
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "Inline ERB control flow outside development should not prevent resolving an adapter inherited from merged defaults"
         );
     }
 
