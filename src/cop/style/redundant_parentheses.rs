@@ -236,6 +236,13 @@ use crate::parse::source::SourceFile;
 ///   — Prism puts block arguments in `block()` not `arguments()`, so the cop didn't count them
 ///   as "has args". Removing the outer parens would change parsing. Now counts block_argument
 ///   nodes for the singular-parent check.
+/// - **Post-condition `while`/`until` predicates with spaced parens:** `begin; work; end while
+///   (current_issue)` and `end while ((a && b) || c)` were still flagged because Prism exposes
+///   them as `WhileNode`/`UntilNode`, while RuboCop skips `while_post`/`until_post` in
+///   `ignore_syntax?`. Fixed by tracking Prism's begin-modifier loop form
+///   (`closing_loc().is_none() && is_begin_modifier()`) and only exempting the predicate parens
+///   for that exact post-condition loop context, preserving offenses for normal
+///   `while (current_issue)` / `while ((a && b) || c)`.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -333,6 +340,9 @@ struct ParentInfo {
     /// For conditional parents, the source range of the predicate expression.
     /// Used to distinguish parens in the condition from parens in the body.
     conditional_predicate_range: Option<(usize, usize)>,
+    /// True for `begin ... end while/until cond` modifier loops. RuboCop skips
+    /// the predicate parens for these `while_post`/`until_post` forms.
+    is_post_condition_loop: bool,
 }
 
 struct RedundantParensVisitor<'a> {
@@ -410,6 +420,14 @@ impl RedundantParensVisitor<'_> {
             {
                 return;
             }
+        }
+
+        // RuboCop's ignore_syntax? skips the predicate parens for `while_post`/`until_post`.
+        // Prism keeps these as begin-modifier while/until nodes, so track that exact form.
+        if parent.is_some_and(|p| {
+            matches!(p.kind, ParentKind::While | ParentKind::Until) && p.is_post_condition_loop
+        }) {
+            return;
         }
 
         // allowed_ancestor? — don't flag `break(value)`, `return(value)`, `next(value)`,
@@ -1085,6 +1103,7 @@ impl RedundantParensVisitor<'_> {
             statements_child_count: 0,
             rescue_expression_start_offset: None,
             conditional_predicate_range: None,
+            is_post_condition_loop: false,
         });
     }
 
@@ -1810,6 +1829,7 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
                 node.predicate().location().start_offset(),
                 node.predicate().location().end_offset(),
             ));
+            top.is_post_condition_loop = node.closing_loc().is_none() && node.is_begin_modifier();
         }
         ruby_prism::visit_while_node(self, node);
     }
@@ -1821,6 +1841,7 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
                 node.predicate().location().start_offset(),
                 node.predicate().location().end_offset(),
             ));
+            top.is_post_condition_loop = node.closing_loc().is_none() && node.is_begin_modifier();
         }
         ruby_prism::visit_until_node(self, node);
     }

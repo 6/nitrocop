@@ -279,3 +279,27 @@ if client = (UNIXSocket.open(socket) rescue nil)
 # Assignment inside string interpolation — Parser AST wraps interpolation in begin
 "value is #{(x = compute)}"
             ^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+
+accumulator << ({ bar: element }.merge!(ORIGINAL_HASH){ |_key, left, _right| left })
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+yield ("Decompressing sparse image #{item.name}"), :percent, (i * 100) / sparse.
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+in [^(a), ^(a.class)]
+^ Style/RedundantParentheses: Don't use parentheses around a variable.
+
+(--5.5).should be_close(5.5, TOLERANCE)
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--5).should == 5
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+args = m ((0; 1))
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+args = m ((0; 1)), ((2; 3))
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(not(true)).should be_false
+^ Style/RedundantParentheses: Don't use parentheses around a keyword.
