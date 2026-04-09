@@ -3,6 +3,8 @@ use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// ## Corpus investigation (2026-03-14)
 ///
@@ -68,15 +70,18 @@ use crate::parse::source::SourceFile;
 /// line, one line before `do`) as the reference. Fix: for `empty_lines` style,
 /// only step back one line instead of walking all the way through `\`.
 ///
-/// Remaining FP=18: `# rubocop:disable Layout:LineLength` (colon syntax)
-/// is treated by RuboCop as a department-level disable (suppressing ALL
-/// `Layout/*` cops including this one), but nitrocop's directive parser
-/// in `src/parse/directives.rs` does not recognize single-colon department
-/// syntax. This is a directive-parsing issue, not a cop detection bug.
-/// Fix requires updating `normalize_directive_cop_name()` to treat
-/// `Dept:CopName` → `Dept` (department disable), matching RuboCop's
-/// `COP_NAME_PATTERN` which excludes `:` from `\w`.
+/// Fixed FP=18 for `EnforcedStyle: empty_lines`: RuboCop treats legacy
+/// `# rubocop:disable Layout:LineLength` syntax as a department-level disable
+/// because its directive cop-name regex stops at `Layout`. nitrocop's global
+/// directive parser still stores `Layout:LineLength` literally, so this cop now
+/// applies a narrow local suppression for `Layout:` disable/enable comments
+/// before emitting each beginning/end diagnostic. This preserves the existing
+/// layout logic while matching RuboCop on the affected corpus files.
 pub struct EmptyLinesAroundBlockBody;
+
+static DIRECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"#\s*(?:rubocop|nitrocop)\s*:\s*(disable|enable|todo)\s+(.+)").unwrap()
+});
 
 /// Compute the effective opening offset for empty-line checks.
 ///
@@ -171,12 +176,103 @@ fn adjusted_keyword_offset(
     }
 }
 
+fn legacy_layout_colon_directive_mentions_department(cop_list_raw: &str) -> bool {
+    let cop_list = match cop_list_raw.find("--") {
+        Some(idx) => &cop_list_raw[..idx],
+        None => cop_list_raw,
+    };
+
+    cop_list.split(',').any(|entry| {
+        let mut entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+
+        if let Some((name, _)) = entry.split_once(' ') {
+            entry = name;
+        }
+        if let Some((name, _)) = entry.split_once('(') {
+            entry = name;
+        }
+        if let Some(dept) = entry.strip_suffix("/*") {
+            entry = dept;
+        }
+
+        let entry = entry.trim_end_matches(|c: char| {
+            !c.is_ascii_alphanumeric() && c != '_' && c != '/' && c != ':'
+        });
+        entry.starts_with("Layout:")
+    })
+}
+
+fn legacy_layout_colon_directive_disables_line(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    let mut disabled = false;
+
+    for comment in parse_result.comments() {
+        let loc = comment.location();
+        let (comment_line, col) = source.offset_to_line_col(loc.start_offset());
+        if comment_line > line {
+            break;
+        }
+
+        let comment_bytes = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+        let Ok(comment_str) = std::str::from_utf8(comment_bytes) else {
+            continue;
+        };
+
+        let Some(caps) = DIRECTIVE_RE.captures(comment_str) else {
+            continue;
+        };
+        if !legacy_layout_colon_directive_mentions_department(&caps[2]) {
+            continue;
+        }
+
+        let is_inline = if comment_line >= 1 && comment_line <= lines.len() {
+            let line_bytes = lines[comment_line - 1];
+            let before_comment = &line_bytes[..col.min(line_bytes.len())];
+            before_comment.iter().any(|b| !b.is_ascii_whitespace())
+        } else {
+            false
+        };
+
+        match &caps[1] {
+            "disable" | "todo" => {
+                if is_inline {
+                    if comment_line == line {
+                        disabled = true;
+                    }
+                } else {
+                    disabled = true;
+                }
+            }
+            "enable" => {
+                if !is_inline {
+                    disabled = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    disabled
+}
+
 fn missing_beginning_empty_line_diagnostic(
     cop_name: &'static str,
     source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
     line: usize,
     mut corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
     let line_bytes = util::line_at(source, line)?;
     if util::is_blank_line(line_bytes) {
         return None;
@@ -207,9 +303,235 @@ fn missing_beginning_empty_line_diagnostic(
     Some(diag)
 }
 
+fn missing_end_empty_line_diagnostic(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
+    let line_bytes = util::line_at(source, line.saturating_sub(1))?;
+    if util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Empty line missing at block body end.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let Some(offset) = source.line_col_to_offset(line, 0) {
+            corr.push(crate::correction::Correction {
+                start: offset,
+                end: offset,
+                replacement: "\n".to_string(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn extra_beginning_empty_line_diagnostic(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
+    let line_bytes = util::line_at(source, line)?;
+    if !util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Extra empty line detected at block body beginning.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let (Some(start), Some(end)) = (
+            source.line_col_to_offset(line, 0),
+            source.line_col_to_offset(line + 1, 0),
+        ) {
+            corr.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: String::new(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn extra_end_empty_line_diagnostic(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
+    let line_bytes = util::line_at(source, line)?;
+    if !util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Extra empty line detected at block body end.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let (Some(start), Some(end)) = (
+            source.line_col_to_offset(line, 0),
+            source.line_col_to_offset(line + 1, 0),
+        ) {
+            corr.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: String::new(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn check_empty_lines_around_body_with_legacy_layout_disable(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    keyword_offset: usize,
+    end_offset: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Vec<Diagnostic> {
+    let (keyword_line, _) = source.offset_to_line_col(keyword_offset);
+    let (end_line, _) = source.offset_to_line_col(end_offset);
+
+    if keyword_line == end_line {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+
+    let after_keyword = keyword_line + 1;
+    if after_keyword < end_line {
+        if let Some(diag) = extra_beginning_empty_line_diagnostic(
+            cop_name,
+            source,
+            parse_result,
+            after_keyword,
+            corrections.as_deref_mut(),
+        ) {
+            diagnostics.push(diag);
+        }
+    }
+
+    if end_line > 1 {
+        let before_end = end_line - 1;
+        if before_end > keyword_line {
+            if let Some(diag) = extra_end_empty_line_diagnostic(
+                cop_name,
+                source,
+                parse_result,
+                before_end,
+                corrections,
+            ) {
+                diagnostics.push(diag);
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn check_missing_empty_lines_around_body_with_legacy_layout_disable(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    keyword_offset: usize,
+    end_offset: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Vec<Diagnostic> {
+    let (keyword_line, _) = source.offset_to_line_col(keyword_offset);
+    let (end_line, _) = source.offset_to_line_col(end_offset);
+
+    if end_line <= keyword_line + 1 {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+
+    let after_keyword = keyword_line + 1;
+    if after_keyword < end_line {
+        if let Some(diag) = missing_beginning_empty_line_diagnostic(
+            cop_name,
+            source,
+            parse_result,
+            after_keyword,
+            corrections.as_deref_mut(),
+        ) {
+            diagnostics.push(diag);
+        }
+    }
+
+    if end_line > 1 {
+        let before_end = end_line - 1;
+        if before_end > keyword_line {
+            if let Some(diag) = missing_end_empty_line_diagnostic(
+                cop_name,
+                source,
+                parse_result,
+                end_line,
+                corrections,
+            ) {
+                diagnostics.push(diag);
+            }
+        }
+    }
+
+    diagnostics
+}
+
 fn check_empty_lines_style_with_rubocop_edge_cases(
     cop_name: &'static str,
     source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
     effective_opening: usize,
     opening_offset: usize,
     closing_offset: usize,
@@ -249,20 +571,24 @@ fn check_empty_lines_style_with_rubocop_edge_cases(
         && (body_start_line == opening_line || body_start_line == closing_line)
     {
         let mut diagnostics = Vec::new();
-        if let Some(diag) =
-            missing_beginning_empty_line_diagnostic(cop_name, source, keyword_line + 1, corrections)
-        {
+        if let Some(diag) = missing_beginning_empty_line_diagnostic(
+            cop_name,
+            source,
+            parse_result,
+            keyword_line + 1,
+            corrections,
+        ) {
             diagnostics.push(diag);
         }
         return diagnostics;
     }
 
-    util::check_missing_empty_lines_around_body_with_corrections(
+    check_missing_empty_lines_around_body_with_legacy_layout_disable(
         cop_name,
         source,
+        parse_result,
         effective_opening,
         closing_offset,
-        "block",
         corrections,
     )
 }
@@ -284,7 +610,7 @@ impl Cop for EmptyLinesAroundBlockBody {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -367,6 +693,7 @@ impl Cop for EmptyLinesAroundBlockBody {
                 diagnostics.extend(check_empty_lines_style_with_rubocop_edge_cases(
                     self.name(),
                     source,
+                    parse_result,
                     effective_opening,
                     opening_offset,
                     closing_offset,
@@ -375,12 +702,12 @@ impl Cop for EmptyLinesAroundBlockBody {
                 ));
             }
             _ => {
-                diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
+                diagnostics.extend(check_empty_lines_around_body_with_legacy_layout_disable(
                     self.name(),
                     source,
+                    parse_result,
                     effective_opening,
                     closing_offset,
-                    "block",
                     corrections,
                 ));
             }
