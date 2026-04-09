@@ -15,6 +15,11 @@ use crate::parse::source::SourceFile;
 /// checkout of the analyzed file. Also fixed false negatives for
 /// `change_table` calls outside instance `def change/up/down` bodies, such as
 /// class-body migrations and `def self.up` / `def self.down`.
+///
+/// Also fixed false positives for ERB-heavy `config/database.yml` files that
+/// RuboCop ignores after Psych syntax errors. We only fall back to text
+/// scanning when the YAML parse failed without standalone ERB control-flow
+/// lines like `<% ... %>`.
 pub struct BulkChangeTable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +129,11 @@ fn database_kind_from_yaml(source: &SourceFile) -> Option<DatabaseKind> {
 
 fn parse_database_yml(path: &std::path::Path) -> Option<DatabaseKind> {
     let contents = std::fs::read_to_string(path).ok()?;
+
+    if has_top_level_erb_control_flow(&contents) {
+        return None;
+    }
+
     if let Ok(mut yaml) = serde_yml::from_str::<serde_yml::Value>(&contents) {
         let _ = yaml.apply_merge();
         if let Some(database) = database_kind_from_parsed_yaml(&yaml) {
@@ -132,6 +142,13 @@ fn parse_database_yml(path: &std::path::Path) -> Option<DatabaseKind> {
     }
 
     database_kind_from_text(&contents)
+}
+
+fn has_top_level_erb_control_flow(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim_start();
+        trimmed.starts_with("<%") || trimmed.starts_with("%>")
+    })
 }
 
 fn database_kind_from_parsed_yaml(yaml: &serde_yml::Value) -> Option<DatabaseKind> {
@@ -608,6 +625,18 @@ mod tests {
             diagnostics.len(),
             1,
             "postgresql database.yml should enable PostgreSQL-specific methods on Rails 5.2+"
+        );
+    }
+
+    #[test]
+    fn skips_database_yml_with_top_level_erb_control_flow() {
+        let source =
+            b"def change\n  add_column :users, :name, :string\n  add_column :users, :age, :integer\nend\n";
+        let discourse_like_yml = "development:\n  prepared_statements: false\n  adapter: postgresql\n<%\n  test_db = ENV['RAILS_DB']\n%>\n";
+        let diagnostics = run_in_temp_project(source, rails_config(7.0), Some(discourse_like_yml));
+        assert!(
+            diagnostics.is_empty(),
+            "Top-level ERB control flow in config/database.yml should disable database detection to match RuboCop"
         );
     }
 
