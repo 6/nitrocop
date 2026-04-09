@@ -183,17 +183,39 @@ use crate::parse::source::SourceFile;
 ///   assignment path, ternary branches like `(cond ? (x |= y) : z)` were incorrectly reported.
 ///   RuboCop keeps assignment parens anywhere inside ternary conditions/branches, so the
 ///   assignment fast-path now bails out when a ternary ancestor is present.
-/// - **Conditional bodies stay exempt:** modifier and block-style conditional bodies like
-///   `(count += 1) unless skip` and `if cond; (count += 1); end` are accepted by RuboCop even
-///   though the immediate Prism parent is still a `StatementsNode`. The assignment path now
-///   recognizes `if`/`unless`/`while`/`until`/`case` statement bodies and skips them instead of
-///   treating every statements wrapper as begin-like.
+/// - **Single-statement conditional bodies stay exempt:** modifier and block-style conditional
+///   bodies like `(count += 1) unless skip` and `if cond; (count += 1); end` are accepted by
+///   RuboCop even though the immediate Prism parent is still a `StatementsNode`. The assignment
+///   path now recognizes one-statement `if`/`unless`/`while`/`until`/`case` bodies and skips
+///   them instead of treating every statements wrapper as begin-like. Multi-statement bodies still
+///   flag because RuboCop treats those like `begin_type?` containers.
+/// - **Modifier-if rescue bodies still flag:** `after { (r.quit rescue nil) if defined?(r) }`
+///   is a body expression, not a conditional predicate. The one-line-rescue exemption now checks
+///   whether the parens are actually inside a conditional predicate range instead of skipping any
+///   nearby `if`/`while`/`until` ancestor.
+/// - **Receiver parens after `until(`/`while(` still flag when chained:** `until($stdin.gets).include?`
+///   uses keyword-adjacent parens, but they wrap the receiver of a chained call, not the whole
+///   loop predicate. The keyword-adjacency fast path now stays limited to non-receiver cases like
+///   `end until(bar)`.
+/// - **Unary `+/-` integer-chain exemption was too broad:** the `-(1.foo)` safeguard only applies
+///   to unary `+@`/`-@` parents. It now tracks true unary parents so binary operators like
+///   `1-(1.quo(ii))` still report redundant parens.
 /// - **Hash-first-argument exemption was too broad:** `first_arg_begins_with_hash_literal` used any
 ///   unparenthesized call ancestor, which incorrectly exempted later arguments like
 ///   `foo a, (({ y: 1 }.merge(z)))`. RuboCop only allows this when the parenthesized expression
 ///   itself, or a receiver chain rooted at it, is the first argument of an unparenthesized call.
 ///   Fixed by tracking first-argument start offsets and only applying the exemption to true
 ///   first-argument chains.
+///
+/// ### FP root causes fixed:
+/// - **Paren descendants inside a hash first arg were still flagged:** RuboCop treats
+///   `foo :plain => ({...}.to_json)` and `Contract ({...}) => Num` like other
+///   hash-first-argument cases because the containing hash literal is the first argument of an
+///   unparenthesized call. Prism inserts `AssocNode`/hash ancestors between the parens and the
+///   call, so the previous offset walk only saw direct call/receiver chains and missed these
+///   nested cases. The exemption now climbs through pair/hash ancestors before checking the
+///   unparenthesized first-argument call boundary, while still flagging standalone hashes like
+///   `x = { plain: ({...}.to_json) }`.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -226,6 +248,7 @@ enum ParentKind {
     And,
     Or,
     Call,
+    Hash,
     Splat,
     KeywordSplat,
     Return,
@@ -262,6 +285,7 @@ struct ParentInfo {
     call_parenthesized: bool,
     call_arg_count: usize,
     is_operator: bool,
+    is_unary_plus_minus: bool,
     is_match_operator: bool,
     is_endless_def: bool,
     is_assignment_parent: bool,
@@ -286,6 +310,9 @@ struct ParentInfo {
     /// which corresponds to the rescue_expression in Prism. The expression
     /// (left side) is still flagged.
     rescue_expression_start_offset: Option<usize>,
+    /// For conditional parents, the source range of the predicate expression.
+    /// Used to distinguish parens in the condition from parens in the body.
+    conditional_predicate_range: Option<(usize, usize)>,
 }
 
 struct RedundantParensVisitor<'a> {
@@ -396,19 +423,21 @@ impl RedundantParensVisitor<'_> {
                 let before = self.source.content[open_offset - 1];
                 if before.is_ascii_alphabetic() {
                     // Check if we're right after a keyword like 'else', 'do', etc.
-                    // Only skip if not in return/next/break/super/yield (those are handled above)
-                    if parent
-                        .map(|p| {
-                            !matches!(
-                                p.kind,
-                                ParentKind::Return
-                                    | ParentKind::Next
-                                    | ParentKind::Break
-                                    | ParentKind::Super
-                                    | ParentKind::Yield
-                            )
-                        })
-                        .unwrap_or(true)
+                    // Only skip if not in return/next/break/super/yield (those are handled above).
+                    // Receiver parens like `until(call).chain` are still redundant.
+                    if !is_receiver
+                        && parent
+                            .map(|p| {
+                                !matches!(
+                                    p.kind,
+                                    ParentKind::Return
+                                        | ParentKind::Next
+                                        | ParentKind::Break
+                                        | ParentKind::Super
+                                        | ParentKind::Yield
+                                )
+                            })
+                            .unwrap_or(true)
                     {
                         return;
                     }
@@ -688,10 +717,11 @@ impl RedundantParensVisitor<'_> {
             && parent.statements_child_count == 1
     }
 
-    /// Check if the parent (a StatementsNode) is the body of a conditional-like
-    /// construct (`if`/`unless`, `while`/`until`, `case`). RuboCop keeps
-    /// assignment parens in these bodies, including modifier forms like
-    /// `(count += 1) unless skip`.
+    /// Check if the parent (a StatementsNode) is the SINGLE statement body of a
+    /// conditional-like construct (`if`/`unless`, `while`/`until`, `case`).
+    /// RuboCop keeps assignment parens in these bodies, including modifier
+    /// forms like `(count += 1) unless skip`, but multi-statement bodies get a
+    /// `begin` wrapper in Parser AST and are flagged.
     fn is_parent_statements_conditional_body(&self) -> bool {
         if self.parent_stack.len() < 3 {
             return false;
@@ -699,7 +729,10 @@ impl RedundantParensVisitor<'_> {
 
         let parent_index = self.parent_stack.len() - 2;
         let parent = &self.parent_stack[parent_index];
-        if !parent.is_statements_node || parent.is_parentheses_body {
+        if !parent.is_statements_node
+            || parent.is_parentheses_body
+            || parent.statements_child_count != 1
+        {
             return false;
         }
 
@@ -768,6 +801,12 @@ impl RedundantParensVisitor<'_> {
             let info = &self.parent_stack[i];
             match info.kind {
                 ParentKind::Other => continue,
+                // RuboCop's `first_argument?` recurses through ancestors, so a begin node
+                // nested inside an assoc/hash still counts when that containing hash is
+                // the first argument of an unparenthesized call.
+                ParentKind::Pair | ParentKind::Hash => {
+                    current_start = info.node_start_offset;
+                }
                 ParentKind::Call => {
                     if info
                         .call_receiver_start_offset
@@ -869,7 +908,7 @@ impl RedundantParensVisitor<'_> {
     /// array, hash, or method argument.
     fn check_one_line_rescue(
         &self,
-        _node: &ruby_prism::ParenthesesNode<'_>,
+        node: &ruby_prism::ParenthesesNode<'_>,
         parent: Option<&ParentInfo>,
     ) -> Option<&'static str> {
         // Not flagged in ternary
@@ -877,12 +916,12 @@ impl RedundantParensVisitor<'_> {
             return None;
         }
 
+        if self.is_in_conditional_predicate(node) {
+            return None;
+        }
+
         if let Some(p) = parent {
             match p.kind {
-                // Not flagged in conditional condition (if/while/until/case)
-                ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
-                    return None;
-                }
                 // Not flagged in array or hash value
                 ParentKind::Array | ParentKind::Pair => return None,
                 // Not flagged in method call (method arg)
@@ -1008,6 +1047,7 @@ impl RedundantParensVisitor<'_> {
             call_parenthesized: false,
             call_arg_count: 0,
             is_operator: false,
+            is_unary_plus_minus: false,
             is_match_operator: false,
             is_endless_def: false,
             is_assignment_parent: false,
@@ -1017,6 +1057,7 @@ impl RedundantParensVisitor<'_> {
             call_first_arg_is_begin: false,
             statements_child_count: 0,
             rescue_expression_start_offset: None,
+            conditional_predicate_range: None,
         });
     }
 
@@ -1034,6 +1075,26 @@ impl RedundantParensVisitor<'_> {
                 }
             }
         }
+        false
+    }
+
+    fn is_in_conditional_predicate(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+        let start = node.location().start_offset();
+        let end = node.location().end_offset();
+
+        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
+            let info = &self.parent_stack[i];
+            match info.kind {
+                ParentKind::Other => continue,
+                ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
+                    return info.conditional_predicate_range.is_some_and(
+                        |(pred_start, pred_end)| start >= pred_start && end <= pred_end,
+                    );
+                }
+                _ => return false,
+            }
+        }
+
         false
     }
 }
@@ -1119,14 +1180,11 @@ fn check_method_call<'a>(
     // call_chain_starts_with_int? — if the call chain starts with an int
     // and the parent is a unary +/- operation, parens are needed.
     // e.g., -(1.foo) — removing parens gives -1.foo which parses as (-1).foo
-    if call_chain_starts_with_int_from_call(&call) {
-        let start_offset = paren_node.location().start_offset();
-        if start_offset > 0 {
-            let before = content[start_offset - 1];
-            if before == b'-' || before == b'+' {
-                return None;
-            }
-        }
+    if call_chain_starts_with_int_from_call(&call)
+        && is_receiver
+        && parent.is_some_and(|p| p.is_unary_plus_minus)
+    {
+        return None;
     }
 
     let has_args = call.arguments().is_some();
@@ -1635,6 +1693,8 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.call_parenthesized = node.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
             top.call_arg_count = node.arguments().map(|a| a.arguments().len()).unwrap_or(0);
             top.is_operator = is_operator_method(node);
+            top.is_unary_plus_minus =
+                matches!(node.name().as_slice(), b"-@" | b"+@") && node.arguments().is_none();
             top.is_match_operator = node.name().as_slice() == b"=~";
             top.is_assignment_parent = node.equal_loc().is_some();
             top.call_receiver_start_offset = node.receiver().map(|r| r.location().start_offset());
@@ -1671,6 +1731,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
                 top.kind = ParentKind::Ternary;
             } else {
                 top.kind = ParentKind::If;
+                top.conditional_predicate_range = Some((
+                    node.predicate().location().start_offset(),
+                    node.predicate().location().end_offset(),
+                ));
             }
         }
         ruby_prism::visit_if_node(self, node);
@@ -1695,6 +1759,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::If; // treat unless same as if for conditional ancestor check
+            top.conditional_predicate_range = Some((
+                node.predicate().location().start_offset(),
+                node.predicate().location().end_offset(),
+            ));
         }
         ruby_prism::visit_unless_node(self, node);
     }
@@ -1703,6 +1771,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::While;
             top.single_child = node.statements().is_none();
+            top.conditional_predicate_range = Some((
+                node.predicate().location().start_offset(),
+                node.predicate().location().end_offset(),
+            ));
         }
         ruby_prism::visit_while_node(self, node);
     }
@@ -1710,6 +1782,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::Until;
+            top.conditional_predicate_range = Some((
+                node.predicate().location().start_offset(),
+                node.predicate().location().end_offset(),
+            ));
         }
         ruby_prism::visit_until_node(self, node);
     }
@@ -1717,6 +1793,12 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::Case;
+            top.conditional_predicate_range = node.predicate().map(|predicate| {
+                (
+                    predicate.location().start_offset(),
+                    predicate.location().end_offset(),
+                )
+            });
         }
         ruby_prism::visit_case_node(self, node);
     }
@@ -1867,6 +1949,20 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.single_child = node.elements().len() == 1;
         }
         ruby_prism::visit_array_node(self, node);
+    }
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Hash;
+        }
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Hash;
+        }
+        ruby_prism::visit_keyword_hash_node(self, node);
     }
 
     fn visit_assoc_node(&mut self, node: &ruby_prism::AssocNode<'pr>) {
