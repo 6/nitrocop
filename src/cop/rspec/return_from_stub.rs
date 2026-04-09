@@ -122,6 +122,14 @@ use crate::parse::source::SourceFile;
 /// Dynamic interpolation like `"#{bar}/path"` must still be ignored, so the
 /// fix recurses through embedded statements and only accepts literal/constant
 /// content there.
+///
+/// ## Corpus investigation (2026-04-09, `EnforcedStyle: block`, round 2)
+///
+/// FN=4 came from spaced calls like `and_return ("partiallll")` and
+/// `and_return (0)`. Prism wraps those arguments in `ParenthesesNode`, while
+/// RuboCop's Parser AST sees a `:begin` node and still applies
+/// `recursive_literal_or_const?` recursively. Match RuboCop by recursing
+/// through parenthesized bodies instead of treating the wrapper as dynamic.
 pub struct ReturnFromStub;
 impl Cop for ReturnFromStub {
     fn name(&self) -> &'static str {
@@ -421,6 +429,19 @@ fn is_static_value(node: &ruby_prism::Node<'_>) -> bool {
             .all(|part| is_static_interpolated_part(&part));
     }
 
+    if let Some(parentheses) = node.as_parentheses_node() {
+        let Some(body) = parentheses.body() else {
+            return false;
+        };
+
+        if let Some(stmts) = body.as_statements_node() {
+            let stmt_list: Vec<_> = stmts.body().iter().collect();
+            return !stmt_list.is_empty() && stmt_list.iter().all(|stmt| is_static_value(stmt));
+        }
+
+        return is_static_value(&body);
+    }
+
     if node.as_call_node().is_some() {
         return false;
     }
@@ -544,6 +565,23 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].location.line, 3);
         assert_eq!(diags[0].location.column, 3);
+    }
+
+    #[test]
+    fn block_style_flags_parenthesized_static_literal() {
+        let config = block_style_config();
+        let source = b"allow(Foo).to receive(:bar).and_return (42)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Use block for static values.");
+    }
+
+    #[test]
+    fn block_style_ignores_parenthesized_dynamic_value() {
+        let config = block_style_config();
+        let source = b"allow(Foo).to receive(:bar).and_return (value)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert!(diags.is_empty());
     }
 
     #[test]
