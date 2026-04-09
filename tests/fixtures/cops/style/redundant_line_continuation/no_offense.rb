@@ -11,8 +11,14 @@ bundle lock \
 foo \
   "string"
 
+foo \
+  (bar)
+
 super \
   bar
+
+super \
+  (bar)
 
 x = 'hello' \
   'world'
@@ -72,6 +78,11 @@ x = 'hello' \
 helper_method \
   def ordergroups_for_adding
   Ordergroup.undeleted.order(:name)
+end
+
+def foo
+  yield \
+    (bar)
 end
 
 existing_autoload_paths = \

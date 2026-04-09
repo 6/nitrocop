@@ -33,6 +33,10 @@ foo&. \
       ^ Style/RedundantLineContinuation: Redundant line continuation.
   bar
 
+foo! \
+     ^ Style/RedundantLineContinuation: Redundant line continuation.
+  bar
+
 foo do \
        ^ Style/RedundantLineContinuation: Redundant line continuation.
   bar
@@ -58,6 +62,14 @@ def merge_strategy(namespace_subclasses)
     || namespace_subclasses.to_set == Set[RbiGenerator::ClassNamespace, RbiGenerator::StructClassNamespace] \
                                                                                                             ^ Style/RedundantLineContinuation: Redundant line continuation.
     || namespace_subclasses.to_set == Set[RbiGenerator::ClassNamespace, RbiGenerator::EnumClassNamespace]
+end
+
+def comparable_to?(type)
+  return \
+         ^ Style/RedundantLineContinuation: Redundant line continuation.
+    (type.kind == :enum_ref && type.enum_class.name == T.must(@enum_class).name) \
+                                                                                 ^ Style/RedundantLineContinuation: Redundant line continuation.
+    || (type.kind == :enum && type.name == T.must(@enum_class).name)
 end
 
 (name.nil? ? true : child.name == name) \
@@ -94,6 +106,18 @@ valid && other and \
 errors << "required" if \
                         ^ Style/RedundantLineContinuation: Redundant line continuation.
   config.nil?
+
+foo do
+  break \
+        ^ Style/RedundantLineContinuation: Redundant line continuation.
+    (bar)
+end
+
+foo do
+  next \
+       ^ Style/RedundantLineContinuation: Redundant line continuation.
+    (bar)
+end
 
 raise "error" unless \
                      ^ Style/RedundantLineContinuation: Redundant line continuation.
