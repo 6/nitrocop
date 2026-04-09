@@ -29,6 +29,28 @@ use super::trailing_comma;
 /// heredoc was nested inside a hash literal, `has_heredoc` was false, causing the
 /// scanner to read through heredoc body content and miss the trailing comma.
 /// Fix: add `HashNode` handling to `is_heredoc_argument`.
+///
+/// ## Investigation (2026-04-09)
+///
+/// Root cause of variant style divergence:
+///
+/// 1. `diff_comma` style was completely unimplemented — fell through to `no_comma`
+///    behavior, causing 34,724 FP (flagging valid trailing commas as "Avoid") and
+///    95,688 FN (missing "Put a comma" for multiline calls where last item
+///    precedes newline). Fix: add `diff_comma` arm using
+///    `last_item_precedes_newline` to determine `should_have_comma`.
+///
+/// 2. `comma` and `consistent_comma` styles only handled the "Put a comma" path
+///    but never the "Avoid comma" path. When a trailing comma was present but
+///    `should_have_comma` was false (e.g., single-line call, elements sharing a
+///    line), nitrocop silently ignored it. Fix: add "Avoid comma... unless ..."
+///    diagnostics for all non-default styles.
+///
+/// 3. `consistent_comma` was missing the braced hash exception from RuboCop's
+///    `method_name_and_arguments_on_same_line?`. When the last argument is a
+///    braced hash `{...}` and the closing paren is on the same line as `}`,
+///    RuboCop considers the call not multiline for trailing comma purposes.
+///    Fix: check if last raw arg is a `HashNode` (braced hash).
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -117,24 +139,40 @@ impl Cop for TrailingCommaInArguments {
         let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
         let effective_args = elem_locs.len();
 
+        // Helper: find trailing comma offset for diagnostics.
+        let find_comma_offset = || {
+            trailing_comma::find_trailing_comma_offset(bytes, last_end, closing_start, has_heredoc)
+        };
+
+        // Build the "Avoid comma" message with style-specific suffix.
+        let avoid_msg = match style {
+            "comma" => {
+                "Avoid comma after the last parameter of a method call, unless each item is on its own line."
+            }
+            "consistent_comma" => {
+                "Avoid comma after the last parameter of a method call, unless items are split onto multiple lines."
+            }
+            "diff_comma" => {
+                "Avoid comma after the last parameter of a method call, unless that item immediately precedes a newline."
+            }
+            _ => "Avoid comma after the last parameter of a method call.",
+        };
+
+        // Single element with closing bracket on same line as element end:
+        // RuboCop's allowed_multiline_argument? returns true, so multiline? is
+        // false and should_have_comma is false for all styles. Only check for
+        // unwanted commas.
         if effective_args == 1 {
             let last_arg_end_line = source.offset_to_line_col(last_end).0;
             if close_line == last_arg_end_line {
-                // Single arg with closing bracket on same line — not considered multiline
-                // for trailing comma purposes (but unwanted commas still detected below)
                 if has_comma && last_end < closing_start {
-                    if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
-                        bytes,
-                        last_end,
-                        closing_start,
-                        has_heredoc,
-                    ) {
+                    if let Some(abs_offset) = find_comma_offset() {
                         let (line, column) = source.offset_to_line_col(abs_offset);
                         diagnostics.push(self.diagnostic(
                             source,
                             line,
                             column,
-                            "Avoid comma after the last parameter of a method call.".to_string(),
+                            avoid_msg.to_string(),
                         ));
                     }
                 }
@@ -142,65 +180,66 @@ impl Cop for TrailingCommaInArguments {
             }
         }
 
-        let is_multiline = match style {
+        // Compute should_have_comma based on style, mirroring RuboCop's
+        // should_have_comma?(style, node) method.
+        let should_have = match style {
+            "comma" => {
+                // multiline?(node) && no_elements_on_same_line?(node)
+                call_is_multiline
+                    && trailing_comma::no_elements_on_same_line(source, &elem_locs, closing_start)
+            }
             "consistent_comma" => {
-                // For consistent_comma: multiline means the call spans multiple lines
-                // AND the method name is NOT on the same line as the last argument's last line.
+                // multiline?(node) && !method_name_and_arguments_on_same_line?(node)
                 if !call_is_multiline {
                     false
                 } else {
-                    let method_line = call_node
-                        .message_loc()
-                        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
-                        .unwrap_or(call_start_line);
                     let last_arg_end_line = source.offset_to_line_col(last_end).0;
-                    method_line != last_arg_end_line
-                }
-            }
-            _ => {
-                let last_line = source.offset_to_line_col(last_end).0;
-                close_line > last_line
-            }
-        };
-
-        match style {
-            "comma" | "consistent_comma" => {
-                let all_on_own_line = if style == "comma" {
-                    trailing_comma::no_elements_on_same_line(source, &elem_locs, closing_start)
-                } else {
-                    true
-                };
-                if is_multiline && !has_comma && all_on_own_line {
-                    let (line, column) = source.offset_to_line_col(last_end);
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Put a comma after the last parameter of a multiline method call."
-                                .to_string(),
-                        ),
-                    );
-                }
-            }
-            _ => {
-                if has_comma && last_end < closing_start {
-                    if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
-                        bytes,
-                        last_end,
-                        closing_start,
-                        has_heredoc,
-                    ) {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Avoid comma after the last parameter of a method call.".to_string(),
-                        ));
+                    // RuboCop: return false if node.last_line != node.last_argument.last_line
+                    // (i.e., closing paren on different line from last arg end → NOT on same line)
+                    if close_line != last_arg_end_line {
+                        // Closing paren on different line from last arg end.
+                        // method_name_and_arguments_on_same_line? returns false → should_have = true
+                        true
+                    } else {
+                        // Closing paren on same line as last arg end.
+                        // Check braced hash exception: if last raw arg is a HashNode (braced hash),
+                        // RuboCop considers it "on same line" → should_have = false
+                        if last_arg.as_hash_node().is_some() {
+                            false
+                        } else {
+                            // Check method name line vs last arg end line
+                            let method_line = call_node
+                                .message_loc()
+                                .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
+                                .unwrap_or(call_start_line);
+                            method_line != last_arg_end_line
+                        }
                     }
                 }
             }
+            "diff_comma" => {
+                // multiline?(node) && last_item_precedes_newline?(node)
+                call_is_multiline
+                    && trailing_comma::last_item_precedes_newline(bytes, last_end, closing_start)
+            }
+            _ => false, // no_comma: never should have a trailing comma
+        };
+
+        if has_comma && !should_have {
+            // Comma present but shouldn't be → "Avoid comma..."
+            if let Some(abs_offset) = find_comma_offset() {
+                let (line, column) = source.offset_to_line_col(abs_offset);
+                diagnostics.push(self.diagnostic(source, line, column, avoid_msg.to_string()));
+            }
+        } else if !has_comma && should_have {
+            // Comma missing but should be present → "Put a comma..."
+            let (line, column) = source.offset_to_line_col(last_end);
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Put a comma after the last parameter of a multiline method call.".to_string(),
+            ));
         }
     }
 }
@@ -380,6 +419,137 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.comma.rb"
             ),
             comma_config(),
+        );
+    }
+
+    fn diff_comma_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyleForMultiline".into(),
+                serde_yml::Value::String("diff_comma".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_diff_comma_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/offense.diff_comma.rb"
+            ),
+            diff_comma_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.diff_comma.rb"
+            ),
+            diff_comma_config(),
+        );
+    }
+
+    #[test]
+    fn offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/offense.consistent_comma.rb"
+            ),
+            consistent_comma_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.consistent_comma.rb"
+            ),
+            consistent_comma_config(),
+        );
+    }
+
+    #[test]
+    fn consistent_comma_braced_hash_no_offense() {
+        // Braced hash as last arg with closing paren on same line as } — RuboCop
+        // considers this "method_name_and_arguments_on_same_line" and does NOT
+        // require a trailing comma.
+        let source = b"foo(arg, {\n  subject: \"hey\",\n  email: \"foo@bar.com\"\n})\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, consistent_comma_config());
+        assert!(
+            diags.is_empty(),
+            "consistent_comma should not flag braced hash with ) on same line as }}"
+        );
+    }
+
+    #[test]
+    fn consistent_comma_single_line_trailing_comma_offense() {
+        // Single-line call with trailing comma should flag "Avoid comma" even
+        // with consistent_comma style.
+        let source = b"foo(a, b, c,)\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, consistent_comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "consistent_comma should flag single-line trailing comma"
+        );
+        assert!(
+            diags[0].message.contains("unless items are split"),
+            "message should include consistent_comma suffix"
+        );
+    }
+
+    #[test]
+    fn diff_comma_multiline_last_precedes_newline_no_offense() {
+        // Last arg precedes newline with comma — OK for diff_comma.
+        let source = b"foo(\n  a,\n  b,\n)\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, diff_comma_config());
+        assert!(
+            diags.is_empty(),
+            "diff_comma should accept comma when last item precedes newline"
+        );
+    }
+
+    #[test]
+    fn diff_comma_multiline_last_precedes_newline_missing_comma_offense() {
+        // Last arg precedes newline without comma — should flag "Put a comma".
+        let source = b"foo(\n  a,\n  b\n)\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, diff_comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "diff_comma should flag missing comma when last item precedes newline"
+        );
+    }
+
+    #[test]
+    fn diff_comma_single_line_trailing_comma_offense() {
+        // Single-line with comma — should flag "Avoid comma".
+        let source = b"foo(a, b, c,)\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, diff_comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "diff_comma should flag single-line trailing comma"
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains("unless that item immediately precedes a newline"),
+            "message should include diff_comma suffix"
         );
     }
 }
