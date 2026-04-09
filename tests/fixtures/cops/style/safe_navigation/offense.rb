@@ -288,3 +288,9 @@ end.join(", ")
 
 options && options.each do |option, value|
 ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+@errors = Array(root && root.errors.map(&:to_s))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+@errors = Array(root && root.errors.map(&:to_s))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
