@@ -14,6 +14,16 @@ use crate::parse::source::SourceFile;
 ///   multiline quoted strings, `%{}` strings, and similar closing-token shapes.
 /// - Fixed by limiting the exemption to double-quoted strings whose physical
 ///   newlines are all backslash continuations, matching RuboCop's token stream.
+///
+/// Investigation notes (2026-04-09, compact FP=673, FN=13,414):
+/// - `EnforcedStyle: compact` is not plain `space` style. RuboCop collapses
+///   same-line successive `{ {` and `} }` token pairs in nested hashes.
+/// - Nitrocop previously treated `compact` exactly like `space`, which caused
+///   false positives for correctly collapsed `{{`/`}}` and false negatives for
+///   spaced `{ {`/`} }` pairs that RuboCop reports as `detected`.
+/// - Fixed by checking whether the next/previous significant same-line byte is
+///   another hash brace and switching `compact` between `missing` and
+///   `detected` to match RuboCop's token-based behavior.
 pub struct SpaceInsideHashLiteralBraces;
 
 struct BraceSpan {
@@ -121,6 +131,7 @@ impl SpaceInsideHashLiteralBraces {
             // Skip if we hit a newline or a comment (comment always precedes a line break)
             pos >= close_start || bytes[pos] == b'\n' || bytes[pos] == b'\r' || bytes[pos] == b'#'
         };
+        let compact_collapse_open = is_adjacent_brace_forward(bytes, open_end, b'{');
 
         // Check closing brace: skip if there's a line break between last content and brace
         let skip_close = close_follows_line_continued_double_quoted_string || {
@@ -132,11 +143,56 @@ impl SpaceInsideHashLiteralBraces {
             // Skip if we hit a newline
             pos <= open_end || bytes[pos - 1] == b'\n' || bytes[pos - 1] == b'\r'
         };
+        let compact_collapse_close = is_adjacent_brace_backward(bytes, close_start, b'}');
 
         if !skip_open {
             match enforced {
-                "space" | "compact" => {
+                "space" => {
                     if !space_after_open {
+                        let (line, column) = source.offset_to_line_col(open_start);
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside { missing.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: open_end,
+                                end: open_end,
+                                replacement: " ".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                }
+                "compact" => {
+                    if compact_collapse_open {
+                        if space_after_open {
+                            let end = scan_space_forward(bytes, open_end);
+                            let (line, column) = source.offset_to_line_col(open_end);
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Space inside { detected.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: open_end,
+                                    end,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
+                    } else if !space_after_open {
                         let (line, column) = source.offset_to_line_col(open_start);
                         let mut diag = self.diagnostic(
                             source,
@@ -190,8 +246,52 @@ impl SpaceInsideHashLiteralBraces {
 
         if !skip_close {
             match enforced {
-                "space" | "compact" => {
+                "space" => {
                     if !space_before_close {
+                        let (line, column) = source.offset_to_line_col(close_start);
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside } missing.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: close_start,
+                                end: close_start,
+                                replacement: " ".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                }
+                "compact" => {
+                    if compact_collapse_close {
+                        if space_before_close {
+                            let start = scan_space_backward(bytes, close_start);
+                            let (line, column) = source.offset_to_line_col(start);
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Space inside } detected.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start,
+                                    end: close_start,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
+                    } else if !space_before_close {
                         let (line, column) = source.offset_to_line_col(close_start);
                         let mut diag = self.diagnostic(
                             source,
@@ -326,6 +426,47 @@ impl SpaceInsideHashLiteralBraces {
     }
 }
 
+fn scan_space_forward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    i
+}
+
+fn scan_space_backward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    i
+}
+
+fn is_adjacent_brace_forward(bytes: &[u8], pos: usize, brace: u8) -> bool {
+    let mut i = pos;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' => i += 1,
+            byte if byte == brace => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn is_adjacent_brace_backward(bytes: &[u8], pos: usize, brace: u8) -> bool {
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b' ' | b'\t' => continue,
+            byte if byte == brace => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 impl Cop for SpaceInsideHashLiteralBraces {
     fn name(&self) -> &'static str {
         "Layout/SpaceInsideHashLiteralBraces"
@@ -437,6 +578,40 @@ mod tests {
         "cops/layout/space_inside_hash_literal_braces"
     );
 
+    fn compact_config() -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn compact_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideHashLiteralBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_hash_literal_braces/compact_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
+
+    #[test]
+    fn compact_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideHashLiteralBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_hash_literal_braces/compact_no_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
+
     #[test]
     fn empty_braces_space_style_flags_no_space() {
         use std::collections::HashMap;
@@ -531,15 +706,7 @@ mod tests {
 
     #[test]
     fn compact_style_non_nested() {
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("compact".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = compact_config();
 
         // Non-nested hash should be fine with spaces
         let source = b"h = { a: 1, b: 2 }\n";
