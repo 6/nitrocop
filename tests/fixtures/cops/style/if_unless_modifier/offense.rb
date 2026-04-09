@@ -210,3 +210,24 @@ end
 
 (raise SugarCRM::NoActiveSession, "No session is active. Create a new session with 'SugarCRM.connect(...)'") if @@sessions.size < 1
 ^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+# FN: interpolation on previous line is not a trailing comment
+          say "Balance: #{account.balance.format}", :green
+          if account.balance != account.available_balance
+          ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+            say "Available: #{account.available_balance.format}", :yellow
+          end
+
+# FN: interpolation on previous line inside an array literal should not force parens
+      changes = ["Study file updated: #{@study_file.upload_file_name}"]
+      if @study.study_shares.any?
+      ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+        SingleCellMailer.share_update_notification(@study, changes, current_user).deliver_now
+      end
+
+# FN: nested indentation near MaxLineLength should still flag when previous line has interpolation
+            Rails.logger.info "Apnotic exception raised: #{exception}"
+            if config[:error_handler].respond_to?(:call)
+            ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+              notification.instance_exec(exception, &config[:error_handler])
+            end
