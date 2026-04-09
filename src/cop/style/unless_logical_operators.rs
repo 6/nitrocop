@@ -18,6 +18,12 @@ use ruby_prism::Visit;
 ///    multiple lines, RuboCop's `add_offense(node)` uses `node.source_range`
 ///    which starts at the statement beginning, not the `unless` keyword.
 /// 2. Messages: RuboCop uses `"in an \`unless\`."` not `"in \`unless\` conditions."`.
+///
+/// Variant FP fix (`EnforcedStyle: forbid_logical_operators`): Prism exposes
+/// pattern-matching guards like `in pattern unless a || b` as `UnlessNode`s
+/// inside the `in` clause, but RuboCop's `on_if` callback only sees real
+/// `if`/`unless` statements. We skip guard nodes whose line prefix is just
+/// `in`, while still flagging ordinary `work unless a || b`.
 pub struct UnlessLogicalOperators;
 
 impl Cop for UnlessLogicalOperators {
@@ -48,6 +54,10 @@ impl Cop for UnlessLogicalOperators {
             Some(u) => u,
             None => return,
         };
+
+        if is_pattern_matching_guard(source, node) {
+            return;
+        }
 
         let predicate = unless_node.predicate();
 
@@ -84,6 +94,18 @@ impl Cop for UnlessLogicalOperators {
 
 fn contains_logical_operator(node: &ruby_prism::Node<'_>) -> bool {
     node.as_and_node().is_some() || node.as_or_node().is_some()
+}
+
+fn is_pattern_matching_guard(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+    let loc = node.location();
+    let start = loc.start_offset();
+    let (line, _col) = source.offset_to_line_col(start);
+    if let Some(line_start) = source.line_col_to_offset(line, 0) {
+        if let Some(prefix) = source.try_byte_slice(line_start, start) {
+            return prefix.trim() == "in";
+        }
+    }
+    false
 }
 
 /// Check if the condition has mixed logical operators.
@@ -148,8 +170,43 @@ impl<'pr> Visit<'pr> for LogicalOperatorCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn forbid_logical_operators_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("forbid_logical_operators".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
     crate::cop_fixture_tests!(
         UnlessLogicalOperators,
         "cops/style/unless_logical_operators"
     );
+
+    #[test]
+    fn forbid_logical_operators_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &UnlessLogicalOperators,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/unless_logical_operators/forbid_logical_operators_offense.rb"
+            ),
+            forbid_logical_operators_config(),
+        );
+    }
+
+    #[test]
+    fn forbid_logical_operators_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &UnlessLogicalOperators,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/unless_logical_operators/forbid_logical_operators_no_offense.rb"
+            ),
+            forbid_logical_operators_config(),
+        );
+    }
 }

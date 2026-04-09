@@ -2,6 +2,53 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
+
+fn collect_regular_interpolated_string_ranges(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> Vec<(usize, usize)> {
+    struct Collector {
+        ranges: Vec<(usize, usize)>,
+    }
+
+    impl<'pr> Visit<'pr> for Collector {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            self.collect(&node);
+        }
+
+        fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            self.collect(&node);
+        }
+    }
+
+    impl Collector {
+        fn collect(&mut self, node: &ruby_prism::Node<'_>) {
+            let Some(interpolated) = node.as_interpolated_string_node() else {
+                return;
+            };
+            let Some(opening) = interpolated.opening_loc() else {
+                return;
+            };
+            if opening.as_slice().starts_with(b"<<") {
+                return;
+            }
+
+            let location = node.location();
+            self.ranges
+                .push((location.start_offset(), location.end_offset()));
+        }
+    }
+
+    let mut collector = Collector { ranges: Vec::new() };
+    collector.visit(&parse_result.node());
+    collector.ranges
+}
+
+fn range_within_ranges(ranges: &[(usize, usize)], start: usize, end: usize) -> bool {
+    ranges
+        .iter()
+        .any(|&(range_start, range_end)| start >= range_start && end <= range_end)
+}
 
 /// Corpus investigation (2026-03-08, reverted):
 /// A previous fix skipped offenses when a closing string delimiter preceded
@@ -25,6 +72,13 @@ use crate::parse::source::SourceFile;
 /// RuboCop, we use `is_heredoc()` instead of `is_code()` for the primary
 /// skip check, and add a separate comment check, so that symbol interiors
 /// are not incorrectly skipped.
+///
+/// Variant divergence (2026-04-09, `EnforcedStyle=no_space`):
+/// OpenProject had 1 FP on `"..." \` inside `#{...}` of an enclosing regular
+/// interpolated string. RuboCop ignores the full offense range because it is
+/// contained by the outer `dstr` expression range (the string has `loc.begin`),
+/// even though the backslash itself is in code. Match that range-based skip
+/// without suppressing standalone continuations like `if 2 + 2  \`.
 pub struct LineContinuationSpacing;
 
 impl Cop for LineContinuationSpacing {
@@ -35,7 +89,7 @@ impl Cop for LineContinuationSpacing {
     fn check_source(
         &self,
         source: &SourceFile,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
@@ -45,6 +99,7 @@ impl Cop for LineContinuationSpacing {
 
         let content = source.as_bytes();
         let lines: Vec<&[u8]> = source.lines().collect();
+        let interpolated_string_ranges = collect_regular_interpolated_string_ranges(parse_result);
 
         // Precompute byte offset of each line start
         let mut line_starts: Vec<usize> = Vec::with_capacity(lines.len());
@@ -78,6 +133,13 @@ impl Cop for LineContinuationSpacing {
             }
 
             let backslash_pos = trimmed_end.len() - 1;
+            let offense_in_regular_interpolated_string = |start: usize, end: usize| {
+                range_within_ranges(
+                    &interpolated_string_ranges,
+                    line_starts[i] + start,
+                    line_starts[i] + end,
+                )
+            };
 
             // Skip backslashes inside heredoc bodies, comments, and the
             // __END__ data section. We intentionally do NOT use the broad
@@ -132,6 +194,10 @@ impl Cop for LineContinuationSpacing {
                     let before = trimmed_end[backslash_pos - 1];
                     if before != b' ' && before != b'\t' {
                         // No space before backslash
+                        if offense_in_regular_interpolated_string(backslash_pos, backslash_pos + 1)
+                        {
+                            continue;
+                        }
                         let line_num = i + 1;
                         diagnostics.push(self.diagnostic(
                             source,
@@ -152,6 +218,9 @@ impl Cop for LineContinuationSpacing {
                                 || trimmed_end[space_start - 1] == b'\t')
                         {
                             space_start -= 1;
+                        }
+                        if offense_in_regular_interpolated_string(space_start, backslash_pos + 1) {
+                            continue;
                         }
                         diagnostics.push(self.diagnostic(
                             source,
@@ -174,6 +243,9 @@ impl Cop for LineContinuationSpacing {
                                 || trimmed_end[space_start - 1] == b'\t')
                         {
                             space_start -= 1;
+                        }
+                        if offense_in_regular_interpolated_string(space_start, backslash_pos + 1) {
+                            continue;
                         }
                         diagnostics.push(self.diagnostic(
                             source,
@@ -198,6 +270,15 @@ mod tests {
         "cops/layout/line_continuation_spacing"
     );
 
+    fn no_space_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::from("no_space"),
+        );
+        config
+    }
+
     #[test]
     fn crlf_backslash_not_flagged() {
         // RuboCop's regex \\$ doesn't match \<CR> so CRLF lines are skipped
@@ -219,15 +300,10 @@ mod tests {
     fn crlf_no_space_style_not_flagged() {
         // no_space style should also skip CRLF lines
         let source = b"x = 1 \\\r\n  + 2\r\n";
-        let mut config = CopConfig::default();
-        config.options.insert(
-            "EnforcedStyle".to_string(),
-            serde_yml::Value::from("no_space"),
-        );
         let diags = crate::testutil::run_cop_full_internal(
             &LineContinuationSpacing,
             source,
-            config,
+            no_space_config(),
             "test.rb",
         );
         assert!(
@@ -235,6 +311,43 @@ mod tests {
             "CRLF backslash should not be flagged in no_space style: got {} diagnostics",
             diags.len()
         );
+    }
+
+    #[test]
+    fn no_space_interpolated_outer_string_continuation_no_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/line_continuation_spacing/no_offense.no_space.rb"
+        );
+        let fixture = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture
+            .strip_prefix("# nitrocop-config: EnforcedStyle: no_space\n")
+            .expect("fixture should start with no_space config directive");
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &LineContinuationSpacing,
+            source.as_bytes(),
+            no_space_config(),
+        );
+    }
+
+    #[test]
+    fn no_space_general_continuation_still_flagged() {
+        let source = b"if 2 + 2  \\\n  == 4\n  foo\nend\n";
+        let diags = crate::testutil::run_cop_full_internal(
+            &LineContinuationSpacing,
+            source,
+            no_space_config(),
+            "test.rb",
+        );
+
+        assert_eq!(
+            diags.len(),
+            1,
+            "general no_space case should still be flagged"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 8);
+        assert_eq!(diags[0].message, "No space before backslash.");
     }
 
     #[test]

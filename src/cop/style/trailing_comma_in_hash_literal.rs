@@ -26,6 +26,22 @@ use super::trailing_comma;
 /// whose last value is another hash containing a heredoc still scans through
 /// the nested heredoc body and can mistake commas in embedded Ruby for a
 /// trailing comma on the outer hash.
+///
+/// ## Variant divergence (2026-04)
+///
+/// The default `no_comma` style was already correct, but the non-default
+/// variants diverged from RuboCop:
+/// - `diff_comma` was falling through to `no_comma`, so hashes like
+///   `added_from_path: true,` followed by an immediate newline were reported as
+///   offenses instead of accepted, and missing commas in that layout were
+///   missed.
+/// - `consistent_comma` required commas for multiline hashes but failed to
+///   reject trailing commas on single-line hashes such as
+///   `{ access_token: 'x', }`.
+///
+/// Fix: mirror RuboCop's style matrix. `diff_comma` keys off whether the last
+/// item immediately precedes a newline, and `consistent_comma` still reports
+/// trailing commas whenever the hash does not qualify as multiline.
 pub struct TrailingCommaInHashLiteral;
 
 impl Cop for TrailingCommaInHashLiteral {
@@ -119,8 +135,40 @@ impl Cop for TrailingCommaInHashLiteral {
                 }
             }
             "consistent_comma" => {
-                // Require trailing comma in multiline; no opinion on single-line
-                if is_multiline && !has_comma {
+                if has_comma && !is_multiline {
+                    if let Some(abs_offset) = find_comma_offset() {
+                        let (line, column) = source.offset_to_line_col(abs_offset);
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid comma after the last item of a hash, unless items are split onto multiple lines.".to_string(),
+                        ));
+                    }
+                } else if !has_comma && is_multiline {
+                    let (line, column) = source.offset_to_line_col(last_end);
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Put a comma after the last item of a multiline hash.".to_string(),
+                    ));
+                }
+            }
+            "diff_comma" => {
+                let last_precedes_newline = is_multiline
+                    && trailing_comma::last_item_precedes_newline(bytes, last_end, closing_start);
+                if has_comma && !last_precedes_newline {
+                    if let Some(abs_offset) = find_comma_offset() {
+                        let (line, column) = source.offset_to_line_col(abs_offset);
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid comma after the last item of a hash, unless that item immediately precedes a newline.".to_string(),
+                        ));
+                    }
+                } else if !has_comma && last_precedes_newline {
                     let (line, column) = source.offset_to_line_col(last_end);
                     diagnostics.push(self.diagnostic(
                         source,
@@ -199,6 +247,28 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/offense.consistent_comma.rb"
             ),
             multiline_config("consistent_comma"),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/offense.diff_comma.rb"
+            ),
+            multiline_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/no_offense.diff_comma.rb"
+            ),
+            multiline_config("diff_comma"),
         );
     }
 }

@@ -70,6 +70,12 @@ use crate::parse::source::SourceFile;
 ///   `describe Foo do; class Bar; def m; self.x; end; end; end` sees lambda
 ///   params from inside the describe block. At the top level (only Root above
 ///   ClassLike) the merge is skipped to prevent class-body leakage.
+/// - `unless ... else` branch visitation follows parser's normalized `if`
+///   semantics, not Prism source order: RuboCop visits the source `else`
+///   branch before the source `unless` body. This keeps block params or locals
+///   introduced only in the source `unless` body from suppressing later
+///   offenses in the source `else` branch (for example, `debug? self.actor`
+///   after `actors.each do |actor|` in the `unless` body).
 pub struct RedundantSelf;
 
 /// Methods where self. is always required (Ruby keywords).
@@ -738,7 +744,18 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
         let mut scanner = ConditionalLocalScanner { names: Vec::new() };
         ruby_prism::visit_unless_node(&mut scanner, node);
         self.apply_conditional_prescan(scanner);
-        ruby_prism::visit_unless_node(self, node);
+
+        // Match parser/RuboCop's normalized `if` AST for `unless`: the source
+        // `else` branch is the truthy branch and is visited before the source
+        // `unless` body. Source-order visitation would incorrectly let locals
+        // from the `unless` body leak into the `else` branch.
+        self.visit(&node.predicate());
+        if let Some(else_clause) = node.else_clause() {
+            self.visit_else_node(&else_clause);
+        }
+        if let Some(statements) = node.statements() {
+            self.visit_statements_node(&statements);
+        }
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {

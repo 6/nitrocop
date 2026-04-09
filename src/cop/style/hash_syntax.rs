@@ -46,11 +46,13 @@ use crate::parse::source::SourceFile;
 /// RuboCop location.
 ///
 /// Also, some US-ASCII corpus files contain regex literals with high-byte `\x`
-/// escapes (for example `\xff` or `\x9F`) that currently crash RuboCop's Prism
-/// translation before it reaches `Style/HashSyntax`. Those files only surfaced
-/// under non-default HashSyntax variants, so the cop now skips non-default
-/// style/shorthand checks for that same crashy file shape to preserve the
-/// default-config baseline while matching RuboCop's observed corpus behavior.
+/// escapes that crash RuboCop's Prism translation before it reaches
+/// `Style/HashSyntax`. The crash only occurs when the decoded hex escape bytes
+/// form invalid UTF-8 (e.g. standalone `\xff` or `\x9F`). Consecutive escapes
+/// that form valid UTF-8 (e.g. `\xef\xbb\xbf` = BOM) are handled fine by
+/// RuboCop. The skip heuristic now checks UTF-8 validity of grouped `\xHH`
+/// sequences so that files like `ruby/rdoc/encoding.rb` (which uses
+/// `\xef\xbb\xbf`) are correctly analyzed under non-default style variants.
 pub struct HashSyntax;
 
 const MSG_19: &str = "Use the new Ruby 1.9 hash syntax.";
@@ -592,7 +594,7 @@ fn line_contains_high_hex_escape_in_regex_literal(line: &[u8]) -> bool {
             }
 
             if byte == b'/' {
-                if contains_high_hex_escape(&line[body_start..idx]) {
+                if contains_non_utf8_hex_escape(&line[body_start..idx]) {
                     return true;
                 }
                 start = idx + 1;
@@ -633,13 +635,63 @@ fn looks_like_regex_open(line: &[u8], slash_idx: usize) -> bool {
     )
 }
 
-fn contains_high_hex_escape(body: &[u8]) -> bool {
-    body.windows(4).any(|window| {
-        window[0] == b'\\'
-            && window[1] == b'x'
-            && matches!(window[2], b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
-            && window[3].is_ascii_hexdigit()
-    })
+/// Check if a regex body contains `\xHH` escape sequences with high bytes (>= 0x80)
+/// that do NOT form valid UTF-8 when grouped as consecutive escapes.
+///
+/// RuboCop crashes on US-ASCII files with regex high-byte escapes that form
+/// invalid UTF-8 (e.g. standalone `\xff`), but handles valid UTF-8 sequences
+/// fine (e.g. `\xef\xbb\xbf` = BOM).
+fn contains_non_utf8_hex_escape(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < body.len() {
+        if body[i] == b'\\' && body[i + 1] == b'x' {
+            let (d1, d2) = (body[i + 2], body[i + 3]);
+            if d1.is_ascii_hexdigit() && d2.is_ascii_hexdigit() {
+                let byte = hex_pair_to_byte(d1, d2);
+                if byte >= 0x80 {
+                    // Collect consecutive \xHH escapes with high bytes
+                    let mut bytes = vec![byte];
+                    let mut j = i + 4;
+                    while j + 3 < body.len()
+                        && body[j] == b'\\'
+                        && body[j + 1] == b'x'
+                        && body[j + 2].is_ascii_hexdigit()
+                        && body[j + 3].is_ascii_hexdigit()
+                    {
+                        let b = hex_pair_to_byte(body[j + 2], body[j + 3]);
+                        if b >= 0x80 {
+                            bytes.push(b);
+                            j += 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    if std::str::from_utf8(&bytes).is_err() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn hex_pair_to_byte(h1: u8, h2: u8) -> u8 {
+    hex_digit_val(h1) * 16 + hex_digit_val(h2)
+}
+
+fn hex_digit_val(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    }
 }
 
 fn sym_indices(

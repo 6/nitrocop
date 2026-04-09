@@ -2,6 +2,7 @@ use crate::cop::shared::node_type::{HASH_NODE, HASH_PATTERN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Layout/SpaceInsideHashLiteralBraces
 ///
@@ -14,6 +15,16 @@ use crate::parse::source::SourceFile;
 ///   multiline quoted strings, `%{}` strings, and similar closing-token shapes.
 /// - Fixed by limiting the exemption to double-quoted strings whose physical
 ///   newlines are all backslash continuations, matching RuboCop's token stream.
+///
+/// Investigation notes (2026-04-09, compact FP=673, FN=13,414):
+/// - `EnforcedStyle: compact` is not plain `space` style. RuboCop collapses
+///   same-line successive `{ {` and `} }` token pairs in nested hashes.
+/// - Nitrocop previously treated `compact` exactly like `space`, which caused
+///   false positives for correctly collapsed `{{`/`}}` and false negatives for
+///   spaced `{ {`/`} }` pairs that RuboCop reports as `detected`.
+/// - Fixed by checking adjacent same-line brace bytes for `compact`, but only
+///   collapsing a closing `}` when it is real code, not a percent-literal
+///   delimiter like `%w{}` that RuboCop tokenizes differently.
 pub struct SpaceInsideHashLiteralBraces;
 
 struct BraceSpan {
@@ -28,10 +39,11 @@ impl SpaceInsideHashLiteralBraces {
     /// Check a hash-like node given its opening and closing brace locations.
     /// Works for both HashNode and HashPatternNode.
     #[allow(clippy::too_many_arguments)]
-    fn check_hash(
+    fn check_hash<'pr>(
         &self,
         source: &SourceFile,
         span: &BraceSpan,
+        last_element: Option<&ruby_prism::Node<'pr>>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -112,31 +124,73 @@ impl SpaceInsideHashLiteralBraces {
 
         // Check opening brace: skip if there's a line break between brace and first content,
         // or if there's a comment after the brace (also indicates line break).
-        let skip_open = {
-            // Scan past spaces/tabs after the opening brace
-            let mut pos = open_end;
-            while pos < close_start && matches!(bytes[pos], b' ' | b'\t') {
-                pos += 1;
-            }
-            // Skip if we hit a newline or a comment (comment always precedes a line break)
-            pos >= close_start || bytes[pos] == b'\n' || bytes[pos] == b'\r' || bytes[pos] == b'#'
-        };
+        let open_content_start = scan_non_space_forward(bytes, open_end, close_start);
+        let skip_open = open_content_start >= close_start
+            || bytes[open_content_start] == b'\n'
+            || bytes[open_content_start] == b'\r'
+            || bytes[open_content_start] == b'#';
+        let compact_collapse_open = !skip_open && bytes[open_content_start] == b'{';
 
         // Check closing brace: skip if there's a line break between last content and brace
-        let skip_close = close_follows_line_continued_double_quoted_string || {
-            // Scan past spaces/tabs before the closing brace
-            let mut pos = close_start;
-            while pos > open_end && matches!(bytes[pos - 1], b' ' | b'\t') {
-                pos -= 1;
-            }
-            // Skip if we hit a newline
-            pos <= open_end || bytes[pos - 1] == b'\n' || bytes[pos - 1] == b'\r'
-        };
+        let close_content_end = scan_non_space_backward(bytes, open_end, close_start);
+        let skip_close = close_follows_line_continued_double_quoted_string
+            || close_content_end <= open_end
+            || bytes[close_content_end - 1] == b'\n'
+            || bytes[close_content_end - 1] == b'\r';
+        let compact_collapse_close = !skip_close
+            && bytes[close_content_end - 1] == b'}'
+            && last_element.is_some_and(|element| {
+                !ends_with_non_code_percent_literal_brace(element, close_content_end - 1)
+            });
 
         if !skip_open {
             match enforced {
-                "space" | "compact" => {
+                "space" => {
                     if !space_after_open {
+                        let (line, column) = source.offset_to_line_col(open_start);
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside { missing.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: open_end,
+                                end: open_end,
+                                replacement: " ".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                }
+                "compact" => {
+                    if compact_collapse_open {
+                        if space_after_open {
+                            let end = scan_space_forward(bytes, open_end);
+                            let (line, column) = source.offset_to_line_col(open_end);
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Space inside { detected.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start: open_end,
+                                    end,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
+                    } else if !space_after_open {
                         let (line, column) = source.offset_to_line_col(open_start);
                         let mut diag = self.diagnostic(
                             source,
@@ -190,8 +244,52 @@ impl SpaceInsideHashLiteralBraces {
 
         if !skip_close {
             match enforced {
-                "space" | "compact" => {
+                "space" => {
                     if !space_before_close {
+                        let (line, column) = source.offset_to_line_col(close_start);
+                        let mut diag = self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Space inside } missing.".to_string(),
+                        );
+                        if let Some(ref mut corr) = corrections {
+                            corr.push(crate::correction::Correction {
+                                start: close_start,
+                                end: close_start,
+                                replacement: " ".to_string(),
+                                cop_name: self.name(),
+                                cop_index: 0,
+                            });
+                            diag.corrected = true;
+                        }
+                        diagnostics.push(diag);
+                    }
+                }
+                "compact" => {
+                    if compact_collapse_close {
+                        if space_before_close {
+                            let start = scan_space_backward(bytes, close_start);
+                            let (line, column) = source.offset_to_line_col(start);
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                column,
+                                "Space inside } detected.".to_string(),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                corr.push(crate::correction::Correction {
+                                    start,
+                                    end: close_start,
+                                    replacement: String::new(),
+                                    cop_name: self.name(),
+                                    cop_index: 0,
+                                });
+                                diag.corrected = true;
+                            }
+                            diagnostics.push(diag);
+                        }
+                    } else if !space_before_close {
                         let (line, column) = source.offset_to_line_col(close_start);
                         let mut diag = self.diagnostic(
                             source,
@@ -326,6 +424,196 @@ impl SpaceInsideHashLiteralBraces {
     }
 }
 
+fn scan_space_forward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    i
+}
+
+fn scan_space_backward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    i
+}
+
+fn scan_non_space_forward(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut pos = start;
+    while pos < end && matches!(bytes[pos], b' ' | b'\t') {
+        pos += 1;
+    }
+    pos
+}
+
+fn scan_non_space_backward(bytes: &[u8], start: usize, end: usize) -> usize {
+    let mut pos = end;
+    while pos > start && matches!(bytes[pos - 1], b' ' | b'\t') {
+        pos -= 1;
+    }
+    pos
+}
+
+#[derive(Default)]
+struct PercentLiteralBraceCloserVisitor {
+    target_offset: usize,
+    found: bool,
+}
+
+impl<'pr> Visit<'pr> for PercentLiteralBraceCloserVisitor {
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        if self.found {
+            return;
+        }
+        if percent_literal_array_closes_with_brace_at(node, self.target_offset) {
+            self.found = true;
+            return;
+        }
+        ruby_prism::visit_array_node(self, node);
+    }
+
+    fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+        if self.found {
+            return;
+        }
+        self.found = percent_literal_brace_closes_at(
+            node.opening_loc(),
+            node.closing_loc(),
+            self.target_offset,
+        );
+    }
+
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        if self.found {
+            return;
+        }
+        if percent_literal_brace_closes_at(
+            node.opening_loc(),
+            node.closing_loc(),
+            self.target_offset,
+        ) {
+            self.found = true;
+            return;
+        }
+        ruby_prism::visit_interpolated_string_node(self, node);
+    }
+
+    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
+        if self.found {
+            return;
+        }
+        self.found = percent_literal_brace_closes_at(
+            Some(node.opening_loc()),
+            Some(node.closing_loc()),
+            self.target_offset,
+        );
+    }
+
+    fn visit_interpolated_regular_expression_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
+    ) {
+        if self.found {
+            return;
+        }
+        if percent_literal_brace_closes_at(
+            Some(node.opening_loc()),
+            Some(node.closing_loc()),
+            self.target_offset,
+        ) {
+            self.found = true;
+            return;
+        }
+        ruby_prism::visit_interpolated_regular_expression_node(self, node);
+    }
+
+    fn visit_x_string_node(&mut self, node: &ruby_prism::XStringNode<'pr>) {
+        if self.found {
+            return;
+        }
+        self.found = percent_literal_brace_closes_at(
+            Some(node.opening_loc()),
+            Some(node.closing_loc()),
+            self.target_offset,
+        );
+    }
+
+    fn visit_interpolated_x_string_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedXStringNode<'pr>,
+    ) {
+        if self.found {
+            return;
+        }
+        if percent_literal_brace_closes_at(
+            Some(node.opening_loc()),
+            Some(node.closing_loc()),
+            self.target_offset,
+        ) {
+            self.found = true;
+            return;
+        }
+        ruby_prism::visit_interpolated_x_string_node(self, node);
+    }
+
+    fn visit_interpolated_symbol_node(&mut self, node: &ruby_prism::InterpolatedSymbolNode<'pr>) {
+        if self.found {
+            return;
+        }
+        if percent_literal_brace_closes_at(
+            node.opening_loc(),
+            node.closing_loc(),
+            self.target_offset,
+        ) {
+            self.found = true;
+            return;
+        }
+        ruby_prism::visit_interpolated_symbol_node(self, node);
+    }
+}
+
+fn ends_with_non_code_percent_literal_brace(
+    element: &ruby_prism::Node<'_>,
+    brace_offset: usize,
+) -> bool {
+    let mut visitor = PercentLiteralBraceCloserVisitor {
+        target_offset: brace_offset,
+        found: false,
+    };
+    visitor.visit(element);
+    visitor.found
+}
+
+fn percent_literal_array_closes_with_brace_at(
+    array_node: &ruby_prism::ArrayNode<'_>,
+    brace_offset: usize,
+) -> bool {
+    let Some(opening) = array_node.opening_loc() else {
+        return false;
+    };
+    let Some(closing) = array_node.closing_loc() else {
+        return false;
+    };
+    opening.as_slice().starts_with(b"%")
+        && closing.as_slice() == b"}"
+        && closing.start_offset() == brace_offset
+}
+
+fn percent_literal_brace_closes_at(
+    opening: Option<ruby_prism::Location<'_>>,
+    closing: Option<ruby_prism::Location<'_>>,
+    brace_offset: usize,
+) -> bool {
+    let (Some(opening), Some(closing)) = (opening, closing) else {
+        return false;
+    };
+    opening.as_slice().starts_with(b"%")
+        && closing.as_slice() == b"}"
+        && closing.start_offset() == brace_offset
+}
+
 impl Cop for SpaceInsideHashLiteralBraces {
     fn name(&self) -> &'static str {
         "Layout/SpaceInsideHashLiteralBraces"
@@ -377,6 +665,7 @@ impl Cop for SpaceInsideHashLiteralBraces {
                         },
                     ),
                 },
+                elements.last(),
                 config,
                 diagnostics,
                 corrections,
@@ -415,6 +704,7 @@ impl Cop for SpaceInsideHashLiteralBraces {
                         },
                     ),
                 },
+                elements.last(),
                 config,
                 diagnostics,
                 corrections,
@@ -436,6 +726,40 @@ mod tests {
         SpaceInsideHashLiteralBraces,
         "cops/layout/space_inside_hash_literal_braces"
     );
+
+    fn compact_config() -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn compact_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideHashLiteralBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_hash_literal_braces/compact_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
+
+    #[test]
+    fn compact_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideHashLiteralBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_hash_literal_braces/compact_no_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
 
     #[test]
     fn empty_braces_space_style_flags_no_space() {
@@ -531,15 +855,7 @@ mod tests {
 
     #[test]
     fn compact_style_non_nested() {
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("compact".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = compact_config();
 
         // Non-nested hash should be fine with spaces
         let source = b"h = { a: 1, b: 2 }\n";
@@ -607,6 +923,31 @@ mod tests {
             diags.len(),
             1,
             "Only multiline plain strings should skip the closing brace check"
+        );
+        assert!(diags[0].message.contains("Space inside } missing."));
+    }
+
+    #[test]
+    fn compact_style_percent_literal_value_keeps_space_before_hash_brace() {
+        let source = b"translations = { month_names: %w{ Jan Feb } }\n";
+        let diags =
+            run_cop_full_with_config(&SpaceInsideHashLiteralBraces, source, compact_config());
+        assert_eq!(
+            diags.len(),
+            0,
+            "Percent literal delimiters should not collapse with the enclosing hash brace"
+        );
+    }
+
+    #[test]
+    fn compact_style_percent_literal_value_without_space_still_offends() {
+        let source = b"translations = { month_names: %w{ Jan Feb }}\n";
+        let diags =
+            run_cop_full_with_config(&SpaceInsideHashLiteralBraces, source, compact_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "Compact style should still require a space before the closing hash brace here"
         );
         assert!(diags[0].message.contains("Space inside } missing."));
     }

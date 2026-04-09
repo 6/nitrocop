@@ -257,3 +257,18 @@ end
         if annotation.destroy then # don't need no blank annotations cluttering up the db, this is extra long text here
           puts "DELETED"
         end
+
+# Operator on previous line chains to if — RuboCop skips via node.chained?
+-
+if foo
+  barrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+end
+
+# Operator on previous line chains to unless — same chained? skip
+-
+unless foo
+  barrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+end
+
+# Modifier if inside block with outer-scope semicolon-separated sibling — another_statement_on_same_line
+(bool = false ; di.block.each_from_normal { |fn| bool = true if @decoded[fn] and @decoded[fn].opcode.props[:saveip] } ; bool)

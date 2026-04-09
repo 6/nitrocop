@@ -10,6 +10,14 @@ use crate::parse::source::SourceFile;
 /// register `def foo()` as an offense even though there are no arguments, but
 /// they must keep parentheses for endless defs and any rest/kwrest/forwarding
 /// argument list where removing them would be a syntax error.
+///
+/// Fixed variant divergence:
+/// - `**nil` (`NoKeywordsParameterNode`) does NOT force parentheses, unlike
+///   `**opts`/`**`/`...`. RuboCop's `anonymous_arguments?` checks for `:kwrestarg`
+///   but not `:kwnilarg`, so `def foo(**nil)` should be flagged. (FN fix)
+/// - For `require_no_parentheses_except_multiline`, the multiline check must
+///   consider the lparen..rparen span even when there are no actual parameters.
+///   `def foo(\n)` has multiline args per RuboCop and is not an offense. (FP fix)
 pub struct MethodDefParentheses;
 
 impl Cop for MethodDefParentheses {
@@ -74,33 +82,24 @@ impl Cop for MethodDefParentheses {
             }
             "require_no_parentheses_except_multiline" => {
                 // RuboCop's `args.multiline?` checks the arguments node which
-                // includes parentheses. In Prism, ParametersNode excludes parens,
-                // so when parens are present we must check the lparen..rparen span.
-                // Without this, defs like `def foo(\n  x:\n)` where ParametersNode
-                // covers only `x:` (one line) would be falsely considered single-line.
-                let is_multiline = match params.as_ref() {
-                    Some(params) if has_actual_parameters => {
-                        if has_parens {
-                            let start = def_node
-                                .lparen_loc()
-                                .map(|lp| lp.start_offset())
-                                .unwrap_or_else(|| params.location().start_offset());
-                            let end = def_node
-                                .rparen_loc()
-                                .map(|rp| rp.end_offset())
-                                .unwrap_or_else(|| params.location().end_offset());
-                            source.byte_slice(start, end, "").contains('\n')
-                        } else {
-                            source
-                                .byte_slice(
-                                    params.location().start_offset(),
-                                    params.location().end_offset(),
-                                    "",
-                                )
-                                .contains('\n')
-                        }
+                // includes parentheses. When parens are present, check the
+                // lparen..rparen span — even for empty parens like `def foo(\n)`,
+                // RuboCop considers the args node multiline if parens span lines.
+                let is_multiline = if has_parens {
+                    let start = def_node.lparen_loc().unwrap().start_offset();
+                    let end = def_node.rparen_loc().unwrap().end_offset();
+                    source.byte_slice(start, end, "").contains('\n')
+                } else {
+                    match params.as_ref() {
+                        Some(params) if has_actual_parameters => source
+                            .byte_slice(
+                                params.location().start_offset(),
+                                params.location().end_offset(),
+                                "",
+                            )
+                            .contains('\n'),
+                        _ => false,
                     }
-                    _ => false,
                 };
 
                 if is_multiline && !has_parens {
@@ -161,9 +160,14 @@ fn is_forced_parentheses(
     if params.rest().is_some() {
         return true;
     }
-    // Any keyword rest (**opts, **) or forwarding parameter (...)
-    if params.keyword_rest().is_some() {
-        return true;
+    // Any keyword rest (**opts, **) or forwarding parameter (...).
+    // **nil (NoKeywordsParameterNode) does NOT force parentheses — `def foo **nil`
+    // is valid syntax. RuboCop's `anonymous_arguments?` checks for :kwrestarg but
+    // not :kwnilarg, so **nil is not considered forced.
+    if let Some(kw_rest) = params.keyword_rest() {
+        if kw_rest.as_no_keywords_parameter_node().is_none() {
+            return true;
+        }
     }
     // Anonymous block forwarding (&)
     if let Some(block) = params.block() {

@@ -7,3 +7,9 @@ end
 it do
   allow(Foo).to receive(:bar).and_return(42, 43, 44)
 end
+
+# Interpolated strings stay dynamic when the interpolation is non-static
+it do
+  bar = 42
+  allow(service).to receive(:url).and_return("#{bar}/test-url")
+end

@@ -260,3 +260,22 @@ elsif cond
   ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
   work
 end
+
+if (obj = (obj.reload rescue nil))
+          ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if (obj = (obj.reload rescue nil))
+          ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if hlp = (send("hlp_#{c}") rescue nil)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if value = (m[name] rescue nil)
+           ^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if client = (UNIXSocket.open(socket) rescue nil)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+# Assignment inside string interpolation — Parser AST wraps interpolation in begin
+"value is #{(x = compute)}"
+            ^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.

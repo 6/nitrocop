@@ -97,6 +97,14 @@ use ruby_prism::Visit;
 ///   errors. This allows the reparse check to work correctly on files that have
 ///   pre-existing Prism parse errors unrelated to the line continuation.
 ///
+/// - **Next-line multiline call expressions**: RuboCop keeps `\` before a
+///   multiline RHS/argument expression when the expression starting on the next
+///   line is itself a call/operator whose first argument begins on a later line
+///   (Rails/Gon/Rubber corpus cases like `lhs = \` + `foo -` + `bar`). Our raw
+///   line heuristics missed these and produced 9 FPs. Fixed by recording the
+///   first `CallNode` that starts on each line and mirroring RuboCop's
+///   `argument_newline?` logic on that node.
+///
 /// ## Remaining gaps
 ///
 /// - **CRLF reparse compat**: `trim_end` strips `\r` so CRLF files are
@@ -105,11 +113,6 @@ use ruby_prism::Visit;
 ///   But `redundant_line_continuation?` does its reparse on `raw_source`
 ///   (CRLF) using that normalized offset, replacing wrong bytes. We replicate
 ///   this exact mismatch in `is_redundant_continuation` to match RuboCop 1:1.
-///
-/// - **Multiline expression FPs**: ~9 remaining FPs where `\` precedes a
-///   multiline expression (e.g., method chains or block calls spanning multiple
-///   lines). RuboCop's `argument_newline?` AST walk detects these via recursive
-///   `method_call_with_arguments?` checks that we don't fully replicate.
 pub struct RedundantLineContinuation;
 
 impl Cop for RedundantLineContinuation {
@@ -132,6 +135,7 @@ impl Cop for RedundantLineContinuation {
             interpolated_literal_continuation_offsets(parse_result, source_bytes);
         let string_like_literal_continuations =
             string_like_literal_continuation_offsets(parse_result, source_bytes);
+        let argument_newline_lines = argument_newline_lines(source, parse_result);
 
         // Determine the AST statements range. RuboCop only scans for `\\\n`
         // within `processed_source.ast.source_range`, which corresponds to
@@ -216,6 +220,10 @@ impl Cop for RedundantLineContinuation {
             let before_backslash = trim_end(&trimmed[..trimmed.len() - 1]);
 
             if continuation_is_required(before_backslash, i, &lines) {
+                continue;
+            }
+
+            if argument_newline_lines.contains(&(i + 2)) {
                 continue;
             }
 
@@ -679,6 +687,69 @@ fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
             | b'_'
             | b'a'..=b'z'
     )
+}
+
+fn argument_newline_lines(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashSet<usize> {
+    let mut collector = ArgumentNewlineLineCollector {
+        source,
+        seen_lines: HashSet::new(),
+        argument_newline_lines: HashSet::new(),
+    };
+    collector.visit(&parse_result.node());
+    collector.argument_newline_lines
+}
+
+fn call_argument_newline(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -> bool {
+    if call.opening_loc().is_some() {
+        return false;
+    }
+
+    let Some(first_argument) = first_call_argument(call) else {
+        return false;
+    };
+
+    if let Some(inner_call) = first_argument.as_call_node() {
+        if first_call_argument(&inner_call).is_some() {
+            return call_argument_newline(&inner_call, source);
+        }
+    }
+
+    let selector_line = call
+        .message_loc()
+        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
+        .unwrap_or_else(|| source.offset_to_line_col(call.location().start_offset()).0);
+    let first_argument_line = source
+        .offset_to_line_col(first_argument.location().start_offset())
+        .0;
+
+    selector_line != first_argument_line
+}
+
+fn first_call_argument<'pr>(call: &'pr ruby_prism::CallNode<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    call.arguments()?.arguments().iter().next()
+}
+
+struct ArgumentNewlineLineCollector<'a> {
+    source: &'a SourceFile,
+    seen_lines: HashSet<usize>,
+    argument_newline_lines: HashSet<usize>,
+}
+
+impl<'pr> Visit<'pr> for ArgumentNewlineLineCollector<'_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let line = self
+            .source
+            .offset_to_line_col(node.location().start_offset())
+            .0;
+        if self.seen_lines.insert(line) && call_argument_newline(node, self.source) {
+            self.argument_newline_lines.insert(line);
+        }
+
+        ruby_prism::visit_call_node(self, node);
+    }
 }
 
 fn interpolated_literal_continuation_offsets(

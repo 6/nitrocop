@@ -110,6 +110,18 @@ use crate::parse::source::SourceFile;
 /// 3. The block-style branch was broader than RuboCop: RuboCop only flags
 ///    `and_return` calls that contain a receiverless `receive(...)` matcher,
 ///    and it ignores multi-argument `and_return(1, 2)` as dynamic.
+///
+/// ## Corpus investigation (2026-04-09, `EnforcedStyle: block`)
+///
+/// FN=63 reduced to Prism's `InterpolatedStringNode` semantics. RuboCop's
+/// `recursive_literal_or_const?` treats composite strings recursively, so
+/// these are static and should be flagged in block style:
+/// - constant-only interpolation (`"#{AWS_S3_ENDPOINT}/#{S3_BUCKET}"`)
+/// - adjacent string literals parsed as a single interpolated string
+///
+/// Dynamic interpolation like `"#{bar}/path"` must still be ignored, so the
+/// fix recurses through embedded statements and only accepts literal/constant
+/// content there.
 pub struct ReturnFromStub;
 impl Cop for ReturnFromStub {
     fn name(&self) -> &'static str {
@@ -381,9 +393,32 @@ fn is_static_value(node: &ruby_prism::Node<'_>) -> bool {
         return left_ok && right_ok;
     }
 
-    // Interpolated strings are dynamic
-    if node.as_interpolated_string_node().is_some() {
-        return false;
+    if let Some(string) = node.as_interpolated_string_node() {
+        return string
+            .parts()
+            .iter()
+            .all(|part| is_static_interpolated_part(&part));
+    }
+
+    if let Some(command) = node.as_interpolated_x_string_node() {
+        return command
+            .parts()
+            .iter()
+            .all(|part| is_static_interpolated_part(&part));
+    }
+
+    if let Some(symbol) = node.as_interpolated_symbol_node() {
+        return symbol
+            .parts()
+            .iter()
+            .all(|part| is_static_interpolated_part(&part));
+    }
+
+    if let Some(regex) = node.as_interpolated_regular_expression_node() {
+        return regex
+            .parts()
+            .iter()
+            .all(|part| is_static_interpolated_part(&part));
     }
 
     if node.as_call_node().is_some() {
@@ -415,6 +450,16 @@ fn is_static_value(node: &ruby_prism::Node<'_>) -> bool {
     }
 
     false
+}
+
+fn is_static_interpolated_part(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(embedded) = node.as_embedded_statements_node() {
+        return embedded
+            .statements()
+            .is_some_and(|stmts| stmts.body().iter().all(|stmt| is_static_value(&stmt)));
+    }
+
+    is_static_value(node)
 }
 
 #[cfg(test)]
@@ -472,6 +517,23 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "Use block for static values.");
+    }
+
+    #[test]
+    fn block_style_flags_constant_only_interpolated_string() {
+        let config = block_style_config();
+        let source = b"allow(service).to receive(:url).and_return(\"#{AWS_S3_ENDPOINT}/#{S3_BUCKET}/test-url\")\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Use block for static values.");
+    }
+
+    #[test]
+    fn block_style_ignores_dynamic_interpolated_string() {
+        let config = block_style_config();
+        let source = b"bar = 42\nallow(service).to receive(:url).and_return(\"#{bar}/test-url\")\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ReturnFromStub, source, config);
+        assert!(diags.is_empty());
     }
 
     #[test]

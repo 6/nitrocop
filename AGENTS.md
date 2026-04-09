@@ -129,7 +129,7 @@ The canonical reference for RuboCop's AST node predicates is vendored at `vendor
 
 ## Corpus Quick Reference
 
-`investigate_cop.py`, `check_cop.py`, and `verify_cop_locations.py` are **CI-only** (guarded by `CI` env var). Do not run them locally.
+`investigate_cop.py`, `check_cop.py`, and `verify_cop_locations.py` are **CI-only** (guarded by `CI` env var). Do not run them locally. Pass `--force` to override in exceptional cases.
 
 For local cop investigation, use these sources instead:
 
@@ -142,12 +142,33 @@ For local cop investigation, use these sources instead:
 python3 scripts/reduce_mismatch.py Department/CopName repo_id path/to/file.rb:line
 ```
 
+The CI-only scripts (for reference in CI workflows and skills):
+
+```bash
+python3 scripts/investigate_cop.py Department/CopName           # FP/FN details from corpus oracle
+python3 scripts/investigate_cop.py Department/CopName --context  # with source snippets
+python3 scripts/investigate_repo.py rails                        # per-repo investigation
+python3 scripts/check_cop.py Department/CopName                  # aggregate count check
+python3 scripts/check_cop.py Department/CopName --verbose --rerun  # re-execute with per-repo breakdown
+python3 scripts/verify_cop_locations.py Department/CopName       # per-line location verification
+python3 scripts/verify_cop_locations.py Department/CopName --style EnforcedStyle=never  # variant check
+```
+
 Important:
 
+- `investigate_cop.py` and `investigate_repo.py` auto-download the latest corpus artifacts. Do not manually download them first.
+- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation. Both support `--style` for variant checks.
 - When reproducing a corpus FP/FN locally, always test from the **PR branch** (with the agent's changes), not main. Testing from main shows pre-change behavior and will not reproduce the issue.
 - “file-drop noise” is not an excuse for FN gaps. Investigate the actual missed examples.
+- `check_cop.py --rerun` depends on the bundle under `bench/corpus/vendor/bundle/`. If needed:
+
+```bash
+cd bench/corpus
+BUNDLE_PATH=vendor/bundle bundle install
+```
+
 - Do not run `cargo run --release --bin bench_nitrocop -- conform` by default during cop-fix loops. Use per-cop corpus gates unless the task explicitly asks for full conformance regeneration.
-- **Disk space:** The devcontainer can only hold ~50 corpus repos locally. Never run `bench/corpus/clone_repos.sh` (which syncs all ~5,500 repos). Instead, clone only the repos needed for a specific cop with `python3 scripts/corpus_repo_map.py --clone Department/CopName`.
+- **Disk space:** The devcontainer can only hold ~50 corpus repos locally. Never run `bench/corpus/clone_repos.sh` (which syncs all ~5,500 repos). Instead, clone only the repos needed for a specific cop with `python3 scripts/corpus_repo_map.py --clone Department/CopName`, or use `check_cop.py --rerun --clone` which fetches only diverging repos.
 
 ## Core Rules
 

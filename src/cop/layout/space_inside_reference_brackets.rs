@@ -1,5 +1,6 @@
 use crate::cop::shared::node_type::{
     CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+    INDEX_TARGET_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -57,6 +58,18 @@ use ruby_prism::Visit;
 /// `]`, in which case it falls back to the first. Matching that selection
 /// logic fixes both false positives without suppressing the broader
 /// offending patterns that RuboCop still reports.
+///
+/// ## Corpus investigation (2026-04-09)
+///
+/// Variant `EnforcedStyle: space` still had 165 FN on multi-write targets like
+/// `data['stdout'], data['stderr'], status = ...` and `rt[col], message = ...`.
+/// Prism parses those LHS references as `IndexTargetNode`, so the cop never
+/// visited them. RuboCop handles them like `[]=`, selecting the first
+/// reference bracket in the target subtree; this intentionally ignores outer
+/// target brackets in cases like `user[ 'items' ][key], other = rhs`. Fixed by
+/// adding `INDEX_TARGET_NODE` support and reusing first-bracket selection for
+/// target nodes. Also report missing leading space for `EnforcedStyle: space`
+/// at `[` to match RuboCop's offense location.
 pub struct SpaceInsideReferenceBrackets;
 
 impl Cop for SpaceInsideReferenceBrackets {
@@ -67,6 +80,7 @@ impl Cop for SpaceInsideReferenceBrackets {
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
+            INDEX_TARGET_NODE,
             INDEX_AND_WRITE_NODE,
             INDEX_OPERATOR_WRITE_NODE,
             INDEX_OR_WRITE_NODE,
@@ -223,7 +237,7 @@ impl Cop for SpaceInsideReferenceBrackets {
             }
             "space" => {
                 if !space_after_open {
-                    let (line, col) = source.offset_to_line_col(open_end);
+                    let (line, col) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -280,11 +294,54 @@ mod tests {
         SpaceInsideReferenceBrackets,
         "cops/layout/space_inside_reference_brackets"
     );
+
+    fn space_config() -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("space".into()),
+                ),
+                (
+                    "EnforcedStyleForEmptyBrackets".into(),
+                    serde_yml::Value::String("space".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn space_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideReferenceBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_reference_brackets/space_offense.rb"
+            ),
+            space_config(),
+        );
+    }
+
+    #[test]
+    fn space_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideReferenceBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_reference_brackets/space_no_offense.rb"
+            ),
+            space_config(),
+        );
+    }
 }
 
 fn reference_bracket_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, usize)> {
     if let Some(call) = node.as_call_node() {
         return call_bracket_offsets(&call, bytes);
+    }
+    if let Some(index) = node.as_index_target_node() {
+        return index_target_bracket_offsets(&index);
     }
     if let Some(index) = node.as_index_and_write_node() {
         return index_write_bracket_offsets(
@@ -317,23 +374,22 @@ fn call_bracket_offsets(call: &ruby_prism::CallNode<'_>, bytes: &[u8]) -> Option
     }
     call_reference_bracket_offsets(call)?;
 
-    let mut collector = ReferenceBracketCollector { pairs: Vec::new() };
-    collector.visit(&call.as_node());
-    collector
-        .pairs
-        .sort_unstable_by_key(|(open_start, _)| *open_start);
-
-    let first = collector.pairs.first().copied()?;
+    let pairs = reference_bracket_pairs(&call.as_node());
+    let first = pairs.first().copied()?;
     if method_name == b"[]=" {
         return Some(first);
     }
 
-    let last = collector.pairs.last().copied()?;
+    let last = pairs.last().copied()?;
     if previous_non_whitespace_byte(bytes, last.0) == Some(b']') {
         Some(last)
     } else {
         Some(first)
     }
+}
+
+fn index_target_bracket_offsets(index: &ruby_prism::IndexTargetNode<'_>) -> Option<(usize, usize)> {
+    reference_bracket_pairs(&index.as_node()).first().copied()
 }
 
 fn index_write_bracket_offsets(
@@ -366,6 +422,15 @@ fn call_reference_bracket_offsets(call: &ruby_prism::CallNode<'_>) -> Option<(us
     }
 
     Some((opening_loc.start_offset(), closing_loc.start_offset()))
+}
+
+fn reference_bracket_pairs(node: &ruby_prism::Node<'_>) -> Vec<(usize, usize)> {
+    let mut collector = ReferenceBracketCollector { pairs: Vec::new() };
+    collector.visit(node);
+    collector
+        .pairs
+        .sort_unstable_by_key(|(open_start, _)| *open_start);
+    collector.pairs
 }
 
 struct ReferenceBracketCollector {
@@ -406,5 +471,14 @@ impl<'pr> Visit<'pr> for ReferenceBracketCollector {
         ));
 
         ruby_prism::visit_index_or_write_node(self, node);
+    }
+
+    fn visit_index_target_node(&mut self, node: &ruby_prism::IndexTargetNode<'pr>) {
+        self.pairs.push((
+            node.opening_loc().start_offset(),
+            node.closing_loc().start_offset(),
+        ));
+
+        ruby_prism::visit_index_target_node(self, node);
     }
 }
