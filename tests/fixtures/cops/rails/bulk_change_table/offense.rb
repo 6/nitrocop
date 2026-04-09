@@ -71,3 +71,35 @@ class AddTypeAndUserIdToLogEntry < ActiveRecord::Migration[5.2]
     end
   end
 end
+
+change_table :users do |t|
+^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+  t.string :email, null: false
+  t.string :encrypted_password, null: false
+end
+
+class AddPublisherToSubmissions < ActiveRecord::Migration[4.2]
+  change_table :course_assessment_submissions do |t|
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+    t.integer :publisher_id, foreign_key: { references: :users }
+    t.datetime :published_at
+  end
+end
+
+class RenameSocialMediaColumnsOnAffiliates < ActiveRecord::Migration
+  def self.up
+    change_table :affiliates do |t|
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+      t.rename :facebook_username, :facebook_handle
+      t.rename :twitter_username, :twitter_handle
+    end
+  end
+
+  def self.down
+    change_table :affiliates do |t|
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+      t.rename :twitter_handle, :twitter_username
+      t.rename :facebook_handle, :facebook_username
+    end
+  end
+end
