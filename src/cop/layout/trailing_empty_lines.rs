@@ -68,6 +68,20 @@ use crate::parse::source::SourceFile;
 /// reports the encoding syntax error there, so line-based cops should skip the
 /// file entirely. Fixed by reusing the same guard pattern already applied to
 /// `Layout/LeadingEmptyLines` and `Naming/FileName`.
+///
+/// ## Corpus investigation (2026-04-09)
+///
+/// Variant gate for `EnforcedStyle: final_blank_line` reported FP=31, FN=30
+/// with paired locations on adjacent lines (for example, RuboCop at `:9`
+/// vs nitrocop at `:10`). The offense itself was correct; the divergence was
+/// only the reported range when a file ended with exactly one newline and the
+/// last code line also had trailing whitespace, e.g. `"...end \n"` or
+/// `"...end \r\n"`.
+///
+/// RuboCop reports `Trailing blank line missing.` on the last real line when
+/// the trailing whitespace starts with spaces/tabs before the final line ending,
+/// but still reports on the phantom next line for a pure final `\n` or `\r\n`.
+/// Nitrocop was sending every `blank_lines == 0` case to the phantom line.
 pub struct TrailingEmptyLines;
 
 /// Check if the source contains `__END__` (with optional leading whitespace).
@@ -106,6 +120,19 @@ fn first_trailing_blank_line_offset(bytes: &[u8], trailing_start: usize) -> usiz
         offset += 1;
     }
     offset.min(bytes.len().saturating_sub(1))
+}
+
+fn missing_blank_line_report_location(
+    source: &SourceFile,
+    bytes: &[u8],
+    trailing_start: usize,
+) -> (usize, usize) {
+    if matches!(bytes.get(trailing_start), Some(b'\n' | b'\r')) {
+        let (last_line, _) = source.offset_to_line_col(trailing_start);
+        (last_line + 1, 0)
+    } else {
+        source.offset_to_line_col(trailing_start + 1)
+    }
 }
 
 fn skip_for_invalid_utf8_without_magic_encoding(source: &SourceFile) -> bool {
@@ -193,12 +220,10 @@ impl Cop for TrailingEmptyLines {
         // last non-whitespace content.
         let begin_pos = bytes.len() - ws_len;
         let (report_line, report_col) = if blank_lines == 0 {
-            // "Trailing blank line missing." — report on the phantom line after
-            // the final newline, matching RuboCop which uses range_between(len, len).
-            // offset_to_line_col can't represent this position because
-            // compute_line_starts omits the phantom line, so compute directly.
-            let (last_line, _) = source.offset_to_line_col(begin_pos);
-            (last_line + 1, 0)
+            // RuboCop reports on the phantom line for a pure trailing line
+            // ending, but on the last real line if spaces/tabs precede that
+            // line ending (for example, `end \n`).
+            missing_blank_line_report_location(source, bytes, begin_pos)
         } else if blank_lines > 0 {
             source.offset_to_line_col(first_trailing_blank_line_offset(bytes, begin_pos))
         } else if ws_len > 0 {
@@ -376,9 +401,28 @@ mod tests {
         TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "Trailing blank line missing.");
-        // RuboCop reports on the phantom line after the final newline
+        // Pure trailing "\n" still reports on the phantom line.
         assert_eq!(diags[0].location.line, 2);
         assert_eq!(diags[0].location.column, 0);
+    }
+
+    #[test]
+    fn final_blank_line_style_flags_missing_blank_with_trailing_space() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes("test.rb", b"module A\nend \n".to_vec());
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Trailing blank line missing.");
+        assert_eq!(diags[0].location.line, 2);
+        assert_eq!(diags[0].location.column, 4);
     }
 
     #[test]
