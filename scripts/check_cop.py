@@ -1104,11 +1104,14 @@ def main():
     parser.add_argument("--variant-batches-dir", type=str, default=None,
                         help="Directory containing variant_batch_*.yml configs. "
                              "If not specified, generates them into a temp directory.")
+    parser.add_argument("--force", action="store_true",
+                        help="Override CI-only guard and run locally")
     args = parser.parse_args()
 
-    if not os.environ.get("CI"):
+    if not os.environ.get("CI") and not args.force:
         print("ERROR: check_cop.py is intended for CI only.", file=sys.stderr)
         print("Use docs/corpus.md, CI cop-check comments/logs, or gh api for local investigation.", file=sys.stderr)
+        print("Pass --force to override.", file=sys.stderr)
         sys.exit(1)
 
     # Declare all globals used in this function up front (Python requires

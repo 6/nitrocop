@@ -104,11 +104,14 @@ def main():
                         help="Show only false negatives")
     parser.add_argument("--limit", type=int, default=0,
                         help="Limit number of examples shown (0 = all)")
+    parser.add_argument("--force", action="store_true",
+                        help="Override CI-only guard and run locally")
     args = parser.parse_args()
 
-    if not os.environ.get("CI"):
+    if not os.environ.get("CI") and not args.force:
         print("ERROR: investigate_cop.py is intended for CI only.", file=sys.stderr)
         print("Use docs/corpus.md, CI cop-check comments/logs, or gh api for local investigation.", file=sys.stderr)
+        print("Pass --force to override.", file=sys.stderr)
         sys.exit(1)
 
     if args.fp_only and args.fn_only:
