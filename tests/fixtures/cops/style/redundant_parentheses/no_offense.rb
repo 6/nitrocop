@@ -48,6 +48,7 @@ arr = [(1..5)]
 ranges + [(line..line)]
 (minimum..maximum).cover?(count)
 x = (0..10)
+(0..10).send(@method, (0..10)).should be_true
 # not/while/until — plausible (RuboCop doesn't flag these)
 (not x)
 (a until b)
@@ -90,6 +91,8 @@ x && (y == z)
 # Match regex against parenthesized expression
 /regexp/ =~ (b || c)
 regexp =~ (b || c)
+if /x/ =~ (line.strip)
+end
 # Command literal on RHS of regex match
 unless /Version/m =~ (`convert -version`)
 end
@@ -174,6 +177,7 @@ x ({ y: 1 }.merge({ y: 2 })), z
 # Parenthesized expression nested in the first hash arg of an unparenthesized call
 foo :plain => ({:error => 0}.to_json), :other => 1
 Contract ({ :a => Num, :b => Num}) => Num
+foo.to match(({ a: 1 }))
 # Chained receiver with operator/logical inner — parens needed for operator precedence
 (a + b).to_s(base)
 (arr || []).each { |x| x }
@@ -229,6 +233,8 @@ obj&.foo((bar in baz))
 # Pattern matching in assignment — parens required
 foo = (bar in baz)
 foo ||= (bar in baz)
+var = 0
+foo in { bar: ^(var.to_i) }
 # Pattern matching in endless method definition — parens required
 def myfoo = (bar in [0, 1])
 def mybar = (baz => result)
