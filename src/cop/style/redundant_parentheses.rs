@@ -825,8 +825,6 @@ impl RedundantParensVisitor<'_> {
         false
     }
 
-    /// Check if a nearby ancestor is a ternary, looking through intermediate
-    /// wrapper nodes (StatementsNode, ElseNode) that Prism inserts.
     /// RuboCop's `rescue?` matcher: `'{^resbody ^^resbody}'`.
     /// Returns true if the paren is inside a rescue clause body (up to 2 levels deep).
     /// Only suppresses parens whose offset is within the rescue body (statements),
@@ -856,6 +854,8 @@ impl RedundantParensVisitor<'_> {
         false
     }
 
+    /// Check if a nearby ancestor is a ternary, looking through intermediate
+    /// wrapper nodes (StatementsNode, ElseNode) that Prism inserts.
     fn has_ternary_ancestor(&self) -> bool {
         if self.parent_stack.len() < 2 {
             return false;
