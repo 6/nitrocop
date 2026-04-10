@@ -146,3 +146,11 @@ when :comment
 when :blip
   blips_path(search: { ip_addr: ip_addr })
 end
+
+# omit_parentheses: parentheses that only wrap an ambiguous descendant are allowed
+def languages
+  Array(foo((bar || [])))
+end
+
+# omit_parentheses: any direct send arg unlocks RuboCop's broad hash-descendant allowance
+foo(([{a: 1}]), bar(1))
