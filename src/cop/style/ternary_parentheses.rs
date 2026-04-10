@@ -28,6 +28,11 @@ use crate::parse::source::SourceFile;
 /// Treating every non-operator call as simple caused variant-only divergence:
 /// parenthesized block calls were false positives and unparenthesized block
 /// calls were false negatives under `require_parentheses_when_complex`.
+///
+/// RuboCop's non-complex whitelist is also narrower than Ruby truthiness.
+/// Literal predicates like `true`, `false`, `nil`, and `self` still count as
+/// complex under `require_parentheses_when_complex`, so they must not be
+/// treated like simple variable reads here.
 pub struct TernaryParentheses;
 
 /// Check if a parenthesized node contains a safe assignment (=) in ternary context.
@@ -92,17 +97,13 @@ fn is_indexed_assign(node: &ruby_prism::Node<'_>) -> bool {
 
 /// Check if a condition is "complex" (not a simple variable/constant/method call).
 fn is_complex_condition(node: &ruby_prism::Node<'_>) -> bool {
-    // Simple: variables, constants, method calls
+    // Simple: variables, constants, `defined?`, `yield`
     if node.as_local_variable_read_node().is_some()
         || node.as_instance_variable_read_node().is_some()
         || node.as_class_variable_read_node().is_some()
         || node.as_global_variable_read_node().is_some()
         || node.as_constant_read_node().is_some()
         || node.as_constant_path_node().is_some()
-        || node.as_true_node().is_some()
-        || node.as_false_node().is_some()
-        || node.as_nil_node().is_some()
-        || node.as_self_node().is_some()
         || node.as_defined_node().is_some()
         || node.as_yield_node().is_some()
     {
@@ -347,6 +348,39 @@ mod tests {
             diags2.is_empty(),
             "yield should not be considered complex: {:?}",
             diags2
+        );
+    }
+
+    #[test]
+    fn literal_conditions_are_complex_when_style_requires_parentheses() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("require_parentheses_when_complex".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"true ? 1 : 0\nfalse ? 1 : 0\nnil ? 1 : 0\nself ? 1 : 0\n";
+        let diags = run_cop_full_with_config(&TernaryParentheses, source, config);
+
+        assert_eq!(
+            diags.len(),
+            4,
+            "literal predicates should be considered complex: {:?}",
+            diags
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[1].location.line, 2);
+        assert_eq!(diags[2].location.line, 3);
+        assert_eq!(diags[3].location.line, 4);
+        assert!(
+            diags
+                .iter()
+                .all(|diag| diag.message.contains("Use parentheses")),
+            "expected complex-condition message for literal predicates: {:?}",
+            diags
         );
     }
 
