@@ -122,6 +122,7 @@ self::process_api_call "projects", "advanced", search_terms, page, category_id, 
 self::process_api_call "projects", "ending-soon", "", page
 ^ Style/RedundantSelf: Redundant `self` detected.
 
+# rescue => self.method — self is redundant when no local shadows the method
 rescue => self.foo
           ^^^^ Style/RedundantSelf: Redundant `self` detected.
 
@@ -130,3 +131,36 @@ rescue => self.captured_error
 
 *self.arr = val
  ^^^^ Style/RedundantSelf: Redundant `self` detected.
+
+# class-body lambda params should not leak into later sibling class-body callbacks/lambdas
+class ClassBodyLambdaParamLeak
+  scope :for_supplier, ->(profile) { where profile_id: profile.id }
+
+  code_numbering :code, scope: -> { self.profile.orders }
+                                    ^^^^ Style/RedundantSelf: Redundant `self` detected.
+end
+
+class ClassBodyLambdaParamIntoCallback
+  scope :of_activity_production, lambda { |activity_production|
+    where(activity_production: activity_production) if activity_production.present?
+  }
+
+  before_save do
+    if activity_production.present?
+      self.activity_id = self.activity_production.activity.id
+                         ^^^^ Style/RedundantSelf: Redundant `self` detected.
+    end
+  end
+end
+
+# source-order `unless` body locals should not leak into the source `else`
+def unless_else_branch_order
+  unless cond
+    actors.each do |actor|
+      actor
+    end
+  else
+    self.actor
+    ^^^^ Style/RedundantSelf: Redundant `self` detected.
+  end
+end

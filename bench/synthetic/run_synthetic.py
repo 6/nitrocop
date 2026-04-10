@@ -14,6 +14,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,6 +177,171 @@ def parse_rubocop_json(data: dict, project_dir: str) -> set[tuple[str, int, str]
     return offenses
 
 
+def find_variant_cops(target_set: set[str]) -> list[dict]:
+    """Find TARGET_COPS that have EnforcedStyle alternatives.
+
+    Returns a list of dicts with keys: cop, key, default, alternatives.
+    """
+    project_root = Path(__file__).resolve().parent.parent.parent
+    sys.path.insert(0, str(project_root / "scripts"))
+    from corpus_stress import VENDOR_CONFIGS, parse_enforced_styles  # noqa: E402
+
+    results = []
+    for config_path, _plugin in VENDOR_CONFIGS:
+        full_path = str(project_root / config_path)
+        if not Path(full_path).exists():
+            continue
+        for s in parse_enforced_styles(full_path):
+            if s["cop"] in target_set and s["alternatives"]:
+                results.append(s)
+    return results
+
+
+def run_variant_batches(
+    variant_styles: list[dict],
+    target_set: set[str],
+    nitrocop_binary: str,
+    rubocop_yml: str,
+    project_dir: str,
+    gemfile: str,
+    verbose: bool,
+) -> dict:
+    """Run nitrocop + RuboCop with variant configs and return results.
+
+    Groups alternatives by index (batch 1 = first alt for each cop, etc.)
+    to match the corpus variant batch structure.
+    """
+    # Group by alternative index
+    max_alts = max((len(s["alternatives"]) for s in variant_styles), default=0)
+    if max_alts == 0:
+        return {"batches": []}
+
+    batches_result = []
+    for alt_idx in range(max_alts):
+        overrides: list[tuple[str, str, str]] = []  # (cop, key, value)
+        for s in variant_styles:
+            if alt_idx < len(s["alternatives"]):
+                overrides.append((s["cop"], s["key"], s["alternatives"][alt_idx]))
+
+        if not overrides:
+            continue
+
+        # Generate a temporary .rubocop.yml with style overrides
+        lines = [
+            f"# Auto-generated variant batch {alt_idx + 1} for synthetic bench",
+            f"inherit_from: {rubocop_yml}",
+            "",
+        ]
+        for cop, key, value in overrides:
+            lines.append(f"{cop}:")
+            lines.append(f"  {key}: {value}")
+            lines.append("")
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yml", dir=project_dir,
+            prefix=".rubocop_variant_", delete=False,
+        ) as tmp:
+            tmp.write("\n".join(lines) + "\n")
+            variant_config = tmp.name
+
+        override_cops = {cop for cop, _, _ in overrides}
+        style_label = f"variant_batch_{alt_idx + 1}"
+        try:
+            batch = _run_single_variant(
+                variant_config, override_cops, target_set,
+                nitrocop_binary, project_dir, gemfile, style_label, verbose,
+            )
+            batches_result.append(batch)
+        finally:
+            os.unlink(variant_config)
+
+    return {"batches": batches_result}
+
+
+def _run_single_variant(
+    config_path: str,
+    override_cops: set[str],
+    target_set: set[str],
+    nitrocop_binary: str,
+    project_dir: str,
+    gemfile: str,
+    style_label: str,
+    verbose: bool,
+) -> dict:
+    """Run a single variant config and return a batch result dict."""
+    # Only diff the cops whose style was overridden
+    filter_set = override_cops & target_set
+
+    print(f"Running variant {style_label} ({len(filter_set)} cops)...",
+          end="", file=sys.stderr, flush=True)
+
+    # nitrocop
+    nc_result = subprocess.run(
+        [nitrocop_binary, "--preview", "--no-cache", "--format", "json",
+         "--config", config_path, "."],
+        capture_output=True, text=True, cwd=project_dir,
+    )
+    nc_data = json.loads(nc_result.stdout) if nc_result.stdout.strip() else {"offenses": []}
+    nc_offenses = {o for o in parse_nitrocop_json(nc_data, project_dir) if o[2] in filter_set}
+
+    # RuboCop
+    rc_env = os.environ.copy()
+    rc_env["BUNDLE_GEMFILE"] = gemfile
+    rc_result = subprocess.run(
+        ["bundle", "exec", "rubocop", "--config", config_path, "--format", "json", "."],
+        capture_output=True, text=True, env=rc_env, cwd=project_dir,
+    )
+    rc_data = json.loads(rc_result.stdout) if rc_result.stdout.strip() else {"files": []}
+    rc_offenses = {o for o in parse_rubocop_json(rc_data, project_dir) if o[2] in filter_set}
+
+    # Diff
+    matches = nc_offenses & rc_offenses
+    fp = nc_offenses - rc_offenses
+    fn = rc_offenses - nc_offenses
+
+    by_cop_m: dict[str, int] = defaultdict(int)
+    by_cop_fp: dict[str, int] = defaultdict(int)
+    by_cop_fn: dict[str, int] = defaultdict(int)
+    for _, _, cop in matches:
+        by_cop_m[cop] += 1
+    for _, _, cop in fp:
+        by_cop_fp[cop] += 1
+    for _, _, cop in fn:
+        by_cop_fn[cop] += 1
+
+    by_cop_list = []
+    for cop in sorted(filter_set | set(by_cop_m) | set(by_cop_fp) | set(by_cop_fn)):
+        m = by_cop_m.get(cop, 0)
+        f = by_cop_fp.get(cop, 0)
+        n = by_cop_fn.get(cop, 0)
+        total = m + f + n
+        rate = m / total if total > 0 else 1.0
+        exercised = total > 0
+        diverging = f + n > 0
+        by_cop_list.append({
+            "cop": cop,
+            "matches": m,
+            "fp": f,
+            "fn": n,
+            "match_rate": trunc4(rate),
+            "exercised": exercised,
+            "perfect_match": exercised and not diverging,
+            "diverging": diverging,
+            "style_label": style_label,
+        })
+
+    total_fp = len(fp)
+    total_fn = len(fn)
+    print(f" {len(matches)} matches, {total_fp} FP, {total_fn} FN", file=sys.stderr)
+
+    if verbose:
+        for c in by_cop_list:
+            if c["diverging"]:
+                print(f"    {c['cop']}: FP={c['fp']} FN={c['fn']}", file=sys.stderr)
+
+    return {"style_label": style_label, "by_cop": by_cop_list}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run nitrocop and RuboCop on the synthetic project and compare results."
@@ -324,6 +490,18 @@ def main():
                     print(f"      FN: {ex}", file=sys.stderr)
             print(file=sys.stderr)
 
+    # ── Run variant batches ──
+    variant_styles = find_variant_cops(target_set)
+    if variant_styles:
+        print(f"\nVariant runs: {len(variant_styles)} cops with EnforcedStyle alternatives",
+              file=sys.stderr)
+        variants = run_variant_batches(
+            variant_styles, target_set,
+            nitrocop_binary, rubocop_yml, project_dir, gemfile, args.verbose,
+        )
+    else:
+        variants = {"batches": []}
+
     json_output = {
         "source": "synthetic",
         "run_date": datetime.now(timezone.utc).isoformat(),
@@ -337,6 +515,7 @@ def main():
             "overall_match_rate": trunc4(overall_rate),
         },
         "by_cop": by_cop,
+        "variants": variants,
     }
     Path(output_path).write_text(json.dumps(json_output, indent=2) + "\n")
     print(f"Wrote {output_path}", file=sys.stderr)

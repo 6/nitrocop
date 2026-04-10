@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Wait for checks.yml on main to be green before proceeding.
+"""Wait for the build-and-test job on main to be green before proceeding.
+
+Only checks the ``build-and-test`` job, not the full workflow conclusion,
+so agents aren't blocked by slow jobs like ``build-macos`` or ``cop-check``.
 
 Handles [skip ci] commits gracefully: if HEAD has no checks run and the
 most recent checks run (for an older SHA) isn't pending, proceeds with
@@ -17,6 +20,8 @@ import subprocess
 import sys
 import time
 
+REQUIRED_JOB = "build-and-test"
+
 
 def get_head_sha() -> str:
     result = subprocess.run(
@@ -31,7 +36,7 @@ def get_latest_checks_run(repo: str) -> dict | None:
             "gh", "run", "list",
             "--workflow=checks.yml", "--branch=main",
             "--repo", repo, "--limit", "1",
-            "--json", "headSha,conclusion,status",
+            "--json", "headSha,conclusion,status,databaseId",
         ],
         capture_output=True, text=True,
     )
@@ -39,6 +44,25 @@ def get_latest_checks_run(repo: str) -> dict | None:
         return None
     runs = json.loads(result.stdout)
     return runs[0] if runs else None
+
+
+def get_job_conclusion(repo: str, run_id: int, job_name: str) -> str | None:
+    """Return the conclusion of a specific job within a workflow run."""
+    result = subprocess.run(
+        [
+            "gh", "run", "view", str(run_id),
+            "--repo", repo,
+            "--json", "jobs",
+        ],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return None
+    data = json.loads(result.stdout)
+    for job in data.get("jobs", []):
+        if job.get("name") == job_name:
+            return job.get("conclusion") or job.get("status") or "unknown"
+    return None
 
 
 def main():
@@ -59,29 +83,42 @@ def main():
             return
 
         run_sha = run.get("headSha", "")
-        conclusion = run.get("conclusion") or run.get("status") or "unknown"
-
-        if conclusion == "success":
-            print(f"::notice::Main Checks is green ({run_sha[:7]}) — proceeding")
-            return
+        run_id = run.get("databaseId")
+        run_conclusion = run.get("conclusion") or run.get("status") or "unknown"
 
         # HEAD is a [skip ci] commit — checks.yml didn't run for it.
         # Don't wait for an older run that's already terminal.
-        if run_sha != head_sha and conclusion not in ("in_progress", "queued"):
+        if run_sha != head_sha and run_conclusion not in ("in_progress", "queued"):
             print(
-                f"::warning::Latest checks ({run_sha[:7]}) were {conclusion} "
+                f"::warning::Latest checks ({run_sha[:7]}) were {run_conclusion} "
                 f"but HEAD ({head_sha[:7]}) has no checks — proceeding"
             )
             return
 
+        # Check the specific job rather than the whole workflow
+        job_status = get_job_conclusion(args.repo, run_id, REQUIRED_JOB) if run_id else None
+
+        if job_status == "success":
+            print(
+                f"::notice::{REQUIRED_JOB} is green ({run_sha[:7]}) — proceeding"
+            )
+            return
+
+        if job_status and job_status not in ("in_progress", "queued"):
+            print(
+                f"::error::{REQUIRED_JOB} concluded with {job_status} ({run_sha[:7]})"
+            )
+            sys.exit(1)
+
+        status_label = job_status or run_conclusion
         print(
-            f"Main Checks status: {conclusion} ({run_sha[:7]}) "
+            f"{REQUIRED_JOB} status: {status_label} ({run_sha[:7]}) "
             f"— waiting {args.interval}s ({elapsed}s/{args.max_wait}s)"
         )
         time.sleep(args.interval)
         elapsed += args.interval
 
-    print(f"::error::Main Checks did not go green within {args.max_wait}s (last: {conclusion})")
+    print(f"::error::{REQUIRED_JOB} did not go green within {args.max_wait}s")
     sys.exit(1)
 
 

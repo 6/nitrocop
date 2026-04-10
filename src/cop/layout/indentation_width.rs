@@ -1,7 +1,7 @@
 use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{
     BEGIN_NODE, BLOCK_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, FOR_NODE,
-    IF_NODE, LAMBDA_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE, SUPER_NODE,
+    IF_NODE, IN_NODE, LAMBDA_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE, SUPER_NODE,
     UNLESS_NODE, UNTIL_NODE, WHEN_NODE, WHILE_NODE,
 };
 use crate::cop::shared::util::{assignment_context_base_col, expected_indent_for_body};
@@ -77,6 +77,39 @@ use crate::parse::source::SourceFile;
 ///   with args). Changed the first-member check from `is_access_modifier_call`
 ///   (bare only) to `is_any_access_modifier_call` (all forms).
 ///   Resolved 25+ FN, 0 regressions.
+///
+/// 2026-04-05 (block rescue/ensure):
+/// - Fixed block body indentation when blocks have rescue/ensure/else clauses
+///   (e.g., `items.each do ... rescue ... end`). In Prism, such blocks have a
+///   BeginNode body instead of StatementsNode. `check_body_indentation` only
+///   handled StatementsNode and returned empty for BeginNode, silently skipping
+///   all indentation checks for these blocks. Applied same pattern as the
+///   existing def handler: check `begin_node.statements()` for the main body
+///   and `check_begin_clauses` for rescue/ensure/else bodies. Applied to
+///   CallNode block, LambdaNode, and SuperNode block handlers.
+///   Resolved 62+ FN, 0 regressions.
+///
+/// 2026-04-06:
+/// - Added InNode (case/in pattern matching) body indentation check. The cop
+///   handled WhenNode (case/when) and CaseMatchNode else clause, but never
+///   checked InNode body indentation. Added IN_NODE to interested_node_types
+///   and an InNode handler analogous to WhenNode. Resolved ~54 FN.
+/// - Fixed UTF-8 BOM (U+FEFF) column miscalculation. Prism counts the 3-byte
+///   BOM as 1 column, making keywords on line 1 appear at col 1 instead of 0.
+///   Added `bom_adjusted_col` correction to all three check methods. Resolved
+///   ~35 FP (webmachine, dryrun repos).
+/// - Fixed `x = def foo` / `(def bar` body indentation. For defs preceded by
+///   non-modifier tokens (assignment `=`, paren `(`), now uses the def keyword
+///   column as base instead of `line_start_column`. Modifier-decorated defs
+///   (`private def foo`) still use line_start_column. Resolved ~3 FP
+///   (elasticgraph `__skip__ = def`).
+///
+/// 2026-04-06 (continued):
+/// - Fixed begin/rescue/end inline FP. When `end` is not the first non-whitespace
+///   character on its line (e.g., `begin ... rescue NameError; end` where the `end`
+///   is on the same line as `rescue NameError;`), RuboCop's `on_kwbegin` skips the
+///   indentation check entirely. Added `end_begins_its_line` helper and the check
+///   to the BeginNode handler. Resolved 8+ FP (neo4jrb, foodsoft, activescaffold).
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -101,6 +134,19 @@ fn is_any_access_modifier_call(node: &ruby_prism::Node<'_>) -> bool {
     }
 }
 
+/// Adjust a column for UTF-8 BOM on line 1. Prism counts the 3-byte BOM as 1 column,
+/// but RuboCop strips it, so `module` right after BOM should be at column 0, not 1.
+/// This matches the BOM correction used in EndAlignment, IndentationConsistency, etc.
+fn bom_adjusted_col(source: &SourceFile, line: usize, col: usize) -> usize {
+    if line == 1 {
+        let bytes = source.as_bytes();
+        if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+            return col.saturating_sub(1);
+        }
+    }
+    col
+}
+
 /// Get the column of the first non-whitespace character on the line containing `offset`.
 /// This gives the "effective indentation level" of the line, used as the base for
 /// `start_of_line` alignment in def bodies (matching RuboCop's behavior of using the
@@ -118,6 +164,71 @@ fn line_start_column(source: &SourceFile, offset: usize) -> usize {
         first_non_ws += 1;
     }
     first_non_ws - line_start
+}
+
+/// Check if the `def` keyword at `kw_offset` is preceded by a modifier identifier
+/// (e.g., `private def foo`, `helper_method \` on the previous line). Returns
+/// `Some(base_col)` with the correct base column for indentation when a modifier is
+/// found, or `None` for non-modifier contexts like `x = def foo` or `(def bar`.
+///
+/// Handles two cases:
+/// 1. Same-line modifier: `private def foo` — returns line_start_column of the def line.
+/// 2. Backslash continuation: `helper_method \` / `  def foo` — returns
+///    line_start_column of the previous (modifier) line, matching RuboCop's
+///    `on_send` + `leftmost_modifier_of` behavior.
+fn def_modifier_base_col(source: &SourceFile, kw_offset: usize) -> Option<usize> {
+    if kw_offset == 0 {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    // Walk back to find start of line
+    let mut line_start = kw_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    // If def is at the start of the line (after indentation), there's no same-line modifier
+    let first_non_ws = {
+        let mut p = line_start;
+        while p < bytes.len() && (bytes[p] == b' ' || bytes[p] == b'\t') {
+            p += 1;
+        }
+        p
+    };
+    if first_non_ws == kw_offset {
+        // def is the first token on its line — check if the previous line ends with
+        // backslash (line continuation), indicating a modifier on the previous line.
+        if line_start > 0 {
+            // line_start points to the first byte of this line; line_start-1 is '\n'.
+            let prev_line_end = line_start - 1;
+            if prev_line_end > 0 {
+                // Find the last non-whitespace char before the newline
+                let mut p = prev_line_end;
+                while p > 0 && (bytes[p - 1] == b' ' || bytes[p - 1] == b'\t') {
+                    p -= 1;
+                }
+                if p > 0 && bytes[p - 1] == b'\\' {
+                    // Previous line ends with backslash — use its start column
+                    return Some(line_start_column(source, p - 1));
+                }
+            }
+        }
+        return None;
+    }
+    // Skip whitespace before `def`
+    let mut pos = kw_offset;
+    while pos > line_start && (bytes[pos - 1] == b' ' || bytes[pos - 1] == b'\t') {
+        pos -= 1;
+    }
+    if pos == line_start {
+        return None;
+    }
+    // Check if the character immediately before is alphanumeric/underscore
+    let prev_byte = bytes[pos - 1];
+    if prev_byte.is_ascii_alphanumeric() || prev_byte == b'_' {
+        Some(line_start_column(source, kw_offset))
+    } else {
+        None
+    }
 }
 
 fn body_members(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
@@ -165,6 +276,30 @@ fn line_uses_tab_indentation(source: &SourceFile, body_offset: usize) -> bool {
         pos += 1;
     }
     false
+}
+
+/// Check if the `end` keyword is the first non-whitespace character on its line.
+/// RuboCop's `on_kwbegin` skips indentation check when the `end` keyword is
+/// inline with other code (e.g., `begin ... rescue NameError; end`).
+/// This matches RuboCop's `begins_its_line?(node.loc.end)` check.
+fn end_begins_its_line(source: &SourceFile, end_offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    // Find the start of the line containing the end keyword
+    let mut line_start = end_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    // Find the first non-whitespace character on this line
+    let mut first_non_ws = line_start;
+    while first_non_ws < bytes.len()
+        && (bytes[first_non_ws] == b' ' || bytes[first_non_ws] == b'\t')
+    {
+        first_non_ws += 1;
+    }
+    // Find the end keyword's column
+    let end_col = end_offset - line_start;
+    // Check if the first non-whitespace is at the same column as end
+    first_non_ws - line_start == end_col
 }
 
 /// Check if the body node is not the first non-whitespace character on its line.
@@ -232,6 +367,10 @@ impl IndentationWidth {
         let (base_line, _) = source.offset_to_line_col(base_offset);
         let loc = member.location();
         let (member_line, member_col) = source.offset_to_line_col(loc.start_offset());
+
+        // BOM correction: adjust columns on line 1 of BOM files
+        let base_col = bom_adjusted_col(source, base_line, base_col);
+        let member_col = bom_adjusted_col(source, member_line, member_col);
 
         if member_line == base_line {
             return None;
@@ -457,6 +596,9 @@ impl IndentationWidth {
         }
 
         let (kw_line, _) = source.offset_to_line_col(keyword_offset);
+
+        // BOM correction
+        let base_col = bom_adjusted_col(source, kw_line, base_col);
         let expected = expected_indent_for_body(base_col, options.width);
 
         // Only check the first child's indentation. Sibling consistency is
@@ -464,6 +606,7 @@ impl IndentationWidth {
         let first = &children[0];
         let loc = first.location();
         let (child_line, child_col) = source.offset_to_line_col(loc.start_offset());
+        let child_col = bom_adjusted_col(source, child_line, child_col);
 
         // Skip if body is on same line as keyword (single-line construct)
         if child_line == kw_line {
@@ -517,6 +660,10 @@ impl IndentationWidth {
         }
 
         let (kw_line, _) = source.offset_to_line_col(keyword_offset);
+
+        // BOM correction
+        let base_col = bom_adjusted_col(source, kw_line, base_col);
+        let alt_base_col = alt_base_col.map(|c| bom_adjusted_col(source, kw_line, c));
         let expected = expected_indent_for_body(base_col, options.width);
 
         // Only check the first child's indentation. Sibling consistency is
@@ -524,6 +671,7 @@ impl IndentationWidth {
         let first = &children[0];
         let loc = first.location();
         let (child_line, child_col) = source.offset_to_line_col(loc.start_offset());
+        let child_col = bom_adjusted_col(source, child_line, child_col);
 
         // Skip if body is on same line as keyword (single-line construct)
         // or before the keyword (modifier if/while/until)
@@ -659,6 +807,7 @@ impl Cop for IndentationWidth {
             DEF_NODE,
             FOR_NODE,
             IF_NODE,
+            IN_NODE,
             LAMBDA_NODE,
             MODULE_NODE,
             SINGLETON_CLASS_NODE,
@@ -715,16 +864,34 @@ impl Cop for IndentationWidth {
         //   x = begin
         //     body       # indented from `end`, not from `begin`
         //   end
+        //
+        // RuboCop's `on_kwbegin` also checks `begins_its_line?(node.loc.end)` —
+        // if the `end` keyword is NOT the first non-whitespace on its line
+        // (e.g., `begin ... rescue NameError; end` where end is inline with code),
+        // indentation is NOT checked. This avoids false positives for inline
+        // begin/rescue/end constructs.
         if let Some(begin_node) = node.as_begin_node() {
             if let Some(begin_kw_loc) = begin_node.begin_keyword_loc() {
                 // Explicit `begin...end` block
                 let kw_offset = begin_kw_loc.start_offset();
                 let (_, kw_col) = source.offset_to_line_col(kw_offset);
-                let base_col = if let Some(end_loc) = begin_node.end_keyword_loc() {
-                    source.offset_to_line_col(end_loc.start_offset()).1
+                let (base_col, end_offset) = if let Some(end_loc) = begin_node.end_keyword_loc() {
+                    (
+                        source.offset_to_line_col(end_loc.start_offset()).1,
+                        Some(end_loc.start_offset()),
+                    )
                 } else {
-                    kw_col
+                    (kw_col, None)
                 };
+                // Skip indentation check if `end` is not on its own line
+                // (RuboCop's `begins_its_line?` check)
+                if let Some(eo) = end_offset {
+                    if !end_begins_its_line(source, eo) {
+                        // Still check rescue/ensure/else clauses (these bypass the walker)
+                        self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        return;
+                    }
+                }
                 let alt_base = if base_col != kw_col {
                     Some(kw_col)
                 } else {
@@ -803,11 +970,19 @@ impl Cop for IndentationWidth {
                 // EnforcedStyleAlignWith: keyword — indent relative to `def` keyword column
                 source.offset_to_line_col(kw_offset).1
             } else {
-                // EnforcedStyleAlignWith: start_of_line (default) — use the indentation
-                // level of the def keyword's line. RuboCop always uses node.loc.keyword
-                // which equals the line start for regular defs, and for `private def foo`
-                // the def is handled by on_send (ignored by on_def).
-                line_start_column(source, kw_offset)
+                // EnforcedStyleAlignWith: start_of_line (default).
+                // RuboCop's on_def always uses node.loc.keyword (def column).
+                // For `private def foo`, RuboCop handles it via on_send and
+                // ignores the def in on_def. We don't have that mechanism, so
+                // we use line_start_column for modifier-decorated defs (which
+                // matches on_send using leftmost_modifier_of). For non-modifier
+                // contexts like `x = def foo` or `(def bar`, use the def
+                // keyword column to match RuboCop's on_def behavior.
+                if let Some(modifier_col) = def_modifier_base_col(source, kw_offset) {
+                    modifier_col
+                } else {
+                    source.offset_to_line_col(kw_offset).1
+                }
             };
 
             if let Some(body) = def_node.body() {
@@ -973,13 +1148,30 @@ impl Cop for IndentationWidth {
                     } else {
                         closing_col
                     };
-                    diagnostics.extend(self.check_body_indentation(
-                        source,
-                        opening_offset,
-                        base_col,
-                        block.body(),
-                        options,
-                    ));
+                    if let Some(body) = block.body() {
+                        if let Some(begin_node) = body.as_begin_node() {
+                            // Block with rescue/ensure — body is implicit BeginNode.
+                            // Check main body statements.
+                            diagnostics.extend(self.check_statements_indentation(
+                                source,
+                                opening_offset,
+                                base_col,
+                                None,
+                                begin_node.statements(),
+                                options,
+                            ));
+                            // Check rescue/ensure/else clauses.
+                            self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        } else {
+                            diagnostics.extend(self.check_body_indentation(
+                                source,
+                                opening_offset,
+                                base_col,
+                                Some(body),
+                                options,
+                            ));
+                        }
+                    }
                     if consistency_style == "indented_internal_methods"
                         && body_contains_access_modifier(block.body())
                     {
@@ -1018,13 +1210,27 @@ impl Cop for IndentationWidth {
                 return;
             }
 
-            diagnostics.extend(self.check_body_indentation(
-                source,
-                opening_offset,
-                closing_col,
-                lambda_node.body(),
-                options,
-            ));
+            if let Some(body) = lambda_node.body() {
+                if let Some(begin_node) = body.as_begin_node() {
+                    diagnostics.extend(self.check_statements_indentation(
+                        source,
+                        opening_offset,
+                        closing_col,
+                        None,
+                        begin_node.statements(),
+                        options,
+                    ));
+                    self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                } else {
+                    diagnostics.extend(self.check_body_indentation(
+                        source,
+                        opening_offset,
+                        closing_col,
+                        Some(body),
+                        options,
+                    ));
+                }
+            }
             return;
         }
 
@@ -1050,13 +1256,27 @@ impl Cop for IndentationWidth {
                         return;
                     }
 
-                    diagnostics.extend(self.check_body_indentation(
-                        source,
-                        opening_offset,
-                        closing_col,
-                        block.body(),
-                        options,
-                    ));
+                    if let Some(body) = block.body() {
+                        if let Some(begin_node) = body.as_begin_node() {
+                            diagnostics.extend(self.check_statements_indentation(
+                                source,
+                                opening_offset,
+                                closing_col,
+                                None,
+                                begin_node.statements(),
+                                options,
+                            ));
+                            self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                        } else {
+                            diagnostics.extend(self.check_body_indentation(
+                                source,
+                                opening_offset,
+                                closing_col,
+                                Some(body),
+                                options,
+                            ));
+                        }
+                    }
                 }
             }
             return;
@@ -1089,6 +1309,38 @@ impl Cop for IndentationWidth {
                 kw_col,
                 None,
                 when_node.statements(),
+                options,
+            ));
+            return;
+        }
+
+        // Check body indentation inside `in` clauses (case/in pattern matching).
+        // Analogous to WhenNode handling for case/when.
+        if let Some(in_node) = node.as_in_node() {
+            let kw_offset = in_node.in_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+
+            // Skip if body is on the same line as `then` keyword in a
+            // multi-line in clause.
+            if let Some(then_loc) = in_node.then_loc() {
+                let (then_line, _) = source.offset_to_line_col(then_loc.start_offset());
+                if let Some(stmts) = in_node.statements() {
+                    if let Some(first) = stmts.body().iter().next() {
+                        let (first_line, _) =
+                            source.offset_to_line_col(first.location().start_offset());
+                        if first_line == then_line {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            diagnostics.extend(self.check_statements_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                None,
+                in_node.statements(),
                 options,
             ));
             return;
@@ -1471,5 +1723,59 @@ mod tests {
             diags
         );
         assert!(diags[0].message.contains("Use 2 (not 1)"));
+    }
+
+    #[test]
+    fn assignment_def_no_false_positive() {
+        use crate::testutil::run_cop_full;
+        // `__skip__ = def foo` — body indented from def keyword, not line start
+        let source = b"      __skip__ = def new_field(**kwargs)\n                   body\n                 end\n";
+        let diags = run_cop_full(&IndentationWidth, source);
+        assert!(
+            diags.is_empty(),
+            "assignment def body indented from def kw should not flag: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn private_def_still_checked_from_line_start() {
+        use crate::testutil::run_cop_full;
+        // `private def foo` — body should be indented from line start (col 0)
+        let source = b"private def foo\n  bar\nend\n";
+        let diags = run_cop_full(&IndentationWidth, source);
+        assert!(
+            diags.is_empty(),
+            "private def with body at col 2 should not flag: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn bom_does_not_cause_false_positive() {
+        use crate::testutil::run_cop_full;
+        // UTF-8 BOM + module Foo / body at col 2 — correctly indented, should not flag
+        let source = b"\xEF\xBB\xBFmodule Foo\n  VERSION = '1.0'\nend\n";
+        let diags = run_cop_full(&IndentationWidth, source);
+        assert!(
+            diags.is_empty(),
+            "BOM should not cause false positive: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn bom_still_detects_wrong_indentation() {
+        use crate::testutil::run_cop_full;
+        // UTF-8 BOM + module Foo with wrong indentation (4 spaces)
+        let source = b"\xEF\xBB\xBFmodule Foo\n    VERSION = '1.0'\nend\n";
+        let diags = run_cop_full(&IndentationWidth, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "BOM file with wrong indentation should still flag: {:?}",
+            diags
+        );
+        assert!(diags[0].message.contains("Use 2 (not 4)"));
     }
 }

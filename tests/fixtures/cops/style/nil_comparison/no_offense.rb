@@ -16,3 +16,7 @@ x == ""
 # Method calls that are not comparisons
 x.nil_class
 x.nill?
+
+# comparison style: RuboCop ignores safe-navigation nil checks
+# nitrocop-config: EnforcedStyle: comparison
+headers[:twr] = region unless region&.nil?

@@ -5,23 +5,16 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// ## Corpus investigation (2026-03-11, updated 2026-03-18)
+/// ## Corpus investigation (2026-03-11, updated 2026-04-07)
 ///
-/// Corpus oracle: FP=2, FN=0, Match=99.6% (538 matches).
+/// Default style (module_function): FP=0, FN=0, Match=100%.
 ///
-/// FP=2: Both false positives are `spec/.../fixtures/singleton_methods.rb` files in
-/// jruby and natalie containing `extend self` inside a small `SelfExtending` module
-/// whose body is only `extend self` (one statement).
+/// Forbidden style variant: FP=490 due to `module_function :foo` (with arguments)
+/// being incorrectly flagged. RuboCop's `module_function_node?` matcher is
+/// `(send nil? :module_function)` which requires NO arguments.
 ///
-/// Root cause: RuboCop's `on_module` has `return unless node.body&.begin_type?`.
-/// In Parser AST, a module body with a single statement is NOT a `begin` node —
-/// only 2+ statements produce `begin_type?`. So RuboCop skips single-statement
-/// module bodies entirely. nitrocop was processing all `StatementsNode` bodies
-/// regardless of child count.
-///
-/// Fix: Skip module bodies with fewer than 2 statements, matching RuboCop's
-/// `begin_type?` guard. This also correctly handles the nested `SelfExtending`
-/// module in the corpus FP pattern.
+/// Fix: In `forbidden` style, only flag `module_function` when it has no arguments
+/// (`call.arguments().is_none()`), matching RuboCop's node matcher.
 pub struct ModuleFunction;
 
 impl Cop for ModuleFunction {
@@ -120,7 +113,12 @@ impl<'pr> Visit<'pr> for ModuleFunctionVisitor<'_> {
                                 ));
                             }
                         } else if self.style == "forbidden" {
-                            if method_bytes == b"module_function" && call.receiver().is_none() {
+                            // RuboCop's module_function_node? matches (send nil? :module_function)
+                            // which requires NO arguments. module_function :foo is not flagged.
+                            if method_bytes == b"module_function"
+                                && call.receiver().is_none()
+                                && call.arguments().is_none()
+                            {
                                 let loc = call.location();
                                 let (line, column) =
                                     self.source.offset_to_line_col(loc.start_offset());
@@ -172,4 +170,38 @@ fn is_private_directive(node: &ruby_prism::Node<'_>) -> bool {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ModuleFunction, "cops/style/module_function");
+
+    fn forbidden_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".into(),
+            serde_yml::Value::String("forbidden".into()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn forbidden_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ModuleFunction,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/module_function/forbidden_offense.rb"
+            ),
+            forbidden_config(),
+        );
+    }
+
+    #[test]
+    fn forbidden_style_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ModuleFunction,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/module_function/forbidden_no_offense.rb"
+            ),
+            forbidden_config(),
+        );
+    }
 }

@@ -390,13 +390,19 @@ pub fn is_screaming_snake_case(name: &[u8]) -> bool {
     true
 }
 
-/// Check if a name is CamelCase (starts uppercase, no underscores).
-/// Non-ASCII characters (e.g., UTF-8 multibyte) are allowed, matching RuboCop behavior.
+/// Check if a name is CamelCase (starts with letter, no underscores in body).
+/// RuboCop's camelCase regex allows lowercase-starting names (e.g., `userName`),
+/// so we accept both lowercase and uppercase first characters.
 pub fn is_camel_case(name: &[u8]) -> bool {
     if name.is_empty() {
         return false;
     }
-    if !name[0].is_ascii_uppercase() && name[0].is_ascii() {
+    // RuboCop's camelCase regex: /^@{0,2}(?:_|_?[[:lower:]][\d[:lower:][:upper:]]*)[!?=]?$/
+    // After optional @/@@ prefix, it allows:
+    //   - Just underscore: _
+    //   - Optional underscore + lowercase start + alphanumerics: _?lower+alnum*
+    // So first char can be lowercase (userName) or the underscore itself
+    if name[0].is_ascii() && !name[0].is_ascii_alphabetic() && name[0] != b'_' {
         return false;
     }
     for &b in &name[1..] {
@@ -809,10 +815,11 @@ pub fn check_missing_empty_lines_around_body_with_corrections(
         if before_end > keyword_line {
             if let Some(line) = line_at(source, before_end) {
                 if !is_blank_line(line) {
+                    // RuboCop reports "missing at body end" on the end/} line itself
                     let mut diag = Diagnostic {
                         path: source.path_str().to_string(),
                         location: Location {
-                            line: before_end,
+                            line: end_line,
                             column: 0,
                         },
                         severity: Severity::Convention,

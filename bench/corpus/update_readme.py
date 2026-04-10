@@ -101,9 +101,23 @@ def format_count_summary(n: int) -> str:
     return str(n)
 
 
+def format_count_precise(n: int) -> str:
+    """Format count with two decimals: 28390000 -> '28.39M', 72659 -> '72.66K'."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.2f}M"
+    elif n >= 1_000:
+        return f"{n / 1_000:.2f}K"
+    return str(n)
+
+
 def format_match_rate(rate: float) -> str:
     """Format match rate floored to 0.1%: 0.9999 -> '99.9%', never rounds up to 100%."""
     return f"{math.floor(rate * 1000) / 10:.1f}%"
+
+
+def format_match_rate_precise(rate: float) -> str:
+    """Format match rate floored to 0.01%: 0.99829 -> '99.82%', never rounds up to 100%."""
+    return f"{math.floor(rate * 10000) / 100:.2f}%"
 
 
 def format_exact_match_pct(exact: int, total: int) -> str:
@@ -214,11 +228,10 @@ def build_department_stats(data: dict, synthetic: dict[str, dict] | None = None)
 
 
 
-def build_cops_section(data: dict, synthetic: dict[str, dict] | None = None) -> str:
+def build_cops_section(data: dict, by_department: dict[str, dict]) -> str:
     """Build the generated README Cops section."""
     summary = data.get("summary", {})
     baseline = data.get("baseline", {})
-    by_department = build_department_stats(data, synthetic)
 
     total_repos = summary.get("total_repos", 0)
     total_files = summary.get("total_files_inspected", 0)
@@ -327,11 +340,12 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
     files_str = format_files(files) if files > 0 else None
 
     # 0. Generated Cops section between explicit markers
+    by_department = build_department_stats(data, synthetic)
     readme_text = replace_marked_section(
         readme_text,
         COPS_SECTION_START,
         COPS_SECTION_END,
-        build_cops_section(data, synthetic),
+        build_cops_section(data, by_department),
     )
 
     # 1. Features bullet: cops count
@@ -344,20 +358,31 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
         )
 
     # 2. Corpus bullet: tested on N repos, X of Y cops match exactly
-    perfect_cops = summary.get("perfect_cops", 0)
+    # Derive from build_department_stats so synthetic boosts are included
+    perfect_cops = sum(d["perfect_cops"] for d in by_department.values())
     variant_perfect = sum(
         d.get("variant_perfect_cops") or 0
-        for d in data.get("by_department", [])
+        for d in by_department.values()
     )
-    new_corpus_bullet = (
-        f"Tested on [**{total_repos:,} open-source repos**](docs/corpus.md): "
-        f"**{perfect_cops:,} of {total_cops:,} cops match RuboCop exactly** (default config)"
+    total_compared = summary.get("total_offenses_compared", 0)
+    total_matches = summary.get("matches", 0)
+    new_corpus_lines = (
+        f"- Tested on [**{total_repos:,} open-source repos**](docs/corpus.md):\n"
+        f"  - **{perfect_cops:,} of {total_cops:,}** cops match RuboCop exactly with default config"
     )
     if variant_perfect > 0 and variant_perfect < perfect_cops:
-        new_corpus_bullet += f", **{variant_perfect:,}** across all style variants"
+        new_corpus_lines += (
+            f"\n  - **{variant_perfect:,} of {total_cops:,}** match across all `EnforcedStyle` variants"
+        )
+    if total_compared > 0 and total_matches > 0:
+        match_pct = format_match_rate_precise(total_matches / total_compared)
+        new_corpus_lines += (
+            f"\n  - Across **{format_count_precise(total_compared)}** offenses compared, "
+            f"**{format_count_precise(total_matches)}** ({match_pct}) match exactly with default config"
+        )
     readme_text = re.sub(
-        r"- .+open-source repos.+\n",
-        f"- {new_corpus_bullet}\n",
+        r"- Tested .+?open-source repos.+?\n(?:  - .+\n)*",
+        f"{new_corpus_lines}\n",
         readme_text,
         count=1,
     )

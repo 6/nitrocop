@@ -11,6 +11,10 @@ impl Cop for TopLevelReturnWithArgument {
         "Lint/TopLevelReturnWithArgument"
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/*.jb"]
+    }
+
     fn default_severity(&self) -> Severity {
         Severity::Warning
     }

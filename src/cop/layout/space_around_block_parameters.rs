@@ -1,4 +1,4 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, LAMBDA_NODE};
+use crate::cop::shared::node_type::{BLOCK_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE};
 use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -53,6 +53,58 @@ use crate::parse::source::SourceFile;
 /// with local variable positions when parameters() is None and locals() is non-empty.
 /// This uses `locals_only_positions()` to populate `first_local_start`/`last_local_end`
 /// in BlockInfo, which are applied as overrides in check_node before the style checks.
+///
+/// ## Variant style fix: EnforcedStyleInsidePipes=space (2026-04-09)
+///
+/// Fixed 4 FP and 105 FN in the `space` variant:
+///
+/// **FN (105)**: `ForwardingSuperNode` (bare `super` without explicit args, e.g.
+/// `super do |x| ... end`) was invisible to the cop. Prism's Visit trait for
+/// `ForwardingSuperNode` calls `visitor.visit_block_node(&block)` directly instead
+/// of `visitor.visit(&block.as_node())`, which bypasses `visit_branch_node_enter`
+/// and thus the cop dispatch table. Fix: register `FORWARDING_SUPER_NODE` in
+/// `interested_node_types` and extract its block child manually in `check_node`.
+///
+/// **FP (4)**: In `space` mode, single-param blocks like `|double|` had both
+/// "No space before first" and "No space after last" emitted. RuboCop deduplicates
+/// these because both offenses target the same source range (`args.first == args.last`).
+/// Fix: track `top_level_arg_count` in BlockInfo; when it's 1 and "before first" already
+/// fired, suppress "after last" to match RuboCop's dedup behavior.
+///
+/// ## Multiline closing delimiter indentation fix (2026-04-09)
+///
+/// The remaining `space`-style FN came from multiline block parameters whose
+/// closing delimiter sits on its own indented line:
+///
+/// ```ruby
+/// shared_examples do |
+///   a:,
+///   b:
+///   |
+/// end
+/// ```
+///
+/// RuboCop accepts a multiline closing delimiter only when it starts the line
+/// immediately after the line break. If that delimiter line is indented,
+/// RuboCop reports "Extra space after last block parameter detected." on the
+/// indentation itself. nitrocop previously skipped every newline-containing
+/// gap before the closing delimiter, which also skipped this indentation-only
+/// offense. Fix: keep the multiline fast-path for aligned closing delimiters,
+/// but in `space` style emit the extra-space offense when the delimiter line
+/// contains only spaces or tabs before the closing `|`/`)`.
+///
+/// ## Variant FP fix: single-colon directive syntax (2026-04-10)
+///
+/// Fixed 4 FP in `space` variant. Root cause was in `src/parse/directives.rs`,
+/// not in the cop itself. The corpus file `cyberark/conjur` uses
+/// `# rubocop:disable Layout:LineLength` (single colon, not slash). RuboCop's
+/// `COP_NAME_PATTERN` regex `([A-Za-z]\w+/)*(?:[A-Za-z]\w+)` does not include
+/// `:` in `\w`, so it captures only `Layout` — treating the directive as a
+/// department-level disable that suppresses ALL `Layout/*` cops. nitrocop's
+/// `normalize_directive_cop_name` only handled `::` (double colon), not `:`
+/// (single colon). Fix: change `split_once("::")` to `split_once(':')` in
+/// `normalize_directive_cop_name` so both forms produce a department-level
+/// disable.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
@@ -79,6 +131,10 @@ struct BlockInfo {
     first_local_start: Option<usize>,
     /// End offset of the last block-local variable name (for "space after last" check).
     last_local_end: Option<usize>,
+    /// Number of top-level arguments (params + locals). When 1, RuboCop deduplicates
+    /// the "missing space before first" and "missing space after last" offenses
+    /// because both target the same source range (args.first == args.last).
+    top_level_arg_count: usize,
 }
 
 impl Cop for SpaceAroundBlockParameters {
@@ -87,7 +143,11 @@ impl Cop for SpaceAroundBlockParameters {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, LAMBDA_NODE]
+        // FORWARDING_SUPER_NODE is included because Prism's Visit trait
+        // dispatches its block child via visit_block_node() rather than
+        // visit(), which bypasses visit_branch_node_enter and thus the
+        // cop dispatch table. We handle it here to extract the block manually.
+        &[BLOCK_NODE, LAMBDA_NODE, FORWARDING_SUPER_NODE]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -109,6 +169,10 @@ impl Cop for SpaceAroundBlockParameters {
             extract_block_info(&block)
         } else if let Some(lambda) = node.as_lambda_node() {
             extract_lambda_info(&lambda)
+        } else if let Some(fwd_super) = node.as_forwarding_super_node() {
+            // ForwardingSuperNode's block child is not visited through the
+            // normal dispatch path (Prism bug), so we extract it manually.
+            fwd_super.block().and_then(|b| extract_block_info(&b))
         } else {
             return;
         };
@@ -205,6 +269,7 @@ impl Cop for SpaceAroundBlockParameters {
             }
             "space" => {
                 let opening_has_newline = contains_line_break(bytes, inner_start, first_non_ws);
+                let mut emitted_before_first = false;
                 if !opening_has_newline && first_non_ws == inner_start {
                     let (line, col) = source.offset_to_line_col(inner_start);
                     let mut diag = self.diagnostic(
@@ -224,6 +289,7 @@ impl Cop for SpaceAroundBlockParameters {
                         diag.corrected = true;
                     }
                     diagnostics.push(diag);
+                    emitted_before_first = true;
                 }
 
                 if !opening_has_newline && first_non_ws > inner_start + 1 {
@@ -249,7 +315,13 @@ impl Cop for SpaceAroundBlockParameters {
                 }
 
                 let closing_has_newline = contains_line_break(bytes, trailing_start, inner_end);
-                if !closing_has_newline && trailing_start == inner_end {
+                // RuboCop deduplicates offenses at the same source range.
+                // When there's a single arg, "before first" and "after last"
+                // both target args.first/args.last (the same node), so the
+                // second offense is suppressed. Skip "after last" when we
+                // already emitted "before first" for a single-arg block.
+                let dedup_after_last = emitted_before_first && info.top_level_arg_count == 1;
+                if !dedup_after_last && !closing_has_newline && trailing_start == inner_end {
                     let (line, col) = source.offset_to_line_col(inner_end);
                     let mut diag = self.diagnostic(
                         source,
@@ -270,8 +342,12 @@ impl Cop for SpaceAroundBlockParameters {
                     diagnostics.push(diag);
                 }
 
-                if !closing_has_newline && inner_end > trailing_start + 1 {
-                    let extra_start = trailing_start + 1;
+                let extra_after_last = if !closing_has_newline && inner_end > trailing_start + 1 {
+                    Some((trailing_start + 1, inner_end))
+                } else {
+                    multiline_closing_indent_range(bytes, trailing_start, inner_end)
+                };
+                if let Some((extra_start, extra_end)) = extra_after_last {
                     let (line, col) = source.offset_to_line_col(extra_start);
                     let mut diag = self.diagnostic(
                         source,
@@ -282,7 +358,7 @@ impl Cop for SpaceAroundBlockParameters {
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
                             start: extra_start,
-                            end: inner_end,
+                            end: extra_end,
                             replacement: String::new(),
                             cop_name: self.name(),
                             cop_index: 0,
@@ -411,6 +487,7 @@ fn extract_block_info(block: &ruby_prism::BlockNode<'_>) -> Option<BlockInfo> {
     }
 
     let param_locations = collect_param_locations(&block_params);
+    let top_level_arg_count = count_top_level_args(&block_params);
 
     // When there are no regular parameters but block-local variables exist
     // (e.g., |; foo| or |;glark|), record the first/last local variable
@@ -429,6 +506,7 @@ fn extract_block_info(block: &ruby_prism::BlockNode<'_>) -> Option<BlockInfo> {
         param_locations,
         first_local_start,
         last_local_end,
+        top_level_arg_count,
     })
 }
 
@@ -446,6 +524,7 @@ fn extract_lambda_info(lambda: &ruby_prism::LambdaNode<'_>) -> Option<BlockInfo>
     }
 
     let param_locations = collect_param_locations(&block_params);
+    let top_level_arg_count = count_top_level_args(&block_params);
     let (first_local_start, last_local_end) =
         locals_only_positions(&block_params, &param_locations);
 
@@ -459,6 +538,7 @@ fn extract_lambda_info(lambda: &ruby_prism::LambdaNode<'_>) -> Option<BlockInfo>
         param_locations,
         first_local_start,
         last_local_end,
+        top_level_arg_count,
     })
 }
 
@@ -544,6 +624,31 @@ fn collect_multi_target_locations(
     }
 }
 
+/// Count the number of top-level arguments (regular params + locals) in the block.
+/// This matches RuboCop's `arguments.children.length` for dedup purposes:
+/// when there's exactly one top-level arg, "before first missing" and "after last
+/// missing" offenses target the same source range and RuboCop deduplicates them.
+fn count_top_level_args(block_params: &ruby_prism::BlockParametersNode<'_>) -> usize {
+    let mut count = 0;
+    if let Some(params_node) = block_params.parameters() {
+        count += params_node.requireds().iter().count();
+        count += params_node.optionals().iter().count();
+        if params_node.rest().is_some() {
+            count += 1;
+        }
+        count += params_node.posts().iter().count();
+        count += params_node.keywords().iter().count();
+        if params_node.keyword_rest().is_some() {
+            count += 1;
+        }
+        if params_node.block().is_some() {
+            count += 1;
+        }
+    }
+    count += block_params.locals().iter().count();
+    count
+}
+
 /// When block_params has no regular parameters but has locals (e.g., `|; foo|`),
 /// return the (first_local_start, last_local_end) from the locals list.
 /// Returns (None, None) when there ARE regular parameters or no locals.
@@ -579,6 +684,29 @@ fn contains_line_break(bytes: &[u8], start: usize, end: usize) -> bool {
         .any(|&b| matches!(b, b'\n' | b'\r'))
 }
 
+fn multiline_closing_indent_range(
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+
+    let last_line_break = bytes[start..end]
+        .iter()
+        .rposition(|&b| matches!(b, b'\n' | b'\r'))?;
+    let indent_start = start + last_line_break + 1;
+    if indent_start >= end {
+        return None;
+    }
+
+    bytes[indent_start..end]
+        .iter()
+        .all(|&b| matches!(b, b' ' | b'\t'))
+        .then_some((indent_start, end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,4 +719,37 @@ mod tests {
         SpaceAroundBlockParameters,
         "cops/layout/space_around_block_parameters"
     );
+
+    fn space_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyleInsidePipes".into(),
+                serde_yml::Value::String("space".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn space_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceAroundBlockParameters,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_around_block_parameters/space_offense.rb"
+            ),
+            space_config(),
+        );
+    }
+
+    #[test]
+    fn space_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceAroundBlockParameters,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_around_block_parameters/space_no_offense.rb"
+            ),
+            space_config(),
+        );
+    }
 }

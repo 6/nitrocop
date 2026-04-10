@@ -97,22 +97,41 @@ use ruby_prism::Visit;
 ///   errors. This allows the reparse check to work correctly on files that have
 ///   pre-existing Prism parse errors unrelated to the line continuation.
 ///
+/// - **Next-line multiline call expressions**: RuboCop keeps `\` before a
+///   multiline RHS/argument expression when the expression starting on the next
+///   line is itself a call/operator whose first argument begins on a later line
+///   (Rails/Gon/Rubber corpus cases like `lhs = \` + `foo -` + `bar`). Our raw
+///   line heuristics missed these and produced 9 FPs. Fixed by recording the
+///   first `CallNode` that starts on each line and mirroring RuboCop's
+///   `argument_newline?` logic on that node.
+///
+/// - **First-node-only argument newline**: RuboCop's `find_node_for_line` checks
+///   only the first AST node that starts on the line after `\`. Our previous
+///   pre-scan marked a whole line if any nested `CallNode` there had multiline
+///   arguments, causing FNs for reductions like `expected_revenue_in_cents = \`
+///   and `expect( \` where a later nested call qualified but the selected first
+///   node did not. Fixed by recording just the first node per line and by
+///   treating Prism `BlockArgumentNode` (`&:sym`, `&block`) as a parser-style
+///   argument during recursive `argument_newline?` checks.
+///
+/// - **Parser-token parity for `tFID` and `(` arguments**: RuboCop's
+///   `method_with_argument?` uses parser token classes, so bang/predicate method
+///   names like `foo!` and `valid?` are `tFID`, not `tIDENTIFIER`, and a next
+///   line starting with `(` is only `tLPAREN_ARG` after plain methods, `super`,
+///   or `yield`, not after `return`, `break`, or `next`. Our broader byte-based
+///   heuristic caused FNs for corpus cases like `return \` + `(expr)` and for
+///   bang-method continuations like `foo! \` + `bar`. Fixed by classifying the
+///   trailing token more narrowly before accepting `(` or any unparenthesized
+///   argument exemption.
+///
 /// ## Remaining gaps
 ///
-/// - **CRLF line endings**: Files with `\r\n` line endings have ~80+ FNs because
-///   `trim_end` does not strip `\r`, so `\` followed by `\r\n` is not detected.
-///   Adding `\r` to `trim_end` correctly detects these, but introduces ~30 FPs
-///   because RuboCop itself has a CRLF bug: its `LINE_CONTINUATION_PATTERN`
-///   regex `/(\\\n)/` fails to match `\<CR><LF>` patterns, and its reparse
-///   position offsets become misaligned between normalized and raw source.
-///   Confirmed by running RuboCop on LF-converted files, where it finds the
-///   same offenses our cop does. A fix requires the oracle to normalize CRLF
-///   before comparison.
-///
-/// - **Multiline expression FPs**: ~9 remaining FPs where `\` precedes a
-///   multiline expression (e.g., method chains or block calls spanning multiple
-///   lines). RuboCop's `argument_newline?` AST walk detects these via recursive
-///   `method_call_with_arguments?` checks that we don't fully replicate.
+/// - **CRLF reparse compat**: `trim_end` strips `\r` so CRLF files are
+///   detected. The Parser gem normalizes `\r\n` → `\n` in its buffer, so
+///   RuboCop's `range.begin_pos` is a normalized offset into shorter source.
+///   But `redundant_line_continuation?` does its reparse on `raw_source`
+///   (CRLF) using that normalized offset, replacing wrong bytes. We replicate
+///   this exact mismatch in `is_redundant_continuation` to match RuboCop 1:1.
 pub struct RedundantLineContinuation;
 
 impl Cop for RedundantLineContinuation {
@@ -135,6 +154,7 @@ impl Cop for RedundantLineContinuation {
             interpolated_literal_continuation_offsets(parse_result, source_bytes);
         let string_like_literal_continuations =
             string_like_literal_continuation_offsets(parse_result, source_bytes);
+        let argument_newline_lines = argument_newline_lines(source, parse_result);
 
         // Determine the AST statements range. RuboCop only scans for `\\\n`
         // within `processed_source.ast.source_range`, which corresponds to
@@ -222,6 +242,10 @@ impl Cop for RedundantLineContinuation {
                 continue;
             }
 
+            if argument_newline_lines.contains(&(i + 2)) {
+                continue;
+            }
+
             let next_trimmed = lines.get(i + 1).map(|next_line| trim_start(next_line));
 
             if next_trimmed.is_some_and(starts_with_boolean_operator)
@@ -241,7 +265,8 @@ impl Cop for RedundantLineContinuation {
 
 fn trim_end(bytes: &[u8]) -> &[u8] {
     let mut end = bytes.len();
-    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t') {
+    while end > 0 && (bytes[end - 1] == b' ' || bytes[end - 1] == b'\t' || bytes[end - 1] == b'\r')
+    {
         end -= 1;
     }
     &bytes[..end]
@@ -332,8 +357,30 @@ fn is_redundant_continuation(
     backslash_offset: usize,
     original_error_count: usize,
 ) -> bool {
+    // RuboCop's reparse check has a CRLF offset mismatch: the Parser gem
+    // normalizes \r\n → \n in its buffer, so `range.begin_pos` is an offset
+    // into the shorter (LF) source. But `processed_source.raw_source` is the
+    // original CRLF content. RuboCop's reparse does:
+    //   source[range.begin_pos, 2] = "\n"
+    // replacing 2 bytes at the normalized offset with "\n". On CRLF files this
+    // replaces the wrong bytes, causing some continuations to appear required.
+    // We replicate this exactly to match RuboCop's behavior.
+    let cr_count = source[..backslash_offset]
+        .iter()
+        .enumerate()
+        .filter(|&(i, &b)| b == b'\r' && source.get(i + 1) == Some(&b'\n'))
+        .count();
+    let normalized_offset = backslash_offset - cr_count;
+
     let mut modified = source.to_vec();
-    modified.remove(backslash_offset);
+    // Replicate RuboCop's `source[pos, 2] = "\n"`: replace byte at pos with \n,
+    // remove byte at pos+1.
+    if normalized_offset + 1 < modified.len() {
+        modified[normalized_offset] = b'\n';
+        modified.remove(normalized_offset + 1);
+    } else if normalized_offset < modified.len() {
+        modified[normalized_offset] = b'\n';
+    }
     ruby_prism::parse(&modified).errors().count() <= original_error_count
 }
 
@@ -504,19 +551,39 @@ fn method_with_argument(before_backslash: &[u8], next_trimmed: &[u8]) -> bool {
         return false;
     }
 
-    last_token_can_take_argument(before_backslash) && next_line_starts_with_argument(next_trimmed)
+    trailing_argument_taking_token(before_backslash)
+        .is_some_and(|token_kind| next_line_starts_with_argument(next_trimmed, token_kind))
 }
 
-fn last_token_can_take_argument(before_backslash: &[u8]) -> bool {
-    let Some(token) = trailing_identifier(before_backslash) else {
-        return false;
-    };
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArgumentTakingTokenKind {
+    Method,
+    Break,
+    Next,
+    Return,
+    Super,
+    Yield,
+}
 
-    matches!(token, b"break" | b"next" | b"return" | b"super" | b"yield")
-        || (token
+fn trailing_argument_taking_token(before_backslash: &[u8]) -> Option<ArgumentTakingTokenKind> {
+    let token = trailing_identifier(before_backslash)?;
+
+    match token {
+        b"break" => Some(ArgumentTakingTokenKind::Break),
+        b"next" => Some(ArgumentTakingTokenKind::Next),
+        b"return" => Some(ArgumentTakingTokenKind::Return),
+        b"super" => Some(ArgumentTakingTokenKind::Super),
+        b"yield" => Some(ArgumentTakingTokenKind::Yield),
+        _ if token
             .first()
             .is_some_and(|b| b.is_ascii_lowercase() || *b == b'_')
-            && !is_keyword_not_method(before_backslash, token))
+            && !matches!(token.last(), Some(b'!' | b'?'))
+            && !is_keyword_not_method(before_backslash, token) =>
+        {
+            Some(ArgumentTakingTokenKind::Method)
+        }
+        _ => None,
+    }
 }
 
 /// Check if a trailing token is a Ruby keyword used as a keyword (not a method call).
@@ -603,7 +670,10 @@ fn leading_identifier(bytes: &[u8]) -> Option<&[u8]> {
     Some(&bytes[..end])
 }
 
-fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
+fn next_line_starts_with_argument(
+    next_trimmed: &[u8],
+    token_kind: ArgumentTakingTokenKind,
+) -> bool {
     if next_trimmed.is_empty() {
         return false;
     }
@@ -633,6 +703,15 @@ fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
         return true;
     }
 
+    if next_trimmed.starts_with(b"(") {
+        return matches!(
+            token_kind,
+            ArgumentTakingTokenKind::Method
+                | ArgumentTakingTokenKind::Super
+                | ArgumentTakingTokenKind::Yield
+        );
+    }
+
     matches!(
         next_trimmed[0],
         b'"'
@@ -644,7 +723,6 @@ fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
             | b'~'
             | b'['
             | b'{'
-            | b'('
             | b'|'
             | b'/'
             | b'*'
@@ -659,6 +737,96 @@ fn next_line_starts_with_argument(next_trimmed: &[u8]) -> bool {
             | b'_'
             | b'a'..=b'z'
     )
+}
+
+fn argument_newline_lines(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashSet<usize> {
+    let mut collector = FirstNodeArgumentNewlineLineCollector {
+        source,
+        seen_lines: HashSet::new(),
+        argument_newline_lines: HashSet::new(),
+    };
+    collector.visit(&parse_result.node());
+    collector.argument_newline_lines
+}
+
+fn call_argument_newline(call: &ruby_prism::CallNode<'_>, source: &SourceFile) -> bool {
+    if call.opening_loc().is_some() {
+        return false;
+    }
+
+    let Some(first_argument) = first_parser_argument(call) else {
+        return false;
+    };
+
+    if let Some(inner_call) = first_argument.as_call_node() {
+        if call_has_parser_arguments(&inner_call) {
+            return call_argument_newline(&inner_call, source);
+        }
+    }
+
+    let selector_line = call
+        .message_loc()
+        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
+        .unwrap_or_else(|| source.offset_to_line_col(call.location().start_offset()).0);
+    let first_argument_line = source
+        .offset_to_line_col(first_argument.location().start_offset())
+        .0;
+
+    selector_line != first_argument_line
+}
+
+fn call_has_parser_arguments(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.arguments()
+        .is_some_and(|arguments| !arguments.arguments().is_empty())
+        || call
+            .block()
+            .is_some_and(|block| block.as_block_argument_node().is_some())
+}
+
+fn first_parser_argument<'pr>(
+    call: &'pr ruby_prism::CallNode<'pr>,
+) -> Option<ruby_prism::Node<'pr>> {
+    call.arguments()
+        .and_then(|arguments| arguments.arguments().iter().next())
+        .or_else(|| {
+            call.block()
+                .filter(|block| block.as_block_argument_node().is_some())
+        })
+}
+
+struct FirstNodeArgumentNewlineLineCollector<'a> {
+    source: &'a SourceFile,
+    seen_lines: HashSet<usize>,
+    argument_newline_lines: HashSet<usize>,
+}
+
+impl FirstNodeArgumentNewlineLineCollector<'_> {
+    fn record_node<'pr>(&mut self, node: ruby_prism::Node<'pr>) {
+        let line = self
+            .source
+            .offset_to_line_col(node.location().start_offset())
+            .0;
+        if self.seen_lines.insert(line)
+            && node
+                .as_call_node()
+                .is_some_and(|call| call_argument_newline(&call, self.source))
+        {
+            self.argument_newline_lines.insert(line);
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for FirstNodeArgumentNewlineLineCollector<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.record_node(node);
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.record_node(node);
+    }
 }
 
 fn interpolated_literal_continuation_offsets(
@@ -794,4 +962,29 @@ mod tests {
         RedundantLineContinuation,
         "cops/style/redundant_line_continuation"
     );
+
+    #[test]
+    fn crlf_line_endings() {
+        // CRLF file: `foo(1, \<CR><LF>  2)<CR><LF>` should detect the redundant continuation
+        let source = b"foo(1, \\\r\n  2)\r\n";
+        let diags = crate::testutil::run_cop_full(&RedundantLineContinuation, source);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected 1 offense on CRLF file, got {diags:?}"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+    }
+
+    #[test]
+    fn crlf_no_offense_string_concat() {
+        // String concatenation with CRLF is still required
+        let source = b"x = \"hello\" \\\r\n  \"world\"\r\n";
+        let diags = crate::testutil::run_cop_full(&RedundantLineContinuation, source);
+        assert!(
+            diags.is_empty(),
+            "string concat should not be flagged: {diags:?}"
+        );
+    }
 }

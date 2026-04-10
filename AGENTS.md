@@ -2,6 +2,10 @@
 
 Fast Ruby linter in Rust targeting RuboCop compatibility. Uses Prism for parsing and rayon for parallelism.
 
+## Core Principle: 1:1 RuboCop Compatibility
+
+nitrocop is a **drop-in replacement** for RuboCop. Match RuboCop's exact output on every file — including edge-case quirks. The corpus oracle treats any deviation as a regression. When you must replicate a RuboCop quirk, document it in a `///` doc comment on the cop struct.
+
 ## Mental Model
 
 - A **cop** is one RuboCop-compatible rule implemented in Rust under `src/cop/`.
@@ -125,27 +129,36 @@ The canonical reference for RuboCop's AST node predicates is vendored at `vendor
 
 ## Corpus Quick Reference
 
-Start with cached corpus tools before rerunning expensive checks:
+`investigate_cop.py`, `check_cop.py`, and `verify_cop_locations.py` are **CI-only** (guarded by `CI` env var). Do not run them locally. Pass `--force` to override in exceptional cases.
+
+For local cop investigation, use these sources instead:
+
+- **`docs/corpus.md`** — FP/FN examples with repo IDs, file paths, and line numbers.
+- **CI cop-check PR comments / CI logs** — contain per-repo breakdowns and specific offense locations.
+- **`gh api`** — fetch source files at pinned commits using repo info from `bench/corpus/manifest.jsonl`.
+- **`reduce_mismatch.py`** — for reducing a specific mismatch to a minimal reproducer:
 
 ```bash
-python3 scripts/investigate_cop.py Department/CopName
-python3 scripts/investigate_cop.py Department/CopName --context
-python3 scripts/investigate_repo.py rails
 python3 scripts/reduce_mismatch.py Department/CopName repo_id path/to/file.rb:line
 ```
 
-Use `check_cop.py` for aggregate regression checks after a fix:
+The CI-only scripts (for reference in CI workflows and skills):
 
 ```bash
-python3 scripts/check_cop.py Department/CopName
-python3 scripts/check_cop.py Department/CopName --verbose --rerun
-python3 scripts/verify_cop_locations.py Department/CopName
+python3 scripts/investigate_cop.py Department/CopName           # FP/FN details from corpus oracle
+python3 scripts/investigate_cop.py Department/CopName --context  # with source snippets
+python3 scripts/investigate_repo.py rails                        # per-repo investigation
+python3 scripts/check_cop.py Department/CopName                  # aggregate count check
+python3 scripts/check_cop.py Department/CopName --verbose --rerun  # re-execute with per-repo breakdown
+python3 scripts/verify_cop_locations.py Department/CopName       # per-line location verification
+python3 scripts/verify_cop_locations.py Department/CopName --style EnforcedStyle=never  # variant check
 ```
 
 Important:
 
 - `investigate_cop.py` and `investigate_repo.py` auto-download the latest corpus artifacts. Do not manually download them first.
-- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation.
+- `check_cop.py` is count-only; use `verify_cop_locations.py` when you need location-level confirmation. Both support `--style` for variant checks.
+- When reproducing a corpus FP/FN locally, always test from the **PR branch** (with the agent's changes), not main. Testing from main shows pre-change behavior and will not reproduce the issue.
 - “file-drop noise” is not an excuse for FN gaps. Investigate the actual missed examples.
 - `check_cop.py --rerun` depends on the bundle under `bench/corpus/vendor/bundle/`. If needed:
 

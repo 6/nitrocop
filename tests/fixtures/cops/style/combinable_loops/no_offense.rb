@@ -68,6 +68,21 @@ def test_inside_begin
   end
 end
 
+# FP fix: %w (string array) followed by %i (symbol array) — different receiver types
+%w{automatic manual disabled}.each do |type|
+  resource.startup_type type
+  expect(resource.startup_type).to eql(type.to_sym)
+end
+
+%i{automatic manual disabled}.each do |type|
+  resource.startup_type type
+  expect(resource.startup_type).to eql(type)
+end
+
+# FP fix: boolean array followed by %w string array — different element types
+[true, false].each { |bool| expect(converted?(bool)).to eq true }
+%w(true false).each { |string| expect(converted?(string)).to eq false }
+
 # Different heredoc receiver contents
 <<END.split.each { |f| require "sequel/extensions/#{f}" }
 date_arithmetic

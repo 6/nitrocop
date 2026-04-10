@@ -109,6 +109,67 @@ use crate::parse::source::SourceFile;
 /// Fix: `is_valid_snake_case` and `is_valid_non_integer` now accept `is_bare_name`
 /// and only apply the all-digits exemption for truly bare names (locals, symbols,
 /// methods), not for sigil-stripped variables.
+///
+/// ## Variant style fix (2026-04-06) — remaining FN in non_integer and snake_case
+///
+/// After the sigil fix, remaining divergence: non_integer 61 FP + 3 FN,
+/// snake_case 0 FP + 1 FN.
+///
+/// **FN fix 1: Nested multi-assignment targets.** `(a,(b1,b2)),c = [...]`
+/// creates `MultiTargetNode` inside `MultiWriteNode`. The previous code only
+/// processed immediate targets of `MultiWriteNode`, not nested
+/// `MultiTargetNode` children. `check_target_variable` now recursively
+/// descends into `MultiTargetNode` to find all target variables. This fixes
+/// 2 FN in jruby test_assignment.rb under non_integer.
+///
+/// **FN fix 2: Hash pattern keys with explicit values.** In `in { md5: String }`,
+/// Parser gem creates `:sym` for the key, so RuboCop's `on_sym` fires. In
+/// `in { k_1: }` (bare binding), Parser creates `match_var`, so `on_sym`
+/// doesn't fire. The previous `visit_hash_pattern_node` skipped ALL keys.
+/// Now it only skips keys whose value is `ImplicitNode` (bare bindings) and
+/// visits keys with explicit values. This fixes 1 FN in danbooru under both
+/// non_integer and snake_case.
+///
+/// ## Variant style fix (2026-04-07) — remaining 61 FP in non_integer
+///
+/// All 61 FPs from jruby repo. Two root causes:
+///
+/// **FP fix 1: Non-UTF-8 encoding files (59 FPs).** Files with encoding
+/// magic comments like `# coding: US-ASCII` or `# encoding:windows-1252`
+/// cause `Prism::Translation::Parser` to crash or produce fatal syntax
+/// errors. RuboCop catches the crash and reports 0 offenses for the file.
+/// Nitrocop's native Prism parser handles these files fine, producing
+/// offenses that are FPs relative to RuboCop. Fix: detect non-UTF-8
+/// encoding magic comments in `check_node`/`check_source` and skip the
+/// file entirely. UTF-8 and binary/ASCII-8BIT encodings are still
+/// processed normally (RuboCop handles those without crashing).
+///
+/// **FP fix 2: `%s()` empty symbols (2 FPs).** `%s()` creates an empty
+/// symbol `:""`'. Parser gem treats `%s()` as `:dsym` (dynamic symbol),
+/// so RuboCop's `on_sym` never fires. Non-empty `%s(foo)` is `:sym` and
+/// IS checked. Fix: in `visit_symbol_node`, also skip empty symbols whose
+/// opening starts with `%s` (not just `:`-prefixed standalone symbols).
+///
+/// ## Variant fix (2026-04-08) — all variants, US-ASCII encoding
+///
+/// All three variants (default 4 FN, snake_case 14 FN, non_integer 1,317 FN)
+/// had FNs from files with `# encoding: US-ASCII` or `# coding: us-ascii`
+/// magic comments. The `has_non_utf8_encoding_comment` function was skipping
+/// these files, but US-ASCII is a strict 7-bit subset of UTF-8. RuboCop's
+/// `Prism::Translation::Parser` handles US-ASCII files without crashing and
+/// reports offenses normally. Fix: add US-ASCII to the allow-list alongside
+/// UTF-8 and binary/ASCII-8BIT.
+///
+/// **Known residual FP (31 snake_case, 52 non_integer):** jruby's
+/// `test/mri/ruby/test_regexp.rb` is a US-ASCII file containing `\u`
+/// Unicode escapes inside regex literals (e.g. `/\u3042/`). RuboCop's
+/// `Prism::Translation::Parser` crashes with `RegexpError` on this file
+/// (multibyte bytes incompatible with US-ASCII encoding), and the corpus
+/// `rescue_parser_crashes.rb` monkey-patch catches the crash → 0 offenses.
+/// Nitrocop's native Prism handles it fine → FP. This is the only known
+/// crash file in ~5,500 corpus repos. A correct fix would use Prism's AST
+/// to detect `RegularExpressionNode` with `\u` escapes in US-ASCII files,
+/// rather than raw-byte heuristics which are fragile around `/` ambiguity.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -122,6 +183,92 @@ const DEFAULT_ALLOWED: &[&str] = &[
     "rfc3339",
     "x86_64",
 ];
+
+/// Check if a file has a non-UTF-8 encoding magic comment (e.g.,
+/// `# encoding: windows-1252`, `# coding: US-ASCII`). When such a comment
+/// is present, RuboCop's `Prism::Translation::Parser` may crash or produce
+/// fatal syntax errors that prevent Naming cops from running, resulting in
+/// 0 offenses. Nitrocop's native Prism parser handles these files fine, so
+/// without this check we'd produce false positives for every offense in
+/// such files.
+fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
+    // Scan up to 3 lines (shebang + possible encoding comment)
+    let mut start = 0;
+    for _ in 0..3 {
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| start + p)
+            .unwrap_or(bytes.len());
+        let line = &bytes[start..end];
+        // Skip leading whitespace
+        let trimmed: Vec<u8> = line.iter().copied().filter(|b| *b != b'\r').collect();
+        if trimmed.starts_with(b"#") {
+            let lower: Vec<u8> = trimmed.iter().map(|b| b.to_ascii_lowercase()).collect();
+            // Look for encoding/coding keywords in the comment
+            if let Some(pos) = find_subsequence(&lower, b"encoding")
+                .or_else(|| find_subsequence(&lower, b"coding"))
+            {
+                // Extract the encoding value after the keyword
+                let after = &lower[pos..];
+                // Skip the keyword and any separator (: = etc.)
+                let value_start = after
+                    .iter()
+                    .position(|&b| b == b':' || b == b'=')
+                    .map(|p| p + 1)
+                    .unwrap_or(after.len());
+                let value = &after[value_start..];
+                // Trim whitespace and extract the encoding name
+                let value_trimmed: Vec<u8> =
+                    value.iter().copied().skip_while(|b| *b == b' ').collect();
+                // Take alphanumeric + hyphens + underscores (for names like utf-8)
+                let enc_end = value_trimmed
+                    .iter()
+                    .position(|b| !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_')
+                    .unwrap_or(value_trimmed.len());
+                let enc_name = &value_trimmed[..enc_end];
+                // UTF-8 variants are fine
+                if enc_name == b"utf"
+                    || enc_name == b"utf8"
+                    || enc_name.starts_with(b"utf-8")
+                    || enc_name.starts_with(b"utf_8")
+                {
+                    return false;
+                }
+                // binary / ASCII-8BIT are fine — RuboCop's Translation::Parser
+                // handles them without crashing. Common in files dealing with
+                // binary data (packetfu, puppetlabs, etc.).
+                if enc_name == b"binary"
+                    || enc_name.starts_with(b"ascii-8bit")
+                    || enc_name.starts_with(b"ascii_8bit")
+                {
+                    return false;
+                }
+                // US-ASCII is fine — it's a strict subset of UTF-8, so
+                // Translation::Parser handles it without crashing. RuboCop
+                // reports offenses normally for US-ASCII files.
+                if enc_name == b"us-ascii" || enc_name == b"ascii" {
+                    return false;
+                }
+                // Other non-UTF-8 encodings (us-ascii, windows-1252,
+                // iso-8859-1, etc.) cause Translation::Parser crashes → skip
+                if !enc_name.is_empty() {
+                    return true;
+                }
+            }
+        }
+        start = end + 1;
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Find the position of a subsequence in a byte slice.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
 
 impl Cop for VariableNumber {
     fn name(&self) -> &'static str {
@@ -162,6 +309,13 @@ impl Cop for VariableNumber {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Skip files with non-UTF-8 encoding magic comments. RuboCop's
+        // Translation::Parser crashes or produces fatal syntax errors on
+        // these files, so no Naming cops run → 0 offenses.
+        if has_non_utf8_encoding_comment(source.as_bytes()) {
+            return;
+        }
+
         let enforced_style = config.get_str("EnforcedStyle", "normalcase");
         let check_method_names = config.get_bool("CheckMethodNames", true);
         let allowed = config.get_string_array("AllowedIdentifiers");
@@ -351,6 +505,11 @@ impl Cop for VariableNumber {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Skip files with non-UTF-8 encoding magic comments (see check_node).
+        if has_non_utf8_encoding_comment(source.as_bytes()) {
+            return;
+        }
+
         // This visitor handles two cases that require tree-walking context:
         //
         // 1. Rescue exception variables (`rescue => error_2`): Prism's Visit trait
@@ -429,10 +588,17 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
         // ("": val) become :sym in Parser 4.0. In Prism, standalone
         // symbols have a colon-prefix opening, while hash-key symbols don't.
         if name_str.is_empty() {
+            // Skip standalone empty symbols (:'' and :"") — Parser gem creates
+            // :dsym, so RuboCop's on_sym never fires.
+            // Also skip %s() empty symbols — Parser gem creates :dsym for these
+            // too. Non-empty %s(foo) IS :sym and IS checked.
             let is_standalone = node
                 .opening_loc()
                 .is_some_and(|loc| loc.as_slice().starts_with(b":"));
-            if is_standalone {
+            let is_percent_s = node
+                .opening_loc()
+                .is_some_and(|loc| loc.as_slice().starts_with(b"%s"));
+            if is_standalone || is_percent_s {
                 return;
             }
         }
@@ -460,16 +626,25 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
     }
 
     fn visit_hash_pattern_node(&mut self, node: &ruby_prism::HashPatternNode<'pr>) {
-        // In pattern matching (`value => k_1:, k_2:`), Prism creates SymbolNode
-        // keys inside HashPatternNode. Parser gem creates match_var nodes instead,
-        // so RuboCop's on_sym never fires for pattern matching hash keys.
-        // Skip recursing into HashPatternNode to avoid false positives on symbols.
-        // We still need to visit the value side of assocs (which may contain
-        // other patterns with rescue/symbol nodes), but NOT the key symbols.
+        // In pattern matching, Prism creates SymbolNode keys inside HashPatternNode.
+        // Parser gem behavior differs based on whether the key has an explicit value:
+        //
+        // - `in { k_1: }` (bare binding): Parser creates match_var, NOT sym.
+        //   RuboCop's on_sym never fires. In Prism, the value is an ImplicitNode.
+        //   → Skip the key symbol.
+        //
+        // - `in { md5: String }` (key with value): Parser creates sym(:md5).
+        //   RuboCop's on_sym DOES fire. In Prism, the value is NOT ImplicitNode.
+        //   → Visit the key symbol.
         for assoc in node.elements().iter() {
             if let Some(assoc_node) = assoc.as_assoc_node() {
-                // Skip the key (SymbolNode in pattern matching) — visit only the value.
                 let value = assoc_node.value();
+                // If the value is ImplicitNode, this is a bare binding (match_var
+                // in Parser) — skip the key. Otherwise, the key is a real symbol.
+                if value.as_implicit_node().is_none() {
+                    let key = assoc_node.key();
+                    self.visit(&key);
+                }
                 self.visit(&value);
             } else if let Some(splat) = assoc.as_assoc_splat_node() {
                 // **rest pattern — visit the expression
@@ -486,9 +661,10 @@ impl<'pr> ruby_prism::Visit<'pr> for VariableNumberVisitor<'_> {
 }
 
 impl VariableNumber {
-    /// Check a target variable node from MultiWriteNode or ForNode.
+    /// Check a target variable node from MultiWriteNode, MultiTargetNode, or ForNode.
     /// Handles LocalVariableTargetNode, InstanceVariableTargetNode,
-    /// ClassVariableTargetNode, and GlobalVariableTargetNode.
+    /// ClassVariableTargetNode, GlobalVariableTargetNode, and recursively
+    /// handles nested MultiTargetNode (e.g., `(a,(b1,b2)),c = ...`).
     fn check_target_variable(
         &self,
         source: &SourceFile,
@@ -498,6 +674,46 @@ impl VariableNumber {
         allowed_pats: &[String],
         diagnostics: &mut Vec<Diagnostic>,
     ) {
+        // Nested destructuring: (a,(b1,b2)) creates a MultiTargetNode
+        // containing further target nodes. Recurse into it.
+        if let Some(mt) = target.as_multi_target_node() {
+            for child in mt.lefts().iter() {
+                self.check_target_variable(
+                    source,
+                    &child,
+                    enforced_style,
+                    allowed_ids,
+                    allowed_pats,
+                    diagnostics,
+                );
+            }
+            if let Some(rest) = mt.rest() {
+                if let Some(splat) = rest.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        self.check_target_variable(
+                            source,
+                            &expr,
+                            enforced_style,
+                            allowed_ids,
+                            allowed_pats,
+                            diagnostics,
+                        );
+                    }
+                }
+            }
+            for child in mt.rights().iter() {
+                self.check_target_variable(
+                    source,
+                    &child,
+                    enforced_style,
+                    allowed_ids,
+                    allowed_pats,
+                    diagnostics,
+                );
+            }
+            return;
+        }
+
         let (name_bytes, loc) = if let Some(n) = target.as_local_variable_target_node() {
             (n.name().as_slice(), n.location())
         } else if let Some(n) = target.as_instance_variable_target_node() {
@@ -869,5 +1085,166 @@ mod tests {
             non_integer_config(),
         );
         assert_eq!(diags.len(), 1, "expected foo_1 flagged under non_integer");
+    }
+
+    #[test]
+    fn nested_multi_assignment_under_non_integer() {
+        // Nested multi-assignment: (a,(b1,b2)),c = [[1,2],3]
+        // Under non_integer, b1 and b2 end with digits → offense.
+        // Prism creates MultiTargetNode inside MultiWriteNode for nested patterns.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"(a,(b1,b2)),c = [[1,2],3]\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            2,
+            "expected b1 and b2 flagged in nested multi-assignment under non_integer"
+        );
+    }
+
+    #[test]
+    fn hash_pattern_key_with_value_is_checked() {
+        // In `in { md5: String }`, the key :md5 is a real symbol (not a binding).
+        // Parser gem creates :sym for it, so RuboCop's on_sym fires.
+        // Under non_integer, md5 ends with digits → offense.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"case obj\nin { md5: String }\n  nil\nend\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected :md5 flagged in hash pattern under non_integer"
+        );
+    }
+
+    #[test]
+    fn hash_pattern_bare_binding_not_checked() {
+        // In `in { k_1: }`, Parser gem creates match_var (not sym),
+        // so RuboCop's on_sym never fires. Nitrocop should not flag it.
+        let diags = crate::testutil::run_cop_full_with_config(
+            &VariableNumber,
+            b"case obj\nin { k_1: }\n  k_1\nend\n",
+            non_integer_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            0,
+            "expected bare binding k_1: to NOT be flagged in hash pattern"
+        );
+    }
+
+    #[test]
+    fn percent_s_empty_symbol_not_checked() {
+        // %s() creates an empty symbol. Parser gem treats it as :dsym,
+        // so RuboCop's on_sym never fires. Non-empty %s(foo) IS checked.
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"x = %s()\n");
+        assert_eq!(diags.len(), 0, "expected %s() empty symbol NOT flagged");
+
+        // Non-empty %s(foo_1) SHOULD be flagged
+        let diags = crate::testutil::run_cop_full(&VariableNumber, b"x = %s(foo_1)\n");
+        assert_eq!(diags.len(), 1, "expected %s(foo_1) to be flagged");
+    }
+
+    #[test]
+    fn non_utf8_encoding_file_skipped() {
+        // Files with non-UTF-8 encoding comments should be skipped entirely.
+        // RuboCop's Translation::Parser crashes on these, resulting in 0 offenses.
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# encoding:windows-1252\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 0, "expected windows-1252 file to be skipped");
+
+        // UTF-8 encoding should NOT be skipped
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# encoding: utf-8\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected utf-8 file to NOT be skipped");
+
+        // binary / ASCII-8BIT should NOT be skipped — RuboCop handles them fine
+        let diags = crate::testutil::run_cop_full(
+            &VariableNumber,
+            b"# -*- coding: binary -*-\nfoo_1 = 1\n",
+        );
+        assert_eq!(diags.len(), 1, "expected binary file to NOT be skipped");
+
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# encoding: ASCII-8BIT\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected ASCII-8BIT file to NOT be skipped");
+
+        // US-ASCII should NOT be skipped — it's a strict subset of UTF-8,
+        // RuboCop's Parser handles it without crashing.
+        let diags =
+            crate::testutil::run_cop_full(&VariableNumber, b"# coding: US-ASCII\nfoo_1 = 1\n");
+        assert_eq!(diags.len(), 1, "expected US-ASCII file to NOT be skipped");
+
+        let diags = crate::testutil::run_cop_full(
+            &VariableNumber,
+            b"# -*- coding: us-ascii -*-\nfoo_1 = 1\n",
+        );
+        assert_eq!(diags.len(), 1, "expected us-ascii file to NOT be skipped");
+    }
+
+    // --- has_non_utf8_encoding_comment unit tests ---
+
+    #[test]
+    fn encoding_us_ascii_not_skipped() {
+        // US-ASCII is a subset of UTF-8 — RuboCop handles it fine
+        assert!(!has_non_utf8_encoding_comment(b"# coding: US-ASCII\nfoo\n"));
+        assert!(!has_non_utf8_encoding_comment(
+            b"# -*- coding: us-ascii -*-\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_detect_windows_1252() {
+        assert!(has_non_utf8_encoding_comment(
+            b"# encoding:windows-1252\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_detect_after_shebang() {
+        // Non-UTF-8 encoding after shebang should still be detected
+        assert!(has_non_utf8_encoding_comment(
+            b"#!/usr/bin/env ruby\n# coding: ISO-8859-1\nfoo\n"
+        ));
+        // US-ASCII after shebang should NOT be detected (it's UTF-8 compatible)
+        assert!(!has_non_utf8_encoding_comment(
+            b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_utf8_not_skipped() {
+        assert!(!has_non_utf8_encoding_comment(b"# encoding: utf-8\nfoo\n"));
+    }
+
+    #[test]
+    fn encoding_no_comment_not_skipped() {
+        assert!(!has_non_utf8_encoding_comment(b"foo_1 = 1\nbar_2 = 2\n"));
+    }
+
+    #[test]
+    fn encoding_frozen_string_not_skipped() {
+        // frozen_string_literal comment should NOT trigger encoding detection
+        assert!(!has_non_utf8_encoding_comment(
+            b"# frozen_string_literal: true\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_binary_not_skipped() {
+        // binary / ASCII-8BIT encodings are handled fine by RuboCop
+        assert!(!has_non_utf8_encoding_comment(
+            b"# -*- coding: binary -*-\nfoo\n"
+        ));
+        assert!(!has_non_utf8_encoding_comment(
+            b"# encoding: ASCII-8BIT\nfoo\n"
+        ));
+        assert!(!has_non_utf8_encoding_comment(
+            b"# -*- encoding : ascii-8bit -*-\nfoo\n"
+        ));
     }
 }

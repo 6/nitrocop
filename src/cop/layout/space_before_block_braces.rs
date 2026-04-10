@@ -1,4 +1,4 @@
-use crate::cop::shared::node_type::{BLOCK_NODE, LAMBDA_NODE};
+use crate::cop::shared::node_type::{BLOCK_NODE, FORWARDING_SUPER_NODE, LAMBDA_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -14,6 +14,18 @@ use crate::parse::source::SourceFile;
 ///   `LambdaNode`. In Prism, `-> { }` parses as a `LambdaNode`, not a `BlockNode`.
 ///   RuboCop's `on_block` also handles lambdas via `on_numblock`/`on_itblock` aliases,
 ///   since in Parser AST lambdas are block nodes. Fixed by also handling `LambdaNode`.
+/// - **ForwardingSuperNode FNs (51 FNs, no_space variant):** `super { ... }` (without
+///   explicit arguments) parses as `ForwardingSuperNode` in Prism, whose block child
+///   is visited via `visit_block_node()` (named method) rather than `visit()` (generic
+///   dispatch), so `visit_branch_node_enter` is never called for the inner BlockNode.
+///   Fixed by registering for `FORWARDING_SUPER_NODE` and extracting the block.
+/// - **No-space variant whitespace-range mismatches (7 FP, 24 FN):** RuboCop's
+///   `range_with_surrounding_space(left_brace)` reports the start of the entire
+///   left whitespace span, not just the byte immediately before `{`. That matters
+///   for tab-aligned blocks (`foo\t\t{ ... }`) and backslash continuations
+///   where `call \` ends one line and `{ ... }` starts the next. RuboCop flags
+///   the first tab or the end of the previous line. Fixed by scanning the same
+///   left whitespace range for `no_space`.
 pub struct SpaceBeforeBlockBraces;
 
 impl Cop for SpaceBeforeBlockBraces {
@@ -22,7 +34,11 @@ impl Cop for SpaceBeforeBlockBraces {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_NODE, LAMBDA_NODE]
+        // ForwardingSuperNode is needed because Prism's generated visitor calls
+        // visit_block_node() (named method) instead of visit() (generic dispatch)
+        // for its block child, so BlockNode inside ForwardingSuperNode never triggers
+        // visit_branch_node_enter. We register for it and extract the block manually.
+        &[BLOCK_NODE, LAMBDA_NODE, FORWARDING_SUPER_NODE]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -41,11 +57,17 @@ impl Cop for SpaceBeforeBlockBraces {
         let style = config.get_str("EnforcedStyle", "space");
         let empty_style = config.get_str("EnforcedStyleForEmptyBraces", "space");
 
-        // Extract opening/closing from either BlockNode or LambdaNode
+        // Extract opening/closing from BlockNode, LambdaNode, or ForwardingSuperNode's block
         let (opening, closing) = if let Some(block) = node.as_block_node() {
             (block.opening_loc(), block.closing_loc())
         } else if let Some(lambda) = node.as_lambda_node() {
             (lambda.opening_loc(), lambda.closing_loc())
+        } else if let Some(fwd_super) = node.as_forwarding_super_node() {
+            if let Some(block) = fwd_super.block() {
+                (block.opening_loc(), block.closing_loc())
+            } else {
+                return;
+            }
         } else {
             return;
         };
@@ -66,8 +88,8 @@ impl Cop for SpaceBeforeBlockBraces {
 
         match effective_style {
             "no_space" => {
-                if before > 0 && bytes[before - 1] == b' ' {
-                    let (line, column) = source.offset_to_line_col(before - 1);
+                if let Some(space_start) = no_space_whitespace_range_start(bytes, before) {
+                    let (line, column) = source.offset_to_line_col(space_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -76,7 +98,7 @@ impl Cop for SpaceBeforeBlockBraces {
                     );
                     if let Some(ref mut corr) = corrections {
                         corr.push(crate::correction::Correction {
-                            start: before - 1,
+                            start: space_start,
                             end: before,
                             replacement: String::new(),
                             cop_name: self.name(),
@@ -114,6 +136,24 @@ impl Cop for SpaceBeforeBlockBraces {
             }
         }
     }
+}
+
+fn no_space_whitespace_range_start(bytes: &[u8], brace_start: usize) -> Option<usize> {
+    if brace_start == 0 {
+        return None;
+    }
+
+    let mut start = brace_start;
+
+    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+
+    while start > 0 && bytes[start - 1] == b'\n' {
+        start -= 1;
+    }
+
+    (start < brace_start).then_some(start)
 }
 
 #[cfg(test)]
@@ -165,6 +205,60 @@ mod tests {
         };
         let src = b"items.each{ |x| puts x }\n";
         assert_cop_no_offenses_full_with_config(&SpaceBeforeBlockBraces, src, config);
+    }
+
+    #[test]
+    fn no_space_offense_fixture() {
+        use crate::testutil::assert_cop_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+                (
+                    "EnforcedStyleForEmptyBraces".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        assert_cop_offenses_full_with_config(
+            &SpaceBeforeBlockBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_before_block_braces/no_space_offense.rb"
+            ),
+            config,
+        );
+    }
+
+    #[test]
+    fn no_space_no_offense_fixture() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+                (
+                    "EnforcedStyleForEmptyBraces".into(),
+                    serde_yml::Value::String("no_space".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        assert_cop_no_offenses_full_with_config(
+            &SpaceBeforeBlockBraces,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_before_block_braces/no_space_no_offense.rb"
+            ),
+            config,
+        );
     }
 
     #[test]

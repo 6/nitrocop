@@ -39,6 +39,43 @@ use crate::parse::source::SourceFile;
 ///   across them. A lambda param `token` at class body level does not suppress
 ///   detection of `self.token` inside a method definition. Blocks within a def
 ///   can still see the def's locals.
+/// - Fixed class-body leakage: block/lambda locals introduced directly under a
+///   class/module/root body do not leak into later sibling callbacks or lambdas
+///   (`scope { |profile| ... }` must not suppress later `self.profile` in
+///   `code_numbering ... -> { self.profile }`). They still leak within defs and
+///   enclosing blocks where RuboCop keeps them visible.
+/// - `rescue => self.foo` references are detected via `visit_rescue_node`. Prism
+///   calls `visit_rescue_node` directly from `visit_begin_node`, bypassing the
+///   normal branch dispatch, so a dedicated visitor is needed to catch these.
+/// - Nested defs inherit locals from all enclosing scopes when there is an
+///   enclosing Method or Soft scope. This matches RuboCop's `add_scope` model
+///   where the def NODE retains the outer shared array, making ancestor-walk
+///   find outer locals through it (`def klass.inherited(child)` inside a method
+///   that has `defaults` as a local sees it via the inherited scope).
+/// - Destructured block parameters (`|(title, path), i|`) introduce each
+///   nested name into the scope, so `self.path` inside the block is allowed.
+/// - Compound self-assignment value expressions: Prism's `CallOrWriteNode`,
+///   `CallAndWriteNode`, and `CallOperatorWriteNode` contain an embedded read
+///   `CallNode` for the method being assigned. The compound target is added to
+///   `allowed_self_methods` before visiting the node so that `self.x` on the
+///   RHS of `self.x ||= default` is not flagged.
+/// - `class << self` uses Soft scoping when inside a Method or Soft scope
+///   (matching RuboCop's lack of an `on_sclass` handler). This lets enclosing
+///   method params remain visible through the singleton class boundary, e.g.
+///   `def build(table_name); class << self; define_method(:search) { |q|
+///   self.table_name }; end; end`.
+/// - Block/lambda locals propagate through class/module (ClassLike) scope
+///   boundaries when an enclosing block or method scope exists beyond the
+///   ClassLike parent. This matches RuboCop's flat shared-array model where
+///   `describe Foo do; class Bar; def m; self.x; end; end; end` sees lambda
+///   params from inside the describe block. At the top level (only Root above
+///   ClassLike) the merge is skipped to prevent class-body leakage.
+/// - `unless ... else` branch visitation follows parser's normalized `if`
+///   semantics, not Prism source order: RuboCop visits the source `else`
+///   branch before the source `unless` body. This keeps block params or locals
+///   introduced only in the source `unless` body from suppressing later
+///   offenses in the source `else` branch (for example, `debug? self.actor`
+///   after `actors.each do |actor|` in the `unless` body).
 pub struct RedundantSelf;
 
 /// Methods where self. is always required (Ruby keywords).
@@ -172,7 +209,7 @@ impl Cop for RedundantSelf {
             cop: self,
             source,
             diagnostics: Vec::new(),
-            local_scopes: vec![(HashSet::new(), ScopeKind::Hard)],
+            local_scopes: vec![(HashSet::new(), ScopeKind::Root)],
             allowed_self_methods: HashSet::new(),
         };
         visitor.visit(&parse_result.node());
@@ -180,14 +217,20 @@ impl Cop for RedundantSelf {
     }
 }
 
-/// Distinguishes hard scope boundaries (def, class, module) from soft/transparent
-/// ones (block, lambda). `is_local_variable` stops searching at hard boundaries,
-/// preventing class-level locals from leaking into method scopes.
+/// Distinguishes method scopes, class/module/root scopes, and soft/transparent
+/// ones (block, lambda). This keeps block locals leaking forward where RuboCop
+/// does (within defs and enclosing blocks) without letting class-body lambda
+/// params suppress later sibling class-body callbacks.
 #[derive(Clone, Copy, PartialEq)]
 enum ScopeKind {
-    /// def, class, module, singleton_class, root — variables from outer scopes
-    /// are not visible across this boundary.
-    Hard,
+    /// root — top-level locals are not a shared "forward leak" scope for later
+    /// sibling blocks in RuboCop's implementation.
+    Root,
+    /// def — block locals may leak forward into the surrounding method scope.
+    Method,
+    /// class, module, singleton_class — block locals should not leak into later
+    /// sibling class-body statements.
+    ClassLike,
     /// block, lambda — variables are visible through this boundary.
     Soft,
 }
@@ -214,14 +257,14 @@ impl RedundantSelfVisitor<'_> {
     }
 
     fn is_local_variable(&self, name: &[u8]) -> bool {
-        // Search from innermost scope outward. Allow at most one Hard boundary
-        // (the enclosing def/class). A second Hard boundary means we've crossed
-        // a scope wall (e.g., class body → def), so we stop. This prevents
-        // class-level locals (from lambda param merges) from leaking into defs,
-        // while still letting blocks within a def see the def's variables.
+        // Search from innermost scope outward. Allow at most one non-soft scope
+        // (the enclosing def/class/module/root). A second non-soft boundary
+        // means we've crossed a scope wall (e.g., class body -> def), so we
+        // stop. This prevents class-level locals from leaking into defs while
+        // still letting blocks within a def or enclosing block see those locals.
         let mut hard_seen = false;
         for (scope, kind) in self.local_scopes.iter().rev() {
-            if *kind == ScopeKind::Hard {
+            if *kind != ScopeKind::Soft {
                 if hard_seen {
                     break;
                 }
@@ -242,10 +285,38 @@ impl RedundantSelfVisitor<'_> {
         self.allowed_self_methods.contains(name)
     }
 
+    fn collect_multi_target_params(&mut self, mt: &ruby_prism::MultiTargetNode<'_>) {
+        for target in mt.lefts().iter() {
+            if let Some(rp) = target.as_required_parameter_node() {
+                self.add_local(rp.name().as_slice());
+            } else if let Some(inner) = target.as_multi_target_node() {
+                self.collect_multi_target_params(&inner);
+            }
+        }
+        if let Some(rest) = mt.rest() {
+            if let Some(splat) = rest.as_splat_node() {
+                if let Some(expr) = splat.expression() {
+                    if let Some(rp) = expr.as_required_parameter_node() {
+                        self.add_local(rp.name().as_slice());
+                    }
+                }
+            }
+        }
+        for target in mt.rights().iter() {
+            if let Some(rp) = target.as_required_parameter_node() {
+                self.add_local(rp.name().as_slice());
+            } else if let Some(inner) = target.as_multi_target_node() {
+                self.collect_multi_target_params(&inner);
+            }
+        }
+    }
+
     fn collect_params_from_node(&mut self, params: &ruby_prism::ParametersNode<'_>) {
         for p in params.requireds().iter() {
             if let Some(req) = p.as_required_parameter_node() {
                 self.add_local(req.name().as_slice());
+            } else if let Some(mt) = p.as_multi_target_node() {
+                self.collect_multi_target_params(&mt);
             }
         }
         for p in params.optionals().iter() {
@@ -293,9 +364,33 @@ impl RedundantSelfVisitor<'_> {
             return;
         }
 
+        // Check parent kind and whether there's an enclosing Soft/Method
+        // before taking a mutable borrow.
+        let parent_kind = self.local_scopes[self.local_scopes.len() - 2].1;
+        let should_merge = if matches!(parent_kind, ScopeKind::Method | ScopeKind::Soft) {
+            true
+        } else if parent_kind == ScopeKind::ClassLike {
+            // RuboCop has no on_class/on_module/on_sclass handlers, so
+            // block/lambda locals propagate through class/module boundaries
+            // when an enclosing block or method scope exists (e.g., a
+            // `describe` block wrapping a class). At the top level the
+            // ClassLike parent has only Root above it, so the merge is
+            // correctly skipped — preventing class-body locals from
+            // leaking into sibling methods.
+            let len = self.local_scopes.len();
+            len > 2
+                && self.local_scopes[..len - 2]
+                    .iter()
+                    .any(|(_, k)| matches!(k, ScopeKind::Method | ScopeKind::Soft))
+        } else {
+            false
+        };
+
         let (current_scope, _) = self.local_scopes.pop().unwrap();
-        if let Some((parent_scope, _)) = self.local_scopes.last_mut() {
-            parent_scope.extend(current_scope);
+        if should_merge {
+            if let Some((parent_scope, _)) = self.local_scopes.last_mut() {
+                parent_scope.extend(current_scope);
+            }
         }
     }
 
@@ -408,7 +503,31 @@ impl<'pr> Visit<'pr> for ConditionalLocalScanner {
 
 impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        // Inherit locals from enclosing scopes for nested defs.
+        // RuboCop's `add_scope` sets all descendants of a def/block to a shared
+        // array; when a nested def calls `add_scope`, the nested def NODE itself
+        // retains the outer shared array. The ancestor walk in `allowed_send_node?`
+        // finds outer locals through this retained reference. We replicate this by
+        // pre-populating the new scope with all enclosing locals — but only when
+        // there is an enclosing Method or Soft (block) scope, so that top-level
+        // class-body locals (which RuboCop doesn't propagate through class nodes)
+        // don't leak in.
+        let mut inherited_locals = HashSet::new();
+        let mut has_enclosing_method_or_soft = false;
+        for (scope, kind) in self.local_scopes.iter().rev() {
+            inherited_locals.extend(scope.iter().cloned());
+            if matches!(kind, ScopeKind::Method | ScopeKind::Soft) {
+                has_enclosing_method_or_soft = true;
+            }
+        }
+
+        let initial_scope = if has_enclosing_method_or_soft {
+            inherited_locals
+        } else {
+            HashSet::new()
+        };
+
+        self.local_scopes.push((initial_scope, ScopeKind::Method));
 
         if let Some(params) = node.parameters() {
             // Collect parameter names into scope first (before visiting defaults).
@@ -482,7 +601,8 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         // Push a new scope for the class body (local variables from the enclosing scope
         // are not visible inside a class body).
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        self.local_scopes
+            .push((HashSet::new(), ScopeKind::ClassLike));
         if let Some(body) = node.body() {
             self.visit(&body);
         }
@@ -490,7 +610,8 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     }
 
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        self.local_scopes
+            .push((HashSet::new(), ScopeKind::ClassLike));
         if let Some(body) = node.body() {
             self.visit(&body);
         }
@@ -498,11 +619,30 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     }
 
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
-        self.local_scopes.push((HashSet::new(), ScopeKind::Hard));
+        // RuboCop has no `on_sclass` handler, so `class << self` is transparent
+        // to scoping inside methods/blocks. Use Soft when an enclosing Method or
+        // Soft scope exists so that the enclosing method's locals remain visible
+        // through the singleton class boundary. At the top level or inside a
+        // class body, keep ClassLike to prevent unwanted leakage.
+        let use_soft = self
+            .local_scopes
+            .iter()
+            .rev()
+            .any(|(_, k)| matches!(k, ScopeKind::Method | ScopeKind::Soft));
+        let kind = if use_soft {
+            ScopeKind::Soft
+        } else {
+            ScopeKind::ClassLike
+        };
+        self.local_scopes.push((HashSet::new(), kind));
         if let Some(body) = node.body() {
             self.visit(&body);
         }
-        self.local_scopes.pop();
+        if use_soft {
+            self.merge_current_scope_into_parent();
+        } else {
+            self.local_scopes.pop();
+        }
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
@@ -604,7 +744,18 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
         let mut scanner = ConditionalLocalScanner { names: Vec::new() };
         ruby_prism::visit_unless_node(&mut scanner, node);
         self.apply_conditional_prescan(scanner);
-        ruby_prism::visit_unless_node(self, node);
+
+        // Match parser/RuboCop's normalized `if` AST for `unless`: the source
+        // `else` branch is the truthy branch and is visited before the source
+        // `unless` body. Source-order visitation would incorrectly let locals
+        // from the `unless` body leak into the `else` branch.
+        self.visit(&node.predicate());
+        if let Some(else_clause) = node.else_clause() {
+            self.visit_else_node(&else_clause);
+        }
+        if let Some(statements) = node.statements() {
+            self.visit_statements_node(&statements);
+        }
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
@@ -622,33 +773,34 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
     }
 
     fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
-        ruby_prism::visit_call_or_write_node(self, node);
-
+        // Add to allowed BEFORE visiting children. Prism exposes the read side
+        // of `self.x ||= expr(self.x)` as a separate CallNode inside the value
+        // expression. RuboCop (parser gem) doesn't have this extra node, so it
+        // never fires `on_send` for the inner read. Pre-allowing prevents a FP.
         if let Some(receiver) = node.receiver() {
             if receiver.as_self_node().is_some() {
                 self.add_allowed_self_method(node.read_name().as_slice());
             }
         }
+        ruby_prism::visit_call_or_write_node(self, node);
     }
 
     fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
-        ruby_prism::visit_call_and_write_node(self, node);
-
         if let Some(receiver) = node.receiver() {
             if receiver.as_self_node().is_some() {
                 self.add_allowed_self_method(node.read_name().as_slice());
             }
         }
+        ruby_prism::visit_call_and_write_node(self, node);
     }
 
     fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
-        ruby_prism::visit_call_operator_write_node(self, node);
-
         if let Some(receiver) = node.receiver() {
             if receiver.as_self_node().is_some() {
                 self.add_allowed_self_method(node.read_name().as_slice());
             }
         }
+        ruby_prism::visit_call_operator_write_node(self, node);
     }
 
     fn visit_splat_node(&mut self, node: &ruby_prism::SplatNode<'pr>) {
@@ -668,6 +820,31 @@ impl<'pr> Visit<'pr> for RedundantSelfVisitor<'_> {
         }
 
         ruby_prism::visit_splat_node(self, node);
+    }
+
+    // Prism's RescueNode is visited via visit_rescue_node() which bypasses the
+    // normal visit_begin_node branch dispatch. We need to handle it explicitly
+    // to catch `self.` in rescue reference expressions like `rescue => self.foo`.
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        // Check the reference (e.g., `rescue => self.foo` — the `self.foo` part)
+        if let Some(reference) = node.reference() {
+            // In `rescue => self.foo`, the reference is a CallTargetNode with a
+            // SelfNode receiver. We need to check if `self.foo` is redundant.
+            if let Some(call_target) = reference.as_call_target_node() {
+                let receiver = call_target.receiver();
+                if receiver.as_self_node().is_some()
+                    && self.self_receiver_is_redundant(
+                        &call_target.call_operator_loc(),
+                        call_target.message_loc().as_slice(),
+                        false,
+                    )
+                {
+                    self.add_redundant_self_offense(receiver.location());
+                }
+            }
+        }
+        // Continue walking children
+        ruby_prism::visit_rescue_node(self, node);
     }
 }
 

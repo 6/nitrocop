@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::node_type::{CALL_NODE, FALSE_NODE, TRUE_NODE};
 use crate::cop::shared::node_type_groups;
 use crate::cop::shared::util::RSPEC_DEFAULT_INCLUDE;
@@ -5,14 +6,28 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Matches RuboCop's `RSpec/PredicateMatcher` for both styles.
+///
+/// The default `inflected` style only rewrites predicates in `expect(actual)`
+/// and skips safe-navigation calls and `respond_to?` with multiple arguments.
+/// The explicit-style branch must also stay scoped to `expect(actual)`: corpus
+/// false positives came from flagging `is_expected.to include ...` and
+/// `is_expected.to be_empty`, which RuboCop intentionally leaves alone because
+/// its explicit matcher check only matches `expect(...)` receivers.
 pub struct PredicateMatcher;
 
-/// Default style `inflected`: flags `expect(foo.bar?).to be_truthy` →
-/// prefer `expect(foo).to be_bar`.
-///
-/// Corpus FP fix: safe navigation calls (`&.visible?`) cannot be rewritten
-/// to predicate matchers because the nil-safe semantics would be lost.
-/// Fixed by checking `call_operator_loc()` for `&.` on the predicate call.
+/// Built-in matchers that should NOT be flagged in explicit style.
+/// These are defined in RuboCop's `ExplicitHelper::BUILT_IN_MATCHERS`.
+const BUILT_IN_MATCHERS: &[&str] = &[
+    "be_truthy",
+    "be_falsey",
+    "be_falsy",
+    "have_attributes",
+    "have_received",
+    "be_between",
+    "be_within",
+];
+
 impl Cop for PredicateMatcher {
     fn name(&self) -> &'static str {
         "RSpec/PredicateMatcher"
@@ -59,6 +74,20 @@ impl Cop for PredicateMatcher {
         }
 
         if enforced_style == "explicit" {
+            let expect_call = match call.receiver().and_then(|receiver| receiver.as_call_node()) {
+                Some(c) if method_dispatch_predicates::is_command(&c, b"expect") => c,
+                _ => return,
+            };
+
+            let expect_args = match expect_call.arguments() {
+                Some(a) if a.arguments().iter().count() >= 1 => a,
+                _ => return,
+            };
+            let expect_arg_list: Vec<_> = expect_args.arguments().iter().collect();
+            if expect_arg_list.is_empty() {
+                return;
+            }
+
             // Explicit style: flag `expect(foo).to be_valid` → prefer explicit predicate
             let args = match call.arguments() {
                 Some(a) => a,
@@ -78,10 +107,34 @@ impl Cop for PredicateMatcher {
             }
             let matcher_name = matcher_call.name().as_slice();
             let matcher_str = std::str::from_utf8(matcher_name).unwrap_or("");
-            // Check for be_xxx or have_xxx pattern
-            if !(matcher_str.starts_with("be_") || matcher_str.starts_with("have_")) {
+
+            // Check for be_xxx or have_xxx pattern, or explicit special cases
+            let is_explicit_matcher = matcher_str.starts_with("be_")
+                || matcher_str.starts_with("have_")
+                || matcher_str == "include"
+                || matcher_str == "respond_to";
+
+            if !is_explicit_matcher {
                 return;
             }
+
+            // In explicit style, `include` must have exactly one argument to be flaggable.
+            // `include` with no args or multiple args cannot be rewritten to `include?`.
+            if matcher_str == "include" {
+                if let Some(args) = matcher_call.arguments() {
+                    if args.arguments().iter().count() != 1 {
+                        return;
+                    }
+                } else {
+                    return;
+                }
+            }
+
+            // BUILT_IN_MATCHERS: skip these even in explicit style
+            if BUILT_IN_MATCHERS.contains(&matcher_str) {
+                return;
+            }
+
             // AllowedExplicitMatchers: skip matchers in the allowlist
             if allowed_explicit.iter().any(|m| m == matcher_str) {
                 return;
@@ -277,6 +330,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_style_does_not_flag_is_expected_shorthand() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"it { is_expected.to include ['x', 1] }\nit { is_expected.not_to include foo }\nit { is_expected.to be_empty }\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert!(
+            diags.is_empty(),
+            "`is_expected` shorthand should not be flagged in explicit style"
+        );
+    }
+
+    #[test]
     fn allowed_explicit_matchers_skips_listed() {
         use crate::cop::CopConfig;
         use std::collections::HashMap;
@@ -367,6 +440,69 @@ mod tests {
             diags.len(),
             1,
             "eql(true) should be flagged in non-strict mode"
+        );
+    }
+
+    #[test]
+    fn explicit_style_flags_include_and_respond_to() {
+        // include and respond_to should be flagged in explicit style
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect(foo).to include('bar')\nexpect(foo).to respond_to(:method)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert_eq!(diags.len(), 2);
+        assert!(diags[0].message.contains("include?"));
+        assert!(diags[1].message.contains("respond_to?"));
+    }
+
+    #[test]
+    fn explicit_style_built_in_matchers_not_flagged() {
+        // Built-in matchers should NOT be flagged in explicit style
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source =
+            b"expect(foo).to be_truthy\nexpect(foo).to be_falsey\nexpect(foo).to be_falsy\nexpect(foo).to have_received(:bar)\nexpect(foo).to have_attributes(name: 'foo')\nexpect(foo).to be_between(1, 10)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert!(
+            diags.is_empty(),
+            "Built-in matchers should not be flagged in explicit style"
+        );
+    }
+
+    #[test]
+    fn explicit_style_exist_not_flagged() {
+        // exist is not a be_/have_ matcher, so it should not be flagged
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect(foo).to exist\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert!(
+            diags.is_empty(),
+            "exist should not be flagged in explicit style"
         );
     }
 }

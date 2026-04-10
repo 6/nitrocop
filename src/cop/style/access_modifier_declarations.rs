@@ -39,6 +39,48 @@ use ruby_prism::Visit;
 /// `check_inline_style_statements` method called from `visit_statements_node`, where
 /// we have access to sibling nodes. For each bare modifier, we look at right siblings
 /// (stopping at the next bare modifier) and only flag if any sibling is a `DefNode`.
+///
+/// ## Inline style scope fix (2026-04-06)
+///
+/// The inline variant still had 377 FPs because `check_inline_style_statements` only
+/// checked `in_macro_scope` (from the stack) but the cop doesn't push `NotMacroScope`
+/// for `def` bodies, `begin/rescue` blocks, or `case/when` branches — it tracks those
+/// via `group_scope_active`. RuboCop's `access_modifier?` (which calls `in_macro_scope?`)
+/// returns false in these contexts because `rescue` and `case` nodes break the
+/// transparent-parent chain, and `def` explicitly exits macro scope.
+///
+/// Fix: added `group_scope_active` check to `check_inline_style_statements`, matching
+/// the same guard already used by `check_group_style_statements`.
+///
+/// ## Inline style class method fix (2026-04-06)
+///
+/// The inline variant had 342 FPs due to a Prism-vs-parser-gem AST difference.
+/// RuboCop's `select_grouped_def_nodes` uses `def_type?` which only matches `:def`
+/// nodes, NOT `:defs` nodes (singleton method definitions like `def self.method`).
+/// In RuboCop's AST, `def self.method` is a `defs` node, but in Prism it's a `DefNode`
+/// with a `SelfNode` receiver. Our `has_grouped_defs` check was using `as_def_node().is_some()`
+/// which matched both instance and class methods, causing FPs for `private def self.method`.
+///
+/// Fix: changed `has_grouped_defs` to exclude `DefNode`s with receivers (class/singleton
+/// methods), matching RuboCop's behavior where only `:def` nodes are considered.
+///
+/// ## Inline style assignment scope fix (2026-04-08)
+///
+/// The inline variant had 78 FPs because assignment nodes (ConstantWriteNode,
+/// LocalVariableWriteNode, etc.) weren't breaking the macro scope chain. In RuboCop,
+/// `in_macro_scope?` walks up the parent chain and only treats `begin`, `kwbegin`,
+/// `block`, and `if`-body as transparent. Assignment nodes like `casgn` (constant
+/// assignment) are NOT transparent, so `CONST = SomeClass.new do ... private ... end`
+/// puts `private` outside macro scope, and RuboCop skips it. However,
+/// `class_constructor?` blocks (Class.new, Module.new, Struct.new, Data.define)
+/// re-establish macro scope even inside assignments.
+///
+/// Fix: added `visit_*_write_node` overrides for assignment node types that push
+/// `NotMacroScope`, breaking the macro scope chain. For class constructor blocks,
+/// push `InMacroScope` (class-like scope) instead of wrapper scope so they
+/// re-establish macro scope regardless of wrapping assignments. Also added
+/// `visit_and_node`/`visit_or_node` since logical operators are likewise
+/// non-transparent (e.g. `defined?(X) and Klass.class_eval do ... end`).
 pub struct AccessModifierDeclarations;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -75,6 +117,10 @@ struct AccessModifierVisitor<'a> {
     next_block_owner_kind: Option<StatementsOwnerKind>,
     /// Optional group-scope override for the direct block child of the current call node.
     next_block_group_scope: Option<bool>,
+    /// Whether the direct block child of the current call node should use class-like
+    /// macro scope (InMacroScope) instead of inheriting from the parent.
+    /// Set for class constructors (Class.new, Module.new, Struct.new, Data.define).
+    next_block_class_like_macro_scope: bool,
 }
 
 struct ModifierClassification<'a> {
@@ -268,6 +314,13 @@ impl AccessModifierVisitor<'_> {
             return;
         }
 
+        // Respect the same scope restrictions as group style: def bodies,
+        // begin/rescue, and case/when branches are not macro scope in RuboCop's
+        // `in_macro_scope?` (rescue/case break the transparent-parent chain).
+        if !self.group_scope_active {
+            return;
+        }
+
         for (index, stmt) in stmts.iter().enumerate() {
             let Some(call) = stmt.as_call_node() else {
                 continue;
@@ -280,6 +333,10 @@ impl AccessModifierVisitor<'_> {
             // RuboCop inline style: only flag if there are grouped def nodes
             // following this bare modifier (up to the next bare access modifier).
             // This mirrors RuboCop's `select_grouped_def_nodes(node).any?`.
+            // NOTE: In RuboCop's parser gem, `def self.login` is a `defs` node (singleton
+            // method def), not a `def` node. But in Prism, both are `DefNode` - the
+            // difference is that singleton method defs have a receiver. We must exclude
+            // DefNodes with receivers to match RuboCop's behavior.
             let has_grouped_defs = stmts[index + 1..]
                 .iter()
                 .take_while(|sibling| {
@@ -287,7 +344,11 @@ impl AccessModifierVisitor<'_> {
                         .as_call_node()
                         .is_some_and(|c| access_modifier_predicates::is_bare_access_modifier(&c))
                 })
-                .any(|sibling| sibling.as_def_node().is_some());
+                .any(|sibling| {
+                    sibling
+                        .as_def_node()
+                        .is_some_and(|def_node| def_node.receiver().is_none())
+                });
 
             if !has_grouped_defs {
                 continue;
@@ -461,7 +522,14 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
-        access_modifier_predicates::push_wrapper_scope(&mut self.macro_scope_stack);
+        // Class constructor blocks (Class.new, Module.new, etc.) establish macro
+        // scope like class/module nodes. Regular blocks inherit from parent.
+        let is_class_like = std::mem::take(&mut self.next_block_class_like_macro_scope);
+        if is_class_like {
+            access_modifier_predicates::push_class_like_scope(&mut self.macro_scope_stack);
+        } else {
+            access_modifier_predicates::push_wrapper_scope(&mut self.macro_scope_stack);
+        }
         let saved_owner = self.statements_owner_kind;
         let saved_group_scope = self.group_scope_active;
         self.statements_owner_kind = self
@@ -546,9 +614,83 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
         self.group_scope_active = saved_group_scope;
     }
 
+    // Assignment nodes break in_macro_scope? in RuboCop because they are not
+    // "transparent" parents (only begin, kwbegin, block, and if-body are
+    // transparent). Push NotMacroScope so nested blocks inside assignments
+    // correctly inherit non-macro scope.
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_constant_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_constant_path_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_local_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'pr>,
+    ) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_instance_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_class_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_global_variable_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableWriteNode<'pr>,
+    ) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_global_variable_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_multi_write_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    // Logical `and`/`or` nodes are not transparent parents in RuboCop's
+    // `in_macro_scope?`. For example:
+    //   defined?(PTY) and SomeClass.class_eval do
+    //     private
+    //     def helper; end
+    //   end
+    // The `and` wrapper breaks macro scope so `private` is not flagged.
+
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_and_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+        ruby_prism::visit_or_node(self, node);
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let saved_next_block_owner_kind = self.next_block_owner_kind;
         let saved_next_block_group_scope = self.next_block_group_scope;
+        let saved_next_block_class_like_macro_scope = self.next_block_class_like_macro_scope;
         if node
             .block()
             .and_then(|block| block.as_block_node())
@@ -558,6 +700,9 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
                 self.next_block_owner_kind = Some(StatementsOwnerKind::ProcLikeBlock);
             } else if call_is_class_constructor(node) {
                 self.next_block_group_scope = Some(true);
+                // Class constructors (Class.new, Module.new, etc.) re-establish macro
+                // scope, matching RuboCop's class_constructor? in in_macro_scope?.
+                self.next_block_class_like_macro_scope = true;
             }
         }
 
@@ -567,6 +712,7 @@ impl<'pr> Visit<'pr> for AccessModifierVisitor<'_> {
         ruby_prism::visit_call_node(self, node);
         self.next_block_owner_kind = saved_next_block_owner_kind;
         self.next_block_group_scope = saved_next_block_group_scope;
+        self.next_block_class_like_macro_scope = saved_next_block_class_like_macro_scope;
     }
 }
 
@@ -602,6 +748,7 @@ impl Cop for AccessModifierDeclarations {
             statements_owner_kind: StatementsOwnerKind::Other,
             next_block_owner_kind: None,
             next_block_group_scope: None,
+            next_block_class_like_macro_scope: false,
         };
 
         visitor.visit(&parse_result.node());
@@ -713,6 +860,116 @@ mod tests {
         assert!(
             diags[0].message.contains("protected"),
             "offense should be on `protected`, not `private`"
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_inside_def_body() {
+        // Bare `private` inside a def body is not in macro scope — RuboCop skips it
+        let source =
+            b"class Foo\n  def some_method\n    private\n\n    def nested; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier inside def body, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_inside_begin_rescue() {
+        // Bare `private` inside begin...rescue is not in macro scope
+        let source = b"class B\n  begin\n    private\n\n    def helper; end\n  rescue\n    nil\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier inside begin/rescue, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_inside_case_when() {
+        // Bare `private` inside case/when is not in macro scope
+        let source =
+            b"class D\n  case x\n  when :a\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier inside case/when, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_bare_modifier_before_class_method() {
+        // Bare `private` followed by `def self.method` (class method) should NOT be flagged.
+        // In RuboCop's parser, `def self.method` is a `defs` node (singleton method def),
+        // not a `def` node. RuboCop's `select_grouped_def_nodes` only considers `def` nodes.
+        // In Prism, `def self.method` is a `DefNode` with a `SelfNode` receiver.
+        // We must exclude DefNodes with receivers to match RuboCop's behavior.
+        let source = b"class Foo\n  private\n\n  def self.bar; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier before class method (def self.*), got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_in_block_under_constant_assignment() {
+        // CONST = SomeClass.new do ... private ... def helper ... end
+        // In RuboCop, casgn (constant assignment) breaks the in_macro_scope? chain,
+        // so the bare modifier is not considered an access modifier and is skipped.
+        let source = b"module Foo\n  Authenticate = CommandClass.new do\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier in block under constant assignment, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_in_block_under_local_var_assignment() {
+        // var = SomeClass.new do ... private ... def helper ... end
+        // Local variable assignment also breaks in_macro_scope? in RuboCop.
+        let source = b"module Foo\n  result = CommandClass.new do\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier in block under local variable assignment, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_no_offense_in_block_under_and_expression() {
+        // defined?(X) and SomeClass.class_eval do ... private ... def helper ... end
+        // In RuboCop, the `and` node is not a transparent parent for in_macro_scope?,
+        // so the block's contents are not in macro scope and bare modifiers are skipped.
+        let source = b"defined?(PTY) and defined?(IO.console) and TestIO_Console.class_eval do\n  private\n  def helper; end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert!(
+            diags.is_empty(),
+            "inline style should NOT flag bare modifier in block under and expression, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn inline_style_flags_in_class_new_block_under_constant_assignment() {
+        // BAR = Class.new do ... private ... def helper ... end
+        // Class.new is a class_constructor in RuboCop, so it re-establishes macro scope
+        // even when wrapped in a constant assignment.
+        let source =
+            b"module Foo\n  Bar = Class.new do\n    private\n\n    def helper; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierDeclarations, source, inline_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "inline style SHOULD flag bare modifier in Class.new block even under constant assignment"
         );
     }
 }

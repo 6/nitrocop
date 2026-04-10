@@ -120,6 +120,170 @@ def test_clone_repos_for_cop_uses_shared_clone_module():
         check_cop._clone_repos = original_clone
 
 
+def test_variant_only_repos_for_cop_returns_diverging_repos():
+    """variant_only_repos_for_cop finds repos with variant-only divergence."""
+    original = check_cop.load_variant_baselines
+    try:
+        check_cop.load_variant_baselines = lambda cop, run_id: {
+            "bar": {
+                "fp": 10, "fn": 5, "matches": 100,
+                "by_repo": {
+                    "repo-v1": {"fp": 5, "fn": 0},
+                    "repo-v2": {"fp": 0, "fn": 3},
+                },
+            },
+        }
+        result = check_cop.variant_only_repos_for_cop(
+            "Style/Foo", run_id=123, exclude=set(),
+        )
+        assert result == {"repo-v1", "repo-v2"}
+    finally:
+        check_cop.load_variant_baselines = original
+
+
+def test_variant_only_repos_for_cop_excludes_already_selected():
+    """Repos already in the default set are excluded."""
+    original = check_cop.load_variant_baselines
+    try:
+        check_cop.load_variant_baselines = lambda cop, run_id: {
+            "bar": {
+                "fp": 10, "fn": 5, "matches": 100,
+                "by_repo": {
+                    "repo-default": {"fp": 5, "fn": 0},
+                    "repo-v1": {"fp": 0, "fn": 3},
+                },
+            },
+        }
+        result = check_cop.variant_only_repos_for_cop(
+            "Style/Foo", run_id=123, exclude={"repo-default"},
+        )
+        assert result == {"repo-v1"}
+    finally:
+        check_cop.load_variant_baselines = original
+
+
+def test_variant_only_repos_for_cop_respects_cap():
+    """Only the top-N repos by FP+FN are returned."""
+    original = check_cop.load_variant_baselines
+    try:
+        by_repo = {f"repo-{i}": {"fp": i, "fn": 0} for i in range(1, 21)}
+        check_cop.load_variant_baselines = lambda cop, run_id: {
+            "bar": {"fp": 0, "fn": 0, "matches": 0, "by_repo": by_repo},
+        }
+        result = check_cop.variant_only_repos_for_cop(
+            "Style/Foo", run_id=123, exclude=set(), cap=5,
+        )
+        assert len(result) == 5
+        # Top 5 by FP: repo-20 through repo-16
+        assert "repo-20" in result
+        assert "repo-1" not in result
+    finally:
+        check_cop.load_variant_baselines = original
+
+
+def test_variant_only_repos_for_cop_aggregates_across_styles():
+    """FP+FN are summed across variant styles for ranking."""
+    original = check_cop.load_variant_baselines
+    try:
+        check_cop.load_variant_baselines = lambda cop, run_id: {
+            "bar": {
+                "fp": 0, "fn": 0, "matches": 0,
+                "by_repo": {"repo-a": {"fp": 3, "fn": 0}},
+            },
+            "baz": {
+                "fp": 0, "fn": 0, "matches": 0,
+                "by_repo": {"repo-a": {"fp": 0, "fn": 2}},
+            },
+        }
+        result = check_cop.variant_only_repos_for_cop(
+            "Style/Foo", run_id=123, exclude=set(), cap=10,
+        )
+        assert result == {"repo-a"}
+    finally:
+        check_cop.load_variant_baselines = original
+
+
+def test_variant_only_repos_for_cop_empty_without_run_id():
+    result = check_cop.variant_only_repos_for_cop(
+        "Style/Foo", run_id=None, exclude=set(),
+    )
+    assert result == set()
+
+
+def test_clone_repos_for_cop_includes_variant_only_repos():
+    """When check_variants=True, variant-only repos are cloned too."""
+    original_manifest = check_cop.MANIFEST_PATH
+    original_clone = check_cop._clone_repos
+    original_vb = check_cop.load_variant_baselines
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "manifest.jsonl"
+            # Write manifest with both repos
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            for repo_id in ["repo-default", "repo-variant"]:
+                entry = {"id": repo_id, "repo_url": "https://example.com/r.git", "sha": "abc"}
+                with manifest_path.open("a") as f:
+                    f.write(json.dumps(entry) + "\n")
+            check_cop.MANIFEST_PATH = manifest_path
+            # Clear cached manifest
+            check_cop._manifest_cache = None
+
+            check_cop.load_variant_baselines = lambda cop, run_id: {
+                "bar": {
+                    "fp": 0, "fn": 0, "matches": 0,
+                    "by_repo": {"repo-variant": {"fp": 5, "fn": 0}},
+                },
+            }
+
+            calls = []
+            check_cop._clone_repos = lambda dest, manifest, repo_ids=None, parallel=3: calls.append(
+                {"ids": repo_ids}
+            ) or 0
+
+            check_cop.clone_repos_for_cop(
+                "Style/Foo",
+                {"cop_activity_repos": {"Style/Foo": ["repo-default"]}, "by_repo_cop": {}},
+                check_variants=True,
+                variant_run_id=123,
+            )
+
+            assert len(calls) == 1
+            assert calls[0]["ids"] == {"repo-default", "repo-variant"}
+    finally:
+        check_cop.MANIFEST_PATH = original_manifest
+        check_cop._clone_repos = original_clone
+        check_cop.load_variant_baselines = original_vb
+        check_cop._manifest_cache = None
+
+
+def test_clone_repos_for_cop_no_variant_repos_without_flag():
+    """Without check_variants, variant-only repos are not added."""
+    original_manifest = check_cop.MANIFEST_PATH
+    original_clone = check_cop._clone_repos
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            check_cop.MANIFEST_PATH = tmp_path / "manifest.jsonl"
+            write_manifest(check_cop.MANIFEST_PATH)
+
+            calls = []
+            check_cop._clone_repos = lambda dest, manifest, repo_ids=None, parallel=3: calls.append(
+                {"ids": repo_ids}
+            ) or 0
+
+            check_cop.clone_repos_for_cop(
+                "Style/MixinUsage",
+                {"cop_activity_repos": {"Style/MixinUsage": ["demo-repo"]}, "by_repo_cop": {}},
+            )
+
+            assert len(calls) == 1
+            assert calls[0]["ids"] == {"demo-repo"}
+    finally:
+        check_cop.MANIFEST_PATH = original_manifest
+        check_cop._clone_repos = original_clone
+
+
 def test_rerun_local_per_repo_always_uses_per_repo_mode():
     original_ensure_binary_fresh = check_cop.ensure_binary_fresh
     original_clear_file_cache = check_cop.clear_file_cache
@@ -689,6 +853,89 @@ def test_run_variant_checks_returns_per_variant_results(tmp_path):
     assert results[0]["fn"] == 0
 
 
+def test_run_variant_checks_uses_per_repo_baselines(tmp_path):
+    """Variant baselines are summed only for sampled repos, not global."""
+    batches = tmp_path / "batches"
+    batches.mkdir()
+    (batches / "variant_batch_1.yml").write_text(
+        "inherit_from: ../baseline.yml\n"
+        "Style/Foo:\n"
+        "  EnforcedStyle: bar\n"
+    )
+
+    def fake_nc(repo_dir, *, cop=None, binary=None, timeout=120, cwd=None, config_override=None):
+        return {"count": 5, "offenses": [], "error": None}
+
+    def fake_rc(repo_dir, *, cop=None, config=None, timeout=120):
+        return {"count": 3}
+
+    # Global baseline: fp=50, fn=20 (across all repos)
+    # Per-repo baseline: repo_a has fp=3, fn=1; repo_b not in baseline
+    variant_baselines = {
+        "bar": {
+            "fp": 50, "fn": 20, "matches": 100,
+            "by_repo": {
+                "repo_a": {"fp": 3, "fn": 1},
+                "repo_c": {"fp": 10, "fn": 5},  # not sampled
+            },
+        },
+    }
+
+    results = check_cop.run_variant_checks(
+        cop_name="Style/Foo",
+        repo_dirs=[str(tmp_path / "repo_a"), str(tmp_path / "repo_b")],
+        batches_dir=str(batches),
+        run_nitrocop_fn=fake_nc,
+        run_rubocop_fn=fake_rc,
+        variant_baselines=variant_baselines,
+    )
+
+    assert len(results) == 1
+    # Local: 2 repos × (5-3) = 4 FP, 0 FN
+    assert results[0]["fp"] == 4
+    assert results[0]["fn"] == 0
+    # Baseline should be per-repo sum: repo_a(fp=3) + repo_b(fp=0) = 3
+    # NOT the global 50
+    assert results[0]["baseline_fp"] == 3
+    assert results[0]["baseline_fn"] == 1
+
+
+def test_run_variant_checks_falls_back_to_global_baseline(tmp_path):
+    """Without per-repo data (old artifacts), falls back to global baseline."""
+    batches = tmp_path / "batches"
+    batches.mkdir()
+    (batches / "variant_batch_1.yml").write_text(
+        "inherit_from: ../baseline.yml\n"
+        "Style/Foo:\n"
+        "  EnforcedStyle: bar\n"
+    )
+
+    def fake_nc(repo_dir, *, cop=None, binary=None, timeout=120, cwd=None, config_override=None):
+        return {"count": 5, "offenses": [], "error": None}
+
+    def fake_rc(repo_dir, *, cop=None, config=None, timeout=120):
+        return {"count": 5}
+
+    # Old-style baseline: no by_repo key
+    variant_baselines = {
+        "bar": {"fp": 50, "fn": 20, "matches": 100},
+    }
+
+    results = check_cop.run_variant_checks(
+        cop_name="Style/Foo",
+        repo_dirs=[str(tmp_path / "repo_a")],
+        batches_dir=str(batches),
+        run_nitrocop_fn=fake_nc,
+        run_rubocop_fn=fake_rc,
+        variant_baselines=variant_baselines,
+    )
+
+    assert len(results) == 1
+    # Falls back to global baseline
+    assert results[0]["baseline_fp"] == 50
+    assert results[0]["baseline_fn"] == 20
+
+
 def test_run_variant_checks_skips_cops_not_in_batch(tmp_path):
     """Cops not overridden in any batch get empty results."""
     batches = tmp_path / "batches"
@@ -724,6 +971,11 @@ def test_load_variant_baselines_from_file(tmp_path):
                     {"cop": "Style/Foo", "style_label": "bar", "matches": 80, "fp": 5, "fn": 3},
                     {"cop": "Style/Other", "style_label": "x", "matches": 10, "fp": 0, "fn": 0},
                 ],
+                "by_repo_cop": {
+                    "repo_a__abc": {"Style/Foo": {"fp": 3, "fn": 1, "matches": 40}},
+                    "repo_b__def": {"Style/Foo": {"fp": 2, "fn": 2, "matches": 40}},
+                    "repo_c__ghi": {"Style/Other": {"fp": 0, "fn": 0, "matches": 10}},
+                },
             },
             {
                 "name": "variant_batch_2",
@@ -741,6 +993,16 @@ def test_load_variant_baselines_from_file(tmp_path):
         assert "baz" in result
         assert result["baz"]["fp"] == 10
         assert "x" not in result  # Style/Other, not Style/Foo
+        # Per-repo data should be populated for batch 1
+        assert "by_repo" in result["bar"]
+        assert "repo_a__abc" in result["bar"]["by_repo"]
+        assert result["bar"]["by_repo"]["repo_a__abc"]["fp"] == 3
+        assert result["bar"]["by_repo"]["repo_a__abc"]["fn"] == 1
+        assert "repo_b__def" in result["bar"]["by_repo"]
+        # repo_c only has Style/Other, not Style/Foo
+        assert "repo_c__ghi" not in result["bar"]["by_repo"]
+        # Batch 2 has no by_repo_cop — by_repo should be empty
+        assert result["baz"]["by_repo"] == {}
     finally:
         cache_file.unlink(missing_ok=True)
 
@@ -922,6 +1184,7 @@ def test_run_rubocop_for_variant_filters_to_requested_cop(monkeypatch):
     def fake_run(cmd, **kwargs):
         class Result:
             stdout = rubocop_json
+            returncode = 0
         return Result()
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -948,6 +1211,7 @@ def test_run_rubocop_for_variant_deduplicates_by_path_line(monkeypatch):
     def fake_run(cmd, **kwargs):
         class Result:
             stdout = rubocop_json
+            returncode = 0
         return Result()
 
     monkeypatch.setattr("subprocess.run", fake_run)
@@ -991,3 +1255,83 @@ def test_run_variant_checks_includes_diverging_repos():
     assert dr["repo"] == "repo_a"
     assert dr["nc"] == 3
     assert dr["rc"] == 2
+
+
+# ── SUMMARY line FN location detail tests ──
+
+
+def _build_summary_detail(
+    fp_repos: list[tuple], fn_repos: list[tuple],
+    fp_examples: list, fn_examples: list,
+) -> str:
+    """Replicate the SUMMARY detail-building logic from check_cop.py."""
+    _repo_fp_locs: dict[str, list[str]] = {}
+    _repo_fn_locs: dict[str, list[str]] = {}
+    for ex in fp_examples:
+        loc = ex["loc"] if isinstance(ex, dict) else ex
+        try:
+            repo_id, filepath, line = check_cop._parse_example_loc(loc)
+            _repo_fp_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+        except (ValueError, IndexError):
+            pass
+    for ex in fn_examples:
+        loc = ex["loc"] if isinstance(ex, dict) else ex
+        try:
+            repo_id, filepath, line = check_cop._parse_example_loc(loc)
+            _repo_fn_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+        except (ValueError, IndexError):
+            pass
+    _fp_repo_ids = {r[0] for r in fp_repos}
+    _fn_repo_ids = {r[0] for r in fn_repos}
+    detail_parts: list[str] = []
+    for repo_id in sorted(_fp_repo_ids | _fn_repo_ids):
+        fp_locs = _repo_fp_locs.get(repo_id, [])
+        fn_locs = _repo_fn_locs.get(repo_id, [])
+        if repo_id in _fp_repo_ids and fp_locs:
+            loc_str = ",".join(fp_locs[:2])
+            detail_parts.append(f"{repo_id}(FP:{loc_str})")
+        elif repo_id in _fp_repo_ids:
+            detail_parts.append(f"{repo_id}(FP)")
+        if repo_id in _fn_repo_ids and fn_locs:
+            loc_str = ",".join(fn_locs[:2])
+            detail_parts.append(f"{repo_id}(FN:{loc_str})")
+        elif repo_id in _fn_repo_ids:
+            detail_parts.append(f"{repo_id}(FN)")
+    return " ".join(detail_parts[:10])
+
+
+def test_summary_detail_includes_fn_locations():
+    """SUMMARY detail should include FN locations from oracle examples."""
+    fp_repos = [("repo-a", 12, 10, 10, 2)]
+    fn_repos = [("repo-b", 5, 10, 10, 5)]
+    fp_examples = [{"loc": "repo-a: app/models/foo.rb:10"}]
+    fn_examples = [{"loc": "repo-b: lib/bar.rb:20"}, {"loc": "repo-b: lib/baz.rb:30"}]
+    detail = _build_summary_detail(fp_repos, fn_repos, fp_examples, fn_examples)
+    assert "repo-a(FP:app/models/foo.rb:10)" in detail
+    assert "repo-b(FN:lib/bar.rb:20,lib/baz.rb:30)" in detail
+
+
+def test_summary_detail_no_examples_uses_bare_kind():
+    """When oracle has no examples for a regressing repo, use bare FP/FN tag."""
+    fp_repos = [("repo-a", 12, 10, 10, 2)]
+    fn_repos = [("repo-b", 5, 10, 10, 5)]
+    detail = _build_summary_detail(fp_repos, fn_repos, [], [])
+    assert "repo-a(FP)" in detail
+    assert "repo-b(FN)" in detail
+
+
+def test_summary_detail_both_fp_and_fn_same_repo():
+    """When a repo has both FP and FN regressions, include both entries."""
+    fp_repos = [("repo-a", 12, 10, 10, 2)]
+    fn_repos = [("repo-a", 12, 10, 10, 2)]
+    fp_examples = [{"loc": "repo-a: app/foo.rb:5"}]
+    fn_examples = [{"loc": "repo-a: lib/bar.rb:15"}]
+    detail = _build_summary_detail(fp_repos, fn_repos, fp_examples, fn_examples)
+    assert "repo-a(FP:app/foo.rb:5)" in detail
+    assert "repo-a(FN:lib/bar.rb:15)" in detail
+
+
+def test_summary_detail_empty_when_no_regressions():
+    """No detail when there are no regressing repos."""
+    detail = _build_summary_detail([], [], [], [])
+    assert detail == ""

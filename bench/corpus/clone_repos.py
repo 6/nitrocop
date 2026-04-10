@@ -83,8 +83,9 @@ def clone_repos(
 
     print(f"  Cloning {len(to_clone)} repos...", file=sys.stderr)
 
-    def _clone_one(repo_info: dict) -> bool:
-        repo_dir = repos_dir / repo_info["id"]
+    def _clone_one(repo_info: dict) -> tuple[bool, str]:
+        repo_id = repo_info["id"]
+        repo_dir = repos_dir / repo_id
         try:
             repo_dir.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", str(repo_dir)],
@@ -94,18 +95,27 @@ def clone_repos(
                            capture_output=True, check=True, timeout=120)
             subprocess.run(["git", "-C", str(repo_dir), "checkout", "FETCH_HEAD"],
                            capture_output=True, check=True, timeout=30)
-            return True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            return True, repo_id
+        except subprocess.TimeoutExpired:
             shutil.rmtree(repo_dir, ignore_errors=True)
-            return False
+            return False, f"{repo_id} (timeout)"
+        except subprocess.CalledProcessError:
+            shutil.rmtree(repo_dir, ignore_errors=True)
+            return False, f"{repo_id} (clone failed — repo may be deleted or private)"
 
     ok = 0
+    failed: list[str] = []
     with ThreadPoolExecutor(max_workers=parallel) as pool:
         futures = {pool.submit(_clone_one, r): r["id"] for r in to_clone}
         for f in as_completed(futures):
-            if f.result():
+            success, detail = f.result()
+            if success:
                 ok += 1
+            else:
+                failed.append(detail)
     print(f"  Cloned {ok}/{len(to_clone)} repos", file=sys.stderr)
+    for msg in failed:
+        print(f"  ::warning::Clone failed: {msg}", file=sys.stderr)
     return ok
 
 

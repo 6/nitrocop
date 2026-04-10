@@ -28,6 +28,16 @@ use crate::parse::source::SourceFile;
 /// pattern. RuboCop's `on_int` only fires for standalone `:int` nodes (Parser gem uses
 /// distinct `:complex`/`:rational` types). Fix: check the byte after the `IntegerNode`
 /// location — if it's `i` or `r`, skip the node.
+///
+/// ## Investigation notes (2026-04-07) — variant: EnforcedOctalStyle: zero_only
+///
+/// **FP root cause (zero_only variant):** In `zero_only` mode, the cop was flagging
+/// octal literals with underscores like `0o100_666` and `0o100_644`. RuboCop's
+/// `OCTAL_ZERO_ONLY_REGEX` is `/^0[Oo][0-7]+$/` which does NOT match literals
+/// containing underscores (since `_` is not in `[0-7]`). The old code only checked
+/// `literal.starts_with("0o")` or `literal.starts_with("0O")` without verifying
+/// that the suffix contained only octal digits. Fix: added `&& literal[2..].bytes().all(|b|
+/// b.is_ascii_digit() && b < b'8')` to match RuboCop's regex behavior.
 pub struct NumericLiteralPrefix;
 
 impl Cop for NumericLiteralPrefix {
@@ -149,8 +159,12 @@ impl Cop for NumericLiteralPrefix {
                 ));
             }
         } else if enforced_octal_style == "zero_only" {
-            // Bad: 0o... or 0O...
-            if literal.starts_with("0o") || literal.starts_with("0O") {
+            // Bad: 0o... or 0O... ONLY if the suffix after 0o/0O contains
+            // only octal digits (matching RuboCop's OCTAL_ZERO_ONLY_REGEX).
+            // Octal literals with underscores like 0o100_666 should NOT be flagged.
+            if (literal.starts_with("0o") || literal.starts_with("0O"))
+                && literal[2..].bytes().all(|b| b.is_ascii_digit() && b < b'8')
+            {
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
@@ -166,4 +180,30 @@ impl Cop for NumericLiteralPrefix {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(NumericLiteralPrefix, "cops/style/numeric_literal_prefix");
+
+    fn zero_only_config() -> CopConfig {
+        let mut opts = std::collections::HashMap::new();
+        opts.insert(
+            "EnforcedOctalStyle".to_string(),
+            serde_yml::Value::String("zero_only".to_string()),
+        );
+        CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn zero_only_no_offense_octal_with_underscore() {
+        // 0o100_666 should NOT be flagged in zero_only mode - RuboCop's
+        // OCTAL_ZERO_ONLY_REGEX (/^0[Oo][0-7]+$/) does not match because
+        // underscore is not an octal digit
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &NumericLiteralPrefix,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/numeric_literal_prefix/no_offense.zero_only.rb"
+            ),
+            zero_only_config(),
+        );
+    }
 }

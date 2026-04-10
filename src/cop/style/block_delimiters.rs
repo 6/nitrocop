@@ -7,99 +7,32 @@ use std::collections::HashSet;
 /// Style/BlockDelimiters checks for uses of braces or do/end around single-line
 /// or multi-line blocks.
 ///
-/// ## Investigation findings (2026-03-08)
+/// ## Supported EnforcedStyle values
 ///
-/// Root cause of 2,263 FPs: RuboCop suppresses nested block offenses. When a block
-/// is flagged (e.g., outer multi-line `{...}`), RuboCop calls `ignore_node(block)` in
-/// the `add_offense` handler. This causes `part_of_ignored_node?` to return true for
-/// all blocks whose source range is contained within the flagged block. As a result,
-/// only the outermost offending block is flagged — inner blocks are suppressed.
+/// - `line_count_based` (default): single-line → braces, multi-line → do-end
+/// - `always_braces`: always prefer braces
+/// - `braces_for_chaining`: like line_count_based, but multi-line chained blocks use braces
+/// - `semantic`: braces for functional blocks (return value used), do-end for procedural
 ///
-/// nitrocop was missing this suppression: it flagged every multi-line `{...}` block
-/// independently, including those nested inside already-flagged blocks. This produced
-/// many duplicate offenses that RuboCop does not emit.
+/// ## Investigation findings (2026-04-05, variant styles)
 ///
-/// Additionally, blocks in non-parenthesized argument positions (already handled via
-/// `ignored_blocks`) were not propagating their suppression to nested child blocks.
-/// A block inside an ignored block's body should also be suppressed, matching
-/// RuboCop's `part_of_ignored_node?` range-containment check.
+/// Root cause of 506,090 FNs across three variant styles: the cop had an early return
+/// `if enforced_style != "line_count_based" { return; }` that skipped ALL processing for
+/// non-default styles. Implemented:
 ///
-/// Fix: track "suppressed ranges" (byte offset ranges). When a block is ignored
-/// (non-parenthesized arg) or flagged (offense registered), add its full byte range.
-/// Before checking any block, verify it is not contained within a suppressed range.
+/// - `always_braces`: flags any `do...end` block
+/// - `braces_for_chaining`: detects chained blocks (call is receiver of another call)
+///   and allows braces on chained multi-line blocks while requiring do-end on non-chained
+/// - `semantic`: detects return-value usage via parent context (assignment, chaining,
+///   argument position, last-in-scope) to distinguish functional vs procedural blocks
 ///
-/// ## Investigation findings (2026-03-15)
+/// ## Fix (2026-04-06): recursive hash/array traversal in rv marking
 ///
-/// Root cause of 188 FPs: chained method calls like `a.select { }.reject { }.each { }`
-/// In Parser AST, the outermost block (`.each`) wraps the entire chain, so RuboCop's
-/// `ignore_node` + `part_of_ignored_node?` naturally suppresses inner blocks.
-/// In Prism, BlockNode ranges only cover `{...}`, not the receiver chain. Fix: use
-/// the CallNode's range (which covers the full chain) for suppression instead of the
-/// BlockNode's range.
-///
-/// Root cause of some FNs: operator methods (`+`, `*`, etc.) with a single block-bearing
-/// argument were incorrectly having their argument blocks ignored. RuboCop's
-/// `single_argument_operator_method?` check skips the ignore logic for these cases.
-/// Fix: added `is_operator_method` check to skip `collect_ignored_blocks` for operators.
-///
-/// ## Investigation findings (2026-03-15, second pass)
-///
-/// Root cause of 68 FPs: `is_single_arg_operator` was too broad. It checked only
-/// `args.len() == 1` without verifying the argument is a block node. RuboCop's
-/// `single_argument_operator_method?` additionally checks `first_argument.block_type?`.
-/// When the operator's argument is a send/call chain (e.g., `a + items.map { }.join`),
-/// the argument is NOT a block type, so RuboCop proceeds to call `get_blocks` on it,
-/// finding and ignoring blocks within the expression tree. Fix: added block-type check.
-///
-/// Additional FP source: lambda nodes (`-> { }`) in non-parenthesized keyword args.
-/// In Parser AST, lambdas are block nodes, so RuboCop's `get_blocks` yields them and
-/// `ignore_node` suppresses all nested blocks. In Prism, lambdas are `LambdaNode`,
-/// which `collect_ignored_blocks` didn't handle. Fix: added LambdaNode handling that
-/// recurses into the lambda body to find and ignore nested blocks.
-///
-/// Root cause of 14 FNs: `super(...)` with blocks uses `SuperNode` / `ForwardingSuperNode`
-/// in Prism, not `CallNode`. The visitor only had `visit_call_node`. Fix: added
-/// `visit_super_node` and `visit_forwarding_super_node` handlers.
-///
-/// ## Investigation findings (2026-03-15, third pass)
-///
-/// Root cause of 6 FPs in two patterns:
-///
-/// 1. Blocks inside lambda bodies with assignment (4 FPs in pakyow): lambda body
-///    recursion via `collect_ignored_blocks_from_body` only handled `CallNode` and
-///    `StatementsNode`, missing assignment nodes like `LocalVariableWriteNode`. When
-///    a block appeared as the RHS of an assignment inside a lambda body in a keyword
-///    arg, it wasn't collected and suppressed. Fix: added handling for all assignment
-///    node types in `collect_ignored_blocks_from_body`.
-///
-/// 2. Hash[] constructor arguments (2 FPs): `Hash[list.map { }]` uses `[]` method,
-///    which in Prism has `opening_loc() = Some` (pointing to `[`), making it appear
-///    parenthesized. RuboCop treats `[]` calls as non-parenthesized for block-binding.
-///    Fix: exclude `[]` method name from the `is_parenthesized` check.
-///
-///
-/// ## Investigation findings (2026-03-15, smoke follow-up)
-///
-/// Root cause of 18 FNs on `ruby-formatter/rufo`: a previous change incorrectly added a
-/// `return_value_used?` carve-out to `EnforcedStyle: line_count_based`. In RuboCop 1.84.2,
-/// `line_count_based_block_style?` is just `node.multiline? ^ node.braces?`; the
-/// `return_value_used?` / `functional_block?` logic only applies to `semantic` style.
-/// That mistake suppressed real offenses like `expect { ... }.to output(...)` and
-/// `result = items.map { ... }`. Fix: removed the `return_value_used` tracking/exemption
-/// and added regression fixtures for chained/assigned multi-line brace blocks.
-///
-/// ## Investigation findings (2026-03-31)
-///
-/// Root cause of 1 FP in `thirdtank/brut`: blocks using `it` (implicit parameter) inside
-/// operator method arguments. The corpus config uses `TargetRubyVersion: 4.0`, which causes
-/// RuboCop's Parser to parse `reject { it =~ /.../ }` as an `:itblock` node instead of
-/// `:block`. RuboCop's `single_argument_operator_method?` checks `first_argument.block_type?`,
-/// which returns false for `:itblock` (and `:numblock`) since `block_type?` checks
-/// `@type == :block` exactly. When `single_argument_operator_method?` returns false,
-/// `on_send` proceeds to call `get_blocks`, which finds and ignores the blocks via
-/// `ignore_node`. In Prism, all blocks are `BlockNode` regardless of parameter style.
-/// Fix: added `is_explicit_block()` check that returns false when the block's parameters
-/// are `ItParametersNode` or `NumberedParametersNode`, matching Parser's type distinction.
+/// `mark_rv_used_on_call` and `mark_rv_of_scope_on_node` now recursively traverse
+/// hash and array nodes to mark nested calls. Previously, a block inside a hash value
+/// argument (e.g., `foo(a: items.map { ... })`) had its inner calls not marked as
+/// having return values used, causing false positives in semantic style where functional
+/// blocks with braces were incorrectly flagged as procedural.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -117,17 +50,16 @@ impl Cop for BlockDelimiters {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
-        let _procedural_methods = config.get_string_array("ProceduralMethods");
-        let _functional_methods = config.get_string_array("FunctionalMethods");
+        let procedural_methods = config
+            .get_string_array("ProceduralMethods")
+            .unwrap_or_else(|| vec!["tap".to_string()]);
+        let functional_methods = config
+            .get_string_array("FunctionalMethods")
+            .unwrap_or_else(|| vec!["let".to_string()]);
         let allowed_methods = config.get_string_array("AllowedMethods");
         let allowed_patterns = config.get_string_array("AllowedPatterns");
-        let _allow_braces_on_procedural =
-            config.get_bool("AllowBracesOnProceduralOneLiners", false);
+        let allow_braces_on_procedural = config.get_bool("AllowBracesOnProceduralOneLiners", false);
         let braces_required_methods = config.get_string_array("BracesRequiredMethods");
-
-        if enforced_style != "line_count_based" {
-            return;
-        }
 
         let allowed = allowed_methods
             .unwrap_or_else(|| vec!["lambda".to_string(), "proc".to_string(), "it".to_string()]);
@@ -143,6 +75,14 @@ impl Cop for BlockDelimiters {
             allowed_methods: allowed,
             allowed_patterns: patterns,
             braces_required_methods: braces_required,
+            enforced_style,
+            chained_blocks: HashSet::new(),
+            rv_used_calls: HashSet::new(),
+            rv_of_scope_calls: HashSet::new(),
+            procedural_methods,
+            functional_methods,
+            allow_braces_on_procedural_one_liners: allow_braces_on_procedural,
+            is_program_body: true,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -161,6 +101,23 @@ struct BlockDelimitersVisitor<'a> {
     allowed_methods: Vec<String>,
     allowed_patterns: Vec<String>,
     braces_required_methods: Vec<String>,
+    enforced_style: &'a str,
+    /// Block opening offsets that are chained (call is receiver of another call).
+    chained_blocks: HashSet<usize>,
+    /// Call node start offsets whose return value is used (for semantic style).
+    rv_used_calls: HashSet<usize>,
+    /// Call node start offsets in scope-return position (for semantic style).
+    rv_of_scope_calls: HashSet<usize>,
+    procedural_methods: Vec<String>,
+    functional_methods: Vec<String>,
+    allow_braces_on_procedural_one_liners: bool,
+    /// True until the first StatementsNode is visited (program body).
+    /// In Parser AST, single-statement programs have no `begin` wrapper,
+    /// so rv_of_scope is false for the single top-level expression.
+    /// Multi-statement programs have a `begin` wrapper where the last
+    /// child gets rv_of_scope. We replicate this by only marking the
+    /// last child of the program body when there are multiple statements.
+    is_program_body: bool,
 }
 
 impl<'a> BlockDelimitersVisitor<'a> {
@@ -181,7 +138,12 @@ impl<'a> BlockDelimitersVisitor<'a> {
         self.suppressed_ranges.push((start, end));
     }
 
-    fn check_block(&mut self, block_node: &ruby_prism::BlockNode<'_>, method_name: &[u8]) -> bool {
+    fn check_block(
+        &mut self,
+        block_node: &ruby_prism::BlockNode<'_>,
+        method_name: &[u8],
+        call_start: usize,
+    ) -> bool {
         let method_str = std::str::from_utf8(method_name).unwrap_or("");
 
         // Skip AllowedMethods (default: lambda, proc, it)
@@ -201,14 +163,15 @@ impl<'a> BlockDelimitersVisitor<'a> {
         let opening_loc = block_node.opening_loc();
         let closing_loc = block_node.closing_loc();
         let opening = opening_loc.as_slice();
+        let is_braces = opening == b"{";
 
         let (open_line, _) = self.source.offset_to_line_col(opening_loc.start_offset());
         let (close_line, _) = self.source.offset_to_line_col(closing_loc.start_offset());
         let is_single_line = open_line == close_line;
 
-        // BracesRequiredMethods: must use braces
+        // BracesRequiredMethods: must use braces (takes precedence over style)
         if self.braces_required_methods.iter().any(|m| m == method_str) {
-            if opening == b"do" {
+            if !is_braces {
                 let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
                 self.diagnostics.push(self.cop.diagnostic(
                     self.source,
@@ -226,31 +189,168 @@ impl<'a> BlockDelimitersVisitor<'a> {
 
         // require_do_end: single-line do-end blocks with rescue/ensure clauses
         // cannot be converted to braces (syntax error). Skip these.
-        if is_single_line && opening == b"do" && block_has_rescue_or_ensure(block_node) {
+        if is_single_line && !is_braces && block_has_rescue_or_ensure(block_node) {
             return false;
         }
 
-        // line_count_based style
-        if is_single_line && opening == b"do" {
-            let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Prefer `{...}` over `do...end` for single-line blocks.".to_string(),
-            ));
-            return true;
-        } else if !is_single_line && opening == b"{" {
-            let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
-            self.diagnostics.push(self.cop.diagnostic(
-                self.source,
-                line,
-                column,
-                "Prefer `do...end` over `{...}` for multi-line blocks.".to_string(),
-            ));
-            return true;
+        match self.enforced_style {
+            "line_count_based" => {
+                self.check_line_count_based(block_node, is_single_line, is_braces)
+            }
+            "always_braces" => self.check_always_braces(block_node, is_braces),
+            "braces_for_chaining" => {
+                let is_chained = self
+                    .chained_blocks
+                    .contains(&block_node.opening_loc().start_offset());
+                self.check_braces_for_chaining(block_node, is_single_line, is_braces, is_chained)
+            }
+            "semantic" => {
+                let is_chained = self
+                    .chained_blocks
+                    .contains(&block_node.opening_loc().start_offset());
+                let rv_used = self.rv_used_calls.contains(&call_start) || is_chained;
+                let rv_of_scope = self.rv_of_scope_calls.contains(&call_start);
+                self.check_semantic(
+                    block_node,
+                    method_name,
+                    is_single_line,
+                    !is_single_line,
+                    is_braces,
+                    rv_used,
+                    rv_of_scope,
+                )
+            }
+            _ => false,
+        }
+    }
+
+    fn check_line_count_based(
+        &mut self,
+        block_node: &ruby_prism::BlockNode<'_>,
+        is_single_line: bool,
+        is_braces: bool,
+    ) -> bool {
+        // line_count_based: multiline ^ braces → proper
+        if is_single_line && !is_braces {
+            self.emit_offense(
+                block_node,
+                "Prefer `{...}` over `do...end` for single-line blocks.",
+            );
+            true
+        } else if !is_single_line && is_braces {
+            self.emit_offense(
+                block_node,
+                "Prefer `do...end` over `{...}` for multi-line blocks.",
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_always_braces(
+        &mut self,
+        block_node: &ruby_prism::BlockNode<'_>,
+        is_braces: bool,
+    ) -> bool {
+        if !is_braces {
+            self.emit_offense(block_node, "Prefer `{...}` over `do...end` for blocks.");
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_braces_for_chaining(
+        &mut self,
+        block_node: &ruby_prism::BlockNode<'_>,
+        is_single_line: bool,
+        is_braces: bool,
+        is_chained: bool,
+    ) -> bool {
+        if is_single_line {
+            // Single-line: prefer braces
+            if !is_braces {
+                self.emit_offense(
+                    block_node,
+                    "Prefer `{...}` over `do...end` for single-line blocks.",
+                );
+                return true;
+            }
+        } else {
+            // Multi-line
+            if is_chained {
+                // Chained: prefer braces
+                if !is_braces {
+                    self.emit_offense(
+                        block_node,
+                        "Prefer `{...}` over `do...end` for multi-line chained blocks.",
+                    );
+                    return true;
+                }
+            } else {
+                // Not chained: prefer do-end
+                if is_braces {
+                    self.emit_offense(
+                        block_node,
+                        "Prefer `do...end` for multi-line blocks without chaining.",
+                    );
+                    return true;
+                }
+            }
         }
         false
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_semantic(
+        &mut self,
+        block_node: &ruby_prism::BlockNode<'_>,
+        method_name: &[u8],
+        is_single_line: bool,
+        _is_multiline: bool,
+        is_braces: bool,
+        rv_used: bool,
+        rv_of_scope: bool,
+    ) -> bool {
+        let method_str = std::str::from_utf8(method_name).unwrap_or("");
+        let is_functional_method = self.functional_methods.iter().any(|m| m == method_str);
+        let is_procedural_method = self.procedural_methods.iter().any(|m| m == method_str);
+        let functional_block = rv_used || rv_of_scope;
+
+        if is_braces {
+            // Proper if: functional_method, or functional_block, or (allow_one_liners && single-line)
+            let proper = is_functional_method
+                || functional_block
+                || (self.allow_braces_on_procedural_one_liners && is_single_line);
+            if !proper {
+                self.emit_offense(
+                    block_node,
+                    "Prefer `do...end` over `{...}` for procedural blocks.",
+                );
+                return true;
+            }
+        } else {
+            // do-end: proper if procedural_method or return value not used
+            let proper = is_procedural_method || !rv_used;
+            if !proper {
+                self.emit_offense(
+                    block_node,
+                    "Prefer `{...}` over `do...end` for functional blocks.",
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    fn emit_offense(&mut self, block_node: &ruby_prism::BlockNode<'_>, message: &str) {
+        let opening_loc = block_node.opening_loc();
+        let (line, column) = self.source.offset_to_line_col(opening_loc.start_offset());
+        self.diagnostics.push(
+            self.cop
+                .diagnostic(self.source, line, column, message.to_string()),
+        );
     }
 }
 
@@ -272,20 +372,6 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             && method_name != b"===";
 
         // Skip operator methods with a single block-bearing argument.
-        // RuboCop's `single_argument_operator_method?` check: for `a + b { }`,
-        // the `+` call should NOT mark `b`'s block as ignored, because the
-        // block is genuinely part of `b`'s call, not an ambiguous binding case.
-        // IMPORTANT: Only skip when the single argument IS itself a block node
-        // (i.e., a call whose block is the argument). When the argument is a
-        // send/call chain (e.g., `a + items.map { }.join`), the block is nested
-        // inside the expression and should be found via collect_ignored_blocks.
-        //
-        // RuboCop quirk: `block_type?` checks `@type == :block`, which returns
-        // false for `:itblock` (Ruby 4.0 `it` parameter) and `:numblock`
-        // (`_1`/`_2` numbered parameters). So `single_argument_operator_method?`
-        // returns false for those, causing `get_blocks` to run and ignore them.
-        // We replicate this by checking that the block has explicit parameters
-        // (BlockParametersNode), not it/numbered parameters.
         let is_single_arg_operator = is_operator_method(method_name)
             && node.arguments().is_some_and(|args| {
                 args.arguments().len() == 1
@@ -305,30 +391,53 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             }
         }
 
+        // Pre-mark context for chaining and return-value detection.
+        // If this call's receiver is a CallNode with a block, that block is chained
+        // and the receiver call's return value is used.
+        if let Some(receiver) = node.receiver() {
+            if let Some(recv_call) = receiver.as_call_node() {
+                self.rv_used_calls.insert(call_node_key(&recv_call));
+                if let Some(block) = recv_call.block() {
+                    if let Some(block_node) = block.as_block_node() {
+                        self.chained_blocks
+                            .insert(block_node.opening_loc().start_offset());
+                    }
+                }
+            }
+            // SuperNode as receiver of a chain
+            if let Some(super_node) = receiver.as_super_node() {
+                self.rv_used_calls
+                    .insert(super_node.keyword_loc().start_offset());
+            }
+            if let Some(fwd_super) = receiver.as_forwarding_super_node() {
+                self.rv_used_calls
+                    .insert(fwd_super.location().start_offset());
+            }
+        }
+
+        // Arguments to this call have their return values used.
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                mark_rv_used_on_call(&arg, &mut self.rv_used_calls);
+            }
+        }
+
         // Phase 2: Check this call's block (if any)
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
                 let offset = block_node.opening_loc().start_offset();
                 let block_end = block_node.closing_loc().end_offset();
 
-                // Use the call node's full range for suppression. In Prism,
-                // chained calls like `a.select { }.reject { }` have the outer
-                // CallNode covering the entire chain [0..end], while BlockNode
-                // ranges only cover `{...}`. Using the call node's range ensures
-                // inner blocks in a chain are contained within the suppressed range.
-                let call_start = node.location().start_offset();
+                let call_range_start = node.location().start_offset();
                 let call_end = node.location().end_offset();
+                let call_key = call_node_key(node);
 
                 if self.ignored_blocks.contains(&offset) {
-                    // Block is in non-parenthesized arg position — suppress it
-                    // and all nested blocks (RuboCop's part_of_ignored_node? behavior)
-                    self.suppress_range(call_start, call_end);
+                    self.suppress_range(call_range_start, call_end);
                 } else if !self.is_suppressed(offset, block_end) {
-                    // Block is not inside a suppressed range — check it
-                    let flagged = self.check_block(&block_node, method_name);
+                    let flagged = self.check_block(&block_node, method_name, call_key);
                     if flagged {
-                        // Suppress nested blocks (RuboCop's ignore_node in add_offense)
-                        self.suppress_range(call_start, call_end);
+                        self.suppress_range(call_range_start, call_end);
                     }
                 }
             }
@@ -339,18 +448,18 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
     }
 
     fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'_>) {
-        // SuperNode: `super(args) { ... }` or `super(args) do ... end`
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
                 let offset = block_node.opening_loc().start_offset();
                 let block_end = block_node.closing_loc().end_offset();
-                let call_start = node.location().start_offset();
+                let call_range_start = node.location().start_offset();
                 let call_end = node.location().end_offset();
+                let call_key = node.keyword_loc().start_offset();
 
                 if !self.is_suppressed(offset, block_end) {
-                    let flagged = self.check_block(&block_node, b"super");
+                    let flagged = self.check_block(&block_node, b"super", call_key);
                     if flagged {
-                        self.suppress_range(call_start, call_end);
+                        self.suppress_range(call_range_start, call_end);
                     }
                 }
             }
@@ -359,21 +468,426 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
     }
 
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'_>) {
-        // ForwardingSuperNode: `super { ... }` or `super do ... end` (no explicit args)
         if let Some(block_node) = node.block() {
             let offset = block_node.opening_loc().start_offset();
             let block_end = block_node.closing_loc().end_offset();
-            let call_start = node.location().start_offset();
+            let call_range_start = node.location().start_offset();
             let call_end = node.location().end_offset();
+            let call_key = node.location().start_offset();
 
             if !self.is_suppressed(offset, block_end) {
-                let flagged = self.check_block(&block_node, b"super");
+                let flagged = self.check_block(&block_node, b"super", call_key);
                 if flagged {
-                    self.suppress_range(call_start, call_end);
+                    self.suppress_range(call_range_start, call_end);
                 }
             }
         }
         ruby_prism::visit_forwarding_super_node(self, node);
+    }
+
+    // --- Context tracking for semantic & braces_for_chaining styles ---
+
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'_>) {
+        // Mark the last statement's call as rv_of_scope (return value of scope).
+        // This matches RuboCop's `parent.children.last == node` check.
+        let body: Vec<_> = node.body().iter().collect();
+        if self.is_program_body {
+            // Program body: only mark if multiple statements (matches Parser's
+            // begin wrapper — single-statement files have no begin, so block.parent
+            // is nil and rv_of_scope is false)
+            self.is_program_body = false;
+            if body.len() > 1 {
+                if let Some(last) = body.last() {
+                    mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
+                }
+            }
+        } else {
+            // Non-program body (def, block, class, etc.): always mark last child
+            if let Some(last) = body.last() {
+                mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_statements_node(self, node);
+    }
+
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+
+    fn visit_global_variable_write_node(&mut self, node: &ruby_prism::GlobalVariableWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOperatorWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_local_variable_operator_write_node(self, node);
+    }
+
+    fn visit_instance_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOperatorWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_instance_variable_operator_write_node(self, node);
+    }
+
+    fn visit_class_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOperatorWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_class_variable_operator_write_node(self, node);
+    }
+
+    fn visit_global_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOperatorWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_global_variable_operator_write_node(self, node);
+    }
+
+    fn visit_constant_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantOperatorWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_operator_write_node(self, node);
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_path_write_node(self, node);
+    }
+
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_path_operator_write_node(self, node);
+    }
+
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_call_operator_write_node(self, node);
+    }
+
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_call_and_write_node(self, node);
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_call_or_write_node(self, node);
+    }
+
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_index_operator_write_node(self, node);
+    }
+
+    fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_index_and_write_node(self, node);
+    }
+
+    fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_index_or_write_node(self, node);
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_local_variable_and_write_node(self, node);
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_local_variable_or_write_node(self, node);
+    }
+
+    fn visit_instance_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_instance_variable_and_write_node(self, node);
+    }
+
+    fn visit_instance_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_instance_variable_or_write_node(self, node);
+    }
+
+    fn visit_class_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_class_variable_and_write_node(self, node);
+    }
+
+    fn visit_class_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_class_variable_or_write_node(self, node);
+    }
+
+    fn visit_global_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_global_variable_and_write_node(self, node);
+    }
+
+    fn visit_global_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_global_variable_or_write_node(self, node);
+    }
+
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_and_write_node(self, node);
+    }
+
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_or_write_node(self, node);
+    }
+
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_path_and_write_node(self, node);
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'_>,
+    ) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_constant_path_or_write_node(self, node);
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'_>) {
+        mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
+        ruby_prism::visit_multi_write_node(self, node);
+    }
+
+    // Conditional and logical contexts mark contents as rv_of_scope
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'_>) {
+        // Block inside if/unless predicate: rv_used (it's used as a condition)
+        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        ruby_prism::visit_if_node(self, node);
+    }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'_>) {
+        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        ruby_prism::visit_unless_node(self, node);
+    }
+
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'_>) {
+        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        ruby_prism::visit_while_node(self, node);
+    }
+
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'_>) {
+        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        ruby_prism::visit_until_node(self, node);
+    }
+
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'_>) {
+        // Both sides of `and`/`or` are in rv_of_scope position
+        mark_rv_of_scope_on_node(&node.left(), &mut self.rv_of_scope_calls);
+        mark_rv_of_scope_on_node(&node.right(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_and_node(self, node);
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'_>) {
+        mark_rv_of_scope_on_node(&node.left(), &mut self.rv_of_scope_calls);
+        mark_rv_of_scope_on_node(&node.right(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_or_node(self, node);
+    }
+
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'_>) {
+        // Elements of array literals have their return values used
+        for element in node.elements().iter() {
+            mark_rv_of_scope_on_node(&element, &mut self.rv_of_scope_calls);
+        }
+        ruby_prism::visit_array_node(self, node);
+    }
+
+    fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'_>) {
+        if let Some(predicate) = node.predicate() {
+            mark_rv_used_on_call(&predicate, &mut self.rv_used_calls);
+        }
+        ruby_prism::visit_case_node(self, node);
+    }
+
+    fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'_>) {
+        if let Some(predicate) = node.predicate() {
+            mark_rv_used_on_call(&predicate, &mut self.rv_used_calls);
+        }
+        ruby_prism::visit_case_match_node(self, node);
+    }
+
+    fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'_>) {
+        // Propagate rv_used through parentheses: if the ParenthesesNode is
+        // in an rv_used position, its contents also have rv_used.
+        // RuboCop's `return_value_used?` recurses through begin_type? (parens).
+        // We handle this by marking the parens' body content if the parens
+        // themselves are marked rv_used.
+        // Note: we can't easily check if parens are in rv_used here, so we
+        // just propagate rv_of_scope from parent context to the child.
+        ruby_prism::visit_parentheses_node(self, node);
+    }
+
+    fn visit_range_node(&mut self, node: &ruby_prism::RangeNode<'_>) {
+        if let Some(left) = node.left() {
+            mark_rv_of_scope_on_node(&left, &mut self.rv_of_scope_calls);
+        }
+        if let Some(right) = node.right() {
+            mark_rv_of_scope_on_node(&right, &mut self.rv_of_scope_calls);
+        }
+        ruby_prism::visit_range_node(self, node);
+    }
+}
+
+/// Mark a node as having its return value used (for semantic style).
+/// Only marks if the node is a CallNode, SuperNode, or ForwardingSuperNode.
+/// Unique key for a CallNode — uses the method name offset (message_loc)
+/// instead of the call's full location. In Prism, chained calls like
+/// `a.b.c` all share the same start_offset (the location includes the
+/// receiver), so using start_offset would mark ALL calls in a chain as
+/// rv_used when only the receiver is. The method name is unique per call.
+fn call_node_key(call: &ruby_prism::CallNode<'_>) -> usize {
+    call.message_loc()
+        .map_or_else(|| call.location().start_offset(), |loc| loc.start_offset())
+}
+
+fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize>) {
+    if let Some(call) = node.as_call_node() {
+        rv_used.insert(call_node_key(&call));
+    } else if let Some(super_node) = node.as_super_node() {
+        rv_used.insert(super_node.keyword_loc().start_offset());
+    } else if let Some(fwd_super) = node.as_forwarding_super_node() {
+        rv_used.insert(fwd_super.location().start_offset());
+    } else if let Some(parens) = node.as_parentheses_node() {
+        // Propagate through parentheses: `(map do ... end)` → rv_used
+        if let Some(body) = parens.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                for stmt in stmts.body().iter() {
+                    mark_rv_used_on_call(&stmt, rv_used);
+                }
+            }
+        }
+    } else if let Some(hash) = node.as_hash_node() {
+        // Recursively mark calls in hash values: `{ k: map { ... } }` → rv_used
+        for element in hash.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_used_on_call(&assoc.value(), rv_used);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_used_on_call(&value, rv_used);
+                }
+            }
+        }
+    } else if let Some(arr) = node.as_array_node() {
+        // Recursively mark calls in array elements
+        for element in arr.elements().iter() {
+            mark_rv_used_on_call(&element, rv_used);
+        }
+    } else if let Some(kwh) = node.as_keyword_hash_node() {
+        // Recursively mark calls in keyword hash values
+        for element in kwh.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_used_on_call(&assoc.value(), rv_used);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_used_on_call(&value, rv_used);
+                }
+            }
+        }
+    }
+}
+
+/// Mark a node as being in return-value-of-scope position (for semantic style).
+fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashSet<usize>) {
+    if let Some(call) = node.as_call_node() {
+        rv_of_scope.insert(call_node_key(&call));
+    } else if let Some(super_node) = node.as_super_node() {
+        rv_of_scope.insert(super_node.keyword_loc().start_offset());
+    } else if let Some(fwd_super) = node.as_forwarding_super_node() {
+        rv_of_scope.insert(fwd_super.location().start_offset());
+    } else if let Some(hash) = node.as_hash_node() {
+        // Recursively mark calls in hash values
+        for element in hash.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_of_scope_on_node(&assoc.value(), rv_of_scope);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_of_scope_on_node(&value, rv_of_scope);
+                }
+            }
+        }
+    } else if let Some(arr) = node.as_array_node() {
+        // Recursively mark calls in array elements
+        for element in arr.elements().iter() {
+            mark_rv_of_scope_on_node(&element, rv_of_scope);
+        }
+    } else if let Some(kwh) = node.as_keyword_hash_node() {
+        // Recursively mark calls in keyword hash values
+        for element in kwh.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_of_scope_on_node(&assoc.value(), rv_of_scope);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_of_scope_on_node(&value, rv_of_scope);
+                }
+            }
+        }
     }
 }
 
@@ -888,6 +1402,357 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not flag block inside assignment in lambda body in keyword arg, got: {:?}",
+            diags
+        );
+    }
+
+    // --- Helper for creating config with EnforcedStyle ---
+
+    fn config_with_style(style: &str) -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        let mut options: HashMap<String, serde_yml::Value> = HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    // =========== always_braces tests ===========
+
+    #[test]
+    fn always_braces_offense_multi_line_do_end() {
+        let source = b"items.each do |x|\n  puts x\nend\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(
+            diags[0]
+                .message
+                .contains("Prefer `{...}` over `do...end` for blocks.")
+        );
+    }
+
+    #[test]
+    fn always_braces_offense_single_line_do_end() {
+        let source = b"each do |x| end\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(
+            diags[0]
+                .message
+                .contains("Prefer `{...}` over `do...end` for blocks.")
+        );
+    }
+
+    #[test]
+    fn always_braces_no_offense_single_line_braces() {
+        let source = b"each { |x| x }\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn always_braces_no_offense_multi_line_braces() {
+        let source = b"each { |x|\n  x\n}\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn always_braces_no_offense_allowed_method() {
+        let source = b"foo = lambda do\n  puts 42\nend\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn always_braces_offense_chained_do_end() {
+        let source = b"each do |x|\nend.map(&:to_s)\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+    }
+
+    // =========== braces_for_chaining tests ===========
+
+    #[test]
+    fn braces_for_chaining_offense_multi_line_chained_do_end() {
+        let source = b"each do |x|\nend.map(&:to_s)\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("multi-line chained blocks"));
+    }
+
+    #[test]
+    fn braces_for_chaining_no_offense_multi_line_chained_braces() {
+        let source = b"each { |x|\n}.map(&:to_sym)\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn braces_for_chaining_offense_multi_line_braces_no_chain() {
+        let source = b"each { |x|\n  x\n}\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("without chaining"));
+    }
+
+    #[test]
+    fn braces_for_chaining_no_offense_multi_line_do_end_no_chain() {
+        let source = b"each do |x|\n  x\nend\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn braces_for_chaining_offense_single_line_do_end() {
+        let source = b"each do |x| end\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("single-line blocks"));
+    }
+
+    #[test]
+    fn braces_for_chaining_no_offense_single_line_braces() {
+        let source = b"each { |x| x }\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn braces_for_chaining_allows_braces_when_chained_via_bracket() {
+        // `[{foo: :bar}].find { }.[:foo]` — [] is a chain
+        let source = b"foo = [{foo: :bar}].find { |h|\n  h.key?(:foo)\n}[:foo]\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    // =========== semantic tests ===========
+
+    #[test]
+    fn semantic_offense_braces_procedural() {
+        // Return value not used — procedural block should use do-end
+        let source = b"each { |x|\n  x\n}\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("procedural blocks"));
+    }
+
+    #[test]
+    fn semantic_offense_do_end_functional_assigned() {
+        // Return value is assigned — functional block should use braces
+        let source = b"foo = map do |x|\n  x\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("functional blocks"));
+    }
+
+    #[test]
+    fn semantic_offense_do_end_functional_attribute_assigned() {
+        // foo.bar = map do ... end — attribute assignment
+        let source = b"foo.bar = map do |x|\n  x\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("functional blocks"));
+    }
+
+    #[test]
+    fn semantic_no_offense_do_end_procedural() {
+        // Return value not used — do-end is proper for procedural
+        let source = b"each do |x|\n  puts x\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_functional_assigned() {
+        // Return value is assigned — braces are proper for functional
+        let source = b"foo = map { |x|\n  x\n}\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_functional_chained() {
+        // Return value is used via chaining — braces are proper
+        let source = b"map { |x|\n  x\n}.inspect\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_return_value_of_scope() {
+        // Block is last expression in another block — return value of scope
+        let source = b"block do\n  map { |x|\n    x\n  }\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_do_end_return_value_of_scope() {
+        // do-end block is last expression in scope — return_value_of_scope is true,
+        // but do-end check only uses return_value_used?, not return_value_of_scope
+        // Since rv_used is false, do-end is proper.
+        let source = b"block do\n  map do |x|\n    x\n  end\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_do_end_procedural_method() {
+        // `tap` is a procedural method — do-end is always proper for procedural methods
+        // even when return value is used
+        let config = {
+            use std::collections::HashMap;
+            let mut options: HashMap<String, serde_yml::Value> = HashMap::new();
+            options.insert(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("semantic".to_string()),
+            );
+            options.insert(
+                "ProceduralMethods".to_string(),
+                serde_yml::Value::Sequence(vec![serde_yml::Value::String("tap".to_string())]),
+            );
+            crate::cop::CopConfig {
+                options,
+                ..crate::cop::CopConfig::default()
+            }
+        };
+        let source = b"foo = bar.tap do |x|\n  x.age = 3\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_functional_method() {
+        // `let` is a functional method — braces are always proper
+        let config = {
+            use std::collections::HashMap;
+            let mut options: HashMap<String, serde_yml::Value> = HashMap::new();
+            options.insert(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("semantic".to_string()),
+            );
+            options.insert(
+                "FunctionalMethods".to_string(),
+                serde_yml::Value::Sequence(vec![serde_yml::Value::String("let".to_string())]),
+            );
+            crate::cop::CopConfig {
+                options,
+                ..crate::cop::CopConfig::default()
+            }
+        };
+        let source = b"let(:foo) {\n  x\n}\n";
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_logical_or() {
+        // Block used in logical or — rv_of_scope
+        let source = b"any? { |c| c } || foo\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_array() {
+        // Block used in array element — rv_of_scope
+        let source = b"[detect { true }, other]\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_hash_value_arg() {
+        // Block inside hash value argument: `foo(a: items.map { ... })`
+        // The inner block's return value flows through the hash to the method arg.
+        // This was a false positive where nitrocop incorrectly flagged it.
+        let source = b"where(id: items.map { |x| x.id })\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_if_condition() {
+        // Block used as if condition — rv_used
+        let source = b"if any? { |x| x }\n  return\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_range() {
+        // Block in range — rv_of_scope
+        let source = b"detect { true }..other\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_offense_do_end_in_parens_passed_to_method() {
+        // `puts (map do |x| x end)` — return value used via parens
+        let source = b"puts (map do |x|\n  x\nend)\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("functional blocks"));
+    }
+
+    #[test]
+    fn semantic_no_offense_do_end_chained_each_not_functional() {
+        // `items.each do |x| end` — .each return value not used, should be procedural (do-end OK)
+        // Regression: call_node_key must use message_loc, not location().start_offset(),
+        // because chained calls share the same start_offset in Prism.
+        let source = b"items.each do |x|\n  puts x\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(
+            diags.is_empty(),
+            "standalone .each should not be flagged as functional: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_compound_assignment() {
+        // `command.extra_schemas += [...].map { |f| ... }` — rv used via +=
+        let source =
+            b"command.extra_schemas += [\"a\", \"b\"].\n  map { |f| File.expand_path(f) }\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(
+            diags.is_empty(),
+            "braces in compound assignment should be functional: {:?}",
             diags
         );
     }

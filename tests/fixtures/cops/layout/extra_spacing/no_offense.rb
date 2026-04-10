@@ -176,18 +176,6 @@ columns << :id
 expect(clo)  .to be_within(0.1).of(1.0)
 expect(clo)  .not_to be_nil
 
-# Multiline block receivers can align a chained call operator on the closing line
-expect {
-  Dry::Schema.Params do
-    required(:foo).maybe(:empty?)
-  end
-}          .to raise_error Dry::Schema::InvalidSchemaError
-
-# Multiline literal receivers can also align a chained call operator
-data = {
-  a: 1
-}  .transform_values
-
 # Heredoc openers can be followed by a same-line block close
 let(:hiera_config) { <<~CONF  }
 ---
@@ -207,3 +195,29 @@ EOM
 code = <<~__CODE     # insert the code update
   body
 __CODE
+
+# Heredoc interpolation lines starting with #{ are not comments
+# Adjacent #{} lines can have alignment
+<<~UNIT_CONFIG_FILE
+  #{unit_settings.compact.map { |key, value| "#{key}=#{value}" }.join("\n")}
+  #{environment.compact.map   { |key, value| "Environment=#{key}=#{value}" }.join("\n")}
+UNIT_CONFIG_FILE
+
+# Alignment across commented-out #{...} lines (they ARE comments, not interpolation)
+# RuboCop's alignment search skips these lines and finds real code alignment.
+functions = [
+  {:name => :each,             :args => '[1,2,3]'},
+  {:name => :epp,              :args => '"template"'},
+  {:name => :filter,           :args => '[4,5,6]'},
+  # find_file() called by binary_file
+  #{:name => :find_file,           :args => '[4,5,6]'},
+  {:name => :inline_epp,       :args => '"test"'},
+  #{:name => :lest,             :args => '100'},
+  {:name => :map,              :args => '[7,8,9]'},
+]
+
+# Interpolated string alignment: = aligned with = on adjacent line
+# RuboCop's tokenizer splits interpolated strings into tSTRING_BEG + contents,
+# so the opening " is a separate token that matches the closing " of "" above.
+aws_sqs_queue_url = ""
+aws_sqs_queue_url =  "https://sqs.#{url}.amazonaws.com" if url

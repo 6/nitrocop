@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::node_type::{
     CALL_NODE, FALSE_NODE, FLOAT_NODE, INTEGER_NODE, NIL_NODE, STRING_NODE, SYMBOL_NODE, TRUE_NODE,
 };
@@ -34,6 +35,12 @@ use crate::parse::source::SourceFile;
 /// - FN: RuboCop treats `__FILE__` as a constant portion, except for the explicit
 ///   `__FILE__ == $0` / `$PROGRAM_NAME` exemption. Added SourceFileNode support and the
 ///   matching exemption.
+///
+/// Variant style divergence (`EnforcedStyle: require_for_all_comparison_operators`):
+/// - FP: safe-navigation operator sends like `foo&.>(0)` are Prism `CallNode`s, but
+///   RuboCop only hooks regular `send`, not `csend`, so they must be skipped.
+/// - FN: RuboCop uses `first_argument` for dotted operator methods such as
+///   `(2**500).<(1,2)`, so extra invalid arguments must not suppress the offense.
 pub struct YodaCondition;
 
 /// RuboCop's `constant_portion?` checks `node.literal? || node.const_type?`.
@@ -142,6 +149,10 @@ impl Cop for YodaCondition {
             return;
         }
 
+        if method_dispatch_predicates::is_safe_navigation(&call) {
+            return;
+        }
+
         // For *_equality_operators_only styles, skip non-equality operators
         let equality_only = enforced_style == "forbid_for_equality_operators_only"
             || enforced_style == "require_for_equality_operators_only";
@@ -159,20 +170,19 @@ impl Cop for YodaCondition {
             None => return,
         };
 
-        let arg_list: Vec<_> = args.arguments().iter().collect();
-        if arg_list.len() != 1 {
+        let Some(argument) = args.arguments().iter().next() else {
             return;
-        }
+        };
 
         let require_yoda = enforced_style == "require_for_all_comparison_operators"
             || enforced_style == "require_for_equality_operators_only";
 
-        if is_source_file_equal_program_name(&receiver, &arg_list[0]) {
+        if is_source_file_equal_program_name(&receiver, &argument) {
             return;
         }
 
         let lhs_constant = is_constant_portion(&receiver);
-        let rhs_constant = is_constant_portion(&arg_list[0]);
+        let rhs_constant = is_constant_portion(&argument);
 
         // Both constant or both non-constant: not a Yoda issue
         if lhs_constant == rhs_constant {
@@ -215,9 +225,45 @@ impl Cop for YodaCondition {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::run_cop_full;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config, run_cop_full,
+    };
 
     crate::cop_fixture_tests!(YodaCondition, "cops/style/yoda_condition");
+
+    fn require_all_comparison_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".into(),
+            serde_yml::Value::String("require_for_all_comparison_operators".into()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn require_all_comparison_operators_offense_fixture() {
+        assert_cop_offenses_full_with_config(
+            &YodaCondition,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/yoda_condition/require_for_all_comparison_operators_offense.rb"
+            ),
+            require_all_comparison_config(),
+        );
+    }
+
+    #[test]
+    fn require_all_comparison_operators_no_offense_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &YodaCondition,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/yoda_condition/require_for_all_comparison_operators_no_offense.rb"
+            ),
+            require_all_comparison_config(),
+        );
+    }
 
     #[test]
     fn both_literals_not_flagged() {
@@ -236,15 +282,8 @@ mod tests {
     #[test]
     fn require_yoda_style() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("require_for_all_comparison_operators".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = require_all_comparison_config();
         // Non-Yoda should be flagged
         let source = b"x == 1\n";
         let diags = run_cop_full_with_config(&YodaCondition, source, config.clone());
@@ -257,6 +296,22 @@ mod tests {
         assert!(
             diags2.is_empty(),
             "Should allow Yoda conditions with require style"
+        );
+    }
+
+    #[test]
+    fn require_yoda_style_flags_dot_operator_call() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let diags = run_cop_full_with_config(
+            &YodaCondition,
+            b"count.>(0)\n",
+            require_all_comparison_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should still flag regular dotted operator calls"
         );
     }
 

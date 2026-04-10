@@ -23,10 +23,10 @@ def test_aggregate_rows_sums_variant_across_shards():
         # Default rows — kept as-is
         {"cop": "Style/Foo", "bl_fp": 3, "bl_fn": 0, "local_fp": 2, "local_fn": 0, "result": "pass"},
         {"cop": "Style/Foo", "bl_fp": 3, "bl_fn": 0, "local_fp": 1, "local_fn": 0, "result": "pass"},
-        # Variant rows — should be aggregated
-        {"cop": "Style/Foo (comma)", "bl_fp": 10, "bl_fn": 5, "local_fp": 100, "local_fn": 20, "result": "pass"},
-        {"cop": "Style/Foo (comma)", "bl_fp": 10, "bl_fn": 5, "local_fp": 200, "local_fn": 30, "result": "pass"},
-        {"cop": "Style/Foo (comma)", "bl_fp": 10, "bl_fn": 5, "local_fp": 50, "local_fn": 10, "result": "pass"},
+        # Variant rows — both baselines and locals should be summed
+        {"cop": "Style/Foo (comma)", "bl_fp": 2, "bl_fn": 1, "local_fp": 100, "local_fn": 20, "result": "pass"},
+        {"cop": "Style/Foo (comma)", "bl_fp": 3, "bl_fn": 2, "local_fp": 200, "local_fn": 30, "result": "pass"},
+        {"cop": "Style/Foo (comma)", "bl_fp": 0, "bl_fn": 0, "local_fp": 50, "local_fn": 10, "result": "pass"},
     ]
     result = mod.aggregate_rows(rows)
 
@@ -39,7 +39,8 @@ def test_aggregate_rows_sums_variant_across_shards():
     assert len(variant) == 1
     assert variant[0]["local_fp"] == 350  # 100 + 200 + 50
     assert variant[0]["local_fn"] == 60   # 20 + 30 + 10
-    assert variant[0]["bl_fp"] == 10      # baseline stays as-is (global)
+    assert variant[0]["bl_fp"] == 5       # 2 + 3 + 0 (summed across shards)
+    assert variant[0]["bl_fn"] == 3       # 1 + 2 + 0
 
 
 def test_aggregate_rows_variant_regression_detected():
@@ -64,6 +65,29 @@ def test_aggregate_rows_variant_regression_even_with_errors():
     result = mod.aggregate_rows(rows)
     variant = [r for r in result if mod.is_variant_row(r["cop"])]
     assert variant[0]["result"] == "regression"  # not "error"
+
+
+def test_aggregate_rows_variant_per_shard_fail_overrides_aggregate_improvement():
+    """If any shard reported fail, aggregate should be regression even if net delta improves."""
+    rows = [
+        # Shard 0: big improvement
+        {"cop": "Style/Foo (bar)", "bl_fp": 500, "bl_fn": 300, "local_fp": 100, "local_fn": 50, "result": "pass"},
+        # Shard 1: per-repo regression (local FN > baseline FN)
+        {"cop": "Style/Foo (bar)", "bl_fp": 10, "bl_fn": 20, "local_fp": 0, "local_fn": 100, "result": "fail",
+         "detail": "repo_x(FN:file.rb:1)"},
+    ]
+    result = mod.aggregate_rows(rows)
+    variant = [r for r in result if mod.is_variant_row(r["cop"])]
+    assert len(variant) == 1
+    # Aggregate is a net improvement: local_fp=100 < bl_fp=510, local_fn=150 < bl_fn=320
+    assert variant[0]["local_fp"] == 100
+    assert variant[0]["local_fn"] == 150
+    assert variant[0]["bl_fp"] == 510
+    assert variant[0]["bl_fn"] == 320
+    # But result should be regression because shard 1 failed
+    assert variant[0]["result"] == "regression"
+    # Details from the failing shard should be preserved
+    assert "repo_x(FN:file.rb:1)" in variant[0]["details"]
 
 
 def test_aggregate_rows_variant_improvement_passes():

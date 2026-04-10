@@ -357,6 +357,17 @@ items.each do |l|
   process(l)
 end
 
+# next if with line-continuation backslashes and blank line after condition
+contents.each do |t|
+  next if t == image \
+          || t.vendor != image.vendor \
+          || t.variant != image.variant \
+          || t.arch != image.arch \
+          || t.distribution != image.distribution \
+
+  t.tags.delete_if { |tag| image.tags.include?(tag) }
+end
+
 # Modifier unless inside parenthesized expression — no right sibling in Parser AST
 # because parens create a begin node wrapping the modifier
 when "file" then
@@ -366,6 +377,16 @@ when "file" then
   if force_doc or RDoc::Parser.can_parse(rel_file_name) then
     do_something
   end
+
+# Modifier if inside parenthesized array element — closing `)` is not a right sibling
+[
+  root_item,
+  (
+    forecast_item if Setting.enable_forecast &&
+      Sensor::Config.exists?(:inverter_power_forecast)
+  ),
+  essentials_item,
+].compact
 
 # next if with hash arg containing string "}" — multiline condition with blank line after
 while rest?

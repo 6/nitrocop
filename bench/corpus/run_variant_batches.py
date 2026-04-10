@@ -132,11 +132,28 @@ def run_variant_batches(
         batch_cops = sorted(style_map.get(batch_name, {}).keys())
         only_flag = ["--only", ",".join(batch_cops)] if batch_cops else []
 
+        # Layer per-repo vendor exclusions on top of the batch config.
+        # This ensures variant runs skip vendor/**/* and other junk dirs
+        # just like the default-config oracle does via gen_repo_config.py.
+        try:
+            gen_result = subprocess.run(
+                [sys.executable, str(CORPUS_DIR / "gen_repo_config.py"),
+                 repo_id, str(batch_config), abs_dest],
+                capture_output=True, text=True, timeout=10,
+            )
+            effective_config = (
+                gen_result.stdout.strip()
+                if gen_result.returncode == 0 and gen_result.stdout.strip()
+                else str(batch_config)
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            effective_config = str(batch_config)
+
         # nitrocop (always run — it's fast)
         nc_ok = _run_tool(
             cmd=[
                 binary, "--preview", "--format", "json", "--no-cache",
-                "--config", str(batch_config), *only_flag, abs_dest,
+                "--config", effective_config, *only_flag, abs_dest,
             ],
             env=env, timeout=timeout,
             stdout_path=nc_json, stderr_path=nc_err,
@@ -164,7 +181,7 @@ def run_variant_batches(
                 cmd=[
                     "bundle", "exec", "rubocop",
                     "--require", str(rescue_file),
-                    "--config", str(batch_config),
+                    "--config", effective_config,
                     *only_flag,
                     "--format", "json", "--force-exclusion", "--cache", "false",
                     abs_dest,
@@ -285,6 +302,23 @@ def merge_variant_results(
                 entry["by_cop"] = filtered
             else:
                 entry["by_cop"] = data["by_cop"]
+        # Preserve per-repo divergence data for per-repo variant baselines.
+        # Only repos with FP+FN > 0 are included (filtered by diff_results.py).
+        if "by_repo_cop" in data:
+            batch_cops = style_map.get(batch_name, {})
+            if batch_cops:
+                # Filter to only repos/cops with overrides in this batch
+                filtered_repo_cop: dict = {}
+                for repo_id, cop_data in data["by_repo_cop"].items():
+                    filtered_cops = {
+                        cop: stats for cop, stats in cop_data.items()
+                        if cop in batch_cops
+                    }
+                    if filtered_cops:
+                        filtered_repo_cop[repo_id] = filtered_cops
+                entry["by_repo_cop"] = filtered_repo_cop
+            else:
+                entry["by_repo_cop"] = data["by_repo_cop"]
         merged["batches"].append(entry)
     return merged
 

@@ -1,0 +1,227 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_annotation_comment
+          - fuzz_directive_parsing
+          - fuzz_parse_source
+          - fuzz_all_cops
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run fuzzer — ${{ matrix.target }}
+        id: fuzz
+        run: |
+          cd fuzz
+          CORPUS_DIR="corpus/${{ matrix.target }}"
+          SEEDS_DIR="seeds/${{ matrix.target }}"
+          mkdir -p "$CORPUS_DIR"
+          SEEDS_ARG=""
+          if [ -d "$SEEDS_DIR" ]; then
+            SEEDS_ARG="$SEEDS_DIR"
+          fi
+          # Nightly run: 30 minutes per target
+          # Corpus dir is listed first (read-write), seeds dir second (read-only)
+          if cargo +nightly fuzz run ${{ matrix.target }} $CORPUS_DIR $SEEDS_ARG -- \
+            -max_total_time=1800 \
+            -max_len=4096; then
+            echo "found_crash=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found_crash=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect crash artifacts
+        if: steps.fuzz.outputs.found_crash == 'true'
+        id: collect
+        run: |
+          CRASH_DIR="fuzz/artifacts/${{ matrix.target }}"
+          SEEDS_DIR="fuzz/seeds/${{ matrix.target }}"
+          mkdir -p "$SEEDS_DIR"
+
+          if [ -d "$CRASH_DIR" ] && [ "$(ls -A "$CRASH_DIR" 2>/dev/null)" ]; then
+            # Copy only crash-triggering inputs, not the evolved corpus
+            for f in "$CRASH_DIR"/*; do
+              cp "$f" "$SEEDS_DIR"/
+              echo "  $(basename "$f")"
+            done
+            echo "has_new_seeds=true" >> "$GITHUB_OUTPUT"
+            echo "Collected $(ls "$CRASH_DIR" | wc -l) crash inputs"
+          else
+            echo "has_new_seeds=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate app token
+        if: steps.collect.outputs.has_new_seeds == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Open PR with crash seeds
+        if: steps.collect.outputs.has_new_seeds == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          BRANCH="fuzz/crash-${{ matrix.target }}-$(date +%Y%m%d)"
+          COMMIT_MSG="Add fuzz crash seeds for ${{ matrix.target }}"
+
+          python3 scripts/workflows/workflow_git.py configure \
+            --repo "${{ github.repository }}" \
+            --identity github-actions \
+            --unset-extraheader
+
+          git checkout -B "$BRANCH"
+          git add fuzz/seeds/${{ matrix.target }}/
+          git commit -m "$COMMIT_MSG"
+          git push origin "$BRANCH" --force
+
+          python3 scripts/workflows/workflow_git.py promote \
+            --repo "${{ github.repository }}" \
+            --branch "$BRANCH" \
+            --message "$COMMIT_MSG"
+
+          CRASH_DIR="fuzz/artifacts/${{ matrix.target }}"
+          CRASH_LIST=$(ls "$CRASH_DIR" 2>/dev/null | head -20)
+
+          # Build per-crash reproduction details: hex dump + repro command
+          CRASH_DETAILS=""
+          for f in "$CRASH_DIR"/*; do
+            [ -f "$f" ] || continue
+            NAME=$(basename "$f")
+            HEX=$(xxd -l 256 "$f" | head -8)
+            CRASH_DETAILS="${CRASH_DETAILS}
+          <details>
+          <summary><code>${NAME}</code> ($(wc -c < "$f") bytes)</summary>
+
+          \`\`\`
+          ${HEX}
+          \`\`\`
+
+          **Reproduce:**
+          \`\`\`bash
+          cargo +nightly fuzz run ${{ matrix.target }} fuzz/seeds/${{ matrix.target }}/ -- -runs=1
+          \`\`\`
+          </details>
+          "
+          done
+
+          PR_BODY=$(cat <<EOF
+          ## Fuzz crashes found
+
+          The nightly fuzz run found crashing inputs for \`${{ matrix.target }}\`.
+
+          ### Crash artifacts
+          ${CRASH_DETAILS}
+
+          These inputs have been added to \`fuzz/seeds/${{ matrix.target }}/\` so they serve as regression tests once the underlying bugs are fixed.
+
+          [Workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          EOF
+          )
+
+          gh pr create \
+            --title "Fuzz: crashes found in ${{ matrix.target }}" \
+            --body "$PR_BODY" \
+            --head "$BRANCH" \
+            --base main
+
+  perf-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: ruby/setup-ruby@v1
+
+      - name: Install hyperfine
+        run: cargo install hyperfine
+
+      - name: Setup benchmark repo
+        run: cargo run --release --bin bench_nitrocop -- setup
+
+      - name: Run quick benchmark
+        run: cargo run --release --bin bench_nitrocop -- quick --output bench/quick_results_ci.md
+
+      - name: Print results
+        run: cat bench/quick_results_ci.md
+
+      - name: Generate app token
+        if: "!cancelled()"
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Open PR with updated results
+        if: "!cancelled()"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          # Stage first so diff detects both new (untracked) and modified files
+          git add bench/quick_results_ci.md 2>/dev/null || true
+          if git diff --cached --quiet -- bench/quick_results_ci.md; then
+            echo "No changes to bench/quick_results_ci.md"
+            exit 0
+          fi
+
+          BRANCH="perf/nightly-$(date +%Y%m%d)"
+          COMMIT_MSG="[bot] Update bench/quick_results_ci.md from nightly perf run"
+
+          python3 scripts/workflows/workflow_git.py configure \
+            --repo "${{ github.repository }}" \
+            --identity github-actions \
+            --unset-extraheader
+
+          git checkout -B "$BRANCH"
+          git add bench/quick_results_ci.md
+          git commit -m "$COMMIT_MSG"
+          git push origin "$BRANCH" --force
+
+          python3 scripts/workflows/workflow_git.py promote \
+            --repo "${{ github.repository }}" \
+            --branch "$BRANCH" \
+            --message "$COMMIT_MSG"
+
+          gh pr create \
+            --title "[skip ci] Perf nightly: update bench/quick_results_ci.md" \
+            --body "Auto-generated by the [nightly workflow](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
+            --head "$BRANCH" \
+            --base main

@@ -58,3 +58,125 @@ def change
   add_column :projects, :fork, :boolean
   add_column :projects, :github_id, :bigint
 end
+
+class AddTypeAndUserIdToLogEntry < ActiveRecord::Migration[5.2]
+  def change
+    add_column :log_entries, :type, :string
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can use `change_table :log_entries, bulk: true` to combine alter queries.
+    add_column :log_entries, :user_id, :integer
+
+    LogEntry.find_each do |log_entry|
+      log_entry.type = "CharacterLogEntry"
+      log_entry.save!
+    end
+  end
+end
+
+change_table :users do |t|
+^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+  t.string :email, null: false
+  t.string :encrypted_password, null: false
+end
+
+class AddPublisherToSubmissions < ActiveRecord::Migration[4.2]
+  change_table :course_assessment_submissions do |t|
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+    t.integer :publisher_id, foreign_key: { references: :users }
+    t.datetime :published_at
+  end
+end
+
+class RenameSocialMediaColumnsOnAffiliates < ActiveRecord::Migration
+  def self.up
+    change_table :affiliates do |t|
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+      t.rename :facebook_username, :facebook_handle
+      t.rename :twitter_username, :twitter_handle
+    end
+  end
+
+  def self.down
+    change_table :affiliates do |t|
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+      t.rename :twitter_handle, :twitter_username
+      t.rename :facebook_handle, :facebook_username
+    end
+  end
+end
+
+class AddImapSettingsToMailSetting < ActiveRecord::Migration[5.0]
+  def change
+    add_column :mail_settings, :imap_address,  :string
+    ^ Rails/BulkChangeTable: You can use `change_table :mail_settings, bulk: true` to combine alter queries.
+    add_column :mail_settings, :imap_port,     :string
+    add_column :mail_settings, :imap_password, :string
+    add_column :mail_settings, :imap_username, :string
+  end
+end
+
+class RemoveFeaturesFromCategories < ActiveRecord::Migration
+  def change
+    remove_column :categories, :parent_id
+    ^ Rails/BulkChangeTable: You can use `change_table :categories, bulk: true` to combine alter queries.
+    remove_column :categories, :organization_id
+    remove_column :categories, :name_translations
+    remove_column :categories, :fqn_translations
+    remove_column :categories, :children_count
+    add_column :categories, :name, :string
+    drop_table :categories_users
+  end
+end
+
+class AddNameTranslationsToCategory < ActiveRecord::Migration
+  def up
+    add_column :categories, :name_translations, :hstore
+    ^ Rails/BulkChangeTable: You can use `change_table :categories, bulk: true` to combine alter queries.
+    remove_column :categories, :name
+  end
+
+  def down
+    remove_column :categories, :name_translations, :hstore
+    ^ Rails/BulkChangeTable: You can use `change_table :categories, bulk: true` to combine alter queries.
+    add_column :categories, :name
+  end
+end
+
+class AddFieldsFromUserToMember < ActiveRecord::Migration
+  def change
+    add_column :members, :entry_date, :date
+    ^ Rails/BulkChangeTable: You can use `change_table :members, bulk: true` to combine alter queries.
+    add_column :members, :member_uid, :integer
+  end
+end
+
+class RemoveMemberFieldsFromUser < ActiveRecord::Migration
+  def up
+    remove_column :users, :member_code
+    ^ Rails/BulkChangeTable: You can use `change_table :users, bulk: true` to combine alter queries.
+    remove_column :users, :organization_id
+    remove_column :users, :registration_date
+    remove_column :users, :registration_number
+    remove_column :users, :admin
+  end
+end
+
+class AddDeviseThingsToUsers < ActiveRecord::Migration
+  def change
+    change_table :users do |t|
+    ^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+      t.string :encrypted_password, :null => false, :default => ''
+      t.string :reset_password_token
+      t.datetime :reset_password_sent_at
+    end
+  end
+end
+
+class AddNewFieldsToOrganization < ActiveRecord::Migration
+  def change
+    change_table :organizations do |t|
+    ^ Rails/BulkChangeTable: You can combine alter queries using `bulk: true` options.
+      t.string :email
+      t.string :phone
+    end
+  end
+end

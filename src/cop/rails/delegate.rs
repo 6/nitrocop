@@ -7,6 +7,7 @@ use crate::cop::shared::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Rails/Delegate cop detects method definitions that simply delegate to another object,
 /// suggesting the use of Rails' `delegate` macro instead.
@@ -271,6 +272,11 @@ use crate::parse::source::SourceFile;
 ///   the nested-body override, so private methods after a heredoc were treated as
 ///   public. Heredoc line ranges are now ignored while scanning for enclosing
 ///   block/conditional openers.
+/// - FP: the visibility walker only recursed through a small set of container
+///   nodes, so it missed `private` for delegations nested under generic Prism
+///   wrappers such as `CONST = Class.new do`, `class_exec do`, and `if ... class`.
+///   Visibility now uses Prism's full visitor and checks every statement list,
+///   while keeping RuboCop's sibling-scope rules intact.
 pub struct Delegate;
 
 impl Cop for Delegate {
@@ -280,6 +286,10 @@ impl Cop for Delegate {
 
     fn default_severity(&self) -> Severity {
         Severity::Convention
+    }
+
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/app/controllers/**/*.rb"]
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -653,27 +663,6 @@ impl<'pr> VisibilityChecker<'_> {
         false
     }
 
-    fn visit_body(&mut self, body: &ruby_prism::Node<'pr>) {
-        if self.result.is_some() {
-            return;
-        }
-        if let Some(s) = body.as_statements_node() {
-            if !self.check_siblings(s.body().iter()) {
-                for stmt in s.body().iter() {
-                    self.visit(&stmt);
-                }
-            }
-        } else if let Some(b) = body.as_begin_node() {
-            if let Some(stmts) = b.statements() {
-                if !self.check_siblings(stmts.body().iter()) {
-                    for stmt in stmts.body().iter() {
-                        self.visit(&stmt);
-                    }
-                }
-            }
-        }
-    }
-
     /// Check if a list of statements contains a bare or non-bare `module_function` call.
     fn has_module_function(stmts: impl Iterator<Item = ruby_prism::Node<'pr>>) -> bool {
         stmts.into_iter().any(|s| {
@@ -684,55 +673,75 @@ impl<'pr> VisibilityChecker<'_> {
         })
     }
 
-    fn visit(&mut self, node: &ruby_prism::Node<'pr>) {
+    fn body_has_module_function(body: &ruby_prism::Node<'pr>) -> bool {
+        if let Some(stmts) = body.as_statements_node() {
+            return Self::has_module_function(stmts.body().iter());
+        }
+        if let Some(begin) = body.as_begin_node() {
+            return begin
+                .statements()
+                .is_some_and(|stmts| Self::has_module_function(stmts.body().iter()));
+        }
+        false
+    }
+}
+
+impl<'pr> Visit<'pr> for VisibilityChecker<'_> {
+    fn visit_program_node(&mut self, node: &ruby_prism::ProgramNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        if let Some(class) = node.as_class_node() {
-            if let Some(body) = class.body() {
-                self.visit_body(&body);
-            }
-        } else if let Some(module) = node.as_module_node() {
-            if let Some(body) = module.body() {
-                // Track module_function in ancestor modules
-                let saved = self.ancestor_has_module_function;
-                if let Some(stmts) = body.as_statements_node() {
-                    if Self::has_module_function(stmts.body().iter()) {
-                        self.ancestor_has_module_function = true;
-                    }
-                } else if let Some(begin) = body.as_begin_node() {
-                    if let Some(stmts) = begin.statements() {
-                        if Self::has_module_function(stmts.body().iter()) {
-                            self.ancestor_has_module_function = true;
-                        }
-                    }
-                }
-                self.visit_body(&body);
-                self.ancestor_has_module_function = saved;
-            }
-        } else if let Some(sclass) = node.as_singleton_class_node() {
-            if let Some(body) = sclass.body() {
-                self.visit_body(&body);
-            }
-        } else if let Some(block) = node.as_block_node() {
-            if let Some(body) = block.body() {
-                self.visit_body(&body);
-            }
-        } else if let Some(begin) = node.as_begin_node() {
-            if let Some(stmts) = begin.statements() {
-                if !self.check_siblings(stmts.body().iter()) {
-                    for stmt in stmts.body().iter() {
-                        self.visit(&stmt);
-                    }
-                }
-            }
-        } else if let Some(program) = node.as_program_node() {
-            if !self.check_siblings(program.statements().body().iter()) {
-                for stmt in program.statements().body().iter() {
-                    self.visit(&stmt);
+
+        if !self.check_siblings(node.statements().body().iter()) {
+            for stmt in node.statements().body().iter() {
+                self.visit(&stmt);
+                if self.result.is_some() {
+                    break;
                 }
             }
         }
+    }
+
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+
+        if !self.check_siblings(node.body().iter()) {
+            for stmt in node.body().iter() {
+                self.visit(&stmt);
+                if self.result.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+
+        if let Some(stmts) = node.statements() {
+            self.visit(&stmts.as_node());
+        }
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+
+        let Some(body) = node.body() else {
+            return;
+        };
+
+        let saved = self.ancestor_has_module_function;
+        if Self::body_has_module_function(&body) {
+            self.ancestor_has_module_function = true;
+        }
+        self.visit(&body);
+        self.ancestor_has_module_function = saved;
     }
 }
 

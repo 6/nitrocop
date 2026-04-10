@@ -14,6 +14,10 @@ impl Cop for ContentTag {
         Severity::Convention
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*.rb", "**/config/**/*.rb"]
+    }
+
     fn interested_node_types(&self) -> &'static [u8] {
         &[CALL_NODE, STRING_NODE, SYMBOL_NODE]
     }

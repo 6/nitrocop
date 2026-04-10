@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Render cop-check PR comment from shard summary files.
 
-Aggregates variant rows across shards before rendering, since variant
-baselines are global but each shard only runs a subset of repos.
+Aggregates variant rows across shards before rendering.  Per-shard
+failures are propagated so that per-repo regressions are not masked
+by net improvements in other shards.
 
 Usage:
     python3 scripts/workflows/render_cop_check_comment.py \
@@ -52,8 +53,9 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
     Default cop rows (no parentheses) are kept individually per shard —
     the default gate already handles per-repo regression correctly.
 
-    Variant rows are summed across shards since the baseline is a global
-    number and per-shard local FP/FN must be aggregated before comparing.
+    Variant rows are summed across shards — both baselines and local
+    FP/FN are per-repo scoped, so summing across shards gives the
+    correct totals for the sampled repos.
     """
     default_rows = []
     variant_agg: dict[str, dict] = {}  # cop name -> aggregated data
@@ -64,8 +66,8 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
             if key not in variant_agg:
                 variant_agg[key] = {
                     "cop": key,
-                    "bl_fp": row["bl_fp"],
-                    "bl_fn": row["bl_fn"],
+                    "bl_fp": 0,
+                    "bl_fn": 0,
                     "local_fp": 0,
                     "local_fn": 0,
                     "result": "pass",
@@ -74,13 +76,17 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
                     "details": [],
                 }
             agg = variant_agg[key]
+            agg["bl_fp"] += row["bl_fp"]
+            agg["bl_fn"] += row["bl_fn"]
             agg["local_fp"] += row["local_fp"]
             agg["local_fn"] += row["local_fn"]
             if row.get("detail"):
                 agg["details"].append(row["detail"])
-            # If any shard errored, mark as error
+            # If any shard failed or errored, propagate that status
             if row["result"] == "error":
                 agg["result"] = "error"
+            elif row["result"] == "fail" and agg["result"] != "error":
+                agg["result"] = "fail"
         else:
             default_rows.append(row)
 
@@ -91,6 +97,9 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
         fp_delta = agg["local_fp"] - agg["bl_fp"]
         fn_delta = agg["local_fn"] - agg["bl_fn"]
         if fp_delta > 0 or fn_delta > 0:
+            agg["result"] = "regression"
+        elif agg["result"] == "fail":
+            # Per-shard regression detected even though aggregate improved
             agg["result"] = "regression"
         elif agg["result"] != "error":
             agg["result"] = "pass"

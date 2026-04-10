@@ -86,3 +86,13 @@ if condition
 else
   totals[:b] += 2
 end
+
+# if/else with comparison sends on different receivers should not be flagged
+if condition
+  match.should == true
+else
+  other.should == false
+end
+
+# ternary with assignment whose correction would exceed line length should not be flagged
+(t.empty? || t == "y" || t == "yes" || t == "yeah") ? conf["env"]["testmode_enabled"] = true : conf["env"]["testmode_enabled"] = false

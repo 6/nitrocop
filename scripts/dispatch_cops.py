@@ -337,8 +337,20 @@ def dept_dir_name(dept: str) -> str:
 
 
 def find_rust_source(dept: str, snake: str) -> Path:
-    """Find the cop's Rust source file."""
-    return PROJECT_ROOT / "src" / "cop" / dept_dir_name(dept) / f"{snake}.rs"
+    """Find the cop's Rust source file.
+
+    Some cops use a ``_cop`` suffix because their snake_case name is a Rust
+    keyword (``for``, ``loop``, ``yield``).  Try the plain name first, then
+    fall back to ``{snake}_cop.rs``.
+    """
+    base = PROJECT_ROOT / "src" / "cop" / dept_dir_name(dept)
+    plain = base / f"{snake}.rs"
+    if plain.exists():
+        return plain
+    suffixed = base / f"{snake}_cop.rs"
+    if suffixed.exists():
+        return suffixed
+    return plain  # return expected path for error messaging
 
 
 def find_vendor_ruby_source(dept: str, snake: str) -> Path | None:
@@ -524,8 +536,45 @@ def load_variant_data_for_cop(cop: str, run_id: int | str | None = None) -> list
                     "matches": cop_entry.get("matches", 0),
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
+                    "fp_examples": cop_entry.get("fp_examples", []),
+                    "fn_examples": cop_entry.get("fn_examples", []),
                 })
     return variants
+
+
+def _infer_variant_style_params(variant: dict) -> list[tuple[str, str]]:
+    """Infer the Enforced* config key-value pairs for a variant from batch YAML files.
+
+    Returns a list of (param, value) tuples. Most cops have a single param
+    (e.g., [("EnforcedStyle", "comma")]), but some have multiple
+    (e.g., [("EnforcedStyleForClasses", "compact"), ("EnforcedStyleForModules", "compact")]).
+
+    Falls back to [("EnforcedStyle", style_label)] which covers the vast majority.
+    """
+    batches_dir = PROJECT_ROOT / "bench" / "corpus" / "variant_batches"
+    style_label = variant.get("style_label", "")
+    try:
+        import yaml
+        for batch_path in sorted(batches_dir.glob("variant_batch_*.yml")):
+            data = yaml.safe_load(batch_path.read_text()) or {}
+            for cop_name, cop_config in data.items():
+                if cop_name == "inherit_from" or not isinstance(cop_config, dict):
+                    continue
+                enforced = [
+                    (param, str(val))
+                    for param, val in sorted(cop_config.items())
+                    if param.startswith("Enforced")
+                ]
+                # Match by checking if the joined values equal the style label
+                joined = ", ".join(v for _, v in enforced)
+                if joined == style_label and enforced:
+                    return enforced
+                # Also match single-value labels
+                if len(enforced) == 1 and enforced[0][1] == style_label:
+                    return enforced
+    except Exception:
+        pass
+    return [("EnforcedStyle", style_label)]
 
 
 def load_variant_only_candidates(
@@ -1456,12 +1505,129 @@ def detect_prism_pitfalls(rust_source: str) -> list[str]:
     return notes
 
 
+def _extract_default_config_entry(cop: str) -> str | None:
+    """Extract the YAML config block for a cop from the vendored default config."""
+    dept = cop.split("/")[0]
+    vendor_gem = DEPT_TO_VENDOR.get(dept)
+    if not vendor_gem:
+        return None
+    config_path = PROJECT_ROOT / vendor_gem / "config" / "default.yml"
+    if not config_path.exists():
+        return None
+    lines = config_path.read_text(errors="replace").splitlines()
+    result = []
+    capturing = False
+    for line in lines:
+        if line.startswith(f"{cop}:"):
+            capturing = True
+            result.append(line)
+        elif capturing:
+            if line and not line[0].isspace() and not line.startswith("#"):
+                break
+            result.append(line)
+    return "\n".join(result) if result else None
+
+
+def generate_audit_task(cops: list[str], mode: str = "fix") -> str:
+    """Generate a ground-truth audit prompt comparing Ruby and Rust implementations."""
+    sections = []
+    sections.append("# Cop Ground-Truth Audit")
+    sections.append("")
+    if mode == "fix":
+        sections.append(
+            "Compare each cop's Ruby source (ground truth) against our Rust implementation. "
+            "Fix any divergences you find. Validate each fix with `cargo test --lib`."
+        )
+    else:
+        sections.append(
+            "Compare each cop's Ruby source (ground truth) against our Rust implementation. "
+            "Report all divergences but do NOT modify code."
+        )
+    sections.append("")
+    sections.append("## Checklist (check ALL of these for each cop)")
+    sections.append("")
+    sections.append("1. **Config attributes**: Compare the `config/default.yml` entry against the Rust `impl Cop` trait:")
+    sections.append("   - `Enabled: false` → `default_enabled() -> false`")
+    sections.append("   - `Exclude: [...]` → `default_exclude() -> &[...]`")
+    sections.append("   - `Include: [...]` → `default_include() -> &[...]`")
+    sections.append("   - `Severity: warning` → `default_severity() -> Severity::Warning`")
+    sections.append("   - Cop-specific options (`AllowedMethods`, `EnforcedStyle`, etc.) → check they're read from `CopConfig`")
+    sections.append("2. **Node types**: Compare Ruby's `on_def`, `on_send`, `on_class` etc. callbacks against our `interested_node_types()`")
+    sections.append("3. **Detection logic**: Walk through the Ruby cop's main methods and compare conditional logic against Rust")
+    sections.append("4. **Autocorrect**: If Ruby has `extend AutoCorrector`, verify we implement `supports_autocorrect() -> true`")
+    sections.append("5. **Shared mixins**: If the Ruby cop includes shared modules, check we use equivalent shared code")
+    sections.append("6. **Edge cases**: Look for Ruby comments/TODOs mentioning special handling — verify we match")
+    sections.append("")
+
+    if mode == "fix":
+        sections.append("## Workflow")
+        sections.append("")
+        sections.append("For each divergence found:")
+        sections.append("1. Add or update test fixtures if the fix changes behavior")
+        sections.append("2. Make the fix in the Rust source")
+        sections.append("3. Run `cargo test --lib -- cop::dept::cop_name` to verify")
+        sections.append("4. Document any replicated RuboCop quirks in `///` doc comments")
+        sections.append("")
+
+    for cop in cops:
+        dept, name, snake = parse_cop_name(cop)
+        sections.append(f"---\n\n## {cop}\n")
+
+        # Corpus stats
+        try:
+            corpus = get_corpus_data(cop, None, require_examples=False)
+            sections.append(
+                f"**Corpus**: {corpus['matches']} matches, "
+                f"{corpus['fp']} FP, {corpus['fn']} FN\n"
+            )
+        except Exception:
+            sections.append("**Corpus**: (no data available)\n")
+
+        # Default config entry
+        config_entry = _extract_default_config_entry(cop)
+        if config_entry:
+            sections.append(f"### Default config (`config/default.yml`)\n\n```yaml\n{config_entry}\n```\n")
+
+        # Ruby source
+        ruby_path = find_vendor_ruby_source(dept, snake)
+        ruby_source = read_file_safe(ruby_path) if ruby_path else None
+        if ruby_source:
+            sections.append(f"### Ruby implementation (`{ruby_path.relative_to(PROJECT_ROOT)}`)\n\n```ruby\n{ruby_source}\n```\n")
+        else:
+            sections.append("### Ruby implementation\n\n(not found in vendored gems)\n")
+
+        # Rust source
+        rust_path = find_rust_source(dept, snake)
+        rust_source = read_file_safe(rust_path)
+        if rust_source:
+            sections.append(f"### Rust implementation (`{rust_path.relative_to(PROJECT_ROOT)}`)\n\n```rust\n{rust_source}\n```\n")
+        else:
+            sections.append(f"### Rust implementation\n\n(not found at {rust_path})\n")
+
+    return "\n".join(sections)
+
+
+# Cops that should not be dispatched to agents. These have structural
+# dependencies on other cops reaching full conformance first.
+BLOCKED_COPS = {
+    "Lint/RedundantCopDisableDirective": (
+        "This cop's accuracy depends on all other cops having zero detection "
+        "gaps. Fix the underlying cops first — this one should be the last "
+        "to reach conformance."
+    ),
+}
+
+
 def generate_task(
     cop: str,
     input_path: Path | None = None,
     binary_path: Path | None = None,
 ) -> str:
     """Generate the full task markdown for a cop."""
+    if cop in BLOCKED_COPS:
+        reason = BLOCKED_COPS[cop]
+        print(f"Error: {cop} is blocked from agent dispatch: {reason}", file=sys.stderr)
+        sys.exit(1)
     dept, name, snake = parse_cop_name(cop)
     dept_snake = dept_dir_name(dept)
 
@@ -1547,6 +1713,50 @@ def generate_task(
     else:
         focus = "both FP and FN"
         focus_detail = "both directions"
+    # Build variant-aware step 1 and step 7
+    variant_only = default_perfect and bool(diverging_variants)
+    if variant_only:
+        # Primary variant style for commands (highest divergence)
+        primary_variant = max(diverging_variants, key=lambda v: v["fp"] + v["fn"])
+        # Detect the config key(s) (e.g., "EnforcedStyle") from variant data
+        style_params = _infer_variant_style_params(primary_variant)
+        if len(style_params) == 1:
+            style_flag = f"--style {style_params[0][0]}={style_params[0][1]}"
+        else:
+            # Multi-param cops can't use --style (only takes one PARAM=VALUE).
+            # Tell the agent to use --check-variants instead.
+            style_flag = "--check-variants"
+        step1_text = (
+            "1. Read the **Variant FP/FN Examples** section below — it contains actual "
+            "Ruby code from the corpus that diverges under the non-default style"
+        )
+        step7_text = (
+            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+            f"   ```bash\n"
+            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
+            f"{style_flag}\n"
+            f"   ```\n"
+            f"   Also validate the default config is not regressed:\n"
+            f"   ```bash\n"
+            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+            f"   ```\n"
+            f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+        )
+    else:
+        if diagnostics:
+            step1_text = "1. Read the **Pre-diagnostic Results** section below first"
+        elif not default_perfect:
+            step1_text = "1. Read the **Corpus FP/FN Examples** section below first"
+        else:
+            step1_text = "1. Read the sections below for context"
+        step7_text = (
+            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+            f"   ```bash\n"
+            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+            f"   ```\n"
+            f"   If this reports FP or FN regression, your fix is too broad — narrow it down."
+        )
+
     parts.append(f"""## Instructions
 
 You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for parsing.
@@ -1557,7 +1767,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 **⚠ {corpus['matches']:,} existing matches must not regress.** Validate with `check_cop.py` before committing.
 
 ### Workflow
-1. Read the **Pre-diagnostic Results** and **Corpus FP/FN Examples** sections below first
+{step1_text}
 2. **Verify with RuboCop first** (for FP fixes): before writing any code, confirm RuboCop's
    behavior on BOTH the specific FP case AND the general pattern:
    ```bash
@@ -1573,11 +1783,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 4. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
 5. Fix `src/cop/{dept_snake}/{snake}.rs`
 6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
-7. **Validate against corpus** (REQUIRED before finishing):
-   ```bash
-   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15
-   ```
-   If this reports FP or FN regression, your fix is too broad — narrow it down.
+{step7_text}
 8. Add a `///` doc comment on the cop struct documenting what you found and fixed
 9. Leave your changes unstaged — the workflow commits for you
 
@@ -1775,6 +1981,13 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
                 "**The default config is already perfect.** Your task is fixing "
                 "non-default style variants listed below.\n"
             )
+            lines.append(
+                "**⚠ The variant FP/FN numbers below are real.** They come from a "
+                "dedicated variant oracle run (not the default config baseline). "
+                "Do NOT conclude that the oracle data is stale or inapplicable. "
+                "If `check_cop.py --style` shows unexpected results, re-read the "
+                "variant instructions.\n"
+            )
         else:
             lines.append(
                 "This cop also has divergence under non-default style configurations.\n"
@@ -1786,6 +1999,11 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
                 f"| {v['style_label']} | {v['matches']:,} | {v['fp']:,} | {v['fn']:,} |"
             )
         lines.append("")
+
+        # Include actual FP/FN examples from variant oracle data
+        if default_perfect:
+            lines.extend(_variant_examples_section())
+
         lines.append("### How to fix variant divergence\n")
         lines.append(
             "1. **Find the config read:** Look for `config.get_str(\"EnforcedStyle\", ...)` or "
@@ -1824,6 +2042,70 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
             "6. **All variants must pass.** The CI gate (`--check-variants`) runs ALL "
             "variant styles automatically. Fixing one variant must not break another.\n"
         )
+        return lines
+
+    def _variant_examples_section() -> list[str]:
+        """Format FP/FN examples from variant oracle data for variant-only cops."""
+        lines = ["## Variant FP/FN Examples\n"]
+        max_examples_per_kind = 8
+        has_examples = False
+        for v in sorted(diverging_variants, key=lambda x: x["fp"] + x["fn"], reverse=True):
+            label = v["style_label"]
+            fp_ex = v.get("fp_examples", [])
+            fn_ex = v.get("fn_examples", [])
+            if not fp_ex and not fn_ex:
+                continue
+            has_examples = True
+            lines.append(f"### Style: `{label}`\n")
+            if fp_ex:
+                lines.append(
+                    f"**False Positives** ({len(fp_ex)} total — "
+                    f"nitrocop flags these but RuboCop does not with `{label}`):\n"
+                )
+                for ex in fp_ex[:max_examples_per_kind]:
+                    loc, msg, src = _normalize_example(ex)
+                    lines.append(f"- `{loc}`")
+                    if msg:
+                        lines.append(f"  Message: {msg}")
+                    if src:
+                        lines.append("  ```ruby")
+                        for s in src:
+                            lines.append(f"  {s}")
+                        lines.append("  ```")
+                if len(fp_ex) > max_examples_per_kind:
+                    lines.append(
+                        f"\n_Omitted {len(fp_ex) - max_examples_per_kind} additional FP example(s)._\n"
+                    )
+                lines.append("")
+            if fn_ex:
+                lines.append(
+                    f"**False Negatives** ({len(fn_ex)} total — "
+                    f"RuboCop flags these but nitrocop misses with `{label}`):\n"
+                )
+                for ex in fn_ex[:max_examples_per_kind]:
+                    loc, msg, src = _normalize_example(ex)
+                    lines.append(f"- `{loc}`")
+                    if msg:
+                        lines.append(f"  Message: {msg}")
+                    if src:
+                        lines.append("  ```ruby")
+                        for s in src:
+                            lines.append(f"  {s}")
+                        lines.append("  ```")
+                if len(fn_ex) > max_examples_per_kind:
+                    lines.append(
+                        f"\n_Omitted {len(fn_ex) - max_examples_per_kind} additional FN example(s)._\n"
+                    )
+                lines.append("")
+        if not has_examples:
+            lines.append(
+                "No example source code is available from the variant oracle data. "
+                "Use `verify_cop_locations.py --style` to find specific diverging files:\n"
+                f"```bash\n"
+                f"python3 scripts/verify_cop_locations.py {cop} "
+                f"--style EnforcedStyle=<value>\n"
+                f"```\n"
+            )
         return lines
 
     start_here = build_start_here_section(cop, corpus)
@@ -1905,6 +2187,14 @@ def detect_cops(base: str, head: str) -> list[str]:
             # all cops; changes validated by cargo test, skip dispatch.
             pass
         else:
+            # Some cops use a _cop suffix because their snake name is a
+            # Rust keyword (for, loop, yield). Strip it before converting
+            # to PascalCase so we get Style/For, not Style/ForCop.
+            if name.endswith("_cop"):
+                unsuffixed = name.removesuffix("_cop")
+                plain = PROJECT_ROOT / "src" / "cop" / dept / f"{unsuffixed}.rs"
+                if not plain.exists():
+                    name = unsuffixed
             cops.add(f"{dept_snake_to_pascal(dept)}/{snake_to_pascal(name)}")
         continue
 
@@ -3014,7 +3304,23 @@ def main():
         help="GitHub repo (owner/name)",
     )
 
+    audit_parser = subparsers.add_parser("audit-task", help="Generate a ground-truth audit prompt for one or more cops")
+    audit_parser.add_argument("cops", help="Comma-separated cop names (e.g., Style/DocumentationMethod,Rails/Exit)")
+    audit_parser.add_argument("--output", "-o", type=Path, help="Output file path (default: stdout)")
+    audit_parser.add_argument("--mode", choices=["fix", "audit"], default="fix", help="fix: attempt fixes; audit: report only")
+
     args = parser.parse_args()
+
+    if args.command == "audit-task":
+        cops = [c.strip() for c in args.cops.split(",") if c.strip()]
+        task = generate_audit_task(cops, args.mode)
+        if args.output:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text(task)
+            print(f"Audit task written to {args.output}", file=sys.stderr)
+        else:
+            print(task)
+        return
 
     if args.command == "task":
         binary = args.binary.resolve() if args.binary else None

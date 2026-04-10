@@ -10,7 +10,49 @@ use crate::parse::source::SourceFile;
 /// hash-label keys like `"":` are still checked for quote style. This fixes the
 /// remaining FN cluster without broadening handling for multiline or escaped
 /// quoted symbols.
+///
+/// For the `double_quotes` variant style, single-quoted symbols stay accepted when
+/// converting them to double quotes would change semantics by activating
+/// interpolation (`:'#{'`, `:'#$SAFE'`) or real double-quote escape sequences
+/// (`:'\000'`). Ordinary escaped single quotes and doubled backslashes remain
+/// offenses (`:'o\'clock'`, `:'foo\\bar'`), matching RuboCop's narrower
+/// `invalid_double_quotes?` check.
 pub struct QuotedSymbols;
+
+fn has_double_quotes_only_escape(inner: &[u8]) -> bool {
+    for i in 0..inner.len().saturating_sub(1) {
+        if inner[i] == b'\\'
+            && (i == 0 || inner[i - 1] != b'\\')
+            && matches!(
+                inner[i + 1],
+                b'a' | b'A'
+                    | b'b'
+                    | b'c'
+                    | b'd'
+                    | b'e'
+                    | b'f'
+                    | b'k'
+                    | b'M'
+                    | b'n'
+                    | b'p'
+                    | b'r'
+                    | b's'
+                    | b'S'
+                    | b't'
+                    | b'u'
+                    | b'U'
+                    | b'x'
+                    | b'z'
+                    | b'Z'
+                    | b'0'..=b'7'
+            )
+        {
+            return true;
+        }
+    }
+
+    false
+}
 
 impl Cop for QuotedSymbols {
     fn name(&self) -> &'static str {
@@ -118,15 +160,19 @@ impl Cop for QuotedSymbols {
                 return;
             }
 
-            let has_double_quote = inner.contains(&b'"');
+            let can_stay_single_quoted = inner.contains(&b'"')
+                || inner
+                    .windows(2)
+                    .any(|w| w == b"#{" || w == b"#@" || w == b"#$")
+                || has_double_quotes_only_escape(inner);
 
-            if style == "double_quotes" && !has_double_quote {
+            if style == "double_quotes" && !can_stay_single_quoted {
                 let (line, column) = source.offset_to_line_col(loc.start_offset());
                 diagnostics.push(self.diagnostic(
                     source,
                     line,
                     column,
-                    "Prefer double-quoted symbols.".to_string(),
+                    "Prefer double-quoted symbols unless you need single quotes to avoid extra backslashes for escaping.".to_string(),
                 ));
             }
         }
@@ -137,6 +183,39 @@ impl Cop for QuotedSymbols {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(QuotedSymbols, "cops/style/quoted_symbols");
+
+    fn double_quotes_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("double_quotes".into()),
+            )]),
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn double_quotes_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &QuotedSymbols,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/quoted_symbols/double_quotes_offense.rb"
+            ),
+            double_quotes_config(),
+        );
+    }
+
+    #[test]
+    fn double_quotes_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &QuotedSymbols,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/quoted_symbols/double_quotes_no_offense.rb"
+            ),
+            double_quotes_config(),
+        );
+    }
 
     /// Regression test: unterminated symbol literals (parse errors) must not panic.
     /// Found by fuzz_all_cops with input `:'`.

@@ -63,6 +63,113 @@ use ruby_prism::Visit;
 /// rejecting chained/operator continuations, then measuring the full rendered
 /// modifier line as RuboCop does: `code_before + expression + code_after`, with
 /// UTF-8 character counts instead of raw byte counts.
+///
+/// FP root cause (2026-04-06): RuboCop's `non_eligible_condition?` skips any
+/// condition containing local-variable assignment nodes (`lvasgn_type?`), which
+/// includes `||=`, `&&=`, `+=`, and multi-assignment destructuring. Prism
+/// represents those as `LocalVariableOrWriteNode`,
+/// `LocalVariableAndWriteNode`, `LocalVariableOperatorWriteNode`, and
+/// `MultiWriteNode` with local targets. The old Rust cop only detected plain
+/// `LocalVariableWriteNode`, so it falsely flagged conditions like
+/// `if (iterations += 1) > MAX_ITERATIONS` and
+/// `unless (a, b = matcher(node))`. Fixed by recognizing all Prism local-write
+/// variants while keeping the skip limited to local targets, not instance/class
+/// variable assignments.
+///
+/// FN root cause (2026-04-06): `code_after_end_is_disallowed` returned `true`
+/// for semicolons (`;`) appearing after `end`, treating them as chained operators
+/// like `.` or `&`. But `;` is a Ruby statement separator — `unless defined?(x);
+/// foo; end; x` is actually two statements (the unless and `x`), not a chained
+/// expression. RuboCop's AST-based `another_statement_on_same_line?` correctly
+/// handles this by not treating `;` as a chained operator. Fixed by removing
+/// `;` from the disallowed characters list in `code_after_end_is_disallowed`.
+///
+/// FN root cause (2026-04-07): `has_another_statement_on_same_line` (RuboCop's
+/// `another_statement_on_same_line?`) incorrectly returned `true` for modifier
+/// forms like `return ret if ret` inside blocks, where the line ends with `; }`.
+/// The function found `;` after the if node and returned `true`, but RuboCop's
+/// AST check would find no sibling statement (no `end` keyword or next sibling
+/// on the same line). The `;` was actually a statement separator, not indicating
+/// a sibling. Fixed by checking if the semicolon is followed by actual code
+/// vs. just closing delimiters (`}` or `]`).
+///
+/// FN root cause (2026-04-08): `has_another_statement_on_same_line` treated
+/// `; end` after a modifier if/unless as a sibling statement, but `end` is a
+/// closing keyword of a parent block (e.g. `unless defined?(x); foo; end; x`).
+/// Fixed by extending `is_only_closing_tokens` to also recognize `end` as a
+/// closing token alongside `}`, `]`, and `)`.
+///
+/// FP root cause (2026-04-08): modifier forms on lines with
+/// `# rubocop:disable Layout/LineLength` (inline or block-level) were flagged
+/// as "too long", but RuboCop's `too_long_single_line?` calls
+/// `line_length_enabled_at_line?` which returns false when Layout/LineLength is
+/// disabled via directive. Fixed by adding `line_length_disabled_at_line` that
+/// scans for both inline `rubocop:disable` on the current line and block-level
+/// `rubocop:disable` on preceding lines (tracking enable/disable state).
+///
+/// FP root cause (2026-04-08): URI-based AllowURI exemption only matched
+/// `scheme://` patterns, but RuboCop uses `URI::DEFAULT_PARSER.make_regexp`
+/// which also matches bare `scheme:` (e.g. `https:` at end of line in a regex).
+/// Fixed by adding `scheme:` as an additional search prefix in
+/// `uri_extends_to_end`.
+///
+/// FP root cause (2026-04-08): multiline parenthesized bodies like
+/// `if cond\n  (expr)\nend` were flagged. RuboCop's `non_eligible_body?`
+/// returns true for `begin_type?`, which in the parser gem includes
+/// parenthesized expressions. In Prism these are `ParenthesesNode`. Fixed by
+/// skipping `ParenthesesNode` bodies for normal-form `if`/`unless`.
+///
+/// FN root cause (2026-04-08): that same `ParenthesesNode` skip also
+/// suppressed real modifier-form offenses like `(raise '...') if condition`.
+/// RuboCop still flags modifier-form nodes here; only the multiline
+/// `if ... (expr) end` form is exempt. Fixed by applying the parenthesized-body
+/// skip only to normal-form nodes and still evaluating modifier-form nodes for
+/// `MSG_USE_NORMAL`.
+///
+/// FP root cause (2026-04-08): body EOL comment detection used character offsets
+/// from `offset_to_line_col` to index into a byte slice. Multi-byte UTF-8
+/// characters (Arabic, em-dash, CJK) caused misalignment — the char offset was
+/// smaller than the byte offset, so the `#` search started too early or missed.
+/// Fixed by computing byte offset via `line_start_offset` subtraction, and
+/// searching for `#` anywhere after the body end rather than just as the first
+/// non-whitespace character (handles `body; # comment` patterns).
+///
+/// FP root cause (2026-04-08): `parenthesize_modifier_form` checked the previous
+/// line for trailing `=`, `:`, or `=>` to decide if the modifier form needs
+/// parenthesization. Comments like `# :nodoc:` on the previous line falsely
+/// matched `:`. Fixed by stripping trailing comments before the check.
+///
+/// FN root cause (2026-04-08): that trailing-comment stripper also treated
+/// string interpolation markers like `#{...}` as comments when they were
+/// preceded by whitespace on the previous line. That truncated lines such as
+/// `changes = ["Study file updated: #{@study_file.upload_file_name}"]` to a
+/// trailing `:`, incorrectly forced `(body if cond)`, and pushed several
+/// nested modifier forms from 119 chars to 121 chars. Fixed by ignoring
+/// interpolation markers (`#{...}`, `#@ivar`, `#$gvar`) in
+/// `strip_trailing_comment`.
+///
+/// FN root cause (2026-04-08): `first_line_comment_text` only found comments
+/// that were the first non-whitespace after the condition/predicate end. Comments
+/// after `then` keyword (e.g. `if cond then # comment`) were missed because
+/// `then` appeared first. Fixed by searching for `#` anywhere after the
+/// predicate (skipping `#{` interpolation markers), matching RuboCop's behavior
+/// of finding any comment on the same line as the node.
+///
+/// FN root cause (2026-04-09): `previous_line_chains_to_if` treated any
+/// previous line ending in `!` as an operator continuation. That falsely
+/// skipped ordinary offenses after bang method names like `def unlock!`,
+/// `parser.parse!`, `m.load_bundler!`, and `item.strip!`. RuboCop's
+/// `node.chained?` only skips real operator/receiver chaining, so the fix keeps
+/// standalone `!` chaining but ignores `!` when it is just method-name
+/// punctuation.
+///
+/// FN root cause (2026-04-09): the broader previous-line punctuation heuristic
+/// was still skipping real offenses after percent-string delimiters (`%!...!`),
+/// exception globals (`$!`), character literals (`?!` / `?-`), `def !`, and
+/// binary operators where the `if` is the ARGUMENT (`foo +\nif cond`) rather
+/// than the receiver. RuboCop's `node.chained?` only skips true receiver
+/// chains, so the fix narrows the heuristic to receiver-looking previous-line
+/// shapes only: bare unary-operator lines and explicit `.` / `&.` continuations.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -144,9 +251,91 @@ struct LvasgnFinder {
     found: bool,
 }
 
+fn target_contains_local_variable(node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_local_variable_target_node().is_some() {
+        return true;
+    }
+
+    if let Some(splat) = node.as_splat_node() {
+        return splat
+            .expression()
+            .is_some_and(|expr| target_contains_local_variable(&expr));
+    }
+
+    if let Some(multi_target) = node.as_multi_target_node() {
+        for target in multi_target.lefts().iter() {
+            if target_contains_local_variable(&target) {
+                return true;
+            }
+        }
+
+        if multi_target
+            .rest()
+            .is_some_and(|target| target_contains_local_variable(&target))
+        {
+            return true;
+        }
+
+        for target in multi_target.rights().iter() {
+            if target_contains_local_variable(&target) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 impl<'pr> Visit<'pr> for LvasgnFinder {
     fn visit_local_variable_write_node(&mut self, _node: &ruby_prism::LocalVariableWriteNode<'pr>) {
         self.found = true;
+    }
+
+    fn visit_local_variable_or_write_node(
+        &mut self,
+        _node: &ruby_prism::LocalVariableOrWriteNode<'pr>,
+    ) {
+        self.found = true;
+    }
+
+    fn visit_local_variable_and_write_node(
+        &mut self,
+        _node: &ruby_prism::LocalVariableAndWriteNode<'pr>,
+    ) {
+        self.found = true;
+    }
+
+    fn visit_local_variable_operator_write_node(
+        &mut self,
+        _node: &ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+    ) {
+        self.found = true;
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        for target in node.lefts().iter() {
+            if target_contains_local_variable(&target) {
+                self.found = true;
+                return;
+            }
+        }
+
+        if node
+            .rest()
+            .is_some_and(|target| target_contains_local_variable(&target))
+        {
+            self.found = true;
+            return;
+        }
+
+        for target in node.rights().iter() {
+            if target_contains_local_variable(&target) {
+                self.found = true;
+                return;
+            }
+        }
+
+        ruby_prism::visit_multi_write_node(self, node);
     }
 }
 
@@ -249,6 +438,25 @@ impl<'pr> Visit<'pr> for NestedConditionalFinder {
     }
 }
 
+/// Strip trailing comment from a line. Finds the first `#` preceded by
+/// whitespace (or at position 0) and returns the trimmed text before it.
+/// This prevents comment text like `# :nodoc:` from falsely matching
+/// operators like `=`, `:`, or `=>`. Ignore interpolation markers like
+/// `#{...}`, `#@ivar`, and `#$gvar` — they are part of string content,
+/// not Ruby comments.
+fn strip_trailing_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#'
+            && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t')
+            && !matches!(bytes.get(i + 1), Some(b'{' | b'@' | b'$'))
+        {
+            return line[..i].trim_end();
+        }
+    }
+    line.trim_end()
+}
+
 fn parenthesize_modifier_form(source: &SourceFile, kw_loc: &ruby_prism::Location<'_>) -> bool {
     let (kw_line, kw_col) = source.offset_to_line_col(kw_loc.start_offset());
     let kw_line_start = kw_loc.start_offset().saturating_sub(kw_col);
@@ -266,9 +474,11 @@ fn parenthesize_modifier_form(source: &SourceFile, kw_loc: &ruby_prism::Location
         let lines: Vec<&[u8]> = source.lines().collect();
         let prev_line = lines[kw_line - 2];
         let prev_trimmed = String::from_utf8_lossy(prev_line).trim_end().to_string();
-        if prev_trimmed.ends_with('=')
-            || prev_trimmed.ends_with(':')
-            || prev_trimmed.ends_with("=>")
+        // Strip trailing comment: find `#` preceded by whitespace (or at line start)
+        // so that `# :nodoc:` or `# = Page =` don't falsely trigger parenthesization.
+        let prev_code = strip_trailing_comment(&prev_trimmed);
+        if !prev_code.is_empty()
+            && (prev_code.ends_with('=') || prev_code.ends_with(':') || prev_code.ends_with("=>"))
         {
             return true;
         }
@@ -356,7 +566,6 @@ fn code_after_end_is_disallowed(after_end: &[u8]) -> bool {
             | b'~'
             | b'?'
             | b':'
-            | b';'
     )
 }
 
@@ -393,7 +602,14 @@ fn uri_extends_to_end(
 ) -> bool {
     let mut all_starts = Vec::new();
     for scheme in schemes {
-        for prefix in [format!("{scheme}://"), format!(r"{scheme}:\/\/")] {
+        // RuboCop uses URI::DEFAULT_PARSER.make_regexp which matches `scheme:`
+        // followed by any valid URI characters (not just `://`). This includes
+        // patterns like `https:/path` and bare `https:` at line end.
+        for prefix in [
+            format!("{scheme}://"),
+            format!(r"{scheme}:\/\/"),
+            format!("{scheme}:"),
+        ] {
             let mut search_from = 0;
             while let Some(pos) = line[search_from..].find(&prefix) {
                 let abs_pos = search_from + pos;
@@ -435,6 +651,82 @@ fn uri_extends_to_end(
     false
 }
 
+/// Check if `Layout/LineLength` is disabled at a given line via rubocop:disable
+/// comments (inline or block). RuboCop's `line_length_enabled_at_line?` checks
+/// `processed_source.comment_config.cop_enabled_at_line?('Layout/LineLength', line)`.
+/// Since cops don't have access to the global DisabledRanges, we scan the source
+/// for disable directives ourselves.
+fn line_length_disabled_at_line(source: &SourceFile, line_num: usize) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    if line_num == 0 || line_num > lines.len() {
+        return false;
+    }
+
+    // Check inline: current line has `# rubocop:disable Layout/LineLength` or `all`
+    let current_line = String::from_utf8_lossy(lines[line_num - 1]);
+    if line_disables_line_length(&current_line) {
+        return true;
+    }
+
+    // Check block: scan preceding lines for standalone `# rubocop:disable` that
+    // covers Layout/LineLength without a matching `# rubocop:enable` before us
+    let mut block_disabled = false;
+    for line_bytes in lines.iter().take(line_num.saturating_sub(1)) {
+        let line_str = String::from_utf8_lossy(line_bytes);
+        let trimmed = line_str.trim();
+        // Block directives are standalone comments (no code before the `#`)
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        if directive_disables_line_length(trimmed) {
+            block_disabled = true;
+        } else if directive_enables_line_length(trimmed) {
+            block_disabled = false;
+        }
+    }
+    block_disabled
+}
+
+/// Check if a line contains an inline `# rubocop:disable` for Layout/LineLength or all.
+fn line_disables_line_length(line: &str) -> bool {
+    // Inline directives have code before the comment
+    if let Some(pos) = line.find("# rubocop:disable") {
+        let cops = &line[pos + "# rubocop:disable".len()..];
+        return cops_list_includes_line_length(cops);
+    }
+    false
+}
+
+/// Check if a standalone comment directive disables Layout/LineLength.
+fn directive_disables_line_length(trimmed: &str) -> bool {
+    if let Some(pos) = trimmed.find("rubocop:disable") {
+        let cops = &trimmed[pos + "rubocop:disable".len()..];
+        return cops_list_includes_line_length(cops);
+    }
+    false
+}
+
+/// Check if a standalone comment directive enables Layout/LineLength.
+fn directive_enables_line_length(trimmed: &str) -> bool {
+    if let Some(pos) = trimmed.find("rubocop:enable") {
+        let cops = &trimmed[pos + "rubocop:enable".len()..];
+        return cops_list_includes_line_length(cops);
+    }
+    false
+}
+
+/// Check if a comma-separated cop list includes Layout/LineLength, Metrics/LineLength,
+/// or `all`.
+fn cops_list_includes_line_length(cops_str: &str) -> bool {
+    for cop in cops_str.split(',') {
+        let cop = cop.trim();
+        if cop == "all" || cop == "Layout/LineLength" || cop == "Metrics/LineLength" {
+            return true;
+        }
+    }
+    false
+}
+
 fn modifier_form_too_long(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
@@ -451,6 +743,12 @@ fn modifier_form_too_long(
     }
 
     let (line_num, _) = source.offset_to_line_col(node.location().start_offset());
+
+    // RuboCop's `line_length_enabled_at_line?` — skip if Layout/LineLength
+    // is disabled at this line via rubocop:disable comments
+    if line_length_disabled_at_line(source, line_num) {
+        return false;
+    }
     let lines: Vec<&[u8]> = source.lines().collect();
     if line_num == 0 || line_num > lines.len() {
         return false;
@@ -506,6 +804,44 @@ fn modifier_form_too_long(
     true
 }
 
+/// Check if a byte slice consists only of closing tokens: `end` keywords,
+/// `}`, `]`, `)`, semicolons, and whitespace. These are not sibling statements
+/// but rather closing delimiters of parent blocks.
+fn is_only_closing_tokens(bytes: &[u8]) -> bool {
+    let mut remaining = bytes;
+    loop {
+        // Skip whitespace and semicolons
+        while remaining
+            .first()
+            .is_some_and(|&b| b == b' ' || b == b'\t' || b == b';')
+        {
+            remaining = &remaining[1..];
+        }
+        if remaining.is_empty() {
+            return true;
+        }
+        // Check for closing delimiters
+        if matches!(remaining[0], b'}' | b']' | b')') {
+            remaining = &remaining[1..];
+            continue;
+        }
+        // Check for `end` keyword (must not be followed by identifier chars)
+        if remaining.starts_with(b"end") {
+            let after = &remaining[3..];
+            if after.is_empty()
+                || (!after[0].is_ascii_alphanumeric()
+                    && after[0] != b'_'
+                    && after[0] != b'!'
+                    && after[0] != b'?')
+            {
+                remaining = after;
+                continue;
+            }
+        }
+        return false;
+    }
+}
+
 fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     let (line_num, _) = source.offset_to_line_col(node.location().end_offset());
     let lines: Vec<&[u8]> = source.lines().collect();
@@ -527,7 +863,96 @@ fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::No
         .skip_while(|&b| b == b' ' || b == b'\t')
         .collect::<Vec<_>>();
 
-    trimmed.first() == Some(&b';')
+    // Check for semicolon followed by actual code (not just closing delimiters
+    // or `end` keywords closing parent blocks)
+    if trimmed.first() == Some(&b';') {
+        // Make sure there's actual code after the semicolon, not just }, ], or `end`
+        let remaining: Vec<_> = trimmed[1..]
+            .iter()
+            .copied()
+            .skip_while(|&b| b == b' ' || b == b'\t')
+            .collect();
+        if is_only_closing_tokens(&remaining) {
+            return false;
+        }
+        return true;
+    }
+
+    // Also check through closing tokens (like `}`, `]`, `)`) for semicolons
+    // that indicate sibling statements in enclosing scopes. RuboCop's AST-based
+    // `another_statement_on_same_line?` traverses upward to find `begin` nodes
+    // with siblings; we detect this textually.
+    // Example: `{ |fn| bool = true if cond } ; bool`
+    //   After the if-node: ` } ; bool` — the `}` closes the block, and `; bool`
+    //   is a sibling statement in the enclosing parenthesized expression.
+    {
+        let mut remaining = &trimmed[..];
+        // Skip closing tokens and whitespace
+        while let Some(&b) = remaining.first() {
+            if b == b'}' || b == b']' || b == b')' || b == b' ' || b == b'\t' {
+                remaining = &remaining[1..];
+            } else {
+                break;
+            }
+        }
+        if remaining.first() == Some(&b';') {
+            let after_semi: Vec<_> = remaining[1..]
+                .iter()
+                .copied()
+                .skip_while(|&b| b == b' ' || b == b'\t')
+                .collect();
+            if !after_semi.is_empty() && !is_only_closing_tokens(&after_semi) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if the if/unless keyword is at the start of a line and the previous
+/// non-empty, non-comment line looks like a true receiver continuation:
+/// a bare unary operator (`-`, `+`, `!`, `~`) or an explicit call chain
+/// continuation (`foo.` / `foo&.`).
+///
+/// This intentionally does NOT treat generic trailing punctuation as chaining.
+/// Examples RuboCop still flags:
+/// - `%!...!` percent-string delimiters
+/// - `$!` exception globals
+/// - `?!` / `?-` character literals
+/// - `def !`
+/// - `foo +` where the if-expression is an argument, not the receiver
+fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location<'_>) -> bool {
+    let (kw_line, kw_col) = source.offset_to_line_col(kw_loc.start_offset());
+    let kw_line_start = kw_loc.start_offset().saturating_sub(kw_col);
+    let before_kw = &source.as_bytes()[kw_line_start..kw_loc.start_offset()];
+
+    // Only applies when the if/unless keyword is at the start of the line.
+    if !before_kw.iter().all(|&b| b == b' ' || b == b'\t') || kw_line < 2 {
+        return false;
+    }
+
+    let lines: Vec<&[u8]> = source.lines().collect();
+    for prev_idx in (0..kw_line - 1).rev() {
+        let prev_line = lines[prev_idx];
+        let prev_str = String::from_utf8_lossy(prev_line);
+        let prev_trimmed = prev_str.trim();
+        let prev_trimmed = prev_trimmed.strip_suffix('\r').unwrap_or(prev_trimmed);
+        if prev_trimmed.is_empty() {
+            continue;
+        }
+
+        let prev_code = strip_trailing_comment(prev_trimmed);
+        if prev_code.is_empty() {
+            continue;
+        }
+
+        return matches!(prev_code, "-" | "+" | "!" | "~")
+            || prev_code.ends_with('.')
+            || prev_code.ends_with("&.");
+    }
+
+    false
 }
 
 /// Check if an IfNode or UnlessNode is a pattern matching guard (e.g., `in "a" if cond`).
@@ -592,16 +1017,18 @@ fn first_line_comment_text(
     }
 
     let after_predicate = &kw_line_bytes[predicate_end_in_line..];
-    let trimmed = after_predicate
+    // Find `#` anywhere after the predicate (not just as first non-whitespace).
+    // This handles comments after `then` keyword: `if cond then # comment`.
+    // RuboCop's `first_line_comment(node)` uses `processed_source.comments`
+    // which finds any comment on the same line regardless of intervening tokens.
+    // Skip `#{` which is string interpolation, not a comment.
+    let hash_pos = after_predicate
         .iter()
-        .copied()
-        .skip_while(|&b| b == b' ' || b == b'\t')
-        .collect::<Vec<_>>();
-    if !trimmed.starts_with(b"#") {
-        return None;
-    }
+        .enumerate()
+        .position(|(i, &b)| b == b'#' && after_predicate.get(i + 1) != Some(&b'{'))?;
+    let comment_bytes = &after_predicate[hash_pos..];
 
-    let comment = match std::str::from_utf8(&trimmed) {
+    let comment = match std::str::from_utf8(comment_bytes) {
         Ok(comment) => comment,
         Err(_) => return None,
     };
@@ -623,7 +1050,9 @@ fn code_after_end(source: &SourceFile, end_loc: ruby_prism::Location<'_>) -> Opt
         return None;
     }
 
-    let end_line_bytes = lines[end_line - 1];
+    let raw_line = lines[end_line - 1];
+    // Strip CRLF: \r at end of line inflates modifier form length by 1 character
+    let end_line_bytes = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
     let after_end_col = end_col + end_loc.as_slice().len();
     if after_end_col >= end_line_bytes.len() {
         return None;
@@ -712,6 +1141,13 @@ impl Cop for IfUnlessModifier {
 
         let modifier_form = kw_loc.start_offset() > body_node.location().start_offset();
 
+        // Skip parenthesized bodies only for normal-form nodes. RuboCop still
+        // checks modifier-form lines like `(raise '...') if condition` for the
+        // "modifier form makes the line too long" branch.
+        if !modifier_form && body_node.as_parentheses_node().is_some() {
+            return;
+        }
+
         // Skip if the body is an endless method definition — conflict with
         // Style/AmbiguousEndlessMethodDefinition (RuboCop: endless_method?).
         if body_is_endless_method(&body_node) {
@@ -789,6 +1225,12 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
+        // Skip if the if/unless is chained from the previous line, matching
+        // the narrow receiver cases RuboCop covers via `node.chained?`.
+        if previous_line_chains_to_if(source, &kw_loc) {
+            return;
+        }
+
         // If there are standalone comment lines between keyword and body, don't suggest
         // modifier form — converting would lose the comments. But blank lines and
         // multiline condition continuation lines are OK.
@@ -817,24 +1259,23 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
-        // Skip if body line has an EOL comment — converting to modifier would lose it
+        // Skip if body line has a comment — RuboCop's `non_eligible_body?` checks
+        // `processed_source.contains_comment?(body.source_range)` which returns true
+        // if there's any comment on the same LINE as the body, even after semicolons.
+        // Use byte offset (not char count from offset_to_line_col) so multi-byte
+        // UTF-8 characters don't cause misalignment.
         {
             let lines: Vec<&[u8]> = source.lines().collect();
             if body_start_line > 0 && body_start_line <= lines.len() {
                 let body_line = lines[body_start_line - 1];
-                let body_end_in_line = body_node.location().end_offset();
-                let (_, body_end_col) = source.offset_to_line_col(body_end_in_line);
-                // Check if there's a comment after the body on the same line
-                if body_end_col < body_line.len() {
-                    let after_body = &body_line[body_end_col..];
-                    let trimmed = after_body
-                        .iter()
-                        .skip_while(|&&b| b == b' ' || b == b'\t')
-                        .copied()
-                        .collect::<Vec<_>>();
-                    if trimmed.starts_with(b"#") {
-                        return;
-                    }
+                let body_line_start = source.line_start_offset(body_start_line);
+                let body_end_byte = body_node
+                    .location()
+                    .end_offset()
+                    .saturating_sub(body_line_start);
+                // Search for `#` anywhere after the body end on the same line
+                if body_end_byte < body_line.len() && body_line[body_end_byte..].contains(&b'#') {
+                    return;
                 }
             }
         }
@@ -921,7 +1362,8 @@ impl Cop for IfUnlessModifier {
         .into_owned();
 
         let mut expression = format!("{body_text} {keyword} {cond_text}");
-        if parenthesize_modifier_form(source, &kw_loc) {
+        let needs_parens = parenthesize_modifier_form(source, &kw_loc);
+        if needs_parens {
             expression = format!("({expression})");
         }
         if let Some(comment) = first_line_comment_text(source, kw_line, &predicate) {
@@ -1014,6 +1456,43 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "Should fire when LineLengthEnabled is false regardless of line length"
+        );
+    }
+
+    #[test]
+    fn semicolon_before_closing_brace_not_another_statement() {
+        use crate::testutil::run_cop_full;
+        // `return ret if ret; }` — the `;` before `}` is not a sibling statement,
+        // so the if should be flaggable as modifier form.
+        let source = b"items.each { |x| if x\n  return x\nend; }\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Semicolon before closing brace should not suppress modifier suggestion"
+        );
+    }
+
+    #[test]
+    fn previous_line_bang_method_is_not_treated_as_chaining() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"m.load_bundler!\nif m.invoked_as_script?\n  load Gem.bin_path(\"bundler\", \"bundle\")\nend\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Bang method names on the previous line should not suppress modifier suggestion"
+        );
+    }
+
+    #[test]
+    fn previous_line_binary_operator_argument_is_not_treated_as_chaining() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"list = a +\nif foo\n  bar\nend\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Binary operators on the previous line should not suppress modifier suggestion"
         );
     }
 }

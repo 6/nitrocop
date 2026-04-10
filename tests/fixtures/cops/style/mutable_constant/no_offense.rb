@@ -43,3 +43,12 @@ CONST18 = `uname`.freeze
 CONST19 = "/"
 CONST20 = "✓"
 CONST21 = "\e[31m"
+
+# Interpolated symbols with .freeze are immutable (strict mode)
+# These were FP: nitrocop flagged them but RuboCop doesn't
+THREAD_KEY = :"#{name}.batched_queries".freeze
+ATTRIBUTE_NAMESPACE = :"job.#{base}".freeze
+
+# Bare range literals are immutable on Ruby 3.0+, including in strict mode
+HTTP_OK_RANGE = 200..299
+DISCARD_BRACES = 0..-3

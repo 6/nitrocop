@@ -9,6 +9,38 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Variant notes (EnforcedStyle: explicit)
+///
+/// For explicit style, trait-name calls inside nested `trait` blocks (e.g.
+/// `with_ipv6` inside `trait :dualstack`) must not be flagged when the method
+/// name matches a trait defined in the enclosing `factory`. Fixed by collecting
+/// trait names from the factory body and passing them through when recursing
+/// into nested trait blocks, rather than processing trait nodes independently.
+///
+/// Two additional fixes for explicit style:
+/// 1. Block argument FN: `password_confirmation(&:password)` was not flagged
+///    because `call.block().is_some()` returned true for `BlockArgumentNode`.
+///    RuboCop's `implicit_association?` matcher uses `(send nil? ...)` which
+///    only matches `send` nodes — in RuboCop AST, `foo do ... end` is a `block`
+///    node (not `send`), but `foo(&:bar)` IS a `send` node. In Prism both are
+///    CallNodes, so we distinguish by checking for `BlockNode` specifically.
+/// 2. Nested factory FP: `premium` inside `factory :child` nested under
+///    `factory :parent` was falsely flagged when `:premium` is a trait in the
+///    parent. RuboCop's `trait_factory_node` finds the OUTERMOST enclosing
+///    factory and collects trait names from it. Fixed by collecting trait names
+///    from all enclosing factory blocks via parse tree traversal.
+/// 3. Iterator-nested trait FN: traits inside iterator blocks (e.g.
+///    `.each do |n| trait :"#{n}_type" do ... end end`) were missed because
+///    the factory handler only recursed into direct trait children. Fixed by
+///    processing both `factory` and `trait` nodes independently in check_node:
+///    factory nodes check their non-trait children, and trait nodes check
+///    their own children using enclosing factory trait names.
+/// 4. Top-level trait FP: `trait` blocks defined at the `FactoryBot.define`
+///    level (siblings of factory blocks, not nested inside any factory) were
+///    falsely flagging their children as implicit associations. RuboCop's
+///    `trait_factory_node` returns nil for such traits, so they are never
+///    processed. Fixed by checking `has_enclosing_factory` before processing
+///    trait blocks.
 pub struct AssociationStyle;
 
 /// Ruby keywords that cannot be implicit associations.
@@ -160,14 +192,80 @@ impl Cop for AssociationStyle {
 
         let style = config.get_str("EnforcedStyle", "implicit");
 
-        let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
-            stmts.body().iter().collect()
-        } else {
-            vec![body]
-        };
+        if style == "explicit" {
+            let my_start = call.location().start_offset();
+            let my_end = call.location().end_offset();
 
-        for child in &children {
-            if style == "implicit" {
+            // RuboCop's trait_factory_node returns nil for traits at the
+            // FactoryBot.define level (not inside any factory block), so they
+            // are never flagged. We replicate this: skip trait blocks that
+            // have no enclosing factory.
+            if method_name == b"trait" && !has_enclosing_factory(_parse_result, my_start, my_end) {
+                return;
+            }
+
+            // Collect trait names before extracting children (body may be moved)
+            let factory_trait_names = if method_name == b"factory" {
+                let mut names = collect_trait_names(&body);
+                let enclosing =
+                    collect_enclosing_factory_trait_names(_parse_result, my_start, my_end);
+                names.extend(enclosing);
+                names
+            } else {
+                collect_enclosing_factory_trait_names(_parse_result, my_start, my_end)
+            };
+
+            let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
+                stmts.body().iter().collect()
+            } else {
+                vec![body]
+            };
+
+            if method_name == b"factory" {
+                // Check direct non-trait children only; trait blocks are processed
+                // independently when check_node fires for the trait CallNode.
+                for child in &children {
+                    if let Some(c) = child.as_call_node() {
+                        if method_dispatch_predicates::is_command(&c, b"trait") {
+                            continue;
+                        }
+                    }
+                    if is_implicit_association_with_traits(child, &factory_trait_names) {
+                        let loc = child.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use explicit style to define associations.".to_string(),
+                        ));
+                    }
+                }
+            } else {
+                // trait node: check its children for implicit associations.
+                // This handles traits nested inside iterator blocks (e.g. .each do)
+                // that the factory handler can't reach via direct child traversal.
+                for child in &children {
+                    if is_implicit_association_with_traits(child, &factory_trait_names) {
+                        let loc = child.location();
+                        let (line, column) = source.offset_to_line_col(loc.start_offset());
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Use explicit style to define associations.".to_string(),
+                        ));
+                    }
+                }
+            }
+        } else {
+            let children: Vec<_> = if let Some(stmts) = body.as_statements_node() {
+                stmts.body().iter().collect()
+            } else {
+                vec![body]
+            };
+
+            for child in &children {
                 if is_explicit_association(child)
                     && !has_strategy_build(child)
                     && !has_keyword_arg(child)
@@ -181,15 +279,6 @@ impl Cop for AssociationStyle {
                         "Use implicit style to define associations.".to_string(),
                     ));
                 }
-            } else if is_implicit_association(child, node) {
-                let loc = child.location();
-                let (line, column) = source.offset_to_line_col(loc.start_offset());
-                diagnostics.push(self.diagnostic(
-                    source,
-                    line,
-                    column,
-                    "Use explicit style to define associations.".to_string(),
-                ));
             }
         }
     }
@@ -294,63 +383,94 @@ fn has_keyword_arg(node: &ruby_prism::Node<'_>) -> bool {
     false
 }
 
-/// Check if a node is an implicit association in explicit style.
-fn is_implicit_association(
-    node: &ruby_prism::Node<'_>,
-    factory_or_trait_node: &ruby_prism::Node<'_>,
+/// Check whether the given source range is enclosed by any `factory` block.
+/// RuboCop's `trait_factory_node` returns nil for traits defined at the
+/// `FactoryBot.define` level (not nested inside any factory), causing them
+/// to be skipped. We replicate this: if a `trait` is not inside any factory,
+/// its children should NOT be flagged.
+fn has_enclosing_factory(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    my_start: usize,
+    my_end: usize,
 ) -> bool {
-    let call = match node.as_call_node() {
-        Some(c) => c,
-        None => return false,
+    struct FactoryEnclosureChecker {
+        my_start: usize,
+        my_end: usize,
+        found: bool,
+    }
+
+    impl<'pr> Visit<'pr> for FactoryEnclosureChecker {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if self.found {
+                return;
+            }
+            if method_dispatch_predicates::is_command(node, b"factory") {
+                let start = node.location().start_offset();
+                let end = node.location().end_offset();
+                if start < self.my_start && end > self.my_end {
+                    self.found = true;
+                    return;
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
+
+    let mut checker = FactoryEnclosureChecker {
+        my_start,
+        my_end,
+        found: false,
     };
-
-    if call.receiver().is_some() {
-        return false;
-    }
-
-    let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
-
-    if is_reserved_method(method_name) {
-        return false;
-    }
-
-    if is_trait_within_factory(method_name, factory_or_trait_node) {
-        return false;
-    }
-
-    if call.block().is_some() {
-        return false;
-    }
-
-    true
+    checker.visit(&parse_result.node());
+    checker.found
 }
 
-/// Check if a method name matches a trait name defined in the enclosing factory node.
-fn is_trait_within_factory(method_name: &str, factory_node: &ruby_prism::Node<'_>) -> bool {
-    let call = match factory_node.as_call_node() {
-        Some(c) => c,
-        None => return false,
-    };
-
-    if call.name().as_slice() != b"factory" {
-        return false;
+/// Collect trait names from all factory blocks that enclose the given source range.
+/// This replicates RuboCop's trait_factory_node behavior, which finds the outermost
+/// enclosing factory and collects trait names from it.
+fn collect_enclosing_factory_trait_names(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    my_start: usize,
+    my_end: usize,
+) -> Vec<String> {
+    struct EnclosingFactoryFinder {
+        my_start: usize,
+        my_end: usize,
+        trait_names: Vec<String>,
     }
 
-    let block = match call.block() {
-        Some(b) => b,
-        None => return false,
-    };
+    impl<'pr> Visit<'pr> for EnclosingFactoryFinder {
+        fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+            if method_dispatch_predicates::is_command(node, b"factory") {
+                let start = node.location().start_offset();
+                let end = node.location().end_offset();
+                // If this factory strictly CONTAINS our factory
+                if start < self.my_start && end > self.my_end {
+                    if let Some(block) = node.block() {
+                        if let Some(block_node) = block.as_block_node() {
+                            if let Some(body) = block_node.body() {
+                                let names = collect_trait_names(&body);
+                                self.trait_names.extend(names);
+                            }
+                        }
+                    }
+                }
+            }
+            ruby_prism::visit_call_node(self, node);
+        }
+    }
 
-    let block_node = match block.as_block_node() {
-        Some(b) => b,
-        None => return false,
+    let mut finder = EnclosingFactoryFinder {
+        my_start,
+        my_end,
+        trait_names: Vec::new(),
     };
+    finder.visit(&parse_result.node());
+    finder.trait_names
+}
 
-    let body = match block_node.body() {
-        Some(b) => b,
-        None => return false,
-    };
-
+/// Collect all trait names defined within a factory body (recursively).
+fn collect_trait_names(body: &ruby_prism::Node<'_>) -> Vec<String> {
     struct TraitCollector {
         trait_names: Vec<String>,
     }
@@ -373,13 +493,85 @@ fn is_trait_within_factory(method_name: &str, factory_node: &ruby_prism::Node<'_
     let mut collector = TraitCollector {
         trait_names: Vec::new(),
     };
-    collector.visit(&body);
+    collector.visit(body);
+    collector.trait_names
+}
 
-    collector.trait_names.iter().any(|n| n == method_name)
+/// Check if a node is an implicit association in explicit style,
+/// using a pre-collected list of trait names from the enclosing factory.
+fn is_implicit_association_with_traits(
+    node: &ruby_prism::Node<'_>,
+    trait_names: &[String],
+) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+
+    if call.receiver().is_some() {
+        return false;
+    }
+
+    let method_name = std::str::from_utf8(call.name().as_slice()).unwrap_or("");
+
+    if is_reserved_method(method_name) {
+        return false;
+    }
+
+    if trait_names.iter().any(|n| n == method_name) {
+        return false;
+    }
+
+    // Only exclude calls with do/end or {} blocks (BlockNode), not block
+    // arguments like &:password (BlockArgumentNode). RuboCop's implicit_association?
+    // matcher only matches `send` nodes; in RuboCop AST, `foo do ... end` is a
+    // `block` node (not a `send`), so it never matches. In Prism, both are CallNodes
+    // but we can distinguish via block type.
+    if let Some(block) = call.block() {
+        if block.as_block_node().is_some() {
+            return false;
+        }
+    }
+
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AssociationStyle, "cops/factorybot/association_style");
+
+    fn explicit_config() -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("explicit".to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_explicit() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &AssociationStyle,
+            include_bytes!(
+                "../../../tests/fixtures/cops/factorybot/association_style/offense.explicit.rb"
+            ),
+            explicit_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_explicit() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &AssociationStyle,
+            include_bytes!(
+                "../../../tests/fixtures/cops/factorybot/association_style/no_offense.explicit.rb"
+            ),
+            explicit_config(),
+        );
+    }
 }

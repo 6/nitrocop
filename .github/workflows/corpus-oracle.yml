@@ -33,7 +33,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
@@ -126,13 +126,14 @@ jobs:
         id: rubocop-cache-key
         run: |
           # Rubocop results are deterministic for a given (repo SHA, rubocop version, config).
-          # Cache key = hash of Gemfile + config + per-repo excludes + parser crash patch.
-          # Including repo_excludes.json ensures cache invalidation when file exclusions change.
-          # Including rescue_parser_crashes.rb ensures cache invalidation when crash handling changes.
+          # Cache key = hash of Gemfile + config + per-repo excludes + parser crash patch +
+          # variant batch script. Including run_variant_batches.py ensures cache invalidation
+          # when variant invocation changes (e.g., adding vendor exclusions).
           EXCLUDES_FILE="bench/corpus/repo_excludes.json"
           RESCUE_FILE="bench/corpus/rescue_parser_crashes.rb"
+          VARIANT_SCRIPT="bench/corpus/run_variant_batches.py"
           EXTRA_HASH=""
-          for f in "$EXCLUDES_FILE" "$RESCUE_FILE"; do
+          for f in "$EXCLUDES_FILE" "$RESCUE_FILE" "$VARIANT_SCRIPT"; do
             if [ -f "$f" ]; then
               EXTRA_HASH="${EXTRA_HASH}$(sha256sum "$f" | cut -c1-16)"
             fi
@@ -207,7 +208,7 @@ jobs:
 
             # Skip repos that failed to clone
             if [ ! -d "repos/${REPO_ID}" ]; then
-              echo "Skipping ${REPO_ID} (clone failed)"
+              echo "::warning::Skipping ${REPO_ID} (clone failed — repo may be deleted or private)"
               echo "::endgroup::"
               continue
             fi
@@ -221,9 +222,9 @@ jobs:
               RUBOCOP_CACHED=true
             fi
 
-            # Per-repo timeout (15 min each tool).
+            # Per-repo timeout (25 min each tool).
             # Keeps one slow repo from killing the whole batch.
-            REPO_TIMEOUT=900  # 15 minutes
+            REPO_TIMEOUT=1500  # 25 minutes
 
             # Resolve per-repo config (adds file exclusions for repos with known parser crashes)
             REPO_CONFIG=$(python3 bench/corpus/gen_repo_config.py "$REPO_ID" bench/corpus/baseline_rubocop.yml "$DEST")
@@ -237,6 +238,19 @@ jobs:
 
             # nitrocop — uses shared script for oracle-identical invocation
             echo "=== nitrocop: ${REPO_ID} ==="
+
+            # Diagnostic: log binary version and config for first repo in shard
+            if [ "${DIAG_DONE:-}" != "1" ]; then
+              echo "--- oracle shard diagnostic ---"
+              echo "binary: $WORKSPACE/bin/nitrocop"
+              "$WORKSPACE/bin/nitrocop" --version 2>&1 || true
+              echo "config: $REPO_CONFIG"
+              head -8 "$REPO_CONFIG" 2>/dev/null || echo "(config not readable)"
+              echo "repo: $ABS_DEST ($(find "$ABS_DEST" -name '*.rb' | wc -l) .rb files)"
+              echo "--- end diagnostic ---"
+              DIAG_DONE=1
+            fi
+
             rc=0
             python3 bench/corpus/run_nitrocop.py "$ABS_DEST" \
               --binary "$WORKSPACE/bin/nitrocop" \
@@ -245,7 +259,22 @@ jobs:
               2>"$WORKSPACE/results/nitrocop/${REPO_ID}.err" || rc=$?
 
             if [ "$rc" -eq 124 ]; then
-              echo "::warning::nitrocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+              echo "::error::nitrocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
+            elif [ "$rc" -gt 1 ]; then
+              # Exit code 1 = offenses found (normal). Only warn on actual failures.
+              echo "::warning::nitrocop exited with code ${rc} for ${REPO_ID}"
+              cat "$WORKSPACE/results/nitrocop/${REPO_ID}.err" 2>/dev/null || true
+            fi
+
+            # Diagnostic: log offense count for first repo
+            if [ "${DIAG_NC_DONE:-}" != "1" ] && [ -f "$WORKSPACE/results/nitrocop/${REPO_ID}.json" ]; then
+              NC_COUNT=$(python3 -c "import json; d=json.load(open('$WORKSPACE/results/nitrocop/${REPO_ID}.json')); print(len(d.get('offenses',[])))" 2>/dev/null || echo "?")
+              echo "diag: nitrocop found $NC_COUNT offenses on ${REPO_ID}"
+              if [ "$RUBOCOP_CACHED" = true ]; then
+                RC_COUNT=$(python3 -c "import json; d=json.load(open('results/rubocop/${REPO_ID}.json')); print(sum(len(f.get('offenses',[])) for f in d.get('files',[])))" 2>/dev/null || echo "?")
+                echo "diag: rubocop (cached) found $RC_COUNT offenses on ${REPO_ID}"
+              fi
+              DIAG_NC_DONE=1
             fi
 
             # rubocop — skip if we have a cached result
@@ -266,7 +295,12 @@ jobs:
                 > "$WORKSPACE/results/rubocop/${REPO_ID}.json" 2>"$WORKSPACE/results/rubocop/${REPO_ID}.err" || rc=$?
 
               if [ "$rc" -eq 124 ]; then
-                echo "::warning::rubocop timed out after ${REPO_TIMEOUT}s for ${REPO_ID}"
+                echo "::error::rubocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
+              elif [ "$rc" -gt 1 ]; then
+                # Exit code 1 = offenses found (normal for corpus repos).
+                # Only warn on actual failures (OOM=137, crashes, etc.).
+                echo "::warning::rubocop exited with code ${rc} for ${REPO_ID}"
+                cat "$WORKSPACE/results/rubocop/${REPO_ID}.err" 2>/dev/null || true
               fi
             fi
 
@@ -295,7 +329,9 @@ jobs:
             # Save rubocop result to cache dir (will be persisted after the batch).
             # Validate file paths are within the repo to prevent cache poisoning.
             if [ "$RUBOCOP_CACHED" = false ] && [ -f "results/rubocop/${REPO_ID}.json" ]; then
-              if python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
+              if [ ! -s "results/rubocop/${REPO_ID}.json" ]; then
+                echo "::warning::Rubocop result for ${REPO_ID} is empty (rubocop likely crashed) — not caching"
+              elif python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
                 cp "results/rubocop/${REPO_ID}.json" "rubocop-cache/${REPO_ID}_${REPO_SHA}.json"
               else
                 echo "::warning::Rubocop result for ${REPO_ID} contains out-of-repo paths — not caching"
@@ -513,8 +549,9 @@ jobs:
           # Same hash as oracle-repo jobs use — must stay in sync
           EXCLUDES_FILE="bench/corpus/repo_excludes.json"
           RESCUE_FILE="bench/corpus/rescue_parser_crashes.rb"
+          VARIANT_SCRIPT="bench/corpus/run_variant_batches.py"
           EXTRA_HASH=""
-          for f in "$EXCLUDES_FILE" "$RESCUE_FILE"; do
+          for f in "$EXCLUDES_FILE" "$RESCUE_FILE" "$VARIANT_SCRIPT"; do
             if [ -f "$f" ]; then
               EXTRA_HASH="${EXTRA_HASH}$(sha256sum "$f" | cut -c1-16)"
             fi
@@ -676,9 +713,14 @@ jobs:
           # Must run AFTER IG merge so variant department rates are computed
           # from the final (merged) default FP/FN. Without this ordering,
           # variant rates can appear higher than default rates.
+          SYNTH_ARG=""
+          if [ -f bench/synthetic/synthetic-results.json ]; then
+            SYNTH_ARG="--synthetic bench/synthetic/synthetic-results.json"
+          fi
           python3 bench/corpus/patch_variant_stats.py \
             --corpus corpus-results.json \
-            --variants style-variant-results.json
+            --variants style-variant-results.json \
+            $SYNTH_ARG
 
       - name: Regenerate report with variant data
         run: |

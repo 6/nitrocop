@@ -118,6 +118,46 @@ use crate::parse::source::SourceFile;
 ///     still filtered out. Fix: reset `expression_depth` while visiting a
 ///     class-constructor block body so its statements are checked like a normal
 ///     class/module body (2026-04-03).
+///
+/// 13. The `only_before` variant was only checking `has_blank_before` and never
+///     checked `has_blank_after`. RuboCop's `only_before` style flags a blank
+///     line AFTER the modifier for `private`/`protected` (special_modifiers),
+///     telling users to remove it. It does not check blank lines after
+///     `module_function` or `public`. Fix: added `has_blank_after` check to the
+///     `only_before` branch for special_modifiers only, reporting "Remove a blank
+///     line after `{modifier}`." when a blank line follows (2026-04-06).
+///
+/// 14. Blocks inside class bodies (e.g. `setup do...end`, `included do...end`)
+///     were incorrectly calling `note_nested_class_like()`, which disabled the
+///     `body_end_boundary` exemption. This caused 6 default-style FPs where a
+///     modifier right before `end` (with a blank before) was flagged as missing
+///     a blank after. Fix: removed the `note_nested_class_like()` call from the
+///     block handler in `visit_call_node` — only actual class/module/sclass
+///     definitions should disable body_end_boundary (2026-04-07).
+///
+/// 15. The `only_before` style used `has_blank_after` (which includes the
+///     body-end exemption) to decide whether to flag "Remove blank line after."
+///     This caused 78 FPs where a special modifier before `end` (no actual
+///     blank line) was incorrectly flagged. Fix: rewrote the `only_before`
+///     branch to match RuboCop's `allowed_only_before_style?` exactly:
+///     (a) exempt when the next line is literal `end` (no indentation),
+///     (b) use `next_line_empty_and_exists?` (body_end OR actual blank, AND
+///     not at EOF) for the "Remove after" check, and (c) fire at most one
+///     offense per modifier (2026-04-07).
+///
+/// 16. The remaining `only_before` variant gaps came from two RuboCop
+///     `bare_access_modifier?` details: assignment wrappers like
+///     `CONST = CommandClass.new do ... private ... end` break macro scope, but
+///     postfix conditional forms like `protected unless $TESTING` still expose
+///     the inner bare send node. Fix: treat non-local write nodes as
+///     non-macro wrappers during visitation, and accept postfix `if`/`unless`
+///     tails in the line-shape filter (2026-04-08).
+///
+/// 17. RuboCop's `class_constructor?` also treats `Data.define do ... end` as a
+///     class-like scope, even when wrapped by a constant assignment such as
+///     `StepDefinition = Data.define(...) do ... private ... end`. Fix:
+///     recognize `Data.define` alongside `Class/Module/Struct.new` when
+///     promoting block bodies to class scope (2026-04-08).
 pub struct EmptyLinesAroundAccessModifier;
 
 // Uses access_modifier_predicates for access modifier detection.
@@ -134,8 +174,9 @@ fn is_comment_line(line: &[u8]) -> bool {
 }
 
 /// Check whether the source from `column` to end-of-line is exactly the access
-/// modifier keyword, optionally followed by whitespace and a trailing comment.
-/// This matches plain `private`, `private # comment`, and same-line body-opening
+/// modifier keyword, optionally followed by whitespace, a postfix `if`/`unless`
+/// condition, or a trailing comment. This matches plain `private`,
+/// `private # comment`, `protected unless $TESTING`, and same-line body-opening
 /// forms such as `module Backend; private # comment`.
 fn is_trailing_bare_modifier_line(line: &[u8], column: usize, method_name: &[u8]) -> bool {
     let end_pos = column.saturating_add(method_name.len());
@@ -148,11 +189,26 @@ fn is_trailing_bare_modifier_line(line: &[u8], column: usize, method_name: &[u8]
         match line[idx] {
             b' ' | b'\t' | b'\r' | b'\n' => idx += 1,
             b'#' => return true,
-            _ => return false,
+            _ => break,
         }
     }
 
-    true
+    if idx == line.len() {
+        return true;
+    }
+
+    let trailing = &line[idx..];
+    matches_postfix_conditional(trailing, b"if") || matches_postfix_conditional(trailing, b"unless")
+}
+
+fn matches_postfix_conditional(trailing: &[u8], keyword: &[u8]) -> bool {
+    if trailing.len() < keyword.len() || &trailing[..keyword.len()] != keyword {
+        return false;
+    }
+
+    trailing
+        .get(keyword.len())
+        .is_some_and(|b| matches!(b, b' ' | b'\t'))
 }
 
 /// Allow inline brace-block forms like `1.times { private }` and
@@ -362,34 +418,34 @@ macro_rules! visit_write_node_as_non_class_scope {
     };
 }
 
-fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
-    if call.name().as_slice() != b"new" {
-        return false;
-    }
-
-    let Some(receiver) = call.receiver() else {
-        return false;
-    };
-
+fn receiver_is_global_constant(receiver: ruby_prism::Node<'_>, names: &[&[u8]]) -> bool {
     if let Some(const_read) = receiver.as_constant_read_node() {
-        return matches!(
-            const_read.name().as_slice(),
-            b"Class" | b"Module" | b"Struct" | b"Data"
-        );
+        return names
+            .iter()
+            .any(|&name| const_read.name().as_slice() == name);
     }
 
     if let Some(const_path) = receiver.as_constant_path_node() {
         if const_path.parent().is_none() {
             if let Some(name_node) = const_path.name() {
-                return matches!(
-                    name_node.as_slice(),
-                    b"Class" | b"Module" | b"Struct" | b"Data"
-                );
+                return names.iter().any(|&name| name_node.as_slice() == name);
             }
         }
     }
 
     false
+}
+
+fn is_class_constructor_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    match call.name().as_slice() {
+        b"new" => receiver_is_global_constant(receiver, &[b"Class", b"Module", b"Struct"]),
+        b"define" => receiver_is_global_constant(receiver, &[b"Data"]),
+        _ => false,
+    }
 }
 
 impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
@@ -589,6 +645,106 @@ impl<'pr> ruby_prism::Visit<'pr> for AccessModifierCollector {
         ruby_prism::LocalVariableOrWriteNode<'pr>,
         visit_local_variable_or_write_node
     );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_and_write_node,
+        ruby_prism::ClassVariableAndWriteNode<'pr>,
+        visit_class_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_operator_write_node,
+        ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+        visit_class_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_or_write_node,
+        ruby_prism::ClassVariableOrWriteNode<'pr>,
+        visit_class_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_class_variable_write_node,
+        ruby_prism::ClassVariableWriteNode<'pr>,
+        visit_class_variable_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_and_write_node,
+        ruby_prism::ConstantAndWriteNode<'pr>,
+        visit_constant_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_operator_write_node,
+        ruby_prism::ConstantOperatorWriteNode<'pr>,
+        visit_constant_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_or_write_node,
+        ruby_prism::ConstantOrWriteNode<'pr>,
+        visit_constant_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_and_write_node,
+        ruby_prism::ConstantPathAndWriteNode<'pr>,
+        visit_constant_path_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_operator_write_node,
+        ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+        visit_constant_path_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_or_write_node,
+        ruby_prism::ConstantPathOrWriteNode<'pr>,
+        visit_constant_path_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_path_write_node,
+        ruby_prism::ConstantPathWriteNode<'pr>,
+        visit_constant_path_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_constant_write_node,
+        ruby_prism::ConstantWriteNode<'pr>,
+        visit_constant_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_and_write_node,
+        ruby_prism::GlobalVariableAndWriteNode<'pr>,
+        visit_global_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_operator_write_node,
+        ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+        visit_global_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_or_write_node,
+        ruby_prism::GlobalVariableOrWriteNode<'pr>,
+        visit_global_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_global_variable_write_node,
+        ruby_prism::GlobalVariableWriteNode<'pr>,
+        visit_global_variable_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_and_write_node,
+        ruby_prism::InstanceVariableAndWriteNode<'pr>,
+        visit_instance_variable_and_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_operator_write_node,
+        ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+        visit_instance_variable_operator_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_or_write_node,
+        ruby_prism::InstanceVariableOrWriteNode<'pr>,
+        visit_instance_variable_or_write_node
+    );
+    visit_write_node_as_non_class_scope!(
+        visit_instance_variable_write_node,
+        ruby_prism::InstanceVariableWriteNode<'pr>,
+        visit_instance_variable_write_node
+    );
 }
 
 impl Cop for EmptyLinesAroundAccessModifier {
@@ -771,6 +927,54 @@ impl Cop for EmptyLinesAroundAccessModifier {
                     }
                 }
                 "only_before" => {
+                    // Match RuboCop's allowed_only_before_style? logic:
+                    // 1. Special modifier + next line is bare 'end' → no offense
+                    // 2. Special modifier + next_line_empty_and_exists → "Remove after"
+                    // 3. No blank before → "Keep before"
+                    // RuboCop fires at most ONE offense per modifier.
+                    let is_special = access_modifier_predicates::is_special_modifier_name(
+                        modifier_str.as_bytes(),
+                    );
+
+                    if is_special {
+                        // RuboCop: return true if processed_source[node.last_line] == 'end'
+                        let next_line_is_bare_end = line < lines.len() && lines[line] == b"end";
+                        if next_line_is_bare_end {
+                            // No offense for this modifier
+                            continue;
+                        }
+
+                        // RuboCop: return false if next_line_empty_and_exists?
+                        // next_line_empty = body_end? || next_line.blank?
+                        let next_empty = is_at_body_end
+                            || (line < lines.len() && is_blank_or_whitespace_line(lines[line]));
+                        // exists = modifier is not on the second-to-last line
+                        let exists = line + 1 != lines.len();
+
+                        if next_empty && exists {
+                            let mut diag = self.diagnostic(
+                                source,
+                                line,
+                                col,
+                                format!("Remove a blank line after `{modifier_str}`."),
+                            );
+                            if let Some(ref mut corr) = corrections {
+                                if let Some(off) = source.line_col_to_offset(line + 1, 0) {
+                                    corr.push(crate::correction::Correction {
+                                        start: off,
+                                        end: off,
+                                        replacement: String::new(),
+                                        cop_name: self.name(),
+                                        cop_index: 0,
+                                    });
+                                    diag.corrected = true;
+                                }
+                            }
+                            diagnostics.push(diag);
+                            continue;
+                        }
+                    }
+
                     if !has_blank_before {
                         let mut diag = self.diagnostic(
                             source,
@@ -803,6 +1007,7 @@ impl Cop for EmptyLinesAroundAccessModifier {
 mod tests {
     use super::*;
     use crate::testutil::run_cop_full;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         EmptyLinesAroundAccessModifier,
@@ -812,6 +1017,134 @@ mod tests {
         EmptyLinesAroundAccessModifier,
         "cops/layout/empty_lines_around_access_modifier"
     );
+
+    #[test]
+    fn flags_only_before_style_with_blank_line_after() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Test\n  def bar; end\n\n  private\n\n  def baz; end\nend\n",
+            config,
+        );
+        // only_before style: blank line AFTER is an offense (should be removed)
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 4);
+        assert!(diags[0].message.contains("Remove a blank line after"));
+    }
+
+    #[test]
+    fn flags_only_before_style_missing_blank_before() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Test\n  def bar; end\n  private\n  def baz; end\nend\n",
+            config,
+        );
+        // only_before style: missing blank line BEFORE is an offense
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 3);
+        assert!(diags[0].message.contains("Keep a blank line before"));
+    }
+
+    #[test]
+    fn only_before_style_allows_blank_line_after_module_function() {
+        // module_function is NOT a special_modifier (only private/protected are),
+        // so only_before style should NOT flag blank line after module_function.
+        // This is a regression test for FP in module_function repos.
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"module Test\n  module_function\n\n  def foo; end\nend\n",
+            config,
+        );
+        // no offense - only_before doesn't check blank line after module_function
+        assert_eq!(diags.len(), 0);
+    }
+
+    #[test]
+    fn only_before_style_allows_blank_line_after_private_inside_constant_assignment_block() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"module Authentication\n  Authenticate = CommandClass.new(\n    inputs: %i[a]\n  ) do\n    def call\n    end\n\n    private\n\n    def authenticator\n    end\n  end\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 0, "Expected no offenses but got {:?}", diags);
+    }
+
+    #[test]
+    fn only_before_style_flags_postfix_conditional_special_modifier() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class C\n\n  protected unless $TESTING\n\n  MAGIC_ARITY_THRESHOLD = 15\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 3);
+        assert!(diags[0].message.contains("Remove a blank line after"));
+    }
+
+    #[test]
+    fn only_before_style_flags_blank_line_after_private_inside_data_define_block() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Wizard\n  StepDefinition = Data.define(:name) do\n    def use_on?\n    end\n\n    private\n\n    def call_with_model\n    end\n  end\nend\n",
+            config,
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert_eq!(diags[0].location.line, 6);
+        assert!(diags[0].message.contains("Remove a blank line after"));
+    }
 
     #[test]
     fn flags_bare_modifier_inside_receiverful_block_in_class_scope() {
@@ -871,6 +1204,34 @@ mod tests {
     }
 
     #[test]
+    fn only_before_block_in_class_counts_as_nested_content() {
+        // A block inside a class body should count as nested content, so
+        // a modifier after the block with a blank line before it is correct
+        // in only_before style (no FP).
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Foo\n  some_method do\n    something\n  end\n\n  private\n\n  def baz; end\nend\n",
+            config,
+        );
+        // only_before: blank after private is the only offense
+        assert_eq!(diags.len(), 1, "Expected 1 offense but got {:?}", diags);
+        assert!(
+            diags[0].message.contains("Remove a blank line after"),
+            "Expected blank-after offense, got: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
     fn ignores_receiverful_block_inside_rescue_wrapper() {
         let diags = run_cop_full(
             &EmptyLinesAroundAccessModifier,
@@ -878,5 +1239,77 @@ mod tests {
         );
 
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn no_offense_modifier_at_body_end_after_block() {
+        // Bug 1 regression: blocks in class scope (like `included do...end`,
+        // `setup do...end`) should NOT disable body_end_boundary. A modifier
+        // right before `end` with a blank line before it is valid.
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"module Loggable\n  included do\n    has_many :outputs\n  end\n\n  def info(line)\n  end\n\n  private\nend\n",
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for modifier at body end after block, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_modifier_at_body_end_after_setup_block() {
+        // Regression test: `setup do...end` block should not disable body_end
+        let diags = run_cop_full(
+            &EmptyLinesAroundAccessModifier,
+            b"class AppTest < ActionDispatch::IntegrationTest\n  setup do\n    do_something\n  end\n\n  protected\nend\n",
+        );
+        assert!(diags.is_empty(), "Expected no offense, got: {:?}", diags);
+    }
+
+    #[test]
+    fn only_before_no_offense_modifier_before_bare_end() {
+        // Bug 2 regression: only_before style should not flag "Remove blank
+        // after" when the next line is bare `end` (no indentation).
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"class Foo\n  def run; end\n\n  private\nend\n",
+            config,
+        );
+        assert!(
+            diags.is_empty(),
+            "Expected no offense for only_before with bare end, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn only_before_no_offense_modifier_at_body_end_after_block() {
+        // Combines Bug 1 + Bug 2: block in class + only_before style +
+        // modifier before bare `end` should be no offense.
+        let mut opts = HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("only_before".to_string()),
+        );
+        let config = CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EmptyLinesAroundAccessModifier,
+            b"module Loggable\n  included do\n    has_many :outputs\n  end\n\n  private\nend\n",
+            config,
+        );
+        assert!(diags.is_empty(), "Expected no offense, got: {:?}", diags);
     }
 }

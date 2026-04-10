@@ -35,6 +35,23 @@ use crate::parse::source::SourceFile;
 /// - Removed `any?`/`none?` (not in RuboCop's ENUMERATOR_METHODS, caused FP).
 /// - Removed `filter` (not in RuboCop's ENUMERATOR_METHODS, caused FP in
 ///   bluepotion `filter do` blocks).
+/// - Fixed variant style divergence for `EnforcedStyle: always`: RuboCop's
+///   `exit_body_type?` check (whether if_branch is break/return) is now
+///   correctly applied based on style. In `skip_modifier_ifs`, modifier forms
+///   are skipped via `allowed_modifier_if?` without consulting `exit_body_type?`.
+///   In `always`, `exit_body_type?` is consulted for all forms - modifier forms
+///   with exit bodies are not flagged, non-modifier forms with exit bodies are
+///   not flagged (matching RuboCop behavior).
+/// - Fixed `EnforcedStyle: always` multiline modifier offense anchoring:
+///   RuboCop reports the offense at the wrapped statement start (`raise(`,
+///   `indent do`, etc.), not at the trailing modifier keyword line. The corpus
+///   FP/FN pairs were the same offense detected on different lines.
+/// - Fixed `EnforcedStyle: always` parenthesized modifier if/unless:
+///   `(expr if cond)` creates a ParenthesesNode wrapping the IfNode in Prism.
+///   RuboCop's `ends_with_condition?` unwraps `begin_type?` (paren) nodes
+///   when the paren IS the sole body statement. Nitrocop now does the same
+///   unwrap for single-statement bodies only, matching RuboCop's behavior of
+///   not flagging parenthesized conditionals in multi-statement bodies.
 pub struct Next;
 
 /// Check if a method name is an iteration method for Style/Next.
@@ -186,6 +203,42 @@ impl NextVisitor<'_> {
             .is_some_and(|nested| nested.has_keyword_else())
     }
 
+    fn offense_start_offset(
+        &self,
+        keyword_loc: &ruby_prism::Location<'_>,
+        statements: Option<ruby_prism::StatementsNode<'_>>,
+        is_modifier: bool,
+    ) -> usize {
+        if is_modifier {
+            statements
+                .map(|stmts| stmts.location().start_offset())
+                .unwrap_or_else(|| keyword_loc.start_offset())
+        } else {
+            keyword_loc.start_offset()
+        }
+    }
+
+    /// Unwrap a ParenthesesNode to reach the inner if/unless.
+    /// Returns Some(inner_node) if the node is a ParenthesesNode containing
+    /// exactly one statement that is an if or unless node.
+    fn unwrap_paren_to_conditional<'a>(
+        node: &ruby_prism::Node<'a>,
+    ) -> Option<ruby_prism::Node<'a>> {
+        let paren = node.as_parentheses_node()?;
+        let body = paren.body()?;
+        let stmts = body.as_statements_node()?;
+        let mut iter = stmts.body().iter();
+        let first = iter.next()?;
+        if iter.next().is_some() {
+            return None;
+        }
+        if first.as_if_node().is_some() || first.as_unless_node().is_some() {
+            Some(first)
+        } else {
+            None
+        }
+    }
+
     fn check_block_body(&mut self, body: &ruby_prism::Node<'_>) {
         let stmts = match body.as_statements_node() {
             Some(s) => s,
@@ -201,6 +254,18 @@ impl NextVisitor<'_> {
         // RuboCop checks if the LAST statement is an if/unless (ends_with_condition?)
         let stmt = &body_stmts[body_stmts.len() - 1];
 
+        // RuboCop's ends_with_condition? unwraps begin-type (paren) nodes when
+        // the paren IS the sole body statement. In Prism, `(expr if cond)`
+        // creates a ParenthesesNode wrapping the IfNode. Only unwrap for
+        // single-statement bodies — multi-statement bodies with a parenthesized
+        // last statement are NOT flagged by RuboCop.
+        let paren_inner = if single_statement_body {
+            Self::unwrap_paren_to_conditional(stmt)
+        } else {
+            None
+        };
+        let stmt = paren_inner.as_ref().unwrap_or(stmt);
+
         // Check for if/unless that wraps the entire block body
         if let Some(if_node) = stmt.as_if_node() {
             // Skip if it has an else branch
@@ -213,12 +278,17 @@ impl NextVisitor<'_> {
                 return;
             };
             let if_statements = if_node.statements();
+            let is_modifier = self.is_modifier_form(&kw_loc, if_statements);
 
-            if self.style == "skip_modifier_ifs" && self.is_modifier_form(&kw_loc, if_statements) {
+            if self.style == "skip_modifier_ifs" && is_modifier {
                 return;
             }
 
-            if self.is_exit_body(if_node.statements()) {
+            // RuboCop's exit_body_type? check is applied after allowed_modifier_if?
+            // returns false. In always style, allowed_modifier_if? returns false
+            // for modifier forms, so exit_body_type? IS consulted. We should check
+            // is_exit_body for: always style (any form), or non-modifier forms.
+            if (self.style == "always" || !is_modifier) && self.is_exit_body(if_node.statements()) {
                 return;
             }
 
@@ -230,7 +300,9 @@ impl NextVisitor<'_> {
                 return;
             }
 
-            let (line, column) = self.source.offset_to_line_col(kw_loc.start_offset());
+            let start_offset =
+                self.offense_start_offset(&kw_loc, if_node.statements(), is_modifier);
+            let (line, column) = self.source.offset_to_line_col(start_offset);
             self.diagnostics.push(self.cop.diagnostic(
                 self.source,
                 line,
@@ -245,13 +317,18 @@ impl NextVisitor<'_> {
 
             // Skip modifier unless if style is skip_modifier_ifs
             let kw_loc = unless_node.keyword_loc();
-            if self.style == "skip_modifier_ifs"
-                && self.is_modifier_form(&kw_loc, unless_node.statements())
-            {
+            let is_modifier = self.is_modifier_form(&kw_loc, unless_node.statements());
+            if self.style == "skip_modifier_ifs" && is_modifier {
                 return;
             }
 
-            if self.is_exit_body(unless_node.statements()) {
+            // RuboCop's exit_body_type? check is applied after allowed_modifier_if?
+            // returns false. In always style, allowed_modifier_if? returns false
+            // for modifier forms, so exit_body_type? IS consulted. We should check
+            // is_exit_body for: always style (any form), or non-modifier forms.
+            if (self.style == "always" || !is_modifier)
+                && self.is_exit_body(unless_node.statements())
+            {
                 return;
             }
 
@@ -267,7 +344,9 @@ impl NextVisitor<'_> {
             // the outer `unless` is the ENTIRE iteration body. If other
             // top-level statements precede the terminal `unless`, keep the
             // offense on the outer guard.
-            let start_offset = if single_statement_body {
+            let start_offset = if is_modifier {
+                self.offense_start_offset(&kw_loc, unless_node.statements(), true)
+            } else if single_statement_body {
                 self.single_nested_conditional(unless_node.statements())
                     .filter(|nested| !nested.has_else())
                     .map_or_else(
@@ -351,5 +430,48 @@ impl<'pr> Visit<'pr> for NextVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
     crate::cop_fixture_tests!(Next, "cops/style/next");
+
+    #[test]
+    fn always_style_skips_modifier_if_with_exit_body() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("always".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+        // Modifier if with exit body (return) should NOT be flagged in always style,
+        // because RuboCop's exit_body_type? check still applies.
+        let source = b"[1, 2, 3].each do |x|\n  return x if x > 2\nend\n";
+        let diags = run_cop_full_with_config(&Next, source, config);
+        assert!(
+            diags.is_empty(),
+            "Modifier if with exit body should not be flagged in always style, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn always_style_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &Next,
+            include_bytes!("../../../tests/fixtures/cops/style/next/always_offense.rb"),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("always".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
 }

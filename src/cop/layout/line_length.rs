@@ -117,6 +117,47 @@ use crate::parse::source::SourceFile;
 ///    creating longer matches than our regex. Added general merge path
 ///    that merges adjacent URI matches through these chars, with `](`
 ///    (markdown link syntax) and `\` (escape sequences) as boundaries.
+///
+/// ## Corpus investigation (2026-04-06)
+///
+/// Resolved 6 FPs (10→4) and 3 FNs (7→4):
+/// 1. Escaped-URL filter (`\\/\\/`) too aggressive — the filter skipped
+///    URI matches whose tail started with `\\/\\/` (JSON-escaped slashes)
+///    or scheme-only matches followed by `\`. These are valid URI matches
+///    that Ruby's `URI.parse` accepts (e.g. `https:` is a valid URI).
+///    Removed both filters; the scheme match extends to end of line via
+///    word-boundary extension, producing the correct AllowURI exemption.
+/// 2. Offense fixture corrections — removed 3 test cases with incorrect
+///    line content (lines too short to trigger offenses), and fixed `^`
+///    marker positions and length annotations on remaining cases.
+///
+/// ## Fix (2026-04-07)
+///
+/// RuboCop uses token boundaries to decide which lines to check.
+/// When `__END__` appears on line 2+, the last parser token is before
+/// `__END__`, so RuboCop skips all subsequent data lines. When `__END__`
+/// is on line 1, there are no tokens at all, so RuboCop falls back to
+/// checking ALL lines (including the data section). The original nitrocop
+/// code skipped all lines after `__END__` regardless of position, causing
+/// FNs for files with `__END__` on line 1 that had long data-section lines.
+/// Fixed by gating the skip on `i > 0`.
+///
+/// ## Fix (2026-04-08)
+///
+/// Two independent issues resolved (FP=7, FN=3):
+/// 1. AllowURI `]` fragment rejection too broad (4 FPs) — the check stripped
+///    both `'` and `"` from extension text before checking for `]`. Double
+///    quote `"` is NOT an RFC 2396 unreserved char and Ruby's URI regex does
+///    not include it, so stripping it made array-bracket patterns like
+///    `["url#frag"]` look like RDoc links `[url#frag]`. Fixed by only
+///    stripping `'` (single quote), which IS RFC 2396 unreserved.
+/// 2. Tab line-number overflow (3 FPs, 3 FNs) — RuboCop's `excess_range`
+///    uses the qualified-name/URI range end (in display units, including
+///    `indentation_difference`) as a byte offset via `source_range`. When
+///    tab expansion causes this to exceed the raw line length, the byte
+///    offset overflows into the next line, and RuboCop reports the offense
+///    on line N+1 instead of N. Replicated this behavior so line numbers
+///    match exactly.
 pub struct LineLength;
 
 impl Cop for LineLength {
@@ -191,7 +232,9 @@ fn check_line_lengths(
             continue;
         }
         let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
-        if line == b"__END__" {
+        // RuboCop skips data lines after __END__ only when it appears on
+        // line 2+. When __END__ is on line 1 (no tokens), all lines are checked.
+        if line == b"__END__" && i > 0 {
             after_end_marker = true;
             continue;
         }
@@ -258,6 +301,9 @@ fn check_line_lengths(
             }
         }
 
+        // Track non-exempting range for RuboCop-compatible offset calculation
+        let mut non_exempt_range: Option<ExemptionRange> = None;
+
         if allow_uri || allow_qualified_name {
             if let Some(line_str) = line_str {
                 let line_length =
@@ -286,13 +332,27 @@ fn check_line_lengths(
                 if allowed_combination(uri_range, qualified_name_range, max, line_length) {
                     continue;
                 }
+                non_exempt_range = uri_range.or(qualified_name_range);
             }
         }
 
+        // RuboCop's excess_range uses the URI/qualified-name range end
+        // (in display units, including indentation_difference) as a byte
+        // offset via source_range. When this exceeds the raw line length,
+        // the byte offset overflows into the next line, causing RuboCop
+        // to report the offense on line N+1 instead of line N.
+        let (offense_line, offense_col) = match non_exempt_range {
+            Some(range) if range.begin < max && range.end > char_len => (i + 2, 0),
+            _ => (
+                i + 1,
+                max.saturating_sub(indentation_difference(line, indentation_width)),
+            ),
+        };
+
         diagnostics.push(cop.diagnostic(
             source,
-            i + 1,
-            max.saturating_sub(indentation_difference(line, indentation_width)),
+            offense_line,
+            offense_col,
             format!("Line is too long. [{}/{}]", effective_len, max),
         ));
     }
@@ -489,7 +549,7 @@ fn uri_range_if_applicable(
     // Our regex also excludes ' and " which Ruby's includes, so we
     // strip those before checking for the ] boundary.
     let extension_text = &line[last_match.end..extended_end];
-    let ext_past_quotes = extension_text.trim_start_matches(['\'', '"']);
+    let ext_past_quotes = extension_text.trim_start_matches('\'');
     if ext_past_quotes.starts_with(']') {
         let uri_text = &line[last_match.start..last_match.end];
         if has_real_uri_fragment(uri_text) {
@@ -530,16 +590,6 @@ fn merge_query_linked_uri_matches(line: &str, uri_regex: &regex::Regex) -> Vec<U
     let mut matches: Vec<UriMatch> = Vec::new();
 
     for current in uri_regex.find_iter(line) {
-        let text = &line[current.start()..current.end()];
-        if text
-            .split_once(':')
-            .is_some_and(|(_, tail)| tail.as_bytes().starts_with(br#"\\/\\/"#))
-        {
-            continue;
-        }
-        if text.ends_with(':') && !text.contains("://") && line[current.end()..].starts_with('\\') {
-            continue;
-        }
         if let Some(previous) = matches.last_mut() {
             let previous_text = &line[previous.start..previous.end];
             let separator = &line[previous.end..current.start()];
@@ -1241,5 +1291,39 @@ x = [
             diags.is_empty(),
             "AllowURI should match bare https:// before angle-bracket placeholders"
         );
+    }
+
+    #[test]
+    fn allow_uri_fragment_in_array_brackets_not_rejected() {
+        // URLs with # fragments inside ["url1", "url2#frag"] — the "] after
+        // the closing " is an array bracket, not an RDoc link. Only ' (single
+        // quote) should be stripped before the ] check, since " is NOT in
+        // Ruby's URI regex (it's not RFC 2396 unreserved).
+        let diags = run_with_config(
+            br#"x = {equivalentClass: ["http://purl.org/dc/dcmitype/Dataset", "http://rdfs.org/ns/void#Dataset", "http://www.w3.org/ns/dcat#Dataset"]}
+"#,
+            CopConfig::default(),
+        );
+        assert!(
+            diags.is_empty(),
+            "AllowURI should not reject URLs with # fragments followed by \"] (array bracket)"
+        );
+    }
+
+    #[test]
+    fn tab_qualified_name_overflow_reports_next_line() {
+        // RuboCop's excess_range uses the qualified name end position (in
+        // display units including indentation_difference) as a byte offset.
+        // When this exceeds the raw line length, the offense overflows to the
+        // next line. Match this behavior.
+        let diags = run_with_config(
+            b"# frozen_string_literal: true\nclass Foo\n\tdef bar\n\t\tcase x\n\t\twhen 1\n\t\t\tr << sprintf( Disp_referrer2_move_to_refererlist, \"#{DispRef2String::escapeHTML(@conf.update)}?conf=disp_referrer2;dr2.new_mode=#{RefList};dr2.change_mode=true\" )\n\t\tend\n\tend\nend\n",
+            CopConfig::default(),
+        );
+        assert_eq!(diags.len(), 1);
+        // The long content is on line 6, but RuboCop reports it on line 7
+        // due to source_range byte overflow from tab indentation_difference.
+        assert_eq!(diags[0].location.line, 7);
+        assert_eq!(diags[0].message, "Line is too long. [168/120]");
     }
 }

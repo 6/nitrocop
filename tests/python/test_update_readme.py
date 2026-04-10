@@ -176,7 +176,8 @@ def test_write():
         assert result.returncode == 0, f"Script failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         updated = readme_path.read_text()
-        assert "6 of 14 cops match RuboCop exactly" in updated
+        assert "**6 of 14** cops match RuboCop exactly" in updated
+        assert "Across **5.10M** offenses compared, **4.90M** (96.07%) match exactly" in updated
         assert "500 open-source repos" in updated
         assert "Compared with RuboCop on [**500 open-source repos**](docs/corpus.md)" in updated
         assert "5.1M offenses compared" in updated
@@ -214,7 +215,7 @@ def test_conformance_includes_fp():
 
         updated = readme_path.read_text()
         # Headline should show cop exact-match count, not percentage
-        assert "6 of 14 cops match RuboCop exactly" in updated
+        assert "**6 of 14** cops match RuboCop exactly" in updated
 
 
 def test_comma_repo_count():
@@ -243,9 +244,92 @@ def test_comma_repo_count():
         assert "500 open-source repos" in updated
 
 
+def test_synthetic_headline_matches_tables():
+    """Headline perfect_cops should include synthetic boosts, matching the tables."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        # by_cop entries: 3 perfect (seen), 1 diverging, 2 no-data
+        by_cop = [
+            {"cop": "Style/Foo", "matches": 10, "fp": 0, "fn": 0},
+            {"cop": "Lint/Bar", "matches": 5, "fp": 0, "fn": 0},
+            {"cop": "Naming/Baz", "matches": 8, "fp": 0, "fn": 0},
+            {"cop": "Layout/Qux", "matches": 3, "fp": 1, "fn": 0},
+            {"cop": "Security/Nope", "matches": 0, "fp": 0, "fn": 0},
+            {"cop": "Gemspec/Also", "matches": 0, "fp": 0, "fn": 0},
+        ]
+
+        corpus = {
+            "schema": 1,
+            "baseline": {
+                "rubocop": "1.84.2",
+                "rubocop-rails": "2.34.3",
+                "rubocop-performance": "1.26.1",
+                "rubocop-rspec": "3.9.0",
+                "rubocop-rspec_rails": "2.32.0",
+                "rubocop-factory_bot": "2.28.0",
+            },
+            "summary": {
+                "total_repos": 500,
+                "repos_perfect": 100,
+                "repos_error": 0,
+                "total_offenses_compared": 100,
+                "matches": 90,
+                "fp": 5,
+                "fn": 5,
+                "registered_cops": 6,
+                "perfect_cops": 3,  # corpus-only: 3 perfect
+                "diverging_cops": 1,
+                "inactive_cops": 2,
+                "overall_match_rate": 0.9,
+                "total_files_inspected": 10000,
+            },
+            "by_cop": by_cop,
+            "by_department": [],
+        }
+
+        # Synthetic says both no-data cops are perfect
+        synthetic = {
+            "by_cop": [
+                {"cop": "Security/Nope", "perfect_match": True},
+                {"cop": "Gemspec/Also", "perfect_match": True},
+            ],
+        }
+
+        input_path = tmp / "corpus-results.json"
+        input_path.write_text(json.dumps(corpus))
+
+        synthetic_path = tmp / "synthetic-results.json"
+        synthetic_path.write_text(json.dumps(synthetic))
+
+        readme_path = tmp / "README.md"
+        readme_path.write_text(SAMPLE_README)
+
+        result = subprocess.run(
+            [
+                sys.executable, str(SCRIPT),
+                "--input", str(input_path),
+                "--readme", str(readme_path),
+                "--synthetic", str(synthetic_path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, f"Script failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+
+        updated = readme_path.read_text()
+        # With synthetic, 3 corpus-perfect + 2 synthetic-perfect = 5
+        # Without the fix, this would show "3 of 6" (raw summary value)
+        assert "**5 of 6** cops match RuboCop exactly" in updated, (
+            f"Expected '5 of 6' (corpus + synthetic), got:\n{updated}"
+        )
+
+
 if __name__ == "__main__":
     test_dry_run()
     test_write()
     test_conformance_includes_fp()
     test_comma_repo_count()
+    test_synthetic_headline_matches_tables()
     print("OK: all tests passed")

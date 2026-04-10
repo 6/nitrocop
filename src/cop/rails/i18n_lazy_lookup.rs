@@ -18,6 +18,12 @@ use ruby_prism::Visit;
 /// `scoped_key` (a String) — in Ruby, `Symbol == String` is always false, so symbol keys are
 /// never flagged. Previously nitrocop converted both to byte slices and compared them, causing
 /// 13 false positives across spotlight, hyrax, and avalon repos.
+///
+/// Location fix: Both lazy and explicit styles now report the offense at the key node's
+/// location (the string/symbol argument), not the enclosing call node's location. This matches
+/// RuboCop's behavior where the offense is reported on `key_node`, not on `node`. This is
+/// particularly important for multi-line t() calls where the key may appear on a different
+/// line than the method name.
 pub struct I18nLazyLookup;
 
 impl Cop for I18nLazyLookup {
@@ -27,6 +33,10 @@ impl Cop for I18nLazyLookup {
 
     fn default_severity(&self) -> Severity {
         Severity::Convention
+    }
+
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/controllers/**/*.rb"]
     }
 
     fn check_source(
@@ -123,6 +133,7 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
             if let Some(args) = node.arguments() {
                 let arg_list: Vec<_> = args.arguments().iter().collect();
                 if !arg_list.is_empty() {
+                    let key_loc = arg_list[0].location();
                     let (key, is_symbol) = if let Some(s) = arg_list[0].as_string_node() {
                         (Some(s.unescaped().to_vec()), false)
                     } else if let Some(sym) = arg_list[0].as_symbol_node() {
@@ -132,7 +143,7 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
                     };
 
                     if let Some(key) = key {
-                        self.check_key(node, &key, is_symbol);
+                        self.check_key(&key, is_symbol, key_loc);
                     }
                 }
             }
@@ -143,7 +154,7 @@ impl<'pr> Visit<'pr> for I18nLazyLookupVisitor<'_> {
 }
 
 impl I18nLazyLookupVisitor<'_> {
-    fn check_key(&mut self, node: &ruby_prism::CallNode<'_>, key: &[u8], is_symbol: bool) {
+    fn check_key(&mut self, key: &[u8], is_symbol: bool, key_loc: ruby_prism::Location) {
         // Only flag inside Controller classes with public methods
         if !self.in_controller_class {
             return;
@@ -158,8 +169,7 @@ impl I18nLazyLookupVisitor<'_> {
                 if !key.starts_with(b".") {
                     return;
                 }
-                let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                let (line, column) = self.source.offset_to_line_col(key_loc.start_offset());
                 self.diagnostics.push(self.cop.diagnostic(
                     self.source,
                     line,
@@ -208,8 +218,7 @@ impl I18nLazyLookupVisitor<'_> {
                     }
                 }
 
-                let loc = node.location();
-                let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                let (line, column) = self.source.offset_to_line_col(key_loc.start_offset());
                 self.diagnostics.push(self.cop.diagnostic(
                     self.source,
                     line,
@@ -274,7 +283,7 @@ mod tests {
             )]),
             ..CopConfig::default()
         };
-        let source = b"# nitrocop-filename: app/controllers/books_controller.rb\nclass BooksController < ApplicationController\n  def create\n    t('.success')\n    ^^^^^^^^^^^^^ Rails/I18nLazyLookup: Use explicit lookup for i18n keys.\n  end\nend\n";
+        let source = b"# nitrocop-filename: app/controllers/books_controller.rb\nclass BooksController < ApplicationController\n  def create\n    t('.success')\n      ^^^^^^^^^ Rails/I18nLazyLookup: Use explicit lookup for i18n keys.\n  end\nend\n";
         assert_cop_offenses_full_with_config(&I18nLazyLookup, source, config);
     }
 

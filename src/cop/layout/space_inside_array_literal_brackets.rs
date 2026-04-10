@@ -293,6 +293,107 @@ impl SpaceInsideArrayLiteralBrackets {
                     diagnostics.push(diag);
                 }
             }
+            "compact" => {
+                let multi_dim_left = is_adjacent_bracket_forward(bytes, open_end);
+                let multi_dim_right = is_adjacent_bracket_backward(bytes, close_start);
+
+                // Left side: whitespace check includes newlines for compact collapse
+                let ws_after_open =
+                    matches!(bytes.get(open_end), Some(b' ' | b'\t' | b'\n' | b'\r'));
+
+                if multi_dim_left && ws_after_open {
+                    // Space (or newline) before nested [[ should be collapsed
+                    let ws_end = scan_all_whitespace_forward(bytes, open_end);
+                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Space inside array literal brackets detected.".to_string(),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: open_end,
+                            end: ws_end,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
+                } else if !multi_dim_left && !start_ok && !space_after_open {
+                    // Non-nested: require space (like space style)
+                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Space inside array literal brackets missing.".to_string(),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: open_end,
+                            end: open_end,
+                            replacement: " ".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
+                }
+
+                // Right side: whitespace check includes newlines for compact collapse
+                let ws_before_close = close_start > 0
+                    && matches!(
+                        bytes.get(close_start - 1),
+                        Some(b' ' | b'\t' | b'\n' | b'\r')
+                    );
+
+                if multi_dim_right && ws_before_close {
+                    // Space (or newline) after nested ]] should be collapsed
+                    let ws_start = scan_all_whitespace_backward(bytes, close_start);
+                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Space inside array literal brackets detected.".to_string(),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: ws_start,
+                            end: close_start,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
+                } else if !multi_dim_right && !end_ok && !space_before_close {
+                    // Non-nested: require space (like space style)
+                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Space inside array literal brackets missing.".to_string(),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: close_start,
+                            end: close_start,
+                            replacement: " ".to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
+                }
+            }
             _ => {}
         }
     }
@@ -389,6 +490,74 @@ fn next_line_starts_with_comment(bytes: &[u8], pos: usize) -> bool {
     }
 
     bytes.get(i) == Some(&b'#')
+}
+
+/// Check if the next non-whitespace character on the same line after `pos` is `[`.
+/// Stops at newlines — RuboCop only collapses adjacent brackets on the same line.
+fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'\t' => i += 1,
+            b'[' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Check if the previous non-whitespace character on the same line before `pos` is `]`
+/// from a real bracket array (not `%w[...]`, `%i[...]`, etc.).
+/// Stops at newlines — RuboCop only collapses adjacent brackets on the same line.
+fn is_adjacent_bracket_backward(bytes: &[u8], pos: usize) -> bool {
+    let mut i = pos;
+    while i > 0 {
+        i -= 1;
+        match bytes[i] {
+            b' ' | b'\t' => continue,
+            b']' => {
+                // Found `]` — find its matching `[` via bracket counting,
+                // then check it's not a %w[/%i[/etc. delimiter.
+                let mut depth: usize = 1;
+                let mut j = i;
+                while j > 0 && depth > 0 {
+                    j -= 1;
+                    match bytes[j] {
+                        b']' => depth += 1,
+                        b'[' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if depth == 0 && j > 0 && bytes[j] == b'[' {
+                    // Check if preceded by %<letter> (e.g. %w[, %i[, %I[, %W[)
+                    if j >= 2 && bytes[j - 2] == b'%' && bytes[j - 1].is_ascii_alphabetic() {
+                        return false;
+                    }
+                }
+                return depth == 0;
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Scan forward from `pos` past all whitespace including newlines.
+fn scan_all_whitespace_forward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\n' | b'\r') {
+        i += 1;
+    }
+    i
+}
+
+/// Scan backward from `pos` past all whitespace including newlines.
+fn scan_all_whitespace_backward(bytes: &[u8], pos: usize) -> usize {
+    let mut i = pos;
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t' | b'\n' | b'\r') {
+        i -= 1;
+    }
+    i
 }
 
 /// Check if the position is the first non-whitespace on its line (raw byte scan).
@@ -501,5 +670,60 @@ mod tests {
         let diags = run_cop_full(&SpaceInsideArrayLiteralBrackets, src);
         assert_eq!(diags.len(), 1, "multiline empty brackets should be flagged");
         assert!(diags[0].message.contains("empty"));
+    }
+
+    fn compact_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn compact_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideArrayLiteralBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_array_literal_brackets/compact_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
+
+    #[test]
+    fn compact_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideArrayLiteralBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_array_literal_brackets/compact_no_offense.rb"
+            ),
+            compact_config(),
+        );
+    }
+
+    #[test]
+    fn compact_multiline_no_collapse_across_lines() {
+        use crate::testutil::run_cop_full_with_config;
+        // RuboCop does NOT collapse brackets across newlines — only same-line.
+        // Opening [ on one line, inner [ on the next → no collapse offense.
+        let src = b"multiline = [\n  [ 1, 2, 3, 4 ],\n  [ 3, 4, 5, 6 ]]\n";
+        let diags =
+            run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
+        assert!(
+            !diags.iter().any(|d| d.message.contains("detected")),
+            "multiline [ \\n [ should NOT collapse across lines"
+        );
+        // Closing ] on one line, outer ] on the next → no collapse offense.
+        let src = b"multiline = [[ 1, 2, 3, 4 ],\n  [ 3, 4, 5, 6 ]\n]\n";
+        let diags =
+            run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
+        assert!(
+            !diags.iter().any(|d| d.message.contains("detected")),
+            "multiline ] \\n ] should NOT collapse across lines"
+        );
     }
 }

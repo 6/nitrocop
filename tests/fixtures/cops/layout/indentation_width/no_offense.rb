@@ -293,3 +293,90 @@ def method_with_ensure
 ensure
   cleanup
 end
+
+# Block with rescue — correctly indented
+items.each do |item|
+  process(item)
+rescue StandardError
+  handle_error
+end
+
+# Block with ensure — correctly indented
+items.each do |item|
+  process(item)
+ensure
+  cleanup
+end
+
+# Block with rescue and else — correctly indented
+items.each do |item|
+  process(item)
+rescue StandardError
+  handle
+else
+  success
+end
+
+# case/in pattern matching — correctly indented
+case a
+in 1
+  do_one
+in String
+  do_two
+end
+
+# case/in with else — correctly indented
+case a
+in 1
+  do_one
+in 2
+  do_two
+else
+  default_action
+end
+
+# FP: helper_method \ def — RuboCop skips indentation check for def
+# inside method call with line continuation
+class Foo
+  helper_method \
+    def ordergroups_for_adding
+    Ordergroup.undeleted.order(:name)
+  end
+end
+
+# FP: begin block in method body (inline assignment style) — RuboCop
+# uses end keyword column as base, but when begin is part of an
+# assignment expression, indentation is relative to end
+@result = begin
+  reference label, link
+  nil
+end
+
+# FP: begin block inside { } block — RuboCop doesn't check
+# indentation for begin body when begin is inside a block
+items.each do |item|
+  begin
+    process(item)
+  rescue StandardError
+    handle
+  end
+end
+
+# FP: begin block inside module body at same indentation as class members
+module ActiveGraph
+  module Shared
+    extend ActiveSupport::Concern
+
+    include ActiveModel::Conversion
+    begin
+    include ActiveModel::Serializers::Xml
+    rescue NameError; end
+    include ActiveModel::Serializers::JSON
+  end
+end
+
+# FP: begin block at top level with inline assignment — RuboCop
+# uses end column as base but doesn't flag when end is inline
+begin
+  require "byebug"
+rescue LoadError; end

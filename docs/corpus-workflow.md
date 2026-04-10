@@ -52,12 +52,6 @@ python3 scripts/dispatch_cops.py issues-sync --binary target/debug/nitrocop
 python3 scripts/dispatch_cops.py backend --cop Department/CopName --binary target/debug/nitrocop
 ```
 
-Regression triage:
-
-```bash
-python3 scripts/investigate_regression.py --action report
-```
-
 ## Style-Variant Testing
 
 The corpus oracle can test every cop with every supported config style, not

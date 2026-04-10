@@ -46,3 +46,7 @@ weight => k_1:, k_2:, k_l:
 begin
 rescue => error2
 end
+# Empty %s() symbols — Parser gem creates :dsym for these, so
+# RuboCop's on_sym never fires. Non-empty %s(foo) IS checked.
+x = %s()
+[%s(), %s()]

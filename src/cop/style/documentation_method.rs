@@ -98,6 +98,27 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 /// documentation by nitrocop but RuboCop's `DirectiveComment` matches `# rubocop:` anywhere
 /// in the comment text, treating the entire line as a directive. Fix: check for
 /// `# rubocop:` as a substring in the comment text.
+///
+/// **Investigation (2026-04-10):** 41 FP, 52 FN.
+/// Two root causes addressed:
+///
+/// 1. FN: When `def` has a non-modifier prefix on the same line (e.g.,
+///    `__skip__ = def foo`, `class << obj; def foo`, `Module.new { def foo`),
+///    nitrocop's line-based documentation check found comments above the
+///    outer expression and treated them as documentation for the inner def.
+///    RuboCop's AST-based comment association correctly assigns those comments
+///    to the outer node (assignment, singleton class, call), not the inner def.
+///    Fix: added `has_non_modifier_prefix()` check — when the def has
+///    non-whitespace content before it that isn't a known modifier
+///    (module_function/ruby2_keywords), skip the documentation check so the
+///    def is flagged as undocumented. Resolved 26 FN.
+///
+/// 2. FP: `ruby2_keywords def foo` and `module_function def foo` in a `private`
+///    or `protected` section were incorrectly flagged because the inner def
+///    didn't inherit the enclosing scope's preceding visibility. The statement
+///    is a CallNode (not a DefNode), so `visit_statements_node` didn't register
+///    it in `pending_visibility`. Fix: detect modifier calls wrapping DefNode
+///    arguments and register the inner def with the enclosing visibility.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,6 +159,20 @@ fn detect_inline_modifier(source: &SourceFile, def_offset: usize) -> Option<(&[u
 /// Check if the detected modifier is a non-public modifier.
 fn is_non_public_modifier(modifier: &[u8]) -> bool {
     NON_PUBLIC_MODIFIERS.contains(&modifier)
+}
+
+/// Returns true if the def keyword has non-whitespace content before it on the
+/// same line that is NOT a known modifier prefix. When true, comments above the
+/// line belong to the outer expression (assignment, call, class << expr, etc.),
+/// not the inner def — mirroring RuboCop's AST-based comment association.
+fn has_non_modifier_prefix(source: &SourceFile, def_offset: usize) -> bool {
+    let bytes = source.as_bytes();
+    let mut line_start = def_offset;
+    while line_start > 0 && bytes[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    let prefix = &bytes[line_start..def_offset];
+    prefix.iter().any(|&b| b != b' ' && b != b'\t')
 }
 
 /// Check if a method is made private/protected retroactively via a single-symbol
@@ -430,7 +465,14 @@ impl DocumentationMethodVisitor<'_> {
             }
         }
 
+        // When the def has a non-modifier prefix on the same line (e.g.,
+        // `__skip__ = def foo`, `class << x; def foo`, `Module.new { def foo`),
+        // comments above the line belong to the outer expression, not the def.
+        let prefix_steals_comments =
+            modifier.is_none() && has_non_modifier_prefix(self.source, def_offset);
+
         if self.wrapped_comment_depth == 0
+            && !prefix_steals_comments
             && has_method_documentation_comment(self.source, def_offset)
         {
             return;
@@ -468,6 +510,35 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
                     .or(preceding_visibility);
                 self.pending_visibility
                     .insert(def_node.location().start_offset(), vis);
+            }
+
+            // Register inner DefNodes of modifier calls (module_function/ruby2_keywords)
+            // so they inherit the enclosing preceding visibility. RuboCop's on_def checks
+            // `non_public?(parent)` for modifier_node? parents, which uses the parent
+            // call's visibility in the statement list.
+            if let Some(call) = stmt.as_call_node() {
+                if call.receiver().is_none()
+                    && matches!(
+                        call.name().as_slice(),
+                        b"module_function" | b"ruby2_keywords"
+                    )
+                {
+                    if let Some(args) = call.arguments() {
+                        for arg in args.arguments().iter() {
+                            if let Some(inner_def) = arg.as_def_node() {
+                                let method_name =
+                                    std::str::from_utf8(inner_def.name().as_slice()).unwrap_or("");
+                                let vis = retroactive_visibility_from_siblings(
+                                    &stmt_nodes[idx + 1..],
+                                    method_name,
+                                )
+                                .or(preceding_visibility);
+                                self.pending_visibility
+                                    .insert(inner_def.location().start_offset(), vis);
+                            }
+                        }
+                    }
+                }
             }
 
             self.visit(stmt);
@@ -639,6 +710,10 @@ impl Cop for DocumentationMethod {
 
     fn default_enabled(&self) -> bool {
         false
+    }
+
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["spec/**/*", "test/**/*"]
     }
 
     fn check_source(

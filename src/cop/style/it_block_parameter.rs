@@ -58,6 +58,49 @@ use ruby_prism::Visit;
 /// 2. **super with block (FN=1)** — `super { [_1.name, _1] }` creates a
 ///    `ForwardingSuperNode` in Prism, not a `CallNode`. The cop wasn't checking
 ///    ForwardingSuperNode or SuperNode. Fix: add both to interested_node_types.
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// Variant `always` style FP (1,611 total): `block { |n| n }` where the body is a
+/// bare reference to the named parameter. RuboCop's `on_block` with `always` style uses
+/// `find_block_variables(node, 'n')` which calls `node.body.each_descendant(:lvar)`.
+/// When the body IS the bare `n` node (not wrapped in a larger expression),
+/// `each_descendant` returns nothing, so RuboCop does NOT flag it.
+///
+/// Fix: add `is_body_bare_named_param()` to skip when body is a bare named parameter
+/// reference. This matches RuboCop's `each_descendant` semantics for both
+/// `check_named_block` (CallNode blocks) and `check_lambda` (lambda blocks).
+///
+/// ## Investigation findings (2026-04-08)
+///
+/// Variant `always` style FN (31,792 total): `NamedParamFinder` stopped traversal
+/// at nested block/lambda boundaries (`visit_block_node`/`visit_lambda_node` returned
+/// early). RuboCop's `find_block_variables` uses `node.body.each_descendant(:lvar)`
+/// which traverses ALL descendants including those inside nested blocks. Named
+/// parameters can be captured by closures, so references in nested blocks must be found.
+///
+/// Fix: removed `visit_block_node` and `visit_lambda_node` overrides from
+/// `NamedParamFinder`, restoring the default traversal behavior that descends into
+/// all child nodes. `ItReferenceFinder` and `NumberedParamFinder` retain their
+/// nested-block stops because `it`/`_1` are lexically scoped to their block.
+///
+/// ## Investigation findings (2026-04-08, implicit rest)
+///
+/// Variant `always` style FN: blocks like `|arg,|` were skipped even though RuboCop
+/// flags them. In Prism, the trailing comma is represented as an `ImplicitRestNode`,
+/// so the current "single named parameter" gate incorrectly rejected these blocks by
+/// treating any `rest()` as multi-arg. RuboCop's `node.arguments.one?` still counts
+/// `|arg,|` as one block argument.
+///
+/// Fix: allow `ImplicitRestNode` in the named-parameter gate, while still rejecting
+/// explicit rest parameters like `|arg, *rest|`.
+///
+/// ## Investigation findings (2026-04-08, block locals)
+///
+/// Variant `always` style FP: blocks with semicolon-declared block locals like
+/// `|arg; tmp|` were flagged, but RuboCop does not register an offense. These
+/// blocks cannot be rewritten to implicit `it` without dropping the block-local
+/// declarations, so they must be rejected by the single named-parameter gate.
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -123,6 +166,40 @@ impl Cop for ItBlockParameter {
 }
 
 impl ItBlockParameter {
+    /// Return the sole named block parameter for `EnforcedStyle: always`, if the
+    /// block shape matches RuboCop's `node.arguments.one?` / `first_argument.arg_type?`.
+    ///
+    /// Prism represents `|arg,|` with a `RequiredParameterNode` plus an
+    /// `ImplicitRestNode`, but RuboCop still treats that as a single block argument.
+    fn single_named_param_name<'pr>(
+        block_params: &ruby_prism::BlockParametersNode<'pr>,
+    ) -> Option<&'pr [u8]> {
+        if !block_params.locals().is_empty() {
+            return None;
+        }
+
+        let parameters = block_params.parameters()?;
+        let requireds = parameters.requireds();
+        if requireds.len() != 1 {
+            return None;
+        }
+        if !parameters.optionals().is_empty()
+            || !parameters.posts().is_empty()
+            || !parameters.keywords().is_empty()
+            || parameters.keyword_rest().is_some()
+            || parameters.block().is_some()
+        {
+            return None;
+        }
+        if let Some(rest) = parameters.rest() {
+            rest.as_implicit_rest_node()?;
+        }
+
+        let param = requireds.iter().next()?;
+        let req_param = param.as_required_parameter_node()?;
+        Some(req_param.name().as_slice())
+    }
+
     /// Dispatch to itblock/numblock/named-block checks based on block parameters.
     fn check_block_params(
         &self,
@@ -309,38 +386,21 @@ impl ItBlockParameter {
             return;
         }
         if let Some(block_params) = params.as_block_parameters_node() {
-            let parameters = match block_params.parameters() {
-                Some(p) => p,
+            let param_name = match Self::single_named_param_name(&block_params) {
+                Some(name) => name,
                 None => return,
             };
-            let requireds = parameters.requireds();
-            if requireds.len() != 1 {
-                return;
-            }
-            if !parameters.optionals().is_empty()
-                || parameters.rest().is_some()
-                || !parameters.posts().is_empty()
-                || !parameters.keywords().is_empty()
-                || parameters.keyword_rest().is_some()
-                || parameters.block().is_some()
-            {
-                return;
-            }
-            let param = match requireds.iter().next() {
-                Some(p) => p,
-                None => return,
-            };
-            let req_param = match param.as_required_parameter_node() {
-                Some(rp) => rp,
-                None => return,
-            };
-            let param_name = req_param.name();
             let body = match lambda.body() {
                 Some(b) => b,
                 None => return,
             };
+            // RuboCop's find_block_variables uses each_descendant which doesn't include body
+            // itself when it's a bare lvar. Match that behavior.
+            if Self::is_body_bare_named_param(&body, param_name) {
+                return;
+            }
             let mut finder = NamedParamFinder {
-                name: param_name.as_slice(),
+                name: param_name,
                 locations: Vec::new(),
             };
             finder.visit(&body);
@@ -430,6 +490,23 @@ impl ItBlockParameter {
         false
     }
 
+    /// Check if the body is a bare named parameter read (single statement, no wrapping).
+    /// RuboCop's `node.body.each_descendant(:lvar)` doesn't find the body node itself
+    /// when it's a leaf `lvar` node. This matches that behavior.
+    fn is_body_bare_named_param(body: &ruby_prism::Node<'_>, param_name: &[u8]) -> bool {
+        if let Some(stmts) = body.as_statements_node() {
+            let body_nodes = stmts.body();
+            if body_nodes.len() == 1 {
+                if let Some(first) = body_nodes.iter().next() {
+                    if let Some(lvar) = first.as_local_variable_read_node() {
+                        return lvar.name().as_slice() == param_name;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     /// Check regular blocks with named parameters (only for `always` style).
     /// Flags single-arg blocks where `it` could be used instead.
     fn check_named_block(
@@ -444,37 +521,10 @@ impl ItBlockParameter {
             return;
         }
 
-        let parameters = match block_params.parameters() {
-            Some(p) => p,
+        let param_name = match Self::single_named_param_name(block_params) {
+            Some(name) => name,
             None => return,
         };
-
-        // Must have exactly one required parameter and no other params
-        let requireds = parameters.requireds();
-        if requireds.len() != 1 {
-            return;
-        }
-        if !parameters.optionals().is_empty()
-            || parameters.rest().is_some()
-            || !parameters.posts().is_empty()
-            || !parameters.keywords().is_empty()
-            || parameters.keyword_rest().is_some()
-            || parameters.block().is_some()
-        {
-            return;
-        }
-
-        let param = match requireds.iter().next() {
-            Some(p) => p,
-            None => return,
-        };
-
-        let req_param = match param.as_required_parameter_node() {
-            Some(rp) => rp,
-            None => return,
-        };
-
-        let param_name = req_param.name();
 
         // Need a body to find references
         let body = match block_node.body() {
@@ -482,9 +532,15 @@ impl ItBlockParameter {
             None => return,
         };
 
+        // RuboCop's find_block_variables uses each_descendant which doesn't include body
+        // itself when it's a bare lvar. Match that behavior.
+        if Self::is_body_bare_named_param(&body, param_name) {
+            return;
+        }
+
         // Find all references to this parameter name in the body
         let mut finder = NamedParamFinder {
-            name: param_name.as_slice(),
+            name: param_name,
             locations: Vec::new(),
         };
         finder.visit(&body);
@@ -552,9 +608,11 @@ impl<'pr, 'a> Visit<'pr> for NamedParamFinder<'a> {
         }
     }
 
-    // Don't descend into nested blocks
-    fn visit_block_node(&mut self, _node: &ruby_prism::BlockNode<'pr>) {}
-    fn visit_lambda_node(&mut self, _node: &ruby_prism::LambdaNode<'pr>) {}
+    // Unlike ItReferenceFinder and NumberedParamFinder, NamedParamFinder DOES
+    // descend into nested blocks. RuboCop's `find_block_variables` uses
+    // `node.body.each_descendant(:lvar)` which traverses all descendants including
+    // those inside nested blocks. Named parameters can be captured by closures,
+    // so references in nested blocks must be found for the `always` style.
 }
 
 #[cfg(test)]
@@ -567,6 +625,19 @@ mod tests {
         config.options.insert(
             "TargetRubyVersion".to_string(),
             serde_yml::Value::Number(serde_yml::Number::from(3.4)),
+        );
+        config
+    }
+
+    fn always_style_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "TargetRubyVersion".to_string(),
+            serde_yml::Value::Number(3.4.into()),
+        );
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("always".to_string()),
         );
         config
     }
@@ -596,5 +667,65 @@ mod tests {
             &ItBlockParameter,
             include_bytes!("../../../tests/fixtures/cops/style/it_block_parameter/offense.rb"),
         );
+    }
+
+    #[test]
+    fn offense_always_style() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ItBlockParameter,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/it_block_parameter/always_offense.rb"
+            ),
+            always_style_config(),
+        );
+    }
+
+    #[test]
+    fn lambda_always_style_direct_ref() {
+        // Lambda with parenthesized params — the only valid lambda param syntax
+        let source = b"-> (x) { x.to_s }\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ItBlockParameter,
+            source,
+            always_style_config(),
+        );
+        assert_eq!(diags.len(), 1, "Expected 1 offense: {:?}", diags);
+    }
+
+    #[test]
+    fn lambda_always_style_nested_block() {
+        // Lambda with named param used inside a nested block
+        let source = b"-> (x) { bar { x.to_s } }\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ItBlockParameter,
+            source,
+            always_style_config(),
+        );
+        assert!(!diags.is_empty(), "Expected at least 1 offense but got 0");
+    }
+
+    #[test]
+    fn no_offense_always_style_bare_named_param() {
+        // Bare named param as entire body should NOT be flagged (FP fix).
+        // RuboCop's find_block_variables uses each_descendant which doesn't include
+        // the body node itself when it's a bare lvar.
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ItBlockParameter,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/it_block_parameter/no_offense_always.rb"
+            ),
+            always_style_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_always_style_explicit_rest_param() {
+        let source = b"block { |x, *rest| do_something(x) }\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ItBlockParameter,
+            source,
+            always_style_config(),
+        );
+        assert!(diags.is_empty(), "Expected 0 offenses: {:?}", diags);
     }
 }

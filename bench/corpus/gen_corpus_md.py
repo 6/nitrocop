@@ -26,6 +26,11 @@ def fmt_pct(rate: float) -> str:
     return f"{math.floor(rate * 1000) / 10:.1f}%"
 
 
+def fmt_pct_precise(rate: float) -> str:
+    """Two-decimal match rate, floored: 0.99829 -> '99.82%'."""
+    return f"{math.floor(rate * 10000) / 100:.2f}%"
+
+
 def _sanitize_for_md(s: str) -> str:
     return "".join(
         repr(c)[1:-1] if ord(c) < 0x20 and c not in '\n\t' else c
@@ -42,7 +47,23 @@ def _format_example_md(ex) -> str:
     return _sanitize_for_md(ex)
 
 
-def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
+def _emit_examples(md: list[str], fp_list: list, fn_list: list, limit: int) -> None:
+    """Append FP/FN example bullets to *md*."""
+    if fp_list:
+        for ex in fp_list[:limit]:
+            md.append(f"- FP: `{_format_example_md(ex)}`")
+        if len(fp_list) > limit:
+            md.append(f"- ... and {len(fp_list) - limit:,} more FP")
+    if fn_list:
+        for ex in fn_list[:limit]:
+            md.append(f"- FN: `{_format_example_md(ex)}`")
+        if len(fn_list) > limit:
+            md.append(f"- ... and {len(fn_list) - limit:,} more FN")
+    md.append("")
+
+
+def generate_md(data: dict, variant_by_cop: dict[str, list[dict]],
+                synthetic: dict[str, dict] | None = None) -> str:
     """Generate corpus markdown from pre-computed JSON data."""
     summary = data["summary"]
     by_cop = data["by_cop"]
@@ -108,11 +129,20 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     md.append(f"| FN (nitrocop missing) | {total_fn:,} |")
     md.append(f"| Registered cops | {registered_cops:,} |")
     md.append(f"| Cops with exact match | {perfect_cops:,} |")
+    if synthetic:
+        synthetic_perfect = sum(
+            1 for c in by_cop
+            if c.get("matches", 0) + c.get("fp", 0) + c.get("fn", 0) == 0
+            and c["cop"] in synthetic
+            and synthetic[c["cop"]].get("perfect_match")
+        )
+        if synthetic_perfect > 0:
+            md.append(f"| Cops with exact match (incl. synthetic) | {perfect_cops + synthetic_perfect:,} |")
     md.append(f"| Cops with divergence | {diverging_cops_count:,} |")
     md.append(f"| Cops with no corpus data | {inactive_cops:,} |")
-    md.append(f"| **Match rate (default config)** | **{fmt_pct(overall_rate)}** |")
+    md.append(f"| **Match rate (default config)** | **{fmt_pct_precise(overall_rate)}** |")
     if variant_by_cop:
-        md.append(f"| **Match rate (all variants)** | **{fmt_pct(variant_overall_rate)}** |")
+        md.append(f"| **Match rate (all variants)** | **{fmt_pct_precise(variant_overall_rate)}** |")
     if repos_error > 0 or warning_repos:
         md.append(f"| Repos with errors | {repos_error} |")
     if warning_repos:
@@ -123,6 +153,10 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     # Department breakdown (default config)
     if by_department:
         md.append("## Department Breakdown")
+        md.append("")
+        md.append("### Default Config")
+        md.append("")
+        md.append("Results using each cop's default RuboCop configuration.")
         md.append("")
         md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
         md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
@@ -138,19 +172,32 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
 
     # Department breakdown (all variants)
     if by_department and variant_by_cop:
-        md.append("### All Variants")
+        md.append("### All `EnforcedStyle` Variants")
         md.append("")
-        md.append("| Department | Default matches | Variant matches | Variant FP | Variant FN | All variants % |")
-        md.append("|------------|----------------:|----------------:|-----------:|-----------:|---------------:|")
+        md.append("Results combining default config and every non-default `EnforcedStyle` option.")
+        md.append("")
+        md.append("| Department | Total cops | Exact match | Diverging | No corpus data | Matches | FP | FN | Match % |")
+        md.append("|------------|-----------:|------------:|----------:|---------------:|--------:|---:|---:|--------:|")
         for d in by_department:
-            total = d["matches"] + d["fp"] + d["fn"]
             vd = variant_dept_stats.get(d["department"], {"matches": 0, "fp": 0, "fn": 0})
-            v_total = total + vd["matches"] + vd["fp"] + vd["fn"]
-            v_matches = d["matches"] + vd["matches"]
-            v_pct = fmt_pct(v_matches / v_total) if v_total > 0 else "N/A"
+            combined_matches = d["matches"] + vd["matches"]
+            combined_fp = d["fp"] + vd["fp"]
+            combined_fn = d["fn"] + vd["fn"]
+            combined_total = combined_matches + combined_fp + combined_fn
+            # Count cops diverging in variants but not in default
+            default_diverging_names = {c["cop"] for c in by_cop if c.get("diverging") and c["cop"].startswith(d["department"] + "/")}
+            variant_only_count = sum(
+                1 for cop_name, variants in variant_by_cop.items()
+                if cop_name.startswith(d["department"] + "/")
+                and cop_name not in default_diverging_names
+                and any(v["fp"] + v["fn"] > 0 for v in variants)
+            )
+            combined_diverging = d["diverging_cops"] + variant_only_count
+            combined_pct = fmt_pct(combined_matches / combined_total) if combined_total > 0 else "N/A"
             md.append(
-                f"| {d['department']} | {d['matches']:,} | "
-                f"{vd['matches']:,} | {vd['fp']:,} | {vd['fn']:,} | {v_pct} |"
+                f"| {d['department']} | {d['cops']:,} | "
+                f"{d['perfect_cops'] - variant_only_count:,} | {combined_diverging:,} | {d['inactive_cops']:,} | "
+                f"{combined_matches:,} | {combined_fp:,} | {combined_fn:,} | {combined_pct} |"
             )
         md.append("")
 
@@ -271,34 +318,39 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
                         md.append(f"| ↳ {c['cop']} ({v['style_label']}) | {v['matches']:,} | {v['fp']:,} | {v['fn']:,} | {v_pct} |")
         md.append("")
 
-        # Detail sections
+        # Detail sections — emit <details> for every cop (default + variant-only)
+        # that has FP/FN examples, including per-variant examples.
         MD_EXAMPLE_LIMIT = 3
-        for c in diverging:
-            fp_list = c.get("fp_examples", [])
-            fn_list = c.get("fn_examples", [])
-            if not fp_list and not fn_list:
+        for c in all_diverging:
+            cop_name = c["cop"]
+            default_fp = c.get("fp_examples", [])
+            default_fn = c.get("fn_examples", [])
+            variants = variant_by_cop.get(cop_name, [])
+            variant_fp = [ex for v in variants for ex in v.get("fp_examples", [])]
+            variant_fn = [ex for v in variants for ex in v.get("fn_examples", [])]
+            if not default_fp and not default_fn and not variant_fp and not variant_fn:
                 continue
             total = c["matches"] + c["fp"] + c["fn"]
             pct = fmt_pct(c['match_rate']) if total > 0 else "N/A"
+            # Aggregate FP/FN across default + variants for the summary line
+            all_fp = c["fp"] + sum(v["fp"] for v in variants)
+            all_fn = c["fn"] + sum(v["fn"] for v in variants)
             md.append("<details>")
-            md.append(f"<summary><strong>{c['cop']}</strong> — {c['matches']:,} matches, {c['fp']:,} FP, {c['fn']:,} FN ({pct})</summary>")
+            md.append(f"<summary><strong>{cop_name}</strong> — {c['matches']:,} matches, {all_fp:,} FP, {all_fn:,} FN ({pct})</summary>")
             md.append("")
-            if fp_list:
-                md.append("**False positives** (nitrocop reports, RuboCop does not):")
+            if default_fp or default_fn:
+                if c["fp"] + c["fn"] > 0:
+                    md.append(f"**Default config** ({c['fp']:,} FP, {c['fn']:,} FN):")
+                    md.append("")
+                    _emit_examples(md, default_fp, default_fn, MD_EXAMPLE_LIMIT)
+            for v in variants:
+                v_fp = v.get("fp_examples", [])
+                v_fn = v.get("fn_examples", [])
+                if not v_fp and not v_fn:
+                    continue
+                md.append(f"**{v['style_label']}** ({v['fp']:,} FP, {v['fn']:,} FN):")
                 md.append("")
-                for ex in fp_list[:MD_EXAMPLE_LIMIT]:
-                    md.append(f"- `{_format_example_md(ex)}`")
-                if len(fp_list) > MD_EXAMPLE_LIMIT:
-                    md.append(f"- ... and {len(fp_list) - MD_EXAMPLE_LIMIT:,} more (see corpus-results.json for full list)")
-                md.append("")
-            if fn_list:
-                md.append("**False negatives** (RuboCop reports, nitrocop does not):")
-                md.append("")
-                for ex in fn_list[:MD_EXAMPLE_LIMIT]:
-                    md.append(f"- `{_format_example_md(ex)}`")
-                if len(fn_list) > MD_EXAMPLE_LIMIT:
-                    md.append(f"- ... and {len(fn_list) - MD_EXAMPLE_LIMIT:,} more (see corpus-results.json for full list)")
-                md.append("")
+                _emit_examples(md, v_fp, v_fn, MD_EXAMPLE_LIMIT)
             md.append("</details>")
             md.append("")
 
@@ -363,6 +415,8 @@ def load_variant_by_cop(path: Path) -> dict[str, list[dict]]:
                     "matches": cop_entry.get("matches", 0),
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
+                    "fp_examples": cop_entry.get("fp_examples", []),
+                    "fn_examples": cop_entry.get("fn_examples", []),
                 })
     return result
 
@@ -373,6 +427,8 @@ def main():
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--style-variant-results", type=Path, default=None)
+    parser.add_argument("--synthetic", type=Path, default=None,
+                        help="Path to synthetic-results.json")
     args = parser.parse_args()
 
     data = json.loads(args.input.read_text())
@@ -380,7 +436,12 @@ def main():
     if args.style_variant_results:
         variant_by_cop = load_variant_by_cop(args.style_variant_results)
 
-    md = generate_md(data, variant_by_cop)
+    synthetic = None
+    if args.synthetic:
+        syn_data = json.loads(args.synthetic.read_text())
+        synthetic = {entry["cop"]: entry for entry in syn_data.get("by_cop", [])}
+
+    md = generate_md(data, variant_by_cop, synthetic)
     args.output.write_text(md)
     print(f"Generated {args.output} ({len(md):,} bytes)", file=sys.stderr)
 

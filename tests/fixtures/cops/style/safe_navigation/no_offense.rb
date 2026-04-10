@@ -55,6 +55,7 @@ foo && (foo.bar).to_s
 
 # Negated wrappers make safe navigation unsafe
 !!(foo && foo.bar)
+foo && !(foo.respond_to?(:empty?) && foo.empty?)
 obj.do_something if !obj
 
 # Outer operator/assignment parents make modifier `if` unsafe
@@ -112,6 +113,8 @@ end
 # Mixed `and` / `&&` chains are not flattened across precedence groups
 raise Interrupt if status and status.signaled? && status.termsig == 1
 foo && (foo.bar? || foo.baz?)
+foo && (cond && foo.bar?)
+foo && ((cond && foo.bar?) || (other && foo.baz?))
 purchase && (purchase.stripe_refunded || (purchase.chargeback_date.present? && !purchase.chargeback_reversed))
 corporation and (corporation.operated? or corporation_sold_out?(corporation))
 foo && (foo.admin? || (foo == owner && foo.pro?))
@@ -175,3 +178,91 @@ before_save :inherit_restricted_status,
 # Ternary inside nil-method call arguments — ancestor walk finds
 # instance_variable_set as a nil-responding method
 instance_variable_set("@bar", baz.nil? ? nil : baz.to_s)
+
+# && chain length 1 inside block of dotless call args — RuboCop's
+# ancestor walk escapes the rhs expression and finds the unsafe parent
+puts(items.map { |x| x && x.b })
+Hash[list.map { |p| [p.name.to_s, p.dt && p.dt.to_s] }]
+scope :accessible, ->(u) { items.select { |i| i && i.active? } }
+
+# Parenthesized condition in modifier if — RuboCop skips because ParenthesesNode
+# wrapping causes find_matching_receiver_invocation to fail to match the receiver
+obj.bar if (obj)
+Plugin.dialog_manager.validate(X) if (Plugin.dialog_manager)
+@cmd.set_validation_proc { Plugin.dialog_manager.validate(X) if (Plugin.dialog_manager) }
+
+# && inside if-else body of assignment — unsafe parent crosses if branches
+cookies[k] = if v && v.to_s
+  v
+else
+  default
+end
+
+# Modifier-if inside block of dotless call — unsafe parent crosses block boundary
+puts(items.map { |x| x.value if x })
+
+# Modifier-unless inside block of dotless call — unsafe parent crosses block boundary
+puts(items.map { |x| x.bar unless x.nil? })
+
+# && inside else body of !!() — unsafe parent preserved across if branches
+!!(if cached; cached; else; data && data.to_json; end)
+
+# Modifier-if with a block-call body inside a non-direct-receiver block can inherit
+# outer call-chain ancestry through the surrounding container expression.
+([
+  Builder.new do
+    reader.options.each do |cli_opt|
+      cli_opt
+    end if reader
+  end
+] + other).uniq
+
+# `private def` with `and` keyword — `private` is a dotless call, making it an
+# unsafe parent. RuboCop's ancestor walk escapes chains whose last call has a
+# block because the block node is not a :call type.
+private def argumentable?(method_obj)
+  method_obj and method_obj.parameters.any? { |param| param[0] == :key and param[1] == :arg }
+end
+
+private def process(method_obj)
+  method_obj && method_obj.parameters.each { |param| param }
+end
+
+# Parenthesized `&&` inside block — RuboCop's find_matching_receiver_invocation
+# follows receiver chain but cannot descend into `and` nodes inside parentheses.
+items.each do |item|
+  errors && (errors.is_a?(Array) && errors != EMPTY_ARRAY) || (errors.is_a?(String))
+end
+
+# `if` used as an array element receiver chain with a real block call leaks past the
+# block node in RuboCop's chain-length walk, so this stays no-offense.
+servers_list = [
+  if config[:tags]
+    config[:tags].split(',').collect do |tag_name|
+      tag_name
+    end
+  end,
+].flatten.compact
+
+# Outer `to_h` is a nil-safe ancestor, so RuboCop skips this `&&` inside the array.
+[
+  value && value.key?('mirror') ? 1 : 0,
+].to_h
+
+# The same outer `to_h` ancestor suppresses `&&` inside the `map` block body.
+base_query = @controller.request.query_parameters.map { |field, v|
+  if sub_field
+    next nil unless root_field.in?(fields)
+
+    sub_fields = @controller.class.field_configuration[root_field][:sub_fields] || []
+    if sub_field.in?(sub_fields)
+      next [ field, v ]
+    elsif pred_sub_field && pred_sub_field.in?(sub_fields)
+      field = pred_field
+    else
+      next nil
+    end
+  else
+    next nil
+  end
+}.compact.to_h.symbolize_keys

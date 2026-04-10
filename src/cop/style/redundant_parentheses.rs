@@ -1,6 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::shared::method_identifier_predicates;
+use crate::cop::shared::node_type::PINNED_EXPRESSION_NODE;
 use crate::cop::shared::predicate_operator_predicates;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -146,11 +147,132 @@ use crate::parse::source::SourceFile;
 ///   by RuboCop even though standalone parenthesized xstrings are redundant. After teaching the cop
 ///   that Prism xstrings are literals, it now keeps a narrow exemption when the parenthesized
 ///   xstring is the argument to a match operator call.
+///
+/// ## Investigation findings (2026-04-06)
+///
+/// ### FN root causes fixed:
+/// - **Assignment in begin-like statement containers:** Prism exposes method/block/BEGIN bodies and
+///   nested `if((var = ...))` conditions through `StatementsNode` wrappers, so the previous
+///   grandparent/conditional heuristic skipped real `begin_type?` cases. Assignment parens now
+///   flag whenever the immediate parent is a non-assignment `StatementsNode`, which restores
+///   RuboCop parity for standalone body statements without re-flagging assignments used as the
+///   RHS of another assignment or inside endless method-definition bodies.
+/// - **Empty-body `while` conditions with operator calls:** RuboCop treats `while (call > 0); end`
+///   like a singular-parent context, but Prism `WhileNode` needed an explicit empty-body check.
+///   Empty-body `while` nodes now participate in the singular-parent method-call rule, while
+///   normal loop bodies remain accepted.
+///
+/// ### FP root causes fixed (2026-04-07):
+/// - **Assignment in block body:** `loop { (i = 1) }`, `[1].each { |x| (i = x) }` were incorrectly
+///   flagged as "redundant parentheses around an assignment" because the parent stack showed the
+///   assignment's parent as a `StatementsNode` (kind=Other) rather than recognizing it was inside
+///   a block body. RuboCop doesn't flag these. Fixed by adding `is_parent_statements_block_body`
+///   check: when the grandparent of the assignment's parent statements is a CallNode or BlockNode,
+///   the assignment is inside a block and should not be flagged.
+///
+/// ## Investigation findings (2026-04-08)
+///
+/// ### FN root causes fixed:
+/// - **Setter/index-write sends in begin-like contexts:** Prism exposes `self[field] = value` and
+///   `self.foo = value` as `CallNode`s with `equal_loc`, so they were skipped by the assignment
+///   path entirely. RuboCop treats these like assignments at top level / begin-like statement
+///   parents, but still falls back to send-based handling in contexts like `return (...)`,
+///   `if (...)`, and `foo((...))`. Fixed by recognizing assignment-like calls separately and only
+///   short-circuiting them in the same contexts RuboCop exempts (single-statement block bodies,
+///   endless-def bodies).
+/// - **Ternary assignment branches stay exempt:** once assignment-like calls started sharing the
+///   assignment path, ternary branches like `(cond ? (x |= y) : z)` were incorrectly reported.
+///   RuboCop keeps assignment parens anywhere inside ternary conditions/branches, so the
+///   assignment fast-path now bails out when a ternary ancestor is present.
+/// - **Single-statement conditional bodies stay exempt:** modifier and block-style conditional
+///   bodies like `(count += 1) unless skip` and `if cond; (count += 1); end` are accepted by
+///   RuboCop even though the immediate Prism parent is still a `StatementsNode`. The assignment
+///   path now recognizes one-statement `if`/`unless`/`while`/`until`/`case` bodies and skips
+///   them instead of treating every statements wrapper as begin-like. Multi-statement bodies still
+///   flag because RuboCop treats those like `begin_type?` containers.
+/// - **Modifier-if rescue bodies still flag:** `after { (r.quit rescue nil) if defined?(r) }`
+///   is a body expression, not a conditional predicate. The one-line-rescue exemption now checks
+///   whether the parens are actually inside a conditional predicate range instead of skipping any
+///   nearby `if`/`while`/`until` ancestor.
+/// - **Receiver parens after `until(`/`while(` still flag when chained:** `until($stdin.gets).include?`
+///   uses keyword-adjacent parens, but they wrap the receiver of a chained call, not the whole
+///   loop predicate. The keyword-adjacency fast path now stays limited to non-receiver cases like
+///   `end until(bar)`.
+/// - **Unary `+/-` integer-chain exemption was too broad:** the `-(1.foo)` safeguard only applies
+///   to unary `+@`/`-@` parents. It now tracks true unary parents so binary operators like
+///   `1-(1.quo(ii))` still report redundant parens.
+/// - **Hash-first-argument exemption was too broad:** `first_arg_begins_with_hash_literal` used any
+///   unparenthesized call ancestor, which incorrectly exempted later arguments like
+///   `foo a, (({ y: 1 }.merge(z)))`. RuboCop only allows this when the parenthesized expression
+///   itself, or a receiver chain rooted at it, is the first argument of an unparenthesized call.
+///   Fixed by tracking first-argument start offsets and only applying the exemption to true
+///   first-argument chains.
+///
+/// ### FP root causes fixed:
+/// - **Paren descendants inside a hash first arg were still flagged:** RuboCop treats
+///   `foo :plain => ({...}.to_json)` and `Contract ({...}) => Num` like other
+///   hash-first-argument cases because the containing hash literal is the first argument of an
+///   unparenthesized call. Prism inserts `AssocNode`/hash ancestors between the parens and the
+///   call, so the previous offset walk only saw direct call/receiver chains and missed these
+///   nested cases. The exemption now climbs through pair/hash ancestors before checking the
+///   unparenthesized first-argument call boundary, while still flagging standalone hashes like
+///   `x = { plain: ({...}.to_json) }`.
+///
+/// ## Investigation findings (2026-04-09)
+///
+/// ### FN root causes fixed:
+/// - **Rescue inside assignment in conditional predicate:** `if (var = (expr rescue nil))` — the
+///   inner `(expr rescue nil)` was not flagged because `is_in_conditional_predicate` used a
+///   containment check (any parens within the predicate range). RuboCop checks exact identity
+///   (`parent.condition == begin_node`), so only the direct predicate is exempt. Changed to
+///   exact range match so nested rescue-in-assignment is correctly flagged.
+///
+/// ### FP root causes fixed:
+/// - **Assignment in single-statement def body (~6+ FPs from ebnf):** `def foo; (@var ||= {}); end`
+///   — Prism always wraps bodies in StatementsNode, but Parser AST only adds a `begin` wrapper
+///   for multi-statement bodies. Single-statement non-paren bodies map to the containing node
+///   directly, which is NOT begin_type. The `begin_like_parent` condition now correctly requires
+///   either parentheses body, multi-statement body, or top-level context.
+/// - **Method call with unparenthesized block argument:** `(method_args.map &:to_json).join(',')`
+///   — Prism puts block arguments in `block()` not `arguments()`, so the cop didn't count them
+///   as "has args". Removing the outer parens would change parsing. Now counts block_argument
+///   nodes for the singular-parent check.
+/// - **Post-condition `while`/`until` predicates with spaced parens:** `begin; work; end while
+///   (current_issue)` and `end while ((a && b) || c)` were still flagged because Prism exposes
+///   them as `WhileNode`/`UntilNode`, while RuboCop skips `while_post`/`until_post` in
+///   `ignore_syntax?`. Fixed by tracking Prism's begin-modifier loop form
+///   (`closing_loc().is_none() && is_begin_modifier()`) and only exempting the predicate parens
+///   for that exact post-condition loop context, preserving offenses for normal
+///   `while (current_issue)` / `while ((a && b) || c)`.
+///
+/// ## Investigation findings (2026-04-09, third pass)
+///
+/// ### FN root causes fixed:
+/// - **Hash-rooted call with attached block:** `({ bar: element }.merge!(other) { ... })` was
+///   incorrectly treated like a hash-first-argument exemption. RuboCop only allows that
+///   exemption for plain receiver chains, not for calls that already carry an attached block.
+/// - **Parenthesized range receivers:** `(same_range).send(..., (same_range))` is the narrow
+///   false-positive case. Broadly exempting every range argument on a parenthesized range
+///   receiver regressed `natalie` coverage, so the cop now only keeps parens for an identical
+///   receiver/argument range pair.
+/// - **`not(...)` keyword form:** `(not(true))` should report "a keyword", while `(not true)`
+///   remains plausible at top level. The previous `not` fast path also skipped method-argument
+///   cases like `assert_eq(false, (not true))`, which RuboCop still reports.
+/// - **Nested parens around multi-statement command-call arguments:** `m ((0; 1))` and
+///   `m ((0; 1)), ((2; 3))` need the outer grouping parens for command-call parsing, but the
+///   inner multi-statement parens are still redundant and RuboCop reports them as literals.
+/// - **Pin operator simple variables:** `foo in { bar: ^(var) }` is redundant, but
+///   `foo in { bar: ^(var.to_i) }` is allowed. Prism stores these delimiters on
+///   `PinnedExpressionNode`, so the cop now inspects that node directly.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
     fn name(&self) -> &'static str {
         "Style/RedundantParentheses"
+    }
+
+    fn interested_node_types(&self) -> &'static [u8] {
+        &[PINNED_EXPRESSION_NODE]
     }
 
     fn check_source(
@@ -171,6 +293,33 @@ impl Cop for RedundantParentheses {
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
     }
+
+    fn check_node(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        _config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        let Some(pinned) = node.as_pinned_expression_node() else {
+            return;
+        };
+        let lparen = pinned.lparen_loc();
+        let expression = pinned.expression();
+        if !is_variable(&expression) {
+            return;
+        }
+
+        let (line, column) = source.offset_to_line_col(lparen.start_offset());
+        diagnostics.push(self.diagnostic(
+            source,
+            line,
+            column,
+            "Don't use parentheses around a variable.".to_string(),
+        ));
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -178,6 +327,7 @@ enum ParentKind {
     And,
     Or,
     Call,
+    Hash,
     Splat,
     KeywordSplat,
     Return,
@@ -199,6 +349,7 @@ enum ParentKind {
     Block,
     BlockArgument,
     RescueModifier,
+    RescueBody,
     MultipleAssignment,
     Interpolation,
     Other,
@@ -208,17 +359,54 @@ struct ParentInfo {
     kind: ParentKind,
     multiline: bool,
     single_child: bool,
+    is_statements_node: bool,
     is_parentheses_body: bool,
     is_parentheses_node: bool,
     call_parenthesized: bool,
     call_arg_count: usize,
     is_operator: bool,
+    is_unary_plus_minus: bool,
     is_match_operator: bool,
+    /// True when the parent is a `=~` call AND the receiver (LHS) is a regex literal.
+    /// RuboCop only exempts the RHS parens for regex-literal `=~` (Parser's `match_with_lvasgn`).
+    is_regex_match_operator: bool,
     is_endless_def: bool,
     is_assignment_parent: bool,
+    /// The start offset of this parent node.
+    /// Used to walk receiver chains for first-argument hash-literal exemptions.
+    node_start_offset: usize,
     /// For Call parents, the start offset of the receiver node (if any).
     /// Used to implement RuboCop's `begin_node.chained?` check.
     call_receiver_start_offset: Option<usize>,
+    /// For Call parents, the inner range body of a parenthesized range receiver.
+    /// RuboCop only keeps method-argument parens for `(same_range).send(..., (same_range))`.
+    call_receiver_range_start_offset: Option<usize>,
+    call_receiver_range_end_offset: Option<usize>,
+    /// For Call parents, the start offset of the first argument (if any).
+    /// Used to implement RuboCop's `first_argument?` check for hash-literal exemptions.
+    call_first_arg_start_offset: Option<usize>,
+    /// For Call parents, whether the first argument is a ParenthesesNode.
+    /// Used to implement RuboCop's `like_method_argument_parentheses?` which
+    /// checks `node.first_argument.begin_type?`.
+    call_first_arg_is_begin: bool,
+    /// For StatementsNode parents, how many children the StatementsNode has.
+    /// Used to distinguish single-statement vs multi-statement block bodies.
+    statements_child_count: usize,
+    /// For RescueModifier parents, the start offset of the rescue_expression
+    /// (right side). RuboCop only exempts parens in the rescue body (resbody),
+    /// which corresponds to the rescue_expression in Prism. The expression
+    /// (left side) is still flagged.
+    rescue_expression_start_offset: Option<usize>,
+    /// For RescueBody parents, the start offset of the statements (body) node.
+    /// Parens in the exception list (`rescue *(Err)`) are NOT exempt — only
+    /// parens inside the body are.
+    rescue_body_start_offset: Option<usize>,
+    /// For conditional parents, the source range of the predicate expression.
+    /// Used to distinguish parens in the condition from parens in the body.
+    conditional_predicate_range: Option<(usize, usize)>,
+    /// True for `begin ... end while/until cond` modifier loops. RuboCop skips
+    /// the predicate parens for these `while_post`/`until_post` forms.
+    is_post_condition_loop: bool,
 }
 
 struct RedundantParensVisitor<'a> {
@@ -251,21 +439,26 @@ impl RedundantParensVisitor<'_> {
         };
         let is_receiver = self.is_receiver_of_parent_call(node, parent);
 
-        // Multiple expressions like (foo; bar) — skip entirely.
-        // RuboCop only flags these in begin/def/block contexts, but distinguishing
-        // those from assignment/call/etc contexts in our parent stack is fragile.
-        // Skipping avoids FPs on patterns like x = (foo; bar).
         if inner_nodes.len() != 1 {
+            if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
+                self.add_offense(node, msg);
+            }
             return;
         }
 
         let inner = &inner_nodes[0];
 
         // like_method_argument_parentheses? — applies to send, super, yield
+        // RuboCop checks: parent has one arg, not parenthesized, not operator,
+        // and first arg is begin_type?. When true, ALL begin nodes under this
+        // parent are skipped (including the receiver).
         if let Some(p) = parent {
             let is_like_method_arg = match p.kind {
                 ParentKind::Call => {
-                    !p.call_parenthesized && !p.is_operator && p.call_arg_count == 1 && !is_receiver
+                    !p.call_parenthesized
+                        && !p.is_operator
+                        && p.call_arg_count == 1
+                        && p.call_first_arg_is_begin
                 }
                 ParentKind::Super | ParentKind::Yield => {
                     !p.call_parenthesized && p.call_arg_count == 1
@@ -277,19 +470,24 @@ impl RedundantParensVisitor<'_> {
             }
         }
 
-        // multiline_control_flow_statements? — applies to return, next, break, super, yield
+        // multiline_control_flow_statements? — RuboCop only checks return, next, break.
+        // Super and yield are NOT included (they use like_method_argument_parentheses? instead).
         if let Some(p) = parent {
             if matches!(
                 p.kind,
-                ParentKind::Return
-                    | ParentKind::Next
-                    | ParentKind::Break
-                    | ParentKind::Super
-                    | ParentKind::Yield
+                ParentKind::Return | ParentKind::Next | ParentKind::Break
             ) && p.multiline
             {
                 return;
             }
+        }
+
+        // RuboCop's ignore_syntax? skips the predicate parens for `while_post`/`until_post`.
+        // Prism keeps these as begin-modifier while/until nodes, so track that exact form.
+        if parent.is_some_and(|p| {
+            matches!(p.kind, ParentKind::While | ParentKind::Until) && p.is_post_condition_loop
+        }) {
+            return;
         }
 
         // allowed_ancestor? — don't flag `break(value)`, `return(value)`, `next(value)`,
@@ -323,19 +521,21 @@ impl RedundantParensVisitor<'_> {
                 let before = self.source.content[open_offset - 1];
                 if before.is_ascii_alphabetic() {
                     // Check if we're right after a keyword like 'else', 'do', etc.
-                    // Only skip if not in return/next/break/super/yield (those are handled above)
-                    if parent
-                        .map(|p| {
-                            !matches!(
-                                p.kind,
-                                ParentKind::Return
-                                    | ParentKind::Next
-                                    | ParentKind::Break
-                                    | ParentKind::Super
-                                    | ParentKind::Yield
-                            )
-                        })
-                        .unwrap_or(true)
+                    // Only skip if not in return/next/break/super/yield (those are handled above).
+                    // Receiver parens like `until(call).chain` are still redundant.
+                    if !is_receiver
+                        && parent
+                            .map(|p| {
+                                !matches!(
+                                    p.kind,
+                                    ParentKind::Return
+                                        | ParentKind::Next
+                                        | ParentKind::Break
+                                        | ParentKind::Super
+                                        | ParentKind::Yield
+                                )
+                            })
+                            .unwrap_or(true)
                     {
                         return;
                     }
@@ -358,51 +558,82 @@ impl RedundantParensVisitor<'_> {
             }
         }
 
-        // Assignment — RuboCop flags (assignment) when parent is nil or begin_type.
-        // parent being nil maps to us having no real parent (top-level or begin statements).
-        // begin_type in RuboCop maps to a wrapping begin/statements node, which in our parent
-        // stack shows up as ParentKind::Other with no specific parent.
-        // Exclude Parameter (default param values), SingletonClass (class << expr),
-        // and Def (def receiver) because those are not begin_type in RuboCop.
-        //
-        // In Prism, ProgramNode/BeginNode call visit_statements_node directly (no push),
-        // while DefNode/BlockNode call visitor.visit(&body) which pushes StatementsNode.
-        // So when parent is Other (StatementsNode), check the grandparent:
-        // - If grandparent is Def/Block/Call/etc., parent is a body StatementsNode (NOT begin_type)
-        // - If grandparent is also Other or absent, parent is likely begin_type
+        // RuboCop's rescue? check: parens inside the rescue body (right side) are
+        // always allowed. `x rescue (y || z)` — the `(y || z)` is exempt.
+        // RuboCop checks `^resbody ^^resbody` which matches children/grandchildren
+        // of the rescue body node. The expression (left side) is NOT exempt.
+        if parent.is_some_and(|p| {
+            matches!(p.kind, ParentKind::RescueModifier)
+                && p.rescue_expression_start_offset
+                    .is_some_and(|off| node.location().start_offset() >= off)
+        }) {
+            return;
+        }
+
+        // RuboCop's rescue? also matches parens inside a full rescue clause body
+        // (`begin ... rescue ... (expr) ... end`). The matcher `'{^resbody ^^resbody}'`
+        // checks parent or grandparent is a resbody node. In Prism, the rescue clause
+        // is a RescueNode whose body is a StatementsNode — so the paren can be a child
+        // (parent = StatementsNode under RescueBody) or grandchild.
+        if self.has_rescue_body_ancestor(node) {
+            return;
+        }
+
+        // Assignment — RuboCop flags `(assignment)` when the immediate parent is nil or
+        // begin_type?. In Prism the comparable container is a plain StatementsNode, but we
+        // must not treat an outer assignment node the same way: `index = (state[:index] = ...)`
+        // keeps its parens in RuboCop. We therefore only flag StatementsNode-style parents
+        // that are not themselves assignment nodes.
         //
         // NOTE: When not flagging as assignment, only fall through to the
         // method argument check when inside a parenthesized call. This catches
         // `foo.include?((port = get_port))` without causing FPs on assignments
         // in boolean context like `(x = y) && z`.
-        if is_assignment(inner) {
+        let assignment_call = is_assignment_call(inner);
+        if is_assignment(inner) || assignment_call {
+            if self.has_ternary_ancestor() || self.is_parent_statements_conditional_body() {
+                return;
+            }
+
             let should_flag = match parent {
                 None => true,
                 Some(p) => {
-                    if matches!(p.kind, ParentKind::Other) {
-                        // Check grandparent: if it's a specific kind (Def, Block, etc.),
-                        // the parent is a body StatementsNode inside a non-begin context.
-                        if self.parent_stack.len() >= 3 {
-                            let gp = &self.parent_stack[self.parent_stack.len() - 3];
-                            matches!(gp.kind, ParentKind::Other)
-                        } else {
-                            true // shallow stack → program level
-                        }
-                    } else {
-                        false
-                    }
+                    // In Parser AST, single-statement bodies (def, if, etc.) do NOT
+                    // get a `begin` wrapper — only multi-statement bodies do.
+                    // Parentheses nodes inside parens always map to begin_type.
+                    // Top-level (program body) is always begin-like.
+                    // In Parser AST, string interpolation wraps content in
+                    // `begin` nodes — treat Interpolation like parentheses body.
+                    let begin_like_parent = p.is_statements_node
+                        && (p.is_parentheses_body
+                            || p.statements_child_count > 1
+                            || self.parent_stack.len() <= 2
+                            || matches!(p.kind, ParentKind::Interpolation));
+                    begin_like_parent
+                        && !p.is_assignment_parent
+                        && !self.is_endless_def_body_parent()
+                        && !self.is_parent_statements_block_body()
                 }
             };
-            // But not inside if/while/unless/until conditions
-            if should_flag && !self.has_conditional_ancestor() {
+            if should_flag {
                 self.add_offense(node, "an assignment");
                 return;
             }
-            // Only fall through when parent is a parenthesized call (method arg candidate)
-            let is_method_arg_candidate =
-                parent.is_some_and(|p| matches!(p.kind, ParentKind::Call) && p.call_parenthesized);
-            if !is_method_arg_candidate {
+            // Setter/index-write sends still participate in RuboCop's send-based checks
+            // in contexts like `return (...)`, `if (...)`, and `foo((...))`, but block
+            // bodies and endless defs keep their parens.
+            if assignment_call
+                && (self.is_parent_statements_block_body() || self.is_endless_def_body_parent())
+            {
                 return;
+            }
+            // Non-call assignments can only fall through when they are a method argument.
+            if !assignment_call {
+                let is_method_arg_candidate = parent
+                    .is_some_and(|p| matches!(p.kind, ParentKind::Call) && p.call_parenthesized);
+                if !is_method_arg_candidate {
+                    return;
+                }
             }
         }
 
@@ -415,14 +646,6 @@ impl RedundantParensVisitor<'_> {
                 self.add_offense(node, msg);
                 return;
             }
-            return;
-        }
-
-        // Skip `not` keyword expressions — (not x) is plausible
-        // Prism represents `not x` as CallNode with name `!` but message_loc `not`
-        if inner.as_call_node().is_some_and(|c| {
-            c.name().as_slice() == b"!" && c.message_loc().is_some_and(|m| m.as_slice() == b"not")
-        }) {
             return;
         }
 
@@ -464,6 +687,13 @@ impl RedundantParensVisitor<'_> {
             return;
         }
 
+        // first_arg_begins_with_hash_literal? — when the inner expression is (or starts
+        // with) a hash literal, and the paren is the first argument of an unparenthesized
+        // method call, the parens are needed to prevent `{` from being parsed as a block.
+        if self.first_arg_begins_with_hash_literal(node, inner, parent) {
+            return;
+        }
+
         // Check if this is an argument of a parenthesized method call
         // e.g., x.y((z)), x.y((z + w)), x.y(a, (b))
         if let Some(msg) = self.check_argument_of_parenthesized_call(node, inner, parent) {
@@ -471,10 +701,13 @@ impl RedundantParensVisitor<'_> {
             return;
         }
 
-        // first_arg_begins_with_hash_literal? — when the inner expression is (or starts
-        // with) a hash literal, and the paren is the first argument of an unparenthesized
-        // method call, the parens are needed to prevent `{` from being parsed as a block.
-        if self.first_arg_begins_with_hash_literal(node, inner, parent) {
+        // Skip top-level `not` keyword expressions — (not x) is plausible.
+        // Method-argument cases like `assert_eq(false, (not true))` were already
+        // handled above by `check_argument_of_parenthesized_call`.
+        if inner
+            .as_call_node()
+            .is_some_and(|c| is_not_keyword_call(&c) && c.opening_loc().is_none())
+        {
             return;
         }
 
@@ -522,7 +755,7 @@ impl RedundantParensVisitor<'_> {
         // len <= 2 approximates "no parent" (program root only).
         if is_comparison(inner)
             && !is_receiver
-            && !is_chained(&self.source.content, node)
+            && !is_chained_or_indexed(&self.source.content, node)
             && self.parent_stack.len() <= 2
             && parent.is_none_or(|p| matches!(p.kind, ParentKind::Other))
         {
@@ -551,6 +784,76 @@ impl RedundantParensVisitor<'_> {
         ));
     }
 
+    fn check_nested_multiple_statement_parens(
+        &self,
+        inner_nodes: &[ruby_prism::Node<'_>],
+    ) -> Option<&'static str> {
+        if !self.is_nested_unparenthesized_call_argument_parentheses() {
+            return None;
+        }
+
+        classify_simple(inner_nodes.last()?)
+    }
+
+    fn is_nested_unparenthesized_call_argument_parentheses(&self) -> bool {
+        let mut saw_outer_parentheses = false;
+
+        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
+            let info = &self.parent_stack[i];
+
+            if info.is_statements_node && info.is_parentheses_body {
+                continue;
+            }
+
+            if info.is_parentheses_node {
+                saw_outer_parentheses = true;
+                continue;
+            }
+
+            if !saw_outer_parentheses {
+                if matches!(info.kind, ParentKind::Other) {
+                    continue;
+                }
+                return false;
+            }
+
+            return matches!(info.kind, ParentKind::Call)
+                && !info.call_parenthesized
+                && !info.is_operator;
+        }
+
+        false
+    }
+
+    /// RuboCop's `rescue?` matcher: `'{^resbody ^^resbody}'`.
+    /// Returns true if the paren is inside a rescue clause body (up to 2 levels deep).
+    /// Only suppresses parens whose offset is within the rescue body (statements),
+    /// not parens in the exception list (`rescue *(Err)`).
+    fn has_rescue_body_ancestor(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+        let paren_offset = node.location().start_offset();
+        // parent_stack.last() is the ParenthesesNode itself.
+        // We need to check parent (len-2) and grandparent (len-3).
+        let len = self.parent_stack.len();
+        if len >= 2
+            && matches!(self.parent_stack[len - 2].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 2]
+                .rescue_body_start_offset
+                .is_some_and(|off| paren_offset >= off)
+        {
+            return true;
+        }
+        // Grandparent check: paren inside StatementsNode inside RescueBody
+        if len >= 3
+            && matches!(self.parent_stack[len - 3].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 3]
+                .rescue_body_start_offset
+                .is_some_and(|off| paren_offset >= off)
+        {
+            return true;
+        }
+        false
+    }
+
     /// Check if a nearby ancestor is a ternary, looking through intermediate
     /// wrapper nodes (StatementsNode, ElseNode) that Prism inserts.
     fn has_ternary_ancestor(&self) -> bool {
@@ -568,19 +871,68 @@ impl RedundantParensVisitor<'_> {
         false
     }
 
-    /// Check if a conditional (if/while/unless/until) is an ancestor.
-    /// Used to determine if assignment parens are needed for disambiguation.
-    fn has_conditional_ancestor(&self) -> bool {
-        if self.parent_stack.len() < 2 {
+    fn is_endless_def_body_parent(&self) -> bool {
+        if self.parent_stack.len() < 3 {
             return false;
         }
-        for i in (0..self.parent_stack.len() - 1).rev() {
-            match self.parent_stack[i].kind {
-                ParentKind::If | ParentKind::While | ParentKind::Until => return true,
+
+        let grandparent = &self.parent_stack[self.parent_stack.len() - 3];
+        matches!(grandparent.kind, ParentKind::Def) && grandparent.is_endless_def
+    }
+
+    /// Check if the parent (a StatementsNode) is the body of a SINGLE-statement
+    /// block. In RuboCop AST, a single-statement block body has the begin node's
+    /// parent as the `:block` node (not begin_type), so `assignment?` checks fail.
+    /// A multi-statement block body wraps children in a `:begin` node, so the
+    /// begin node's parent IS begin_type and the assignment IS flagged.
+    ///
+    /// We replicate this by checking: the grandparent is a Block/Call, AND the
+    /// parent StatementsNode has exactly one child (single-statement block).
+    fn is_parent_statements_block_body(&self) -> bool {
+        // parent_stack structure for `(assignment)` inside a block:
+        // [..., CallNode/BlockEntry, OuterStatements, ParenthesesNode, InnerStatements]
+        // grandparent = parent_stack[len - 3]
+        if self.parent_stack.len() < 3 {
+            return false;
+        }
+        let parent = &self.parent_stack[self.parent_stack.len() - 2];
+        let grandparent = &self.parent_stack[self.parent_stack.len() - 3];
+        // Only suppress for single-statement block bodies. Multi-statement block
+        // bodies correspond to RuboCop's begin wrapper where assignments ARE flagged.
+        matches!(grandparent.kind, ParentKind::Call | ParentKind::Block)
+            && parent.statements_child_count == 1
+    }
+
+    /// Check if the parent (a StatementsNode) is the SINGLE statement body of a
+    /// conditional-like construct (`if`/`unless`, `while`/`until`, `case`).
+    /// RuboCop keeps assignment parens in these bodies, including modifier
+    /// forms like `(count += 1) unless skip`, but multi-statement bodies get a
+    /// `begin` wrapper in Parser AST and are flagged.
+    fn is_parent_statements_conditional_body(&self) -> bool {
+        if self.parent_stack.len() < 3 {
+            return false;
+        }
+
+        let parent_index = self.parent_stack.len() - 2;
+        let parent = &self.parent_stack[parent_index];
+        if !parent.is_statements_node
+            || parent.is_parentheses_body
+            || parent.statements_child_count != 1
+        {
+            return false;
+        }
+
+        for i in (0..=parent_index).rev() {
+            let info = &self.parent_stack[i];
+            match info.kind {
                 ParentKind::Other => continue,
+                ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
+                    return true;
+                }
                 _ => return false,
             }
         }
+
         false
     }
 
@@ -592,7 +944,7 @@ impl RedundantParensVisitor<'_> {
         &self,
         node: &ruby_prism::ParenthesesNode<'_>,
         inner: &ruby_prism::Node<'_>,
-        parent: Option<&ParentInfo>,
+        _parent: Option<&ParentInfo>,
     ) -> bool {
         // Check if the inner expression is or starts with a hash literal
         if !self.inner_begins_with_hash(inner) {
@@ -606,23 +958,7 @@ impl RedundantParensVisitor<'_> {
         // `x ({y: 1}).merge(z), w` — parens are receiver of .merge, but .merge
         // is a first arg of x).
         //
-        // Simplified check: if the parens are the receiver of a parent call AND
-        // there's no unparenthesized call ancestor above that, don't exempt.
-        if self.is_receiver_of_parent_call(node, parent) {
-            // The parens are a receiver. Check if the receiver chain ultimately
-            // ends as an argument of an unparenthesized call further up.
-            // Walk up the stack: skip the immediate parent (the call we're receiver of)
-            // and look for an unparenthesized call ancestor above it.
-            let skip_depth = self.parent_stack.len().saturating_sub(2);
-            let has_outer_unparenthesized = (0..skip_depth).rev().any(|i| {
-                matches!(self.parent_stack[i].kind, ParentKind::Call)
-                    && !self.parent_stack[i].call_parenthesized
-            });
-            return has_outer_unparenthesized;
-        }
-
-        // Check that there's an unparenthesized Call ancestor
-        self.has_unparenthesized_call_ancestor()
+        self.is_first_argument_of_unparenthesized_call_chain(node)
     }
 
     /// Walk the receiver chain of call nodes to find a hash literal at the root.
@@ -631,6 +967,9 @@ impl RedundantParensVisitor<'_> {
             return true;
         }
         if let Some(call) = node.as_call_node() {
+            if call.block().is_some() {
+                return false;
+            }
             if let Some(recv) = call.receiver() {
                 return self.inner_begins_with_hash(&recv);
             }
@@ -638,15 +977,52 @@ impl RedundantParensVisitor<'_> {
         false
     }
 
-    /// Check if there's an unparenthesized Call ancestor in the parent stack.
-    fn has_unparenthesized_call_ancestor(&self) -> bool {
+    /// RuboCop's first_argument? allows hash-first-argument parens when the begin
+    /// node itself, or a receiver chain rooted at it, becomes the first argument
+    /// of an unparenthesized call.
+    fn is_first_argument_of_unparenthesized_call_chain(
+        &self,
+        node: &ruby_prism::ParenthesesNode<'_>,
+    ) -> bool {
+        let mut current_start = node.location().start_offset();
+
         for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
-            if matches!(self.parent_stack[i].kind, ParentKind::Call)
-                && !self.parent_stack[i].call_parenthesized
-            {
-                return true;
+            let info = &self.parent_stack[i];
+            match info.kind {
+                ParentKind::Other => continue,
+                // RuboCop's `first_argument?` recurses through ancestors, so a begin node
+                // nested inside an assoc/hash still counts when that containing hash is
+                // the first argument of an unparenthesized call.
+                ParentKind::Pair | ParentKind::Hash => {
+                    current_start = info.node_start_offset;
+                }
+                ParentKind::Call => {
+                    if info
+                        .call_receiver_start_offset
+                        .is_some_and(|start| start == current_start)
+                    {
+                        current_start = info.node_start_offset;
+                        continue;
+                    }
+
+                    if info
+                        .call_first_arg_start_offset
+                        .is_some_and(|start| start == current_start)
+                    {
+                        if info.call_parenthesized {
+                            current_start = info.node_start_offset;
+                            continue;
+                        }
+
+                        return true;
+                    }
+
+                    return false;
+                }
+                _ => return false,
             }
         }
+
         false
     }
 
@@ -656,6 +1032,13 @@ impl RedundantParensVisitor<'_> {
         &self,
         inner: &ruby_prism::Node<'_>,
     ) -> Option<&'static str> {
+        if inner
+            .as_call_node()
+            .is_some_and(|call| is_not_keyword_call(&call) && call.opening_loc().is_some())
+        {
+            return Some("a keyword");
+        }
+
         // defined?(expr) — keyword when parenthesized, but (defined? expr) is plausible
         if let Some(defined) = inner.as_defined_node() {
             // Only flag when defined? uses parenthesized form: defined?(:A)
@@ -730,7 +1113,7 @@ impl RedundantParensVisitor<'_> {
     /// array, hash, or method argument.
     fn check_one_line_rescue(
         &self,
-        _node: &ruby_prism::ParenthesesNode<'_>,
+        node: &ruby_prism::ParenthesesNode<'_>,
         parent: Option<&ParentInfo>,
     ) -> Option<&'static str> {
         // Not flagged in ternary
@@ -738,12 +1121,12 @@ impl RedundantParensVisitor<'_> {
             return None;
         }
 
+        if self.is_in_conditional_predicate(node) {
+            return None;
+        }
+
         if let Some(p) = parent {
             match p.kind {
-                // Not flagged in conditional condition (if/while/until/case)
-                ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
-                    return None;
-                }
                 // Not flagged in array or hash value
                 ParentKind::Array | ParentKind::Pair => return None,
                 // Not flagged in method call (method arg)
@@ -774,9 +1157,9 @@ impl RedundantParensVisitor<'_> {
             return None;
         }
 
-        // If the paren is chained (followed by `.` or `&.`), it's the receiver of
+        // If the paren is chained (followed by `.`, `&.`, or `[`), it's the receiver of
         // the parent call, not an argument. RuboCop checks `parent.receiver != begin_node`.
-        if is_chained(&self.source.content, node) {
+        if is_chained_or_indexed(&self.source.content, node) {
             return None;
         }
 
@@ -797,6 +1180,22 @@ impl RedundantParensVisitor<'_> {
         // Don't flag pattern matching in method arg (RuboCop's in_pattern_matching_in_method_argument?)
         if inner.as_match_predicate_node().is_some() || inner.as_match_required_node().is_some() {
             return None;
+        }
+
+        // RuboCop only accepts `(range)` here when it exactly matches a
+        // parenthesized range receiver: `(0..10).foo((0..10))`.
+        if let Some(inner_range) = inner.as_range_node() {
+            if let (Some(start), Some(end)) = (
+                p.call_receiver_range_start_offset,
+                p.call_receiver_range_end_offset,
+            ) {
+                let loc = inner_range.location();
+                if self.source.content[start..end]
+                    == self.source.content[loc.start_offset()..loc.end_offset()]
+                {
+                    return None;
+                }
+            }
         }
 
         // Don't flag if inner is a method call with unparenthesized args
@@ -858,20 +1257,33 @@ impl RedundantParensVisitor<'_> {
         parent.is_some_and(|p| matches!(p.kind, ParentKind::Interpolation))
     }
 
-    fn push_parent(&mut self, kind: ParentKind) {
+    fn push_parent(&mut self, kind: ParentKind, node_start_offset: usize) {
         self.parent_stack.push(ParentInfo {
             kind,
             multiline: false,
             single_child: false,
+            is_statements_node: false,
             is_parentheses_body: false,
             is_parentheses_node: false,
             call_parenthesized: false,
             call_arg_count: 0,
             is_operator: false,
+            is_unary_plus_minus: false,
             is_match_operator: false,
+            is_regex_match_operator: false,
             is_endless_def: false,
             is_assignment_parent: false,
+            node_start_offset,
             call_receiver_start_offset: None,
+            call_receiver_range_start_offset: None,
+            call_receiver_range_end_offset: None,
+            call_first_arg_start_offset: None,
+            call_first_arg_is_begin: false,
+            statements_child_count: 0,
+            rescue_expression_start_offset: None,
+            rescue_body_start_offset: None,
+            conditional_predicate_range: None,
+            is_post_condition_loop: false,
         });
     }
 
@@ -891,6 +1303,29 @@ impl RedundantParensVisitor<'_> {
         }
         false
     }
+
+    fn is_in_conditional_predicate(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+        let start = node.location().start_offset();
+        let end = node.location().end_offset();
+
+        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
+            let info = &self.parent_stack[i];
+            match info.kind {
+                ParentKind::Other => continue,
+                ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
+                    // RuboCop checks `parent.condition == begin_node` — exact identity,
+                    // not containment. A rescue nested INSIDE the predicate (e.g.,
+                    // `if (var = (expr rescue nil))`) should still be flagged.
+                    return info.conditional_predicate_range.is_some_and(
+                        |(pred_start, pred_end)| start == pred_start && end == pred_end,
+                    );
+                }
+                _ => return false,
+            }
+        }
+
+        false
+    }
 }
 
 fn check_logical<'a>(
@@ -900,7 +1335,8 @@ fn check_logical<'a>(
     parent: Option<&ParentInfo>,
     is_receiver: bool,
 ) -> Option<&'a str> {
-    if is_receiver || is_chained(content, paren_node) {
+    // RuboCop's chained? check — includes `[` indexing since (a && b)['key'] is chained
+    if is_receiver || is_chained_or_indexed(content, paren_node) {
         return None;
     }
 
@@ -971,22 +1407,37 @@ fn check_method_call<'a>(
         return None;
     }
 
+    // RuboCop only exempts the RHS parens for regex-literal `=~` (Parser's `match_with_lvasgn`).
+    // Example: `/regexp/ =~ (line.strip)` — exempt; `var =~ (line.strip)` — NOT exempt.
+    if parent.is_some_and(|p| p.is_regex_match_operator) && !is_receiver {
+        return None;
+    }
+
     // call_chain_starts_with_int? — if the call chain starts with an int
     // and the parent is a unary +/- operation, parens are needed.
     // e.g., -(1.foo) — removing parens gives -1.foo which parses as (-1).foo
-    if call_chain_starts_with_int_from_call(&call) {
-        let start_offset = paren_node.location().start_offset();
-        if start_offset > 0 {
-            let before = content[start_offset - 1];
-            if before == b'-' || before == b'+' {
-                return None;
-            }
-        }
+    if call_chain_starts_with_int_from_call(&call)
+        && is_receiver
+        && parent.is_some_and(|p| p.is_unary_plus_minus)
+    {
+        return None;
     }
 
     let has_args = call.arguments().is_some();
+    // Block arguments (&block) count as args for the singular-parent check.
+    // `(method_args.map &:to_json).join(',')` — removing parens changes parsing.
+    let has_block_arg = call
+        .block()
+        .is_some_and(|b| b.as_block_argument_node().is_some());
     let call_has_parens = call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
-    let is_square_brackets = call.name().as_slice() == b"[]" && call.call_operator_loc().is_none();
+    // RuboCop's `square_brackets?` matcher only treats `[]` calls as square brackets
+    // when the receiver is one of: send, str, array, hash, const, or variable.
+    // Notably, `self` is NOT in the list — `(self[0, n]).to_s` keeps its parens.
+    let is_square_brackets = call.name().as_slice() == b"[]"
+        && call.call_operator_loc().is_none()
+        && call
+            .receiver()
+            .is_some_and(|r| is_square_brackets_receiver(&r));
 
     // RuboCop does not fall back to "a method call" for comparisons used as the
     // direct return value of a method or block body, but it still does for nested
@@ -1005,7 +1456,7 @@ fn check_method_call<'a>(
     // exactly one child. For Return/Next/Break/Super/Yield, this means the
     // keyword has a single argument. `[]` calls are handled like RuboCop's
     // `square_brackets?` matcher and don't need the singular-parent check.
-    if has_args
+    if (has_args || has_block_arg)
         && !call_has_parens
         && !is_square_brackets
         && !has_singular_parenthesized_parent(parent)
@@ -1033,8 +1484,8 @@ fn check_unary<'a>(
     parent: Option<&ParentInfo>,
     is_receiver: bool,
 ) -> Option<&'a str> {
-    // RuboCop: `return if begin_node.chained?`
-    if is_receiver || is_chained(content, paren_node) {
+    // RuboCop: `return if begin_node.chained?` — includes `[` indexing
+    if is_receiver || is_chained_or_indexed(content, paren_node) {
         return None;
     }
 
@@ -1145,6 +1596,33 @@ fn is_unary_operation(call: &ruby_prism::CallNode<'_>) -> bool {
     call.receiver().is_some() && call.arguments().is_none() && call.opening_loc().is_none()
 }
 
+fn is_not_keyword_call(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.name().as_slice() == b"!"
+        && call
+            .message_loc()
+            .is_some_and(|message| message.as_slice() == b"not")
+}
+
+fn parenthesized_range_body_offsets(node: &ruby_prism::Node<'_>) -> Option<(usize, usize)> {
+    let paren = node.as_parentheses_node()?;
+    let body = paren.body()?;
+
+    if body.as_range_node().is_some() {
+        let loc = body.location();
+        return Some((loc.start_offset(), loc.end_offset()));
+    }
+
+    let statements = body.as_statements_node()?;
+    let mut children = statements.body().iter();
+    let child = children.next()?;
+    if child.as_range_node().is_none() || children.next().is_some() {
+        return None;
+    }
+
+    let loc = child.location();
+    Some((loc.start_offset(), loc.end_offset()))
+}
+
 /// Check if a method call chain starts with an integer literal.
 /// E.g., `1.foo` or `1.foo.bar`
 fn call_chain_starts_with_int(node: &ruby_prism::Node<'_>) -> bool {
@@ -1180,6 +1658,24 @@ fn is_chained(content: &[u8], paren_node: &ruby_prism::ParenthesesNode<'_>) -> b
         }
     }
     false
+}
+
+/// Like `is_chained` but also considers `[` as chaining. Used for logical and
+/// comparison expressions where `(expr)[key]` means parens are required.
+/// RuboCop's `begin_node.chained?` returns true when the begin node is a
+/// receiver of its parent call, which includes `[]` calls.
+fn is_chained_or_indexed(content: &[u8], paren_node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+    if is_chained(content, paren_node) {
+        return true;
+    }
+    let end_offset = paren_node.location().end_offset();
+    let mut i = end_offset;
+    // Only skip horizontal whitespace — a `[` on the next line is an array literal,
+    // not indexing into the parenthesized expression.
+    while i < content.len() && matches!(content[i], b' ' | b'\t') {
+        i += 1;
+    }
+    i < content.len() && content[i] == b'['
 }
 
 /// Returns true if the call node has a do..end block attached to it.
@@ -1292,6 +1788,20 @@ fn is_literal(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_interpolated_regular_expression_node().is_some()
 }
 
+/// RuboCop's `square_brackets?` matcher checks the receiver of `[]` calls.
+/// Only these receiver types count: send (method call), str, array, hash, const, variable.
+/// Notably, `self` is NOT in this list.
+fn is_square_brackets_receiver(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_call_node().is_some()
+        || node.as_string_node().is_some()
+        || node.as_interpolated_string_node().is_some()
+        || node.as_array_node().is_some()
+        || node.as_hash_node().is_some()
+        || node.as_constant_read_node().is_some()
+        || node.as_constant_path_node().is_some()
+        || is_variable(node)
+}
+
 fn is_xstring(node: &ruby_prism::Node<'_>) -> bool {
     node.as_x_string_node().is_some() || node.as_interpolated_x_string_node().is_some()
 }
@@ -1321,13 +1831,43 @@ fn is_assignment(node: &ruby_prism::Node<'_>) -> bool {
     {
         return true;
     }
-    // []= calls (index assignment)
-    if let Some(call) = node.as_call_node() {
-        if call.name().as_slice() == b"[]=" {
-            return true;
-        }
+    // Compound assignment operators (||=, &&=, +=, etc.) on variables
+    if node.as_local_variable_or_write_node().is_some()
+        || node.as_local_variable_and_write_node().is_some()
+        || node.as_local_variable_operator_write_node().is_some()
+        || node.as_instance_variable_or_write_node().is_some()
+        || node.as_instance_variable_and_write_node().is_some()
+        || node.as_instance_variable_operator_write_node().is_some()
+        || node.as_class_variable_or_write_node().is_some()
+        || node.as_class_variable_and_write_node().is_some()
+        || node.as_class_variable_operator_write_node().is_some()
+        || node.as_global_variable_or_write_node().is_some()
+        || node.as_global_variable_and_write_node().is_some()
+        || node.as_global_variable_operator_write_node().is_some()
+        || node.as_constant_or_write_node().is_some()
+        || node.as_constant_and_write_node().is_some()
+        || node.as_constant_operator_write_node().is_some()
+        || node.as_constant_path_or_write_node().is_some()
+        || node.as_constant_path_and_write_node().is_some()
+        || node.as_constant_path_operator_write_node().is_some()
+    {
+        return true;
+    }
+    // Index compound assignment: a[b] ||=, a[b] &&=, a[b] +=
+    if node.as_index_or_write_node().is_some()
+        || node.as_index_and_write_node().is_some()
+        || node.as_index_operator_write_node().is_some()
+    {
+        return true;
     }
     false
+}
+
+fn is_assignment_call(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|call| {
+        let name = call.name().as_slice();
+        name.ends_with(b"=") && !matches!(name, b"==" | b"!=" | b"<=" | b">=" | b"===")
+    })
 }
 
 fn is_comparison(node: &ruby_prism::Node<'_>) -> bool {
@@ -1416,8 +1956,8 @@ fn is_raised_to_power_negative_numeric(
 impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     // visit_branch_node_enter/leave provide push/pop for ALL branch nodes.
     // Specific visit_* methods then MODIFY the top of stack to set the correct kind.
-    fn visit_branch_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {
-        self.push_parent(ParentKind::Other);
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.push_parent(ParentKind::Other, node.location().start_offset());
     }
 
     fn visit_branch_node_leave(&mut self) {
@@ -1428,8 +1968,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
         let is_parentheses_body = self.parent_stack.len() >= 2
             && self.parent_stack[self.parent_stack.len() - 2].is_parentheses_node;
         if let Some(top) = self.parent_stack.last_mut() {
+            top.is_statements_node = true;
             top.single_child = node.body().len() == 1 && is_parentheses_body;
             top.is_parentheses_body = is_parentheses_body;
+            top.statements_child_count = node.body().len();
         }
         ruby_prism::visit_statements_node(self, node);
     }
@@ -1458,8 +2000,32 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.call_parenthesized = node.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
             top.call_arg_count = node.arguments().map(|a| a.arguments().len()).unwrap_or(0);
             top.is_operator = is_operator_method(node);
+            top.is_unary_plus_minus =
+                matches!(node.name().as_slice(), b"-@" | b"+@") && node.arguments().is_none();
             top.is_match_operator = node.name().as_slice() == b"=~";
+            // RuboCop's match_with_lvasgn only applies when LHS is a regex literal.
+            // Only these forms exempt the RHS parens: `/regex/ =~ (expr)`
+            top.is_regex_match_operator = top.is_match_operator
+                && node.receiver().is_some_and(|r| {
+                    r.as_regular_expression_node().is_some()
+                        || r.as_interpolated_regular_expression_node().is_some()
+                });
+            top.is_assignment_parent = node.equal_loc().is_some();
             top.call_receiver_start_offset = node.receiver().map(|r| r.location().start_offset());
+            let receiver_range_offsets = node
+                .receiver()
+                .and_then(|receiver| parenthesized_range_body_offsets(&receiver));
+            top.call_receiver_range_start_offset = receiver_range_offsets.map(|(start, _)| start);
+            top.call_receiver_range_end_offset = receiver_range_offsets.map(|(_, end)| end);
+            top.call_first_arg_start_offset = node
+                .arguments()
+                .and_then(|args| args.arguments().iter().next())
+                .map(|first| first.location().start_offset());
+            // RuboCop's like_method_argument_parentheses? checks node.first_argument.begin_type?
+            top.call_first_arg_is_begin = node
+                .arguments()
+                .and_then(|args| args.arguments().iter().next())
+                .is_some_and(|first| first.as_parentheses_node().is_some());
         }
         ruby_prism::visit_call_node(self, node);
     }
@@ -1484,6 +2050,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
                 top.kind = ParentKind::Ternary;
             } else {
                 top.kind = ParentKind::If;
+                top.conditional_predicate_range = Some((
+                    node.predicate().location().start_offset(),
+                    node.predicate().location().end_offset(),
+                ));
             }
         }
         ruby_prism::visit_if_node(self, node);
@@ -1508,6 +2078,10 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::If; // treat unless same as if for conditional ancestor check
+            top.conditional_predicate_range = Some((
+                node.predicate().location().start_offset(),
+                node.predicate().location().end_offset(),
+            ));
         }
         ruby_prism::visit_unless_node(self, node);
     }
@@ -1515,6 +2089,12 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::While;
+            top.single_child = node.statements().is_none();
+            top.conditional_predicate_range = Some((
+                node.predicate().location().start_offset(),
+                node.predicate().location().end_offset(),
+            ));
+            top.is_post_condition_loop = node.closing_loc().is_none() && node.is_begin_modifier();
         }
         ruby_prism::visit_while_node(self, node);
     }
@@ -1522,6 +2102,11 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::Until;
+            top.conditional_predicate_range = Some((
+                node.predicate().location().start_offset(),
+                node.predicate().location().end_offset(),
+            ));
+            top.is_post_condition_loop = node.closing_loc().is_none() && node.is_begin_modifier();
         }
         ruby_prism::visit_until_node(self, node);
     }
@@ -1529,6 +2114,12 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::Case;
+            top.conditional_predicate_range = node.predicate().map(|predicate| {
+                (
+                    predicate.location().start_offset(),
+                    predicate.location().end_offset(),
+                )
+            });
         }
         ruby_prism::visit_case_node(self, node);
     }
@@ -1601,6 +2192,8 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_block_argument_node(&mut self, node: &ruby_prism::BlockArgumentNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::BlockArgument;
+            // BlockArgumentNode wraps a single expression (the value after &)
+            top.single_child = true;
         }
         ruby_prism::visit_block_argument_node(self, node);
     }
@@ -1608,8 +2201,20 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::RescueModifier;
+            top.rescue_expression_start_offset =
+                Some(node.rescue_expression().location().start_offset());
         }
         ruby_prism::visit_rescue_modifier_node(self, node);
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::RescueBody;
+            // Store the body start offset so has_rescue_body_ancestor() can
+            // distinguish exception-list parens from body parens.
+            top.rescue_body_start_offset = node.statements().map(|s| s.location().start_offset());
+        }
+        ruby_prism::visit_rescue_node(self, node);
     }
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
@@ -1675,6 +2280,20 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.single_child = node.elements().len() == 1;
         }
         ruby_prism::visit_array_node(self, node);
+    }
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Hash;
+        }
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::Hash;
+        }
+        ruby_prism::visit_keyword_hash_node(self, node);
     }
 
     fn visit_assoc_node(&mut self, node: &ruby_prism::AssocNode<'pr>) {

@@ -1,12 +1,30 @@
 use crate::cop::shared::node_type::{
-    BLOCK_NODE, CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE, INSTANCE_VARIABLE_READ_NODE,
-    LOCAL_VARIABLE_READ_NODE, STATEMENTS_NODE, SYMBOL_NODE,
+    BLOCK_NODE, CALL_NODE, CLASS_VARIABLE_READ_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE,
+    GLOBAL_VARIABLE_READ_NODE, INSTANCE_VARIABLE_READ_NODE, LOCAL_VARIABLE_READ_NODE,
+    STATEMENTS_NODE, SYMBOL_NODE,
 };
 use crate::cop::shared::util::RSPEC_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks for consistent style of change matcher.
+///
+/// Enforces either passing a receiver and message as method arguments,
+/// or a block.
+///
+/// `EnforcedStyle: method_call` (default): flags `change { obj.attr }` and
+/// suggests `change(obj, :attr)`. The receiver must be a constant or bare
+/// method call (no receiver, no arguments, no block).
+///
+/// `EnforcedStyle: block`: flags `change(obj, :attr)` and suggests
+/// `change { obj.attr }`. RuboCop's pattern accepts ANY first argument type
+/// (not just constants/variables), so the Rust implementation was too
+/// restrictive — it was missing global variables (`$token`) and chained
+/// method calls (e.g., `users.green`). The second argument can be a symbol
+/// or string (RuboCop's pattern is `({sym str} $_)`).
+///
+/// This cop is visited by the corpus oracle for both style variants.
 pub struct ExpectChange;
 
 impl Cop for ExpectChange {
@@ -26,8 +44,10 @@ impl Cop for ExpectChange {
         &[
             BLOCK_NODE,
             CALL_NODE,
+            CLASS_VARIABLE_READ_NODE,
             CONSTANT_PATH_NODE,
             CONSTANT_READ_NODE,
+            GLOBAL_VARIABLE_READ_NODE,
             INSTANCE_VARIABLE_READ_NODE,
             LOCAL_VARIABLE_READ_NODE,
             STATEMENTS_NODE,
@@ -70,19 +90,11 @@ impl Cop for ExpectChange {
             if arg_list.len() != 2 {
                 return;
             }
-            // First arg should be a constant or local variable, second a symbol
-            let first = &arg_list[0];
-            if first.as_constant_read_node().is_none()
-                && first.as_constant_path_node().is_none()
-                && first.as_local_variable_read_node().is_none()
-                && first.as_instance_variable_read_node().is_none()
-                && !first.as_call_node().is_some_and(|c| {
-                    c.receiver().is_none() && c.arguments().is_none() && c.block().is_none()
-                })
-            {
-                return;
-            }
-            if arg_list[1].as_symbol_node().is_none() {
+            // RuboCop's pattern `({sym str} $_)` accepts symbol or string.
+            // Accept BOTH symbol and string as the second argument.
+            let is_sym_or_str =
+                arg_list[1].as_symbol_node().is_some() || arg_list[1].as_string_node().is_some();
+            if !is_sym_or_str {
                 return;
             }
             let loc = call.location();
@@ -215,5 +227,78 @@ mod tests {
         let source = b"expect { x }.to change { User.count }\n";
         let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn block_style_flags_global_variable_first_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect { run }.to change($token, :value)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn block_style_flags_instance_variable_first_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect { run }.to change(@user, :name)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn block_style_flags_chained_method_call_first_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"expect { run }.to change(users.green, :count)\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
+    fn block_style_flags_string_second_arg() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("block".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // RuboCop's pattern is ({sym str} $_) — accepts both symbol and string
+        let source = b"expect { run }.to change(user, \"name\")\n";
+        let diags = crate::testutil::run_cop_full_with_config(&ExpectChange, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "String second arg should be flagged in block style"
+        );
     }
 }

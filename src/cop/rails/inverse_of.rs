@@ -72,6 +72,10 @@ impl Cop for InverseOf {
         Severity::Convention
     }
 
+    fn default_include(&self) -> &'static [&'static str] {
+        &["**/app/models/**/*.rb"]
+    }
+
     fn check_source(
         &self,
         source: &SourceFile,

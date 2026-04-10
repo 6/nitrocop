@@ -262,6 +262,10 @@ impl Cop for FileName {
         "Naming/FileName"
     }
 
+    fn default_exclude(&self) -> &'static [&'static str] {
+        &["Rakefile.rb"]
+    }
+
     fn check_lines(
         &self,
         source: &SourceFile,

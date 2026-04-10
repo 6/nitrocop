@@ -371,15 +371,62 @@ def relevant_repos_for_cop(
     return relevant
 
 
+def variant_only_repos_for_cop(
+    cop_name: str,
+    run_id: int | None,
+    *,
+    exclude: set[str],
+    cap: int = 10,
+) -> set[str]:
+    """Return repos that diverge ONLY in variant styles, not in default.
+
+    Extracts repo IDs from ``load_variant_baselines()``'s per-repo data,
+    filters out repos already in *exclude* (the default-style set), and
+    returns up to *cap* repos ranked by highest total variant FP+FN.
+    """
+    if run_id is None:
+        return set()
+    baselines = load_variant_baselines(cop_name, run_id)
+    if not baselines:
+        return set()
+
+    # Aggregate FP+FN across all variant styles per repo
+    repo_scores: dict[str, int] = {}
+    for _style_label, style_data in baselines.items():
+        for repo_id, repo_data in style_data.get("by_repo", {}).items():
+            if repo_id in exclude:
+                continue
+            fp = repo_data.get("fp", 0)
+            fn = repo_data.get("fn", 0)
+            if fp > 0 or fn > 0:
+                repo_scores[repo_id] = repo_scores.get(repo_id, 0) + fp + fn
+
+    if not repo_scores:
+        return set()
+
+    # Rank by total divergence, take top `cap`
+    ranked = sorted(repo_scores, key=lambda r: repo_scores[r], reverse=True)
+    selected = set(ranked[:cap])
+    print(f"  variant-only repos: {len(selected)} additional "
+          f"(from {len(repo_scores)} with variant divergence, cap={cap})",
+          file=sys.stderr)
+    return selected
+
+
 def clone_repos_for_cop(
     cop_name: str, data: dict,
     shard_index: int | None = None, total_shards: int | None = None,
     sample: int | None = None,
     include_gated: bool = False,
+    check_variants: bool = False,
+    variant_run_id: int | None = None,
 ) -> Path:
     """Clone repos needed for a cop into a temp dir matching the oracle's structure.
 
     When sharding, only clones repos in this shard's slice.
+    When *check_variants* is True, also includes repos that diverge only
+    in variant styles (up to 10 extra), so variant CI is not trivially 0/0
+    for cops with no default-style divergence.
     Returns the temp dir path. Repos are at <tmpdir>/repos/REPO_ID/.
     """
     import tempfile
@@ -393,6 +440,16 @@ def clone_repos_for_cop(
                                     include_gated=include_gated)
     if not needed:
         print(f"  No baseline activity or divergence for {cop_name}", file=sys.stderr)
+
+    # When variant checks are enabled, also clone repos that ONLY diverge
+    # in variant styles.  These are invisible to the default-style selection.
+    if check_variants and variant_run_id is not None:
+        variant_extra = variant_only_repos_for_cop(
+            cop_name, variant_run_id, exclude=needed, cap=10,
+        )
+        variant_extra &= set(manifest.keys())
+        if variant_extra:
+            needed = needed | variant_extra
 
     # When sharding, only clone this shard's repos
     if shard_index is not None and total_shards is not None and needed:
@@ -748,7 +805,10 @@ def load_variant_baselines(
 ) -> dict[str, dict]:
     """Load per-style baseline FP/FN from the oracle's style-variant-results.json.
 
-    Returns {style_label: {fp, fn, matches}} or empty dict if unavailable.
+    Returns {style_label: {fp, fn, matches, by_repo: {repo_id: {fp, fn}}}}
+    or empty dict if unavailable.  ``by_repo`` is populated when the oracle
+    artifact contains per-repo divergence data (``by_repo_cop``); older
+    artifacts without this field will have an empty ``by_repo`` dict.
     """
     if run_id is None:
         return {}
@@ -765,10 +825,20 @@ def load_variant_baselines(
         for cop_entry in batch.get("by_cop", []):
             if cop_entry.get("cop") == cop_name:
                 label = cop_entry.get("style_label", batch.get("name", ""))
+                # Build per-repo baseline from by_repo_cop if available
+                by_repo: dict[str, dict] = {}
+                for repo_id, cop_data in batch.get("by_repo_cop", {}).items():
+                    if cop_name in cop_data:
+                        stats = cop_data[cop_name]
+                        by_repo[repo_id] = {
+                            "fp": stats.get("fp", 0),
+                            "fn": stats.get("fn", 0),
+                        }
                 baselines[label] = {
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
                     "matches": cop_entry.get("matches", 0),
+                    "by_repo": by_repo,
                 }
     return baselines
 
@@ -900,6 +970,25 @@ def run_variant_checks(
                 })
 
         baseline = variant_baselines.get(label, {})
+        by_repo_baseline = baseline.get("by_repo", {})
+        if by_repo_baseline:
+            # Per-repo baseline: sum only repos we actually sampled
+            sampled_bl_fp = 0
+            sampled_bl_fn = 0
+            for repo_dir in repo_dirs:
+                repo_id = Path(repo_dir).name
+                repo_bl = by_repo_baseline.get(repo_id, {})
+                sampled_bl_fp += repo_bl.get("fp", 0)
+                sampled_bl_fn += repo_bl.get("fn", 0)
+        else:
+            # TODO(variant-per-repo-compat): remove after first corpus-oracle
+            # run with by_repo_cop data lands (check style-variant-results.json
+            # for the by_repo_cop key, then delete this else branch).
+            # Fallback for old artifacts without per-repo data:
+            # use global baseline (lossy but not worse than before)
+            sampled_bl_fp = baseline.get("fp", 0)
+            sampled_bl_fn = baseline.get("fn", 0)
+            # END TODO(variant-per-repo-compat)
         results.append({
             "style_label": label,
             "batch_config": config,
@@ -908,8 +997,8 @@ def run_variant_checks(
             "fp": max(0, nc_total - rc_total),
             "fn": max(0, rc_total - nc_total),
             "rubocop_errors": rc_errors,
-            "baseline_fp": baseline.get("fp", 0),
-            "baseline_fn": baseline.get("fn", 0),
+            "baseline_fp": sampled_bl_fp,
+            "baseline_fn": sampled_bl_fn,
             "diverging_repos": repo_counts,
         })
 
@@ -922,14 +1011,17 @@ def _run_rubocop_for_variant(
     """Run rubocop with --only <cop> --config <config> on a repo.
 
     Returns {"count": N} where N is the offense count, or {"count": -1} on error.
+    Applies per-repo vendor exclusions on top of *config* via gen_repo_config.
     """
-    from run_nitrocop import build_env
+    from run_nitrocop import build_env, resolve_repo_config
+    repo_id = Path(repo_dir).name
+    effective_config = resolve_repo_config(repo_id, repo_dir, base_config=config)
     RESCUE_FILE = str(PROJECT_ROOT / "bench" / "corpus" / "rescue_parser_crashes.rb")
     env = build_env(repo_dir)
     cmd = [
         "bundle", "exec", "rubocop",
         "--require", RESCUE_FILE,
-        "--config", config,
+        "--config", effective_config,
         "--only", cop,
         "--format", "json",
         "--force-exclusion",
@@ -1012,7 +1104,15 @@ def main():
     parser.add_argument("--variant-batches-dir", type=str, default=None,
                         help="Directory containing variant_batch_*.yml configs. "
                              "If not specified, generates them into a temp directory.")
+    parser.add_argument("--force", action="store_true",
+                        help="Override CI-only guard and run locally")
     args = parser.parse_args()
+
+    if not os.environ.get("CI") and not args.force:
+        print("ERROR: check_cop.py is intended for CI only.", file=sys.stderr)
+        print("Use docs/corpus.md, CI cop-check comments/logs, or gh api for local investigation.", file=sys.stderr)
+        print("Pass --force to override.", file=sys.stderr)
+        sys.exit(1)
 
     # Declare all globals used in this function up front (Python requires
     # global declarations before any assignment to the name in the function).
@@ -1104,6 +1204,8 @@ def main():
                 shard_index=args.shard_index, total_shards=args.total_shards,
                 sample=args.sample,
                 include_gated=include_gated and zero_baseline,
+                check_variants=args.check_variants,
+                variant_run_id=corpus_run_id,
             )
             _CLONE_DIR = tmpdir / "repos"
         else:
@@ -1475,15 +1577,56 @@ def main():
             print()
 
         # Machine-readable summary for CI aggregation
-        # Format: cop|baseline_fp|baseline_fn|local_fp|local_fn|result|count_bl_fp|count_bl_fn
+        # Format: cop|baseline_fp|baseline_fn|local_fp|local_fn|result|count_bl_fp|count_bl_fn|detail
         # baseline_fp/fn = location-level from oracle
         # local_fp/fn = count-level from local run (max(0, local - rubocop))
         # count_bl_fp/fn = count-level baseline (max(0, oracle_nc - oracle_rc))
-        # The last two fields enable the CI comment to detect when a large
+        # detail = space-separated repo_id(FP:file:line,...) repo_id(FN:file:line,...)
+        # The count fields enable the CI comment to detect when a large
         # location-level FP delta has no count-level counterpart (location
         # shift or config resolution artifact, not a real regression).
         result_str = "fail" if failed else "pass"
-        print(f"SUMMARY|{args.cop}|{total_baseline_fp}|{total_baseline_fn}|{total_local_fp}|{total_local_fn}|{result_str}|{total_count_baseline_fp}|{total_count_baseline_fn}")
+
+        # Build location detail from oracle FP/FN examples for regressing repos.
+        by_cop_map = {c["cop"]: c for c in data.get("by_cop", [])}
+        cop_data = by_cop_map.get(args.cop, {})
+        # Index oracle examples by repo_id and kind
+        _repo_fp_locs: dict[str, list[str]] = {}
+        _repo_fn_locs: dict[str, list[str]] = {}
+        for ex in cop_data.get("fp_examples", []):
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, line = _parse_example_loc(loc)
+                _repo_fp_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+            except (ValueError, IndexError):
+                pass
+        for ex in cop_data.get("fn_examples", []):
+            loc = ex["loc"] if isinstance(ex, dict) else ex
+            try:
+                repo_id, filepath, line = _parse_example_loc(loc)
+                _repo_fn_locs.setdefault(repo_id, []).append(f"{filepath}:{line}")
+            except (ValueError, IndexError):
+                pass
+        # Collect detail parts for regressing repos
+        _fp_repo_ids = {r[0] for r in fp_repos}
+        _fn_repo_ids = {r[0] for r in fn_repos}
+        detail_parts: list[str] = []
+        for repo_id in sorted(_fp_repo_ids | _fn_repo_ids):
+            fp_locs = _repo_fp_locs.get(repo_id, [])
+            fn_locs = _repo_fn_locs.get(repo_id, [])
+            if repo_id in _fp_repo_ids and fp_locs:
+                loc_str = ",".join(fp_locs[:2])
+                detail_parts.append(f"{repo_id}(FP:{loc_str})")
+            elif repo_id in _fp_repo_ids:
+                detail_parts.append(f"{repo_id}(FP)")
+            if repo_id in _fn_repo_ids and fn_locs:
+                loc_str = ",".join(fn_locs[:2])
+                detail_parts.append(f"{repo_id}(FN:{loc_str})")
+            elif repo_id in _fn_repo_ids:
+                detail_parts.append(f"{repo_id}(FN)")
+        detail = " ".join(detail_parts[:10])
+
+        print(f"SUMMARY|{args.cop}|{total_baseline_fp}|{total_baseline_fn}|{total_local_fp}|{total_local_fn}|{result_str}|{total_count_baseline_fp}|{total_count_baseline_fn}|{detail}")
 
         if failed:
             sys.exit(1)
@@ -1547,6 +1690,10 @@ def main():
             # the spread catches NEW regressions the oracle hasn't seen.
             oracle_repos = load_variant_example_repos(args.cop, corpus_run_id)
             oracle_set = set(oracle_repos) if oracle_repos else set()
+            # Also prioritize repos with known variant divergence from baselines
+            for style_data in vb.values():
+                for repo_id in style_data.get("by_repo", {}):
+                    oracle_set.add(repo_id)
             priority = [d for d in all_repo_dirs if Path(d).name in oracle_set]
             rest = [d for d in all_repo_dirs if Path(d).name not in oracle_set]
             # Take up to half the sample from oracle, fill the rest with spread
@@ -1578,13 +1725,10 @@ def main():
                     print(f"  {'Style':<30} {'NC':>8} {'RC':>8} {'FP':>6} {'FN':>6}  {'BL FP':>6} {'BL FN':>6}")
                     print(f"  {'-'*30} {'-'*8} {'-'*8} {'-'*6} {'-'*6}  {'-'*6} {'-'*6}")
                     for vr in variant_results:
-                        # Regression: local FP/FN on this shard's repos exceeds
-                        # what's expected. Since baseline is global (all repos) and
-                        # the shard is a subset, we can't compare directly. Instead,
-                        # flag when baseline was 0 but local has FP/FN (new regression),
-                        # or when local FP/FN exceeds the global baseline (definitely worse).
-                        fp_regressed = (vr['fp'] > 0 and vr['baseline_fp'] == 0) or vr['fp'] > vr['baseline_fp']
-                        fn_regressed = (vr['fn'] > 0 and vr['baseline_fn'] == 0) or vr['fn'] > vr['baseline_fn']
+                        # Regression: local FP/FN exceeds baseline for the
+                        # same set of sampled repos (apples-to-apples).
+                        fp_regressed = vr['fp'] > vr['baseline_fp']
+                        fn_regressed = vr['fn'] > vr['baseline_fn']
                         v_result = "fail" if fp_regressed or fn_regressed else "pass"
                         marker = " ← REGRESSION" if v_result == "fail" else ""
                         print(

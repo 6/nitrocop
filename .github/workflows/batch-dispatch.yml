@@ -55,6 +55,7 @@ on:
         options:
           - codex
           - claude
+          - minimax
         default: codex
       mode:
         description: 'Mode passed to agent-cop-fix (auto = fix for ≤500 divergence, reduce for >500)'
@@ -85,7 +86,6 @@ jobs:
 
       - uses: ./.github/actions/setup-agent-env
         with:
-          rust_components: ''
           install_vendor_gems: 'false'
 
       - name: Build nitrocop binary

@@ -1,0 +1,3 @@
+module Fasterer
+  # Your code goes here...
+end

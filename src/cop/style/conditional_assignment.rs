@@ -1,10 +1,33 @@
+use std::cell::RefCell;
+
 use crate::cop::shared::method_identifier_predicates;
-use crate::cop::shared::node_type::{CASE_MATCH_NODE, CASE_NODE, IF_NODE, UNLESS_NODE};
+use crate::cop::shared::node_type::{
+    CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE, CASE_MATCH_NODE,
+    CASE_NODE, CLASS_VARIABLE_AND_WRITE_NODE, CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+    CLASS_VARIABLE_OR_WRITE_NODE, CLASS_VARIABLE_WRITE_NODE, CONSTANT_AND_WRITE_NODE,
+    CONSTANT_OPERATOR_WRITE_NODE, CONSTANT_OR_WRITE_NODE, CONSTANT_PATH_AND_WRITE_NODE,
+    CONSTANT_PATH_OPERATOR_WRITE_NODE, CONSTANT_PATH_OR_WRITE_NODE, CONSTANT_PATH_WRITE_NODE,
+    CONSTANT_WRITE_NODE, GLOBAL_VARIABLE_AND_WRITE_NODE, GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+    GLOBAL_VARIABLE_OR_WRITE_NODE, GLOBAL_VARIABLE_WRITE_NODE, IF_NODE, INDEX_AND_WRITE_NODE,
+    INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE, INSTANCE_VARIABLE_AND_WRITE_NODE,
+    INSTANCE_VARIABLE_OPERATOR_WRITE_NODE, INSTANCE_VARIABLE_OR_WRITE_NODE,
+    INSTANCE_VARIABLE_WRITE_NODE, LOCAL_VARIABLE_AND_WRITE_NODE,
+    LOCAL_VARIABLE_OPERATOR_WRITE_NODE, LOCAL_VARIABLE_OR_WRITE_NODE, LOCAL_VARIABLE_WRITE_NODE,
+    MULTI_WRITE_NODE, UNLESS_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+// Tracks assignment node ranges for `assign_inside_condition` to suppress
+// nested assignments (mirrors RuboCop's `ignore_node`/`part_of_ignored_node?`).
+// Cleared per file via `check_source`.
+thread_local! {
+    static IGNORED_ASSIGN_RANGES: RefCell<Vec<(usize, usize)>> = const { RefCell::new(Vec::new()) };
+}
+
 const MSG: &str = "Use the return of the conditional for variable assignment and comparison.";
+const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals.";
 
 /// Checks for `if`, `unless`, `case`, and `case/in` statements where each
 /// branch assigns to the same variable. Suggests using the return value of
@@ -12,7 +35,8 @@ const MSG: &str = "Use the return of the conditional for variable assignment and
 ///
 /// Supports local, instance, class, global variable writes, constant writes,
 /// setter calls (`obj.x =`), index setters (`obj[k] =`), shovel sends
-/// (`obj << value`), and compound assignments (`+=`, `&&=`, `||=`).
+/// (`obj << value`), comparison/operator sends (`==`, `!=`, `<=`, `>=`, `=~`,
+/// `!~`, `<`, `>`, `<=>`), and compound assignments (`+=`, `&&=`, `||=`).
 ///
 /// Handles `if/elsif/else` chains (all branches must assign the same target),
 /// `unless/else`, and ternary expressions with assignments.
@@ -40,6 +64,16 @@ const MSG: &str = "Use the return of the conditional for variable assignment and
 /// `foo[bar] ||=`, and `foo[bar] +=`. Those do not come through as `CallNode`
 /// or variable write nodes, so this cop must derive stable target keys from
 /// the receiver, method/index, and operator to match RuboCop.
+///
+/// FN reduction (2026-04-06): RuboCop's `assignment_type?` also treats
+/// comparison/operator sends like `match.should == true` and `foo =~ /bar/`
+/// as assignment-like for this cop. nitrocop was only handling setters and
+/// `<<`, which missed comparison-based branch patterns.
+///
+/// FN reduction (2026-04-06): the line-length guard was adding `node_col`
+/// (starting column) to the first line's length, double-counting indentation.
+/// RuboCop's `longest_line` computes each branch line's length independently
+/// of the node's column position. Dropped `node_col` to match.
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -48,7 +82,63 @@ impl Cop for ConditionalAssignment {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CASE_MATCH_NODE, CASE_NODE, IF_NODE, UNLESS_NODE]
+        &[
+            // For assign_to_condition (existing)
+            CASE_MATCH_NODE,
+            CASE_NODE,
+            IF_NODE,
+            UNLESS_NODE,
+            // For assign_inside_condition: variable writes
+            LOCAL_VARIABLE_WRITE_NODE,
+            INSTANCE_VARIABLE_WRITE_NODE,
+            CLASS_VARIABLE_WRITE_NODE,
+            GLOBAL_VARIABLE_WRITE_NODE,
+            CONSTANT_WRITE_NODE,
+            CONSTANT_PATH_WRITE_NODE,
+            MULTI_WRITE_NODE,
+            // Operator writes
+            LOCAL_VARIABLE_OPERATOR_WRITE_NODE,
+            INSTANCE_VARIABLE_OPERATOR_WRITE_NODE,
+            CLASS_VARIABLE_OPERATOR_WRITE_NODE,
+            GLOBAL_VARIABLE_OPERATOR_WRITE_NODE,
+            CONSTANT_OPERATOR_WRITE_NODE,
+            CONSTANT_PATH_OPERATOR_WRITE_NODE,
+            CALL_OPERATOR_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            // And writes
+            LOCAL_VARIABLE_AND_WRITE_NODE,
+            INSTANCE_VARIABLE_AND_WRITE_NODE,
+            CLASS_VARIABLE_AND_WRITE_NODE,
+            GLOBAL_VARIABLE_AND_WRITE_NODE,
+            CONSTANT_AND_WRITE_NODE,
+            CONSTANT_PATH_AND_WRITE_NODE,
+            CALL_AND_WRITE_NODE,
+            INDEX_AND_WRITE_NODE,
+            // Or writes
+            LOCAL_VARIABLE_OR_WRITE_NODE,
+            INSTANCE_VARIABLE_OR_WRITE_NODE,
+            CLASS_VARIABLE_OR_WRITE_NODE,
+            GLOBAL_VARIABLE_OR_WRITE_NODE,
+            CONSTANT_OR_WRITE_NODE,
+            CONSTANT_PATH_OR_WRITE_NODE,
+            CALL_OR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+            // Call nodes (setter, []=, <<, comparisons)
+            CALL_NODE,
+        ]
+    }
+
+    fn check_source(
+        &self,
+        _source: &SourceFile,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        _config: &CopConfig,
+        _diagnostics: &mut Vec<Diagnostic>,
+        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        // Clear per-file state for assign_inside_condition nested-assignment suppression.
+        IGNORED_ASSIGN_RANGES.with(|ranges| ranges.borrow_mut().clear());
     }
 
     fn check_node(
@@ -60,10 +150,14 @@ impl Cop for ConditionalAssignment {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        if config.get_str("EnforcedStyle", "assign_to_condition") != "assign_to_condition" {
+        let style = config.get_str("EnforcedStyle", "assign_to_condition");
+
+        if style == "assign_inside_condition" {
+            self.check_assign_inside_condition(source, node, config, diagnostics);
             return;
         }
 
+        // assign_to_condition (default)
         let single_line_only = config.get_bool("SingleLineConditionsOnly", true);
         let include_ternary = config.get_bool("IncludeTernaryExpressions", true);
         let max_line_length = config.get_usize("MaxLineLength", 120);
@@ -362,11 +456,11 @@ impl ConditionalAssignment {
             return;
         }
 
-        if line_length_enabled && max_line_length > 0 {
-            let (_, col) = source.offset_to_line_col(if_node.location().start_offset());
-            if exceeds_line_limit(&if_node.location(), col, &if_info.lhs_text, max_line_length) {
-                return;
-            }
+        if line_length_enabled
+            && max_line_length > 0
+            && exceeds_line_limit(&if_node.location(), &if_info.lhs_text, max_line_length)
+        {
+            return;
         }
 
         let loc = if_node.location();
@@ -422,16 +516,386 @@ impl ConditionalAssignment {
         }
 
         // Line length guard
-        if line_length_enabled && max_line_length > 0 && !lhs_text.is_empty() {
-            let (_, col) = source.offset_to_line_col(node_loc.start_offset());
-            if exceeds_line_limit(node_loc, col, &lhs_text, max_line_length) {
-                return;
-            }
+        if line_length_enabled
+            && max_line_length > 0
+            && !lhs_text.is_empty()
+            && exceeds_line_limit(node_loc, &lhs_text, max_line_length)
+        {
+            return;
         }
 
         let (line, col) = source.offset_to_line_col(node_loc.start_offset());
         diagnostics.push(self.diagnostic(source, line, col, MSG.to_string()));
     }
+
+    /// Check for the `assign_inside_condition` variant.
+    /// Flags assignment nodes (variable writes, setter calls, etc.) whose RHS
+    /// is a conditional (if/unless/case/case_match).
+    ///
+    /// Mirrors RuboCop's `ignore_node`/`part_of_ignored_node?` mechanism:
+    /// assignments nested inside another assignment's RHS are suppressed.
+    /// RuboCop calls `ignore_node` on every candidate assignment node
+    /// (unconditionally), so ALL descendant assignments are skipped.
+    fn check_assign_inside_condition(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Only process assignment-like nodes (not conditionals visited for
+        // the default style). Check this before the nesting logic.
+        if get_assignment_value(node).is_none() {
+            return;
+        }
+
+        let loc = node.location();
+        let node_start = loc.start_offset();
+        let node_end = node_start + loc.as_slice().len();
+
+        // Suppress assignments nested inside another assignment's source range
+        // (mirrors RuboCop's part_of_ignored_node?).
+        let is_nested = IGNORED_ASSIGN_RANGES.with(|ranges| {
+            ranges
+                .borrow()
+                .iter()
+                .any(|&(s, e)| node_start > s && node_end <= e)
+        });
+        if is_nested {
+            return;
+        }
+
+        // Record this assignment's range unconditionally (mirrors RuboCop's
+        // ignore_node — called before checking if the RHS is a conditional).
+        IGNORED_ASSIGN_RANGES.with(|ranges| ranges.borrow_mut().push((node_start, node_end)));
+
+        let single_line_only = config.get_bool("SingleLineConditionsOnly", true);
+        let include_ternary = config.get_bool("IncludeTernaryExpressions", true);
+
+        // Extract the RHS of the assignment
+        let rhs = match get_assignment_value(node) {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Unwrap parentheses: x = (if ...) -> check the if inside
+        let rhs = unwrap_begin_single_child(rhs);
+
+        // Check if RHS is a conditional and validate branches
+        if let Some(if_node) = rhs.as_if_node() {
+            // Ternary: Prism IfNode with no if_keyword_loc
+            if if_node.if_keyword_loc().is_none() {
+                if !include_ternary {
+                    return;
+                }
+                // Ternaries also respect SingleLineConditionsOnly:
+                // skip if any branch is parenthesized (begin_type? in RuboCop)
+                if single_line_only && has_begin_type_branches_ternary(&if_node) {
+                    return;
+                }
+            } else {
+                // Must have subsequent (elsif or else)
+                if if_node.subsequent().is_none() {
+                    return;
+                }
+                // SingleLineConditionsOnly: skip if any branch is multi-statement
+                // or has a parenthesized expression (begin_type? in RuboCop)
+                if single_line_only && has_begin_type_branches_if(&if_node) {
+                    return;
+                }
+            }
+        } else if let Some(unless_node) = rhs.as_unless_node() {
+            // Must have else clause
+            if unless_node.else_clause().is_none() {
+                return;
+            }
+            if single_line_only && has_begin_type_branches_unless(&unless_node) {
+                return;
+            }
+        } else if let Some(case_node) = rhs.as_case_node() {
+            // Must have else clause
+            if case_node.else_clause().is_none() {
+                return;
+            }
+            if single_line_only && has_begin_type_branches_case(&case_node) {
+                return;
+            }
+        } else if let Some(cm) = rhs.as_case_match_node() {
+            if cm.else_clause().is_none() {
+                return;
+            }
+            if single_line_only && has_begin_type_branches_case_match(&cm) {
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let (line, col) = source.offset_to_line_col(loc.start_offset());
+        diagnostics.push(self.diagnostic(source, line, col, ASSIGN_TO_CONDITION_MSG.to_string()));
+    }
+}
+
+/// Extract the RHS value from any assignment node. Returns `None` for
+/// non-assignment nodes.
+fn get_assignment_value<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    // Variable writes
+    if let Some(w) = node.as_local_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_multi_write_node() {
+        return Some(w.value());
+    }
+    // Operator writes
+    if let Some(w) = node.as_local_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_call_operator_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_index_operator_write_node() {
+        return Some(w.value());
+    }
+    // And writes
+    if let Some(w) = node.as_local_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_call_and_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_index_and_write_node() {
+        return Some(w.value());
+    }
+    // Or writes
+    if let Some(w) = node.as_local_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_instance_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_class_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_global_variable_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_constant_path_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_call_or_write_node() {
+        return Some(w.value());
+    }
+    if let Some(w) = node.as_index_or_write_node() {
+        return Some(w.value());
+    }
+    // Call nodes: setter methods, []=, <<, comparisons
+    if let Some(call) = node.as_call_node() {
+        if is_assignment_type_call(call.name().as_slice()) {
+            let args = call.arguments()?;
+            return args.arguments().iter().last();
+        }
+    }
+    None
+}
+
+/// Check if a call method name is assignment-like for this cop.
+/// Matches RuboCop's `assignment_type?` send pattern:
+/// `{:[]= :<< :=~ :!~ :<=> #end_with_eq? :< :>}`
+fn is_assignment_type_call(method: &[u8]) -> bool {
+    method.ends_with(b"=") // covers: foo=, []=, ==, ===, !=, <=, >=
+        || method == b"<<"
+        || method == b"=~"
+        || method == b"!~"
+        || method == b"<=>"
+        || method == b"<"
+        || method == b">"
+}
+
+/// Unwrap `ParenthesesNode` containing a single-expression body, matching
+/// RuboCop's `begin_type? && children.one?` unwrap in `assignment_node`.
+fn unwrap_begin_single_child(node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                let items: Vec<_> = stmts.body().iter().collect();
+                if items.len() == 1 {
+                    return items.into_iter().next().unwrap();
+                }
+            }
+        }
+    }
+    node
+}
+
+/// Check if a statements body is `begin_type?` in RuboCop terms.
+/// In the parser gem, `begin_type?` covers both multi-statement bodies
+/// (wrapped in a `begin` node) AND single parenthesized expressions
+/// (`(expr)` → `(begin expr)`). Prism represents parenthesized expressions
+/// as `ParenthesesNode`, which we check here alongside `body.len() > 1`.
+fn stmts_is_begin_type(stmts: &ruby_prism::StatementsNode<'_>) -> bool {
+    let body = stmts.body();
+    if body.len() > 1 {
+        return true;
+    }
+    if body.len() == 1 {
+        let first = body.iter().next().unwrap();
+        if first.as_parentheses_node().is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if any branch of an if/elsif chain is begin_type?.
+/// Matches RuboCop's `allowed_single_line?` quirk: only the first branch
+/// and the direct subsequent (else body or elsif node as a whole) are
+/// checked. Inner elsif branches are not individually tested.
+fn has_begin_type_branches_if(if_node: &ruby_prism::IfNode<'_>) -> bool {
+    if let Some(stmts) = if_node.statements() {
+        if stmts_is_begin_type(&stmts) {
+            return true;
+        }
+    }
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_node) = subsequent.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                if stmts_is_begin_type(&stmts) {
+                    return true;
+                }
+            }
+        }
+        // If subsequent is IfNode (elsif), it's not considered begin_type
+        // per RuboCop's deconstruction quirk.
+    }
+    false
+}
+
+/// Check if either branch of a ternary has a parenthesized expression
+/// (begin_type? in RuboCop). This is a subset of the if branch check
+/// for ternary-specific handling.
+fn has_begin_type_branches_ternary(if_node: &ruby_prism::IfNode<'_>) -> bool {
+    if let Some(stmts) = if_node.statements() {
+        if stmts_is_begin_type(&stmts) {
+            return true;
+        }
+    }
+    if let Some(subsequent) = if_node.subsequent() {
+        if let Some(else_node) = subsequent.as_else_node() {
+            if let Some(stmts) = else_node.statements() {
+                if stmts_is_begin_type(&stmts) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if either branch of an unless/else is begin_type?.
+fn has_begin_type_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> bool {
+    if let Some(stmts) = unless_node.statements() {
+        if stmts_is_begin_type(&stmts) {
+            return true;
+        }
+    }
+    if let Some(else_clause) = unless_node.else_clause() {
+        if let Some(stmts) = else_clause.statements() {
+            if stmts_is_begin_type(&stmts) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if any when branch or else branch of a case is begin_type?.
+fn has_begin_type_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
+    for condition in case_node.conditions().iter() {
+        if let Some(when_node) = condition.as_when_node() {
+            if let Some(stmts) = when_node.statements() {
+                if stmts_is_begin_type(&stmts) {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(else_clause) = case_node.else_clause() {
+        if let Some(stmts) = else_clause.statements() {
+            if stmts_is_begin_type(&stmts) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if any in branch or else branch of a case_match is begin_type?.
+fn has_begin_type_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool {
+    for condition in cm.conditions().iter() {
+        if let Some(in_node) = condition.as_in_node() {
+            if let Some(stmts) = in_node.statements() {
+                if stmts_is_begin_type(&stmts) {
+                    return true;
+                }
+            }
+        }
+    }
+    if let Some(else_clause) = cm.else_clause() {
+        if let Some(stmts) = else_clause.statements() {
+            if stmts_is_begin_type(&stmts) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 struct AssignInfo {
@@ -535,7 +999,8 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
         });
     }
     // Setter call: obj.method= value or obj[key]= value.
-    // RuboCop also treats shovel sends as assignment-like here.
+    // RuboCop also treats shovel and comparison/operator sends as
+    // assignment-like here.
     if let Some(call) = node.as_call_node() {
         let method = call.name().as_slice();
         // Check []= BEFORE is_setter_method — is_setter_method matches any
@@ -565,6 +1030,19 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
             return Some(AssignInfo {
                 key: format!("send:{}<<", recv_src),
                 lhs_text: format!("{} << ", recv_src),
+            });
+        }
+        // Comparison/operator sends: ==, !=, <=, >=, =~, !~, <=>, <, >
+        // RuboCop's assignment_type? treats these as assignment-like.
+        if matches!(
+            method,
+            b"==" | b"!=" | b"<=" | b">=" | b"=~" | b"!~" | b"<=>" | b"<" | b">"
+        ) {
+            let recv_src = receiver_source(call.receiver());
+            let method_str = String::from_utf8_lossy(method);
+            return Some(AssignInfo {
+                key: format!("send:{} {}", recv_src, method_str),
+                lhs_text: format!("{} {} ", recv_src, method_str),
             });
         }
     }
@@ -751,11 +1229,15 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
 
 /// Check if the corrected form would exceed the configured line length.
 /// Mirrors RuboCop's `correction_exceeds_line_limit?`: for each source line,
-/// remove the assignment LHS (if present), find the longest remaining line,
-/// and check if `lhs.len() + longest > max_line_length`.
+/// remove the first occurrence of the assignment LHS (anywhere in the line),
+/// find the longest remaining line, and check if
+/// `lhs.len() + longest > max_line_length`.
+///
+/// RuboCop uses `line.sub(assignment_regex, '')` which removes the first
+/// occurrence anywhere in the line. This matters for ternaries where the
+/// assignment appears mid-line (`cond ? x = 1 : x = 2`), not at the start.
 fn exceeds_line_limit(
     node_loc: &ruby_prism::Location<'_>,
-    node_col: usize,
     lhs_text: &str,
     max_line_length: usize,
 ) -> bool {
@@ -766,17 +1248,17 @@ fn exceeds_line_limit(
     };
     let lhs_trimmed = lhs_text.trim_end();
     let mut max_remaining = 0;
-    for (i, line) in src.lines().enumerate() {
-        // Compute actual line length (first line needs column offset)
-        let base_len = if i == 0 { node_col } else { 0 };
-        // Try to remove the LHS from this line (at line start after whitespace)
-        let trimmed = line.trim_start();
-        let remaining = if let Some(stripped) = trimmed.strip_prefix(lhs_trimmed) {
-            let rest = stripped.trim_start();
-            let leading_ws = line.len() - trimmed.len();
-            base_len + leading_ws + rest.len()
+    for line in src.lines() {
+        // Remove first occurrence of the LHS anywhere in the line, matching
+        // RuboCop's `line.sub(assignment_regex, '')`. For if/else branches
+        // the LHS is at the start; for ternaries it appears mid-line.
+        let remaining = if let Some(pos) = line.find(lhs_trimmed) {
+            let before = &line[..pos];
+            let after = &line[pos + lhs_trimmed.len()..];
+            let after_trimmed = after.trim_start();
+            before.len() + after_trimmed.len()
         } else {
-            base_len + line.len()
+            line.len()
         };
         if remaining > max_remaining {
             max_remaining = remaining;
@@ -789,4 +1271,37 @@ fn exceeds_line_limit(
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ConditionalAssignment, "cops/style/conditional_assignment");
+
+    fn assign_inside_condition_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("assign_inside_condition".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn assign_inside_condition_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ConditionalAssignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/conditional_assignment/assign_inside_condition_offense.rb"
+            ),
+            assign_inside_condition_config(),
+        );
+    }
+
+    #[test]
+    fn assign_inside_condition_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ConditionalAssignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/conditional_assignment/assign_inside_condition_no_offense.rb"
+            ),
+            assign_inside_condition_config(),
+        );
+    }
 }

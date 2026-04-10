@@ -1,4 +1,10 @@
 [tools]
+# When updating rust, also update dtolnay/rust-toolchain@<version> in:
+#   .github/workflows/checks.yml
+#   .github/workflows/cop-issue-sync.yml
+#   .github/workflows/corpus-oracle.yml
+#   .github/workflows/nightly.yml (perf-benchmark job only)
+#   .github/actions/setup-agent-env/action.yml
 rust = "1.93.1"
 hyperfine = "1.20.0"
 ruby = "4.0"

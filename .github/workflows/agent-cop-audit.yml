@@ -1,0 +1,285 @@
+name: Agent Cop Audit
+
+run-name: >-
+  Agent Cop Audit: ${{ github.event.inputs.cops }} (${{ github.event.inputs.mode }})
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      cops:
+        description: 'Comma-separated cops to audit (max 10, e.g. Style/DocumentationMethod,Rails/Exit)'
+        required: true
+        type: string
+      backend:
+        description: 'Backend family'
+        type: choice
+        options:
+          - auto
+          - codex
+          - claude
+        default: auto
+      mode:
+        description: 'fix: attempt fixes; audit: report only'
+        type: choice
+        options:
+          - fix
+          - audit
+        default: fix
+      extra_context:
+        description: 'Additional instructions for the agent (optional)'
+        required: false
+        type: string
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      RUSTFLAGS: -C link-arg=-fuse-ld=mold
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h / | tail -1
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          fetch-depth: 0
+          persist-credentials: false
+
+      # --- Shared environment setup (Rust, Ruby, mold, corpus) ---
+      - uses: ./.github/actions/setup-agent-env
+        with:
+          install_vendor_gems: 'true'
+
+      - name: Set up cargo cache
+        run: |
+          if [ -d "/home/runner/cargo-target-seed" ]; then
+            echo "Self-hosted runner — seeding target/ from pre-warmed cache"
+            cp -al /home/runner/cargo-target-seed target 2>/dev/null || \
+              cp -r /home/runner/cargo-target-seed target
+            echo "seeded=true" >> "$GITHUB_OUTPUT"
+          fi
+        id: cargo-cache
+
+      - uses: actions/cache@v5
+        if: steps.cargo-cache.outputs.seeded != 'true'
+        with:
+          path: target
+          key: agent-target-${{ hashFiles('Cargo.lock') }}
+          restore-keys: agent-target-
+
+      - name: Initialize runtime layout
+        run: |
+          python3 scripts/workflows/agent_runtime.py agent-cop-audit \
+            --runner-temp "${RUNNER_TEMP}" >> "$GITHUB_ENV"
+
+      - name: Validate cop count
+        id: validate
+        run: |
+          IFS=',' read -ra COPS <<< "${{ github.event.inputs.cops }}"
+          COUNT=${#COPS[@]}
+          echo "cop_count=$COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$COUNT" -gt 10 ]; then
+            echo "::error::Too many cops ($COUNT). Maximum is 10 per dispatch."
+            exit 1
+          fi
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No cops specified."
+            exit 1
+          fi
+          echo "Auditing $COUNT cop(s): ${COPS[*]}"
+
+      - name: Compute identifiers
+        id: init
+        run: |
+          # Use first cop for branch naming
+          FIRST_COP=$(echo "${{ github.event.inputs.cops }}" | cut -d, -f1 | tr -d ' ')
+          SLUG=$(echo "$FIRST_COP" | tr '/' '-' | tr '[:upper:]' '[:lower:]')
+          BRANCH="audit/${SLUG}-${{ github.run_id }}"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "Branch: $BRANCH"
+
+      # --- App token (needed for push + PR creation) ---
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # --- Build ---
+      - name: Build binary
+        run: |
+          cargo build 2>&1
+          CARGO_INCREMENTAL=1 cargo test --lib --no-run 2>&1
+
+      # --- Generate task ---
+      - name: Generate audit task
+        run: |
+          python3 scripts/dispatch_cops.py audit-task \
+            "${{ github.event.inputs.cops }}" \
+            --mode "${{ github.event.inputs.mode }}" \
+            --output "$TASK_FILE"
+          echo "=== Audit task stats ==="
+          wc -l "$TASK_FILE"
+
+      # --- Select backend ---
+      - name: Select backend
+        id: selected_backend
+        run: |
+          python3 scripts/workflows/cop_fix_lifecycle.py select-backend \
+            --cop "$(echo '${{ github.event.inputs.cops }}' | cut -d, -f1 | tr -d ' ')" \
+            --mode "fix" \
+            --backend-input "${{ github.event.inputs.backend }}" \
+            --repo "${{ github.repository }}" \
+            --binary target/debug/nitrocop \
+            >> "$GITHUB_OUTPUT"
+
+      - name: Resolve backend config
+        id: backend
+        run: |
+          python3 scripts/workflows/cop_fix_lifecycle.py resolve-backend \
+            --backend "${{ steps.selected_backend.outputs.backend }}" \
+            >> "$GITHUB_OUTPUT"
+
+      # --- Claim PR ---
+      - name: Claim PR
+        id: claim
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          FIRST_COP=$(echo "${{ github.event.inputs.cops }}" | cut -d, -f1 | tr -d ' ')
+          COUNT=${{ steps.validate.outputs.cop_count }}
+          if [ "$COUNT" -eq 1 ]; then
+            TITLE="[audit] $FIRST_COP"
+          else
+            TITLE="[audit] $FIRST_COP (+$((COUNT - 1)) more)"
+          fi
+
+          git checkout -b "${{ steps.init.outputs.branch }}"
+          git push origin "${{ steps.init.outputs.branch }}"
+
+          PR_URL=$(gh pr create \
+            --title "$TITLE" \
+            --body "> **Status:** Agent is auditing...\n>\n> **Cops:** ${{ github.event.inputs.cops }}\n> **Mode:** ${{ github.event.inputs.mode }}\n> **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --head "${{ steps.init.outputs.branch }}" \
+            --draft \
+            --label "type:cop-audit" \
+            --repo "${{ github.repository }}")
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+          echo "Created draft PR: $PR_URL"
+
+      # --- Build prompt ---
+      - name: Build prompt
+        run: |
+          FINAL="$FINAL_TASK_FILE"
+          cp "$TASK_FILE" "$FINAL"
+          if [ -n "${{ github.event.inputs.extra_context }}" ]; then
+            printf '\n\n## Additional Instructions\n\n%s\n' "${{ github.event.inputs.extra_context }}" >> "$FINAL"
+          fi
+
+      # --- Wait for healthy main ---
+      - name: Wait for healthy main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/workflows/wait_healthy_main.py --repo "${{ github.repository }}"
+
+      # --- Prepare branch ---
+      - name: Prepare branch
+        id: prepare
+        run: |
+          echo "branch_base_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # --- Run agent ---
+      - name: Run agent
+        id: agent
+        uses: ./.github/actions/run-agent
+        timeout-minutes: 90
+        with:
+          backend: ${{ steps.selected_backend.outputs.backend }}
+          actions_read_token: ${{ github.token }}
+          anthropic_auth_token: ${{ secrets.MINIMAX_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          codex_auth_json: ${{ secrets.CODEX_AUTH_JSON }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          base_sha: ${{ steps.prepare.outputs.branch_base_sha }}
+          workflow: agent-cop-audit
+          diff_paths: 'src/cop/ tests/fixtures/cops/ bench/corpus/'
+
+      # --- Post-agent ---
+
+      - name: Upload agent artifacts
+        if: always()
+        id: upload
+        uses: ./.github/actions/upload-agent-artifacts
+        with:
+          base_sha: ${{ steps.prepare.outputs.branch_base_sha }}
+          diff_paths: 'src/cop/ tests/fixtures/cops/ bench/corpus/'
+          workflow: agent-cop-audit
+          artifact_name: agent-log-${{ github.run_id }}-${{ github.run_attempt }}
+          anthropic_auth_token: ${{ secrets.MINIMAX_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          codex_auth_json: ${{ secrets.CODEX_AUTH_JSON }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          actions_read_token: ${{ github.token }}
+
+      # Refresh app token
+      - name: Refresh app token
+        if: always()
+        id: refreshed-app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      # --- Finalize ---
+      - name: Check agent ran
+        id: agent_ran
+        run: |
+          if [ ! -s "$AGENT_RESULT_FILE" ]; then
+            echo "Agent produced no result"
+            echo "ran=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ran=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Finalize PR
+        if: steps.agent_ran.outputs.ran != 'false'
+        id: finalize
+        env:
+          GH_TOKEN: ${{ steps.refreshed-app-token.outputs.token }}
+          GH_TOKEN_FOR_ACTIONS_READ: ${{ github.token }}
+        run: |
+          python3 scripts/workflows/cop_fix_lifecycle.py finalize \
+            --cop "$(echo '${{ github.event.inputs.cops }}' | cut -d, -f1 | tr -d ' ')" \
+            --branch "${{ steps.init.outputs.branch }}" \
+            --base-sha "${{ steps.prepare.outputs.branch_base_sha }}" \
+            --pr-url "${{ steps.claim.outputs.pr_url }}" \
+            --backend "${{ steps.selected_backend.outputs.backend }}" \
+            --backend-label "${{ steps.selected_backend.outputs.display_label }}" \
+            --model-label "${{ steps.backend.outputs.model_label }}" \
+            --mode "${{ github.event.inputs.mode }}" \
+            --repo "${{ github.repository }}" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --run-number "${{ github.run_number }}" \
+            --tokens "0" \
+            --code-bugs "0" \
+            >> "$GITHUB_OUTPUT"
+
+      # --- Cleanup on failure ---
+      - name: Close draft PR on failure
+        if: failure() && steps.claim.outputs.pr_url
+        env:
+          GH_TOKEN: ${{ steps.refreshed-app-token.outputs.token }}
+        run: |
+          gh pr close "${{ steps.claim.outputs.pr_url }}" \
+            --comment "Audit workflow failed. See [run logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})." \
+            --repo "${{ github.repository }}" || true

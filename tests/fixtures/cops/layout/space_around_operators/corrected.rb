@@ -73,7 +73,7 @@ t.warning = false
 { :reset => "\e[0m" }
 
 # Setter call with extra trailing space (not aligned with neighbor)
-adapter.properties = @props
+obj.prop = @v
 
 # Ternary operator: missing space before :
 incoming_page = resource.is_a?( Page ) ? resource : resource.to_page
@@ -86,3 +86,11 @@ lend = @rl_end > 0 ? @rl_end - ((@rl_editing_mode == @vi_mode) ? 1 : 0) : @rl_en
 
 # Ternary operator: missing space in method argument context
 target_url = target_url + (target_url.include?("?") ? "&" : "?") + params
+
+# Extra leading space before = when subsequent assignment exists but is NOT aligned
+# (non-assignment lines between them don't break the search)
+workload = []
+foo(bar)
+tag = Tag.create name: 'tag 1'
+baz(qux)
+options = nil
