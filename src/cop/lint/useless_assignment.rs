@@ -71,6 +71,7 @@ impl Cop for UselessAssignment {
         let pattern_match_offsets = collect_pattern_match_target_offsets(parse_result);
         let or_condition_offsets = collect_or_condition_write_offsets(parse_result);
         let do_while_body_offsets = collect_do_while_body_write_offsets(parse_result);
+        let rescue_body_write_offsets = collect_rescue_body_write_offsets(parse_result);
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
         let mut rescue_modifier_offsets = rescue_modifier_collector.offsets;
@@ -91,10 +92,21 @@ impl Cop for UselessAssignment {
             let emit = if conditional_operator_offsets.contains(&candidate.node_offset) {
                 true
             } else if !candidate.engine_used {
-                !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
-                    && !or_condition_offsets.contains(&candidate.node_offset)
-                    && !do_while_body_offsets.contains(&candidate.node_offset)
-                    && !rescue_modifier_offsets.contains(&candidate.node_offset)
+                // Suppress if captured_by_block + inside rescue body: RuboCop's
+                // branch model makes rescue-body references reach earlier
+                // assignments, keeping them alive. Our VF engine doesn't model
+                // rescue branches, so captured_by_block was compensating. After
+                // the used() fix, we must suppress these explicitly.
+                if candidate.captured_by_block
+                    && rescue_body_write_offsets.contains(&candidate.node_offset)
+                {
+                    false
+                } else {
+                    !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
+                        && !or_condition_offsets.contains(&candidate.node_offset)
+                        && !do_while_body_offsets.contains(&candidate.node_offset)
+                        && !rescue_modifier_offsets.contains(&candidate.node_offset)
+                }
             } else {
                 false
             };
@@ -135,6 +147,8 @@ struct AssignmentCandidate {
     node_offset: usize,
     branch_id: Option<usize>,
     engine_used: bool,
+    /// Whether the parent variable is captured by a block/lambda.
+    captured_by_block: bool,
     assignment_states: Vec<AssignmentState>,
     reference_states: Vec<ReferenceState>,
 }
@@ -188,6 +202,7 @@ impl variable_force::VariableForceConsumer for PendingOffenseCollector {
                     node_offset: assignment.node_offset,
                     branch_id: assignment.branch_id,
                     engine_used: assignment.used(variable.captured_by_block),
+                    captured_by_block: variable.captured_by_block,
                     assignment_states: assignment_states.clone(),
                     reference_states: reference_states.clone(),
                 });
@@ -628,6 +643,86 @@ impl<'pr> Visit<'pr> for DoWhileBodyWriteCollector {
             node.is_begin_modifier(),
         );
         ruby_prism::visit_while_node(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: captured-by-block assignments inside begin/rescue bodies
+// ---------------------------------------------------------------------------
+//
+// RuboCop's VF branch model creates branches for begin/rescue, making the
+// reference walk reach earlier assignments in the rescue-able body. Our VF
+// engine treats the body as unbranched, so `captured_by_block` was previously
+// compensating. After the `used()` fix (which checks `!reassigned`), we must
+// suppress these explicitly to avoid new FPs.
+
+fn collect_rescue_body_write_offsets(parse_result: &ruby_prism::ParseResult<'_>) -> HashSet<usize> {
+    let mut collector = RescueBodyWriteCollector::default();
+    collector.visit(&parse_result.node());
+    collector.offsets
+}
+
+#[derive(Default)]
+struct RescueBodyWriteCollector {
+    offsets: HashSet<usize>,
+    in_rescue_body: bool,
+}
+
+impl<'pr> Visit<'pr> for RescueBodyWriteCollector {
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        // Only mark the body as rescue-able if there IS a rescue clause
+        if node.rescue_clause().is_some() {
+            let was = self.in_rescue_body;
+            self.in_rescue_body = true;
+            if let Some(stmts) = node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+            }
+            self.in_rescue_body = was;
+            // Visit rescue/else/ensure normally (not in rescue body context)
+            let mut current_rescue = node.rescue_clause();
+            while let Some(rescue) = current_rescue {
+                if let Some(stmts) = rescue.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.visit(&stmt);
+                    }
+                }
+                current_rescue = rescue.subsequent();
+            }
+            if let Some(else_clause) = node.else_clause() {
+                if let Some(stmts) = else_clause.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.visit(&stmt);
+                    }
+                }
+            }
+            if let Some(ensure) = node.ensure_clause() {
+                if let Some(stmts) = ensure.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.visit(&stmt);
+                    }
+                }
+            }
+        } else {
+            ruby_prism::visit_begin_node(self, node);
+        }
+    }
+
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        if self.in_rescue_body {
+            self.offsets.insert(node.location().start_offset());
+        }
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+
+    fn visit_local_variable_target_node(
+        &mut self,
+        node: &ruby_prism::LocalVariableTargetNode<'pr>,
+    ) {
+        if self.in_rescue_body {
+            self.offsets.insert(node.location().start_offset());
+        }
     }
 }
 
