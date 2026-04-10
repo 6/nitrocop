@@ -15,6 +15,9 @@ runs:
     - uses: jdx/mise-action@v4
       with:
         install_args: rust
+    - name: Ensure rustfmt and clippy
+      shell: bash
+      run: rustup component add rustfmt clippy
 
     - uses: Swatinem/rust-cache@v2
 
