@@ -324,3 +324,21 @@ rescue *(RuntimeError) => e
         ^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a constant.
   :expected
 end
+
+# Rescue body with assignment-wrapped logical expression still flags
+begin
+  work
+rescue Exception => e
+  error_class = e.class.to_s
+  is_gss_error = (error_class.include?('GSSAPI') || error_class.include?('GssApi') || error_class.include?('GSS'))
+                 ^ Style/RedundantParentheses: Don't use parentheses around a logical expression.
+end
+
+# Rescue body with parenthesized method call argument still flags
+begin
+  work
+rescue Exception => e
+  path = __FILE__
+  raise ASSERTION_CLASS, e.message, (e.backtrace.reject { |line| File.expand_path(line).match?(/#{path}/) })
+                                    ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+end
