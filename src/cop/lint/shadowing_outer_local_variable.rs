@@ -400,6 +400,40 @@ impl ShadowingContext {
             }
         }
 
+        // Check: block inside assignment RHS at branch top level (RuboCop Check 6
+        // for assignment-wrapped blocks). In parser gem, `d = expr { |d| }` in an
+        // else clause has block.parent = lvasgn = if.else_branch, so Check 6 fires.
+        // In Prism, the block is inside the call which is inside the assignment, so
+        // it's at expression_depth > 0 and the main Check 1 is blocked by
+        // is_nested_in_expression. Handle this by checking if the block param is
+        // inside an assignment RHS whose LHS is a top-level statement in a
+        // different branch of the same conditional as the outer variable.
+        if let Some(bi) = block_interval.as_ref() {
+            if let Some((outer_cond, outer_branch)) = outer_info.conditional_branch {
+                if bi.cond_offset == outer_cond
+                    && bi.branch_offset != outer_branch
+                    && bi.is_body
+                    && bi.is_if_type
+                    && bi.single_stmt
+                    && !has_block_boundary
+                {
+                    let in_top_level_assignment_rhs =
+                        self.assignment_rhs_ranges
+                            .iter()
+                            .any(|(_, lhs, rhs_start, rhs_end, _)| {
+                                *rhs_start <= param_offset
+                                    && param_offset < *rhs_end
+                                    && bi.start <= *lhs
+                                    && *lhs < bi.end
+                                    && !self.is_in_expression_at(*lhs, bi.expression_depth_base)
+                            });
+                    if in_top_level_assignment_rhs {
+                        return true;
+                    }
+                }
+            }
+        }
+
         false
     }
 }
@@ -1229,19 +1263,38 @@ impl<'pr> Visit<'pr> for ContextCollector {
         // Record conditional parent info for blocks at statement level.
         // This enables RuboCop's check 5/6 suppression for blocks that are
         // direct children of conditional branch bodies.
+        //
+        // Propagate through single-statement ancestor chains: when a block is
+        // the sole statement in a when body, its "variable_node" in RuboCop
+        // terms is the case node (one level up). If that case is the sole
+        // statement in an else-branch, the variable_node IS the else-branch.
+        // Record entries for each ancestor body level as long as the chain
+        // remains single-statement (each intermediate branch has ≤1 statement).
         if self.expression_depth == 0 {
-            if let Some(entry) = self
+            let mut is_innermost = true;
+            for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
-                .find(|e| e.is_body)
+                .filter(|e| e.is_body)
             {
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
-                    is_single_stmt_branch: entry.single_stmt,
+                    // Only the innermost entry gets is_single_stmt_branch = true.
+                    // Propagated entries only propagate is_else_of_if_type (RuboCop
+                    // Check 6). This prevents over-suppression for case/when where
+                    // a block nested inside a single-stmt when body was incorrectly
+                    // treated as a direct child of the case node.
+                    is_single_stmt_branch: is_innermost && entry.single_stmt,
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
+                is_innermost = false;
+                // Stop propagating at multi-statement boundaries — the block
+                // no longer "represents" the branch at the next level.
+                if !entry.single_stmt {
+                    break;
+                }
             }
         }
 
@@ -1298,19 +1351,25 @@ impl<'pr> Visit<'pr> for ContextCollector {
         }
 
         // Record conditional parent info for lambdas at statement level.
+        // Same propagation logic as visit_block_node.
         if self.expression_depth == 0 {
-            if let Some(entry) = self
+            let mut is_innermost = true;
+            for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
-                .find(|e| e.is_body)
+                .filter(|e| e.is_body)
             {
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
-                    is_single_stmt_branch: entry.single_stmt,
+                    is_single_stmt_branch: is_innermost && entry.single_stmt,
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
+                is_innermost = false;
+                if !entry.single_stmt {
+                    break;
+                }
             }
         }
 
@@ -1464,6 +1523,64 @@ impl<'pr> Visit<'pr> for ContextCollector {
             } else {
                 self.visit(&condition);
             }
+            self.pop_branch();
+        }
+
+        // Visit else clause
+        if let Some(else_clause) = node.else_clause() {
+            let branch_offset = else_clause.location().start_offset();
+            let else_start = else_clause.location().start_offset();
+            let else_end = else_clause.location().end_offset();
+            let else_single_stmt = else_clause.statements().is_none_or(|s| s.body().len() <= 1);
+            let else_entry = CondBranchEntry {
+                cond_offset: case_offset,
+                branch_offset,
+                subsequent_offset: None,
+                is_body: true,
+                is_if_type: false,
+                single_stmt: else_single_stmt,
+                is_else_clause: true,
+                expression_depth_base: self.expression_depth,
+            };
+            self.push_branch(else_entry, else_start, else_end);
+            self.visit_else_node(&else_clause);
+            self.pop_branch();
+        }
+    }
+
+    fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
+        let case_offset = node.location().start_offset();
+
+        // Visit predicate
+        if let Some(pred) = node.predicate() {
+            self.visit(&pred);
+        }
+
+        // Visit each `in` clause as a branch of the case_match conditional.
+        // Pattern variables captured in `in` clauses are visible in other
+        // branches (Ruby scoping), but RuboCop suppresses shadowing when
+        // the outer variable is in a different `in`/`else` branch via
+        // same_conditions_node_different_branch? (Check 5).
+        for condition in node.conditions().iter() {
+            let branch_offset = condition.location().start_offset();
+            let in_start = condition.location().start_offset();
+            let in_end = condition.location().end_offset();
+            let in_single_stmt = condition
+                .as_in_node()
+                .and_then(|n| n.statements())
+                .is_none_or(|s| s.body().len() <= 1);
+            let in_entry = CondBranchEntry {
+                cond_offset: case_offset,
+                branch_offset,
+                subsequent_offset: None,
+                is_body: true,
+                is_if_type: false,
+                single_stmt: in_single_stmt,
+                is_else_clause: false,
+                expression_depth_base: self.expression_depth,
+            };
+            self.push_branch(in_entry, in_start, in_end);
+            self.visit(&condition);
             self.pop_branch();
         }
 

@@ -5,8 +5,9 @@
     "exclude": [
       "bench/compiler/bench_compilation.rb",
       "spec/ruby/language/if_spec.rb",
-      "test/mri/ruby/test_regexp.rb",
-      "test/mri/logger/test_logger.rb"
+      "test/jruby/test_regexp.rb",
+      "test/mri/logger/test_logger.rb",
+      "test/mri/ruby/test_regexp.rb"
     ]
   },
   "ruby__logger__00796ec": {

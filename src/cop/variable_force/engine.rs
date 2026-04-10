@@ -952,56 +952,113 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         let parent_id = node.location().start_offset();
+        let is_post_condition = node.is_begin_modifier();
 
-        let pred_has_write = predicate_has_lvar_write(&node.predicate());
-        if pred_has_write {
+        if is_post_condition {
+            // Post-condition loop (begin...end while): visit body first,
+            // then condition. Matches RuboCop's VariableForce which processes
+            // body before condition for while_post/until_post nodes.
+            let pred_has_write = predicate_has_lvar_write(&node.predicate());
+            let body_child = if pred_has_write { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
-        }
-        self.visit(&node.predicate());
-        if pred_has_write {
+            self.push_branch(parent_id, body_child);
+            if let Some(stmts) = node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+            }
+            self.pop_branch();
+            self.branch_depth -= 1;
+
+            if pred_has_write {
+                self.branch_depth += 1;
+                self.push_branch(parent_id, 0);
+            }
+            self.visit(&node.predicate());
+            if pred_has_write {
+                self.pop_branch();
+                self.branch_depth -= 1;
+            }
+        } else {
+            // Pre-condition loop (while...end): visit condition first, then body.
+            let pred_has_write = predicate_has_lvar_write(&node.predicate());
+            if pred_has_write {
+                self.branch_depth += 1;
+                self.push_branch(parent_id, 0);
+            }
+            self.visit(&node.predicate());
+            if pred_has_write {
+                self.pop_branch();
+                self.branch_depth -= 1;
+            }
+
+            let body_child = if pred_has_write { 1 } else { 0 };
+            self.branch_depth += 1;
+            self.push_branch(parent_id, body_child);
+            if let Some(stmts) = node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+            }
             self.pop_branch();
             self.branch_depth -= 1;
         }
-
-        let body_child = if pred_has_write { 1 } else { 0 };
-        self.branch_depth += 1;
-        self.push_branch(parent_id, body_child);
-        if let Some(stmts) = node.statements() {
-            for stmt in stmts.body().iter() {
-                self.visit(&stmt);
-            }
-        }
-        self.pop_branch();
-        self.branch_depth -= 1;
         let loc = node.location();
         self.mark_loop_back_edges(loc.start_offset(), loc.end_offset());
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         let parent_id = node.location().start_offset();
+        let is_post_condition = node.is_begin_modifier();
 
-        let pred_has_write = predicate_has_lvar_write(&node.predicate());
-        if pred_has_write {
+        if is_post_condition {
+            // Post-condition loop (begin...end until): visit body first,
+            // then condition. Matches RuboCop's VariableForce.
+            let pred_has_write = predicate_has_lvar_write(&node.predicate());
+            let body_child = if pred_has_write { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
-        }
-        self.visit(&node.predicate());
-        if pred_has_write {
+            self.push_branch(parent_id, body_child);
+            if let Some(stmts) = node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+            }
+            self.pop_branch();
+            self.branch_depth -= 1;
+
+            if pred_has_write {
+                self.branch_depth += 1;
+                self.push_branch(parent_id, 0);
+            }
+            self.visit(&node.predicate());
+            if pred_has_write {
+                self.pop_branch();
+                self.branch_depth -= 1;
+            }
+        } else {
+            // Pre-condition loop (until...end): visit condition first, then body.
+            let pred_has_write = predicate_has_lvar_write(&node.predicate());
+            if pred_has_write {
+                self.branch_depth += 1;
+                self.push_branch(parent_id, 0);
+            }
+            self.visit(&node.predicate());
+            if pred_has_write {
+                self.pop_branch();
+                self.branch_depth -= 1;
+            }
+
+            let body_child = if pred_has_write { 1 } else { 0 };
+            self.branch_depth += 1;
+            self.push_branch(parent_id, body_child);
+            if let Some(stmts) = node.statements() {
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+            }
             self.pop_branch();
             self.branch_depth -= 1;
         }
-
-        let body_child = if pred_has_write { 1 } else { 0 };
-        self.branch_depth += 1;
-        self.push_branch(parent_id, body_child);
-        if let Some(stmts) = node.statements() {
-            for stmt in stmts.body().iter() {
-                self.visit(&stmt);
-            }
-        }
-        self.pop_branch();
-        self.branch_depth -= 1;
         let loc = node.location();
         self.mark_loop_back_edges(loc.start_offset(), loc.end_offset());
     }

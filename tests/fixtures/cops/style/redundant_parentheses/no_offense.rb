@@ -48,6 +48,7 @@ arr = [(1..5)]
 ranges + [(line..line)]
 (minimum..maximum).cover?(count)
 x = (0..10)
+(0..10).send(@method, (0..10)).should be_true
 # not/while/until — plausible (RuboCop doesn't flag these)
 (not x)
 (a until b)
@@ -90,6 +91,8 @@ x && (y == z)
 # Match regex against parenthesized expression
 /regexp/ =~ (b || c)
 regexp =~ (b || c)
+if /x/ =~ (line.strip)
+end
 # Command literal on RHS of regex match
 unless /Version/m =~ (`convert -version`)
 end
@@ -106,6 +109,13 @@ end while(bar)
 begin
   do_something
 end until(bar)
+# post-condition loops with spaced parens
+begin
+  do_something
+end while (current_issue)
+begin
+  do_something
+end while ((a && b) || c)
 # Parens touching keyword
 if x; y else(1) end
 if x; y else (1)end
@@ -167,6 +177,7 @@ x ({ y: 1 }.merge({ y: 2 })), z
 # Parenthesized expression nested in the first hash arg of an unparenthesized call
 foo :plain => ({:error => 0}.to_json), :other => 1
 Contract ({ :a => Num, :b => Num}) => Num
+foo.to match(({ a: 1 }))
 # Chained receiver with operator/logical inner — parens needed for operator precedence
 (a + b).to_s(base)
 (arr || []).each { |x| x }
@@ -222,6 +233,8 @@ obj&.foo((bar in baz))
 # Pattern matching in assignment — parens required
 foo = (bar in baz)
 foo ||= (bar in baz)
+var = 0
+foo in { bar: ^(var.to_i) }
 # Pattern matching in endless method definition — parens required
 def myfoo = (bar in [0, 1])
 def mybar = (baz => result)
@@ -287,4 +300,30 @@ end
 # Non-empty while body — RuboCop only flags the empty-body form
 while (pop_messages(queue_url, 10).length > 0)
   work
+end
+# Single-line def body with assignment — not a multi-statement begin
+def start_handlers; (@start_handlers ||= {}); end
+# Double-negation on numeric — Prism collapses --5 to -@(5),
+# but RuboCop (Parser) sees (send (int -5) :-@) and doesn't flag
+(--5.5).should be_close(5.5, 0.01)
+(--5).should == 5
+(--2).should == 2
+# Rescue clause body — RuboCop's rescue? exempts parens inside resbody
+begin
+  work
+rescue StandardError
+  (foo.bar).to_s
+end
+begin
+  work
+rescue
+  (x && y)
+end
+# Bracket chaining — (expr)[key] is chained like (expr).method
+(n.next_element || n.parent)['id'] ||= n['name']
+# self[] receiver — RuboCop's square_brackets? doesn't include self
+class Foo
+  def bar(n)
+    (self[0, n]).to_s
+  end
 end

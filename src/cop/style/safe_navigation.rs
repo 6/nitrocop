@@ -92,6 +92,17 @@ use ruby_prism::Visit;
 ///   RuboCop's `unsafe_method_used?` walk for patterns like
 ///   `foo && !(foo.respond_to?(:empty?) && foo.empty?)` while preserving longer-chain
 ///   offenses such as `lat_lng && !(lat_lng.first.zero? && lat_lng.last.zero?)`.
+/// - Outer `to_h` receiver ancestors now count as nil-safe contexts. RuboCop suppresses
+///   `&&` inside receiver chains like `[value && value.key?("mirror")].to_h` and inside
+///   block bodies like `map { ... pred && pred.in?(...) ... }.compact.to_h.symbolize_keys`.
+/// - Block-pass arguments like `map(&:to_s)` no longer count as real block nodes for
+///   chain-length escape or unsafe-parent suppression. RuboCop only leaks past literal
+///   `do`/`{}` blocks, so `Array(root && root.errors.map(&:to_s))` now reports while
+///   `Array(root && root.errors.map { |e| e.to_s })` stays skipped.
+/// - `if`/`unless`/ternary bodies whose safe-navigation chain ends in a literal block call
+///   now add the surrounding receiver-call depth when RuboCop's `chain_length` leaks past
+///   the block node, matching receiver-chain skips like
+///   `[if config[:tags] then config[:tags].split(',').collect do ... end end].flatten.compact`.
 pub struct SafeNavigation;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -112,12 +123,14 @@ struct TernaryCheckContext<'a> {
     offense_start_offset: Option<usize>,
     skip_nested_block_call_args: bool,
     skip_direct_receiver_block_body_block_calls: bool,
+    receiver_call_depth: usize,
 }
 
 struct ModifierIfCheckContext<'a> {
     max_chain_length: usize,
     allowed_methods: &'a Option<Vec<String>>,
     skip_direct_receiver_block_body_block_calls: bool,
+    receiver_call_depth: usize,
     /// Whether the modifier-if is inside an unsafe parent (dotless call, operator, etc.).
     /// RuboCop's `unsafe_method_used?` ancestor walk escapes the method chain for
     /// chain-length-1 and finds these parents, suppressing the offense.
@@ -161,6 +174,7 @@ const NIL_METHODS: &[&[u8]] = &[
     b"to_i",
     b"to_r",
     b"to_c",
+    b"to_h",
     b"to_json",
     b"object_id",
     b"send",
@@ -379,6 +393,14 @@ impl SafeNavigation {
         Some(chain)
     }
 
+    /// Search the RHS expression for a call chain whose receiver matches
+    /// `checked_node`.  When `flatten_and` is true, inner `and` nodes (with
+    /// matching operator) are entered and their left branch is searched —
+    /// this mirrors the clause-flattening that RuboCop's `collect_and_clauses`
+    /// does at the top level.  Inside blocks, `flatten_and` must be false
+    /// because RuboCop's `concat_nodes` skips `and` nodes with a `:block`
+    /// ancestor.
+    #[allow(clippy::too_many_arguments)]
     fn first_safe_chain_in_expression<'a>(
         node: &ruby_prism::Node<'a>,
         checked_node: &ruby_prism::Node<'a>,
@@ -387,6 +409,7 @@ impl SafeNavigation {
         max_chain_length: usize,
         allowed_methods: &Option<Vec<String>>,
         local_unsafe_parent_depth: usize,
+        flatten_and: bool,
     ) -> SafeChainSearchResult<'a> {
         if let Some(inner) = Self::unwrapped_parenthesized_node(node) {
             return Self::first_safe_chain_in_expression(
@@ -397,6 +420,7 @@ impl SafeNavigation {
                 max_chain_length,
                 allowed_methods,
                 local_unsafe_parent_depth,
+                flatten_and,
             );
         }
 
@@ -414,6 +438,7 @@ impl SafeNavigation {
                             max_chain_length,
                             allowed_methods,
                             local_unsafe_parent_depth + 1,
+                            flatten_and,
                         );
                     }
                 }
@@ -434,20 +459,23 @@ impl SafeNavigation {
             return SafeChainSearchResult::Safe(chain);
         }
 
-        if let Some(and) = node.as_and_node() {
-            if Self::and_operator_kind(&and, bytes) != outer_operator {
-                return SafeChainSearchResult::NoneFound;
-            }
+        if flatten_and {
+            if let Some(and) = node.as_and_node() {
+                if Self::and_operator_kind(&and, bytes) != outer_operator {
+                    return SafeChainSearchResult::NoneFound;
+                }
 
-            return Self::first_safe_chain_in_expression(
-                &and.left(),
-                checked_node,
-                bytes,
-                outer_operator,
-                max_chain_length,
-                allowed_methods,
-                local_unsafe_parent_depth,
-            );
+                return Self::first_safe_chain_in_expression(
+                    &and.left(),
+                    checked_node,
+                    bytes,
+                    outer_operator,
+                    max_chain_length,
+                    allowed_methods,
+                    local_unsafe_parent_depth,
+                    flatten_and,
+                );
+            }
         }
 
         if let Some(or) = node.as_or_node() {
@@ -459,6 +487,7 @@ impl SafeNavigation {
                 max_chain_length,
                 allowed_methods,
                 local_unsafe_parent_depth,
+                flatten_and,
             );
 
             return match left_result {
@@ -471,6 +500,7 @@ impl SafeNavigation {
                         max_chain_length,
                         allowed_methods,
                         local_unsafe_parent_depth,
+                        flatten_and,
                     )
                 }
                 result => result,
@@ -480,6 +510,7 @@ impl SafeNavigation {
         SafeChainSearchResult::NoneFound
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn first_safe_chain_in_nested_and_descendants<'a>(
         node: &ruby_prism::Node<'a>,
         checked_node: &ruby_prism::Node<'a>,
@@ -488,6 +519,7 @@ impl SafeNavigation {
         max_chain_length: usize,
         allowed_methods: &Option<Vec<String>>,
         local_unsafe_parent_depth: usize,
+        flatten_and: bool,
     ) -> SafeChainSearchResult<'a> {
         if let Some(inner) = Self::unwrapped_parenthesized_node(node) {
             return Self::first_safe_chain_in_nested_and_descendants(
@@ -498,23 +530,27 @@ impl SafeNavigation {
                 max_chain_length,
                 allowed_methods,
                 local_unsafe_parent_depth,
+                flatten_and,
             );
         }
 
-        if let Some(and) = node.as_and_node() {
-            if Self::and_operator_kind(&and, bytes) != outer_operator {
-                return SafeChainSearchResult::NoneFound;
-            }
+        if flatten_and {
+            if let Some(and) = node.as_and_node() {
+                if Self::and_operator_kind(&and, bytes) != outer_operator {
+                    return SafeChainSearchResult::NoneFound;
+                }
 
-            return Self::first_safe_chain_in_expression(
-                &and.as_node(),
-                checked_node,
-                bytes,
-                outer_operator,
-                max_chain_length,
-                allowed_methods,
-                local_unsafe_parent_depth,
-            );
+                return Self::first_safe_chain_in_expression(
+                    &and.as_node(),
+                    checked_node,
+                    bytes,
+                    outer_operator,
+                    max_chain_length,
+                    allowed_methods,
+                    local_unsafe_parent_depth,
+                    flatten_and,
+                );
+            }
         }
 
         if let Some(or) = node.as_or_node() {
@@ -526,6 +562,7 @@ impl SafeNavigation {
                 max_chain_length,
                 allowed_methods,
                 local_unsafe_parent_depth,
+                flatten_and,
             );
 
             return match left_result {
@@ -538,6 +575,7 @@ impl SafeNavigation {
                         max_chain_length,
                         allowed_methods,
                         local_unsafe_parent_depth,
+                        flatten_and,
                     )
                 }
                 result => result,
@@ -697,6 +735,7 @@ impl Cop for SafeNavigation {
             in_definition_argument_wrapper: 0,
             in_nil_method_call_arguments: 0,
             outer_unsafe_parent_above_current_block_stack: Vec::new(),
+            receiver_call_depth: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -728,6 +767,7 @@ struct SafeNavVisitor<'a> {
     in_definition_argument_wrapper: usize,
     in_nil_method_call_arguments: usize,
     outer_unsafe_parent_above_current_block_stack: Vec<bool>,
+    receiver_call_depth: usize,
 }
 
 impl<'a> SafeNavVisitor<'a> {
@@ -781,6 +821,7 @@ impl<'a> SafeNavVisitor<'a> {
             self.max_chain_length,
             &self.allowed_methods,
             0,
+            false, // block context: don't flatten inner `and` nodes
         ) {
             SafeChainSearchResult::Safe(chain) => chain,
             _ => {
@@ -790,7 +831,8 @@ impl<'a> SafeNavVisitor<'a> {
         };
 
         if self.is_direct_receiver_block_body(&node.as_node())
-            && chain.iter().any(|call| call.block().is_some())
+            && chain_has_literal_block(&chain)
+            && chain.len() >= self.max_chain_length
         {
             ruby_prism::visit_and_node(self, node);
             return;
@@ -812,9 +854,12 @@ impl<'a> SafeNavVisitor<'a> {
         // RuboCop's `unsafe_method_used?` walks send ancestors from the first
         // call in the chain up to the rhs expression.  For chain length 1 the
         // walk escapes the expression and finds unsafe (dotless / operator /
-        // assignment) parents above.  For chain length ≥ 2 the walk is bounded
-        // by the outermost call in the chain and never reaches them.
-        if self.in_unsafe_parent > 0 && chain.len() == 1 {
+        // assignment) parents above.  For chain length ≥ 2 the walk is normally
+        // bounded by the outermost call in the chain — but if that call has a
+        // block, the block node is not a :call type so the walk escapes past it
+        // and finds the unsafe parent.
+        if self.in_unsafe_parent > 0 && (chain.len() == 1 || chain_ends_with_literal_block(&chain))
+        {
             ruby_prism::visit_and_node(self, node);
             return;
         }
@@ -1168,7 +1213,9 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 &receiver,
                 &mut self.direct_receiver_block_bodies,
             );
+            self.receiver_call_depth += 1;
             self.visit(&receiver);
+            self.receiver_call_depth -= 1;
             if is_nil_safe_call_ancestor {
                 self.in_nil_safe_call_ancestor -= 1;
             }
@@ -1254,7 +1301,6 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
         let bytes = self.source.as_bytes();
         let clauses = SafeNavigation::top_level_and_clauses(node, bytes);
         let operator = SafeNavigation::and_operator_kind(node, bytes);
-        let mut found_offense = false;
 
         for pair in clauses.windows(2) {
             let lhs = &pair[0];
@@ -1272,13 +1318,21 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 self.max_chain_length,
                 &self.allowed_methods,
                 0,
+                true, // top-level: flatten inner `and` nodes like RuboCop's collect_and_clauses
             ) {
                 SafeChainSearchResult::Safe(chain) => chain,
                 _ => continue,
             };
 
+            // RuboCop's `chain_length` uses `each_ancestor(:call)` which
+            // leaks past block nodes (not `:call` type).  In a direct-receiver
+            // block body the leaked chain length includes the outer receiver
+            // chain, pushing the total over `max_chain_length` — but only
+            // when the chain is already at max length (chain_length + at_least_1
+            // outer call > max).  Chain length 1 still fits: 1 + 1 = 2 ≤ 2.
             if self.is_direct_receiver_block_body(&node.as_node())
-                && chain.iter().any(|call| call.block().is_some())
+                && chain_has_literal_block(&chain)
+                && chain.len() >= self.max_chain_length
             {
                 continue;
             }
@@ -1296,7 +1350,11 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
 
             // RuboCop's `unsafe_method_used?` ancestor walk is bounded by the
             // rhs expression for chain length ≥ 2 but escapes for length 1.
-            if self.in_unsafe_parent > 0 && chain.len() == 1 {
+            // It also escapes for chain length ≥ 2 when the outermost call has
+            // a block, because the block node is not a :call type.
+            if self.in_unsafe_parent > 0
+                && (chain.len() == 1 || chain_ends_with_literal_block(&chain))
+            {
                 continue;
             }
 
@@ -1308,12 +1366,15 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 column,
                 "Use safe navigation (`&.`) instead of checking if an object exists before calling the method.".to_string(),
             ));
-            found_offense = true;
         }
 
-        if !found_offense {
-            self.visit_flattened_and_clauses(node);
-        }
+        // Always visit flattened clauses so that inner `&&` expressions
+        // (e.g. inside parenthesized `or` branches) are checked even when
+        // the top-level chain already produced an offense.  RuboCop's
+        // `on_and` fires independently for each `and` node in the AST, so
+        // nested `and` nodes get their own `on_and` call regardless of
+        // whether an ancestor `and` was an offense.
+        self.visit_flattened_and_clauses(node);
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
@@ -1346,6 +1407,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                     skip_nested_block_call_args: self.in_call_arguments > 1,
                     skip_direct_receiver_block_body_block_calls: self
                         .is_direct_receiver_block_body(&node.as_node()),
+                    receiver_call_depth: self.receiver_call_depth,
                 },
             );
             self.diagnostics.extend(diags);
@@ -1394,6 +1456,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
                 allowed_methods: &self.allowed_methods,
                 skip_direct_receiver_block_body_block_calls: self
                     .is_direct_receiver_block_body(&node.as_node()),
+                receiver_call_depth: self.receiver_call_depth,
                 in_unsafe_parent: self.in_unsafe_parent > 0,
                 in_assignment_or_operator_parent: self.in_assignment_or_operator_parent > 0,
                 has_outer_unsafe_parent_above_current_block: self
@@ -1500,6 +1563,13 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
+        if chain_ends_with_literal_block(&chain)
+            && chain.len() + self.receiver_call_depth > self.max_chain_length
+        {
+            ruby_prism::visit_unless_node(self, node);
+            return;
+        }
+
         if SafeNavigation::chain_has_dotless_operator(&chain) {
             ruby_prism::visit_unless_node(self, node);
             return;
@@ -1517,9 +1587,7 @@ impl<'a, 'pr> Visit<'pr> for SafeNavVisitor<'a> {
             return;
         }
 
-        if self.is_direct_receiver_block_body(&node.as_node())
-            && chain.iter().any(|call| call.block().is_some())
-        {
+        if self.is_direct_receiver_block_body(&node.as_node()) && chain_has_literal_block(&chain) {
             ruby_prism::visit_unless_node(self, node);
             return;
         }
@@ -1670,7 +1738,7 @@ impl SafeNavigation {
             None => return Vec::new(),
         };
 
-        if context.skip_nested_block_call_args && body_call.block().is_some() {
+        if context.skip_nested_block_call_args && call_has_literal_block(&body_call) {
             return Vec::new();
         }
 
@@ -1684,13 +1752,17 @@ impl SafeNavigation {
             None => return Vec::new(),
         };
 
-        if context.skip_direct_receiver_block_body_block_calls
-            && chain.iter().any(|call| call.block().is_some())
-        {
+        if context.skip_direct_receiver_block_body_block_calls && chain_has_literal_block(&chain) {
             return Vec::new();
         }
 
         if chain.len() > context.max_chain_length {
+            return Vec::new();
+        }
+
+        if chain_ends_with_literal_block(&chain)
+            && chain.len() + context.receiver_call_depth > context.max_chain_length
+        {
             return Vec::new();
         }
 
@@ -1833,13 +1905,11 @@ impl SafeNavigation {
             None => return Vec::new(),
         };
 
-        if context.skip_direct_receiver_block_body_block_calls
-            && chain.iter().any(|call| call.block().is_some())
-        {
+        if context.skip_direct_receiver_block_body_block_calls && chain_has_literal_block(&chain) {
             return Vec::new();
         }
 
-        if body_call.block().is_some()
+        if call_has_literal_block(&body_call)
             && !context.skip_direct_receiver_block_body_block_calls
             && context.has_outer_unsafe_parent_above_current_block
         {
@@ -1847,6 +1917,12 @@ impl SafeNavigation {
         }
 
         if chain.len() > context.max_chain_length {
+            return Vec::new();
+        }
+
+        if chain_ends_with_literal_block(&chain)
+            && chain.len() + context.receiver_call_depth > context.max_chain_length
+        {
             return Vec::new();
         }
 
@@ -1893,6 +1969,19 @@ impl SafeNavigation {
         }
         false
     }
+}
+
+fn call_has_literal_block(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.block()
+        .is_some_and(|block| block.as_block_node().is_some())
+}
+
+fn chain_has_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
+    chain.iter().any(call_has_literal_block)
+}
+
+fn chain_ends_with_literal_block(chain: &[ruby_prism::CallNode<'_>]) -> bool {
+    chain.last().is_some_and(call_has_literal_block)
 }
 
 #[cfg(test)]
