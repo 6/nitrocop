@@ -73,3 +73,22 @@ def foo
     ^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.all` on line 58.
     .map { |e| e.name }
 end
+
+# Descendant multiline block chain: later `.and` calls still align with inline `.to`
+expect {
+  run
+}.to change {
+  foo
+}.from(1).to(2)
+  .and change {
+  ^^^^ Layout/MultilineMethodCallIndentation: Align `.and` with `.to` on line 68.
+    bar
+  }.from(3).to(4)
+  .and change {
+  ^^^^ Layout/MultilineMethodCallIndentation: Align `.and` with `.to` on line 71.
+    baz
+  }.from(5).to(6)
+  .and change {
+  ^^^^ Layout/MultilineMethodCallIndentation: Align `.and` with `.to` on line 74.
+    qux
+  }.by(-1)

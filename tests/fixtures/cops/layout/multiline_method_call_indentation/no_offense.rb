@@ -53,6 +53,32 @@ expect(subject)
   .to receive(:method)
   .and_return(value)
 
+# Trailing-dot matcher chain inside `to` argument
+expect_any_instance_of(Postmark::ApiClient).
+  to receive(:get_template).with(message.template_alias).
+  and_return(template_response)
+
+# Nested matcher chain under `to change`
+expect { rendering }.
+  to change { message.subject }.to(render_response[:subject][:rendered_content]).
+  and change { message.body_text }.to(render_response[:text_body][:rendered_content]).
+  and change { message.body_html }.to(render_response[:html_body][:rendered_content])
+
+# Matcher continuation should align with outer `.to`, not inner `.with_payload`
+expect { subject.run! }
+  .to emit_notification("delayed.monitor.run").with_payload(default_payload.except(:queue))
+  .and emit_notification("delayed.job.future_count").with_payload(default_payload.merge(priority: 'user_visible')).with_value(0)
+
+# Multiline matcher arguments keep `.ordered` / `.and_return` aligned to `.with`
+expect(OpenaiClient).to receive(:chat)
+  .with(hash_including(
+    messages: array_including(
+      { role: "tool", tool_call_id: tool_call_id, name: "modify_reservation", content: tool_result_content.to_json }
+    )
+  ))
+  .ordered
+  .and_return(final_openai_response)
+
 result =
   Foo
   .where(active: true)
