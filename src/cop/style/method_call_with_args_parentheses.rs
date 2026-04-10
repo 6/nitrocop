@@ -634,15 +634,13 @@ impl ParenVisitor<'_> {
         };
 
         // Check if last arg is a hash with value omission
-        let has_value_omission = if let Some(hash) = last_arg.as_hash_node() {
+        if let Some(hash) = last_arg.as_hash_node() {
             has_hash_value_omission(&hash)
         } else if let Some(kw_hash) = last_arg.as_keyword_hash_node() {
             has_keyword_hash_value_omission(&kw_hash)
         } else {
-            return false;
-        };
-
-        has_value_omission
+            false
+        }
     }
 
     /// Check require_parentheses_for_hash_value_omission?
