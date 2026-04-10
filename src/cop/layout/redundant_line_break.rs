@@ -187,6 +187,19 @@ use crate::parse::source::SourceFile;
 ///   Resolves ~41 FPs (e.g., ruby2js repo). Added `UntilNode`, `WhileNode`, and
 ///   `ForNode` visitors to `UnsafeRangeCollector` to support modifier keywords.
 ///
+/// ## Fixes applied (2026-04-10)
+/// - **String continuation merging in `too_long`**: RuboCop's `to_single_line`
+///   merges adjacent string literals across backslash continuations:
+///   `"foo" \ "bar"` → `"foobar"` (same quotes), `"foo" \ 'bar'` → `"foo" + 'bar'`
+///   (different quotes). Nitrocop's `too_long` previously joined these lines with
+///   a space, keeping both sets of quotes: `"foo" "bar"` — 2 extra characters per
+///   continuation. For deeply-indented expressions with string continuations, this
+///   caused the combined length to exceed 120 chars when RuboCop's version fit,
+///   resulting in FNs. For example, `raise ArgumentError, "long..." \ "msg"` inside
+///   a 4-level-deep nesting would measure 124 chars (nitrocop) vs 117 chars (RuboCop).
+///   Added `merge_string_continuation()` helper and `prev_had_backslash` tracking in
+///   `too_long` to match RuboCop's merging behavior.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -583,6 +596,10 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
     }
 
     /// Check if combining lines of this span would exceed max_line_length.
+    ///
+    /// Matches RuboCop's `to_single_line` method which merges string
+    /// continuations across backslash: `"foo" \ "bar"` → `"foobar"` (same
+    /// quotes merged), `"foo" \ 'bar'` → `"foo" + 'bar'` (different quotes).
     fn too_long(&self, start_offset: usize, end_offset: usize) -> bool {
         let (start_line, _) = self.source.offset_to_line_col(start_offset);
         let (end_line, _) = self
@@ -591,6 +608,7 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
 
         let lines: Vec<&[u8]> = self.source.lines().collect();
         let mut combined = Vec::new();
+        let mut prev_had_backslash = false;
         for line_num in start_line..=end_line {
             if line_num > lines.len() {
                 break;
@@ -600,7 +618,8 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
             // Only remove the line-continuation backslash, NOT backslashes that are part of
             // content (e.g., \1_\2 in regex replacements, \d in character classes).
             let trimmed_end = trim_trailing_whitespace(line);
-            let without_continuation = if trimmed_end.ends_with(b"\\") {
+            let had_backslash = trimmed_end.ends_with(b"\\");
+            let without_continuation = if had_backslash {
                 trim_trailing_whitespace(&trimmed_end[..trimmed_end.len() - 1])
             } else {
                 trimmed_end
@@ -609,7 +628,12 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 combined.extend_from_slice(without_continuation);
             } else {
                 let trimmed = trim_leading_whitespace(without_continuation);
-                if starts_with_method_chain_dot(trimmed)
+                // RuboCop's to_single_line merges string literals across backslash:
+                //   /(["']) *\\\n\s*\1/ → '' (same quote = merge)
+                //   /" *\\\n\s*'/ → '" + \'' (different quotes)
+                if prev_had_backslash && merge_string_continuation(&mut combined, trimmed) {
+                    // Merged string continuation — already handled
+                } else if starts_with_method_chain_dot(trimmed)
                     || (ends_with_safe_navigation_operator(&combined)
                         && trimmed.first().is_some_and(|b| is_word_char(*b)))
                 {
@@ -619,6 +643,7 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                     combined.extend_from_slice(trimmed);
                 }
             }
+            prev_had_backslash = had_backslash;
         }
 
         utf8_char_count(&combined) > self.max_line_length
@@ -1442,6 +1467,39 @@ fn starts_with_method_chain_dot(trimmed: &[u8]) -> bool {
     } else {
         false
     }
+}
+
+/// Merge string continuation across a backslash line break, matching
+/// RuboCop's `to_single_line` regex patterns:
+///   - `/(["']) *\\\n\s*\1/` → `''` (same quote: merge the strings)
+///   - `/" *\\\n\s*'/` → `" + '` (different quotes: use concatenation)
+///   - `/' *\\\n\s*"/` → `' + "` (different quotes: use concatenation)
+///
+/// Returns true if a merge was performed, false otherwise.
+fn merge_string_continuation(combined: &mut Vec<u8>, next_trimmed: &[u8]) -> bool {
+    if combined.is_empty() || next_trimmed.is_empty() {
+        return false;
+    }
+    let last = combined[combined.len() - 1];
+    let first = next_trimmed[0];
+    if last != b'"' && last != b'\'' {
+        return false;
+    }
+    if first != b'"' && first != b'\'' {
+        return false;
+    }
+    if last == first {
+        // Same quote: merge the two string literals into one
+        // "foo" \ "bar" → "foobar"
+        combined.pop(); // Remove trailing quote
+        combined.extend_from_slice(&next_trimmed[1..]); // Skip leading quote
+    } else {
+        // Different quotes: use + operator
+        // "foo" \ 'bar' → "foo" + 'bar'
+        combined.extend_from_slice(b" + ");
+        combined.extend_from_slice(next_trimmed);
+    }
+    true
 }
 
 fn ends_with_safe_navigation_operator(trimmed: &[u8]) -> bool {
