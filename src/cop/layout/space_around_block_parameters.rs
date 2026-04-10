@@ -92,6 +92,19 @@ use crate::parse::source::SourceFile;
 /// offense. Fix: keep the multiline fast-path for aligned closing delimiters,
 /// but in `space` style emit the extra-space offense when the delimiter line
 /// contains only spaces or tabs before the closing `|`/`)`.
+///
+/// ## Variant FP fix: single-colon directive syntax (2026-04-10)
+///
+/// Fixed 4 FP in `space` variant. Root cause was in `src/parse/directives.rs`,
+/// not in the cop itself. The corpus file `cyberark/conjur` uses
+/// `# rubocop:disable Layout:LineLength` (single colon, not slash). RuboCop's
+/// `COP_NAME_PATTERN` regex `([A-Za-z]\w+/)*(?:[A-Za-z]\w+)` does not include
+/// `:` in `\w`, so it captures only `Layout` — treating the directive as a
+/// department-level disable that suppresses ALL `Layout/*` cops. nitrocop's
+/// `normalize_directive_cop_name` only handled `::` (double colon), not `:`
+/// (single colon). Fix: change `split_once("::")` to `split_once(':')` in
+/// `normalize_directive_cop_name` so both forms produce a department-level
+/// disable.
 pub struct SpaceAroundBlockParameters;
 
 /// Extracted info about a block or lambda's parameters and body.
