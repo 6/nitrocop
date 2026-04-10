@@ -1,5 +1,6 @@
 use crate::cop::shared::node_type::{
     CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE,
+    INDEX_TARGET_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -57,6 +58,46 @@ use ruby_prism::Visit;
 /// `]`, in which case it falls back to the first. Matching that selection
 /// logic fixes both false positives without suppressing the broader
 /// offending patterns that RuboCop still reports.
+///
+/// ## Corpus investigation (2026-04-09)
+///
+/// Variant `EnforcedStyle: space` still had 165 FN on multi-write targets like
+/// `data['stdout'], data['stderr'], status = ...` and `rt[col], message = ...`.
+/// Prism parses those LHS references as `IndexTargetNode`, so the cop never
+/// visited them. RuboCop handles them like `[]=`, selecting the first
+/// reference bracket in the target subtree; this intentionally ignores outer
+/// target brackets in cases like `user[ 'items' ][key], other = rhs`. Fixed by
+/// adding `INDEX_TARGET_NODE` support and reusing first-bracket selection for
+/// target nodes. Also report missing leading space for `EnforcedStyle: space`
+/// at `[` to match RuboCop's offense location.
+///
+/// ## Corpus investigation (2026-04-09, follow-up)
+///
+/// Variant `EnforcedStyle: space` still diverged after the multi-write fix:
+///
+/// 1. `Try[StandardError] do ... end` was an FN because Prism's `CallNode`
+///    location spans the trailing block, while RuboCop's `SendNode#multiline?`
+///    does not. Block-attached `[]` reads must still be checked.
+/// 2. Multiline receiver chains such as `sort { ... }.reverse[0..49]` were FPs
+///    once the guard was removed entirely. RuboCop still skips those because
+///    the `[]` send itself is multiline when the receiver spans multiple lines.
+///
+/// Match both behaviors by applying the whole-node multiline skip to `[]=`
+/// calls and to `[]` reads without an attached block, while still checking
+/// `[]` reads that own their trailing `do ... end`.
+///
+/// ## Corpus investigation (2026-04-09, heredoc interpolation)
+///
+/// Variant `EnforcedStyle: space` had 2 FN on
+/// `mysql_query(<<-SQL).first["pagetext"]` where the heredoc body contains
+/// interpolation with brackets like `#{mapping[post.id][0]}`. Prism includes
+/// the heredoc content in the `CallNode` subtree, so `reference_bracket_pairs`
+/// collected brackets from inside the heredoc interpolation. The bracket
+/// selection logic then picked an inner bracket pair instead of the outer
+/// `["pagetext"]` brackets. RuboCop's `tokens_within(node)` excludes heredoc
+/// body tokens, so it always picks the correct brackets. Fixed by making
+/// `ReferenceBracketCollector` skip `InterpolatedStringNode`s whose opening
+/// delimiter starts with `<<` (i.e., heredocs).
 pub struct SpaceInsideReferenceBrackets;
 
 impl Cop for SpaceInsideReferenceBrackets {
@@ -67,6 +108,7 @@ impl Cop for SpaceInsideReferenceBrackets {
     fn interested_node_types(&self) -> &'static [u8] {
         &[
             CALL_NODE,
+            INDEX_TARGET_NODE,
             INDEX_AND_WRITE_NODE,
             INDEX_OPERATOR_WRITE_NODE,
             INDEX_OR_WRITE_NODE,
@@ -162,16 +204,24 @@ impl Cop for SpaceInsideReferenceBrackets {
             return;
         }
 
-        // RuboCop skips when the entire send node is multiline (e.g. `obj[key] = if\n...\nend`),
-        // not just when the brackets span multiple lines. This only applies to CallNode
-        // (where `[]`/`[]=` is the send). For IndexOperatorWriteNode/IndexAndWriteNode/
-        // IndexOrWriteNode, the node includes the RHS value expression (which can be on a
-        // different line), but RuboCop's `on_send` only sees the inner `[]` send node.
-        if node.as_call_node().is_some() {
-            let node_start_line = source.offset_to_line_col(node.location().start_offset()).0;
-            let node_end_line = source.offset_to_line_col(node.location().end_offset()).0;
-            if node_start_line != node_end_line {
-                return;
+        // RuboCop skips multiline `[]=` sends such as `obj[key] = if\n...\nend`
+        // and multiline `[]` reads whose receiver chain spans lines, but not
+        // block-attached reads like `Try[StandardError] do ... end`. Prism's
+        // CallNode location includes the trailing block, so distinguish whether
+        // the current `[]` call owns an attached BlockNode.
+        if let Some(call) = node.as_call_node() {
+            let has_attached_block = call
+                .block()
+                .is_some_and(|block| block.as_block_node().is_some());
+            let should_skip_multiline = call.name().as_slice() == b"[]="
+                || (call.name().as_slice() == b"[]" && !has_attached_block);
+
+            if should_skip_multiline {
+                let node_start_line = source.offset_to_line_col(node.location().start_offset()).0;
+                let node_end_line = source.offset_to_line_col(node.location().end_offset()).0;
+                if node_start_line != node_end_line {
+                    return;
+                }
             }
         }
 
@@ -223,7 +273,7 @@ impl Cop for SpaceInsideReferenceBrackets {
             }
             "space" => {
                 if !space_after_open {
-                    let (line, col) = source.offset_to_line_col(open_end);
+                    let (line, col) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -280,11 +330,54 @@ mod tests {
         SpaceInsideReferenceBrackets,
         "cops/layout/space_inside_reference_brackets"
     );
+
+    fn space_config() -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("space".into()),
+                ),
+                (
+                    "EnforcedStyleForEmptyBrackets".into(),
+                    serde_yml::Value::String("space".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn space_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideReferenceBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_reference_brackets/space_offense.rb"
+            ),
+            space_config(),
+        );
+    }
+
+    #[test]
+    fn space_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideReferenceBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_reference_brackets/space_no_offense.rb"
+            ),
+            space_config(),
+        );
+    }
 }
 
 fn reference_bracket_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, usize)> {
     if let Some(call) = node.as_call_node() {
         return call_bracket_offsets(&call, bytes);
+    }
+    if let Some(index) = node.as_index_target_node() {
+        return index_target_bracket_offsets(&index);
     }
     if let Some(index) = node.as_index_and_write_node() {
         return index_write_bracket_offsets(
@@ -317,23 +410,22 @@ fn call_bracket_offsets(call: &ruby_prism::CallNode<'_>, bytes: &[u8]) -> Option
     }
     call_reference_bracket_offsets(call)?;
 
-    let mut collector = ReferenceBracketCollector { pairs: Vec::new() };
-    collector.visit(&call.as_node());
-    collector
-        .pairs
-        .sort_unstable_by_key(|(open_start, _)| *open_start);
-
-    let first = collector.pairs.first().copied()?;
+    let pairs = reference_bracket_pairs(&call.as_node());
+    let first = pairs.first().copied()?;
     if method_name == b"[]=" {
         return Some(first);
     }
 
-    let last = collector.pairs.last().copied()?;
+    let last = pairs.last().copied()?;
     if previous_non_whitespace_byte(bytes, last.0) == Some(b']') {
         Some(last)
     } else {
         Some(first)
     }
+}
+
+fn index_target_bracket_offsets(index: &ruby_prism::IndexTargetNode<'_>) -> Option<(usize, usize)> {
+    reference_bracket_pairs(&index.as_node()).first().copied()
 }
 
 fn index_write_bracket_offsets(
@@ -368,6 +460,15 @@ fn call_reference_bracket_offsets(call: &ruby_prism::CallNode<'_>) -> Option<(us
     Some((opening_loc.start_offset(), closing_loc.start_offset()))
 }
 
+fn reference_bracket_pairs(node: &ruby_prism::Node<'_>) -> Vec<(usize, usize)> {
+    let mut collector = ReferenceBracketCollector { pairs: Vec::new() };
+    collector.visit(node);
+    collector
+        .pairs
+        .sort_unstable_by_key(|(open_start, _)| *open_start);
+    collector.pairs
+}
+
 struct ReferenceBracketCollector {
     pairs: Vec<(usize, usize)>,
 }
@@ -379,6 +480,19 @@ impl<'pr> Visit<'pr> for ReferenceBracketCollector {
         }
 
         ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        // Don't descend into heredoc content. RuboCop's `tokens_within(node)`
+        // excludes heredoc body tokens, so bracket pairs inside heredoc
+        // interpolation must not influence the outer bracket selection.
+        if node
+            .opening_loc()
+            .is_some_and(|o| o.as_slice().starts_with(b"<<"))
+        {
+            return;
+        }
+        ruby_prism::visit_interpolated_string_node(self, node);
     }
 
     fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
@@ -406,5 +520,14 @@ impl<'pr> Visit<'pr> for ReferenceBracketCollector {
         ));
 
         ruby_prism::visit_index_or_write_node(self, node);
+    }
+
+    fn visit_index_target_node(&mut self, node: &ruby_prism::IndexTargetNode<'pr>) {
+        self.pairs.push((
+            node.opening_loc().start_offset(),
+            node.closing_loc().start_offset(),
+        ));
+
+        ruby_prism::visit_index_target_node(self, node);
     }
 }

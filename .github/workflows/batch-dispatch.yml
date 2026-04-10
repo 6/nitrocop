@@ -86,7 +86,6 @@ jobs:
 
       - uses: ./.github/actions/setup-agent-env
         with:
-          rust_components: ''
           install_vendor_gems: 'false'
 
       - name: Build nitrocop binary

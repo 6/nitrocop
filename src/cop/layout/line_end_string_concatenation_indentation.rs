@@ -78,6 +78,20 @@ use ruby_prism::Visit;
 /// and 2+ body statements, treat that body as `ParentType::Begin`. Keep
 /// single-statement `begin ... rescue` bodies and rescue-less `begin ... end`
 /// blocks as `ParentType::ExplicitBegin`.
+///
+/// ## Investigation findings (2026-04-09)
+///
+/// **Variant-only divergence under `EnforcedStyle: indented`:** RuboCop's
+/// `check_indented` anchors the second line to `base_column(children[0])`.
+/// When the continued string is the direct value of a hash/keyword pair,
+/// `base_column` uses the pair's column, not the first string line's
+/// indentation. nitrocop always used the first string line's leading
+/// whitespace, which produced false positives for correctly indented pair
+/// values on the next line and false negatives for over-indented pair values.
+///
+/// **Fix:** Track when the current concatenated string is the direct value of
+/// an `AssocNode`, and in that case anchor `indented` style to the pair's
+/// column to match RuboCop's `pair_type?` special case.
 pub struct LineEndStringConcatenationIndentation;
 
 impl Cop for LineEndStringConcatenationIndentation {
@@ -107,6 +121,7 @@ impl Cop for LineEndStringConcatenationIndentation {
             nearest_parent_type: ParentType::TopLevel,
             saved_parent_types: Vec::new(),
             expected_stack_depth: 0,
+            pair_value_base_column: None,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -128,6 +143,9 @@ struct ConcatVisitor<'a> {
     /// `visit_else_node` call. Used to detect whether
     /// `visit_branch_node_enter` was called for that node.
     expected_stack_depth: usize,
+    /// RuboCop's `base_column(child)` anchors direct hash/keyword pair values
+    /// to the pair column in `EnforcedStyle: indented`.
+    pair_value_base_column: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -252,9 +270,10 @@ impl ConcatVisitor<'_> {
             // base_column = first non-whitespace column of the first part's
             // source line, matching RuboCop's `source_line =~ /\S/`.
             let (first_part_line, _) = self.part_start_line_col(&parts[0]);
-            let first_line_indent = self.line_indent_column(first_part_line);
-
-            let expected_indent = first_line_indent + self.indent_width;
+            let base_column = self
+                .pair_value_base_column
+                .unwrap_or_else(|| self.line_indent_column(first_part_line));
+            let expected_indent = base_column + self.indent_width;
 
             if columns[1] != expected_indent {
                 let (line_num, _) = self
@@ -426,6 +445,24 @@ impl<'pr> Visit<'pr> for ConcatVisitor<'_> {
         self.expected_stack_depth = saved_depth;
     }
 
+    fn visit_assoc_node(&mut self, node: &ruby_prism::AssocNode<'pr>) {
+        self.visit(&node.key());
+
+        let value = node.value();
+        if value.as_interpolated_string_node().is_some() {
+            let saved = self.pair_value_base_column;
+            self.pair_value_base_column = Some(
+                self.source
+                    .offset_to_line_col(node.location().start_offset())
+                    .1,
+            );
+            self.visit(&value);
+            self.pair_value_base_column = saved;
+        } else {
+            self.visit(&value);
+        }
+    }
+
     // --- Pass-through nodes ---
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         // Detect if visit_branch_node_enter was called for this node by
@@ -459,9 +496,43 @@ impl<'pr> Visit<'pr> for ConcatVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         LineEndStringConcatenationIndentation,
         "cops/layout/line_end_string_concatenation_indentation"
     );
+
+    fn indented_style_config() -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("indented".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn indented_style_pair_value_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &LineEndStringConcatenationIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/line_end_string_concatenation_indentation/indented_pair_value_offense.rb"
+            ),
+            indented_style_config(),
+        );
+    }
+
+    #[test]
+    fn indented_style_pair_value_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &LineEndStringConcatenationIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/line_end_string_concatenation_indentation/indented_pair_value_no_offense.rb"
+            ),
+            indented_style_config(),
+        );
+    }
 }

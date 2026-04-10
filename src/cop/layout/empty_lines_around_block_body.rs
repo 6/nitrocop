@@ -3,6 +3,8 @@ use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// ## Corpus investigation (2026-03-14)
 ///
@@ -51,12 +53,35 @@ use crate::parse::source::SourceFile;
 ///    `empty_lines`. nitrocop was still requiring blank lines at beginning/end.
 /// 2. `super do ... end` blocks were missed because Prism exposes them through
 ///    `SuperNode` / `ForwardingSuperNode`, not plain `BlockNode`.
-/// 3. Two-line brace blocks whose body starts on the opening line
-///    (`it { foo.\n  bar }`) were incorrectly skipped as "single-line" by the
-///    shared helper. RuboCop still requires the blank line at block body
-///    beginning here, but not at block body end because there is no standalone
-///    line before `}`.
+/// 3. Two-line blocks where exactly one delimiter shares a body line diverge
+///    from the shared helper when the effective opening is the actual `do`/`{`
+///    line: `it { foo.\n  bar }` and `items.each { |x|\n  puts x }` both need
+///    the beginning offense only. Multiline `->` params are different because
+///    RuboCop still uses the earlier `->` line as the opening reference, so
+///    those cases continue through the normal missing-beginning/end checks.
+///
+/// ## Corpus investigation (2026-04-08, variant `empty_lines`)
+///
+/// FN=4, FP=4: backslash continuation before `do` (e.g.
+/// `it "str" \ "str" \ do\n body\n end`) with `empty_lines` style.
+/// `adjusted_keyword_offset` walked ALL the way back through `\` continuations
+/// to the `it` line, making the check flag the continuation string line instead
+/// of the `do` line. RuboCop uses `send_node.last_line` (the last argument
+/// line, one line before `do`) as the reference. Fix: for `empty_lines` style,
+/// only step back one line instead of walking all the way through `\`.
+///
+/// Fixed FP=18 for `EnforcedStyle: empty_lines`: RuboCop treats legacy
+/// `# rubocop:disable Layout:LineLength` syntax as a department-level disable
+/// because its directive cop-name regex stops at `Layout`. nitrocop's global
+/// directive parser still stores `Layout:LineLength` literally, so this cop now
+/// applies a narrow local suppression for `Layout:` disable/enable comments
+/// before emitting each beginning/end diagnostic. This preserves the existing
+/// layout logic while matching RuboCop on the affected corpus files.
 pub struct EmptyLinesAroundBlockBody;
+
+static DIRECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"#\s*(?:rubocop|nitrocop)\s*:\s*(disable|enable|todo)\s+(.+)").unwrap()
+});
 
 /// Compute the effective opening offset for empty-line checks.
 ///
@@ -72,7 +97,23 @@ pub struct EmptyLinesAroundBlockBody;
 ///   continuation line (e.g. `run_command(arg) \ \n  do |x|`). Walk
 ///   backward through `\` continuations to find the method-call line and
 ///   use that as the reference.
-fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize {
+///
+/// Compute the effective opening offset for empty-line checks.
+///
+/// When `full_walkback` is true (used for `no_empty_lines` style), walk all
+/// the way back through `\` continuations to the method-call line. This makes
+/// the "line after effective opening" be the next continuation string, which is
+/// never blank, so no false extra-blank-line offense.
+///
+/// When `full_walkback` is false (used for `empty_lines` style), only step
+/// back one line. This matches RuboCop's `send_node.last_line`, which is the
+/// last argument line — the line immediately before `do`/`{`. The helper then
+/// checks the `do` line itself for emptiness, matching RuboCop exactly.
+fn adjusted_keyword_offset(
+    source: &SourceFile,
+    opening_offset: usize,
+    full_walkback: bool,
+) -> usize {
     let (opening_line, opening_col) = source.offset_to_line_col(opening_offset);
 
     // Check if there is non-whitespace content before `do`/`{` on its line.
@@ -90,24 +131,41 @@ fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize 
         return opening_offset;
     }
 
-    // `do`/`{` is at the start of its line. Walk backward through `\`
-    // continuations to find the method-call line.
+    // Helper: check if a line (by 1-indexed number) ends with `\`.
+    let line_ends_with_backslash = |line_num: usize| -> bool {
+        if let Some(bytes) = util::line_at(source, line_num) {
+            let mut end = bytes.len();
+            while end > 0 && (bytes[end - 1] == b'\n' || bytes[end - 1] == b'\r') {
+                end -= 1;
+            }
+            end > 0 && bytes[end - 1] == b'\\'
+        } else {
+            false
+        }
+    };
+
+    if !full_walkback {
+        // For `empty_lines` style: step back exactly one line when the
+        // previous line ends with `\`. This matches `send_node.last_line`
+        // in RuboCop (the last argument line, not the first continuation).
+        if opening_line > 1 && line_ends_with_backslash(opening_line - 1) {
+            if let Some(off) = source.line_col_to_offset(opening_line - 1, 0) {
+                return off;
+            }
+        }
+        return opening_offset;
+    }
+
+    // Full walkback for `no_empty_lines` style: walk backward through all
+    // `\` continuations to find the method-call line.
     let mut line = opening_line;
     loop {
         if line <= 1 {
             break;
         }
-        let prev_line = line - 1;
-        if let Some(prev_bytes) = util::line_at(source, prev_line) {
-            // Strip trailing newline/carriage-return, then check for `\`
-            let mut end = prev_bytes.len();
-            while end > 0 && (prev_bytes[end - 1] == b'\n' || prev_bytes[end - 1] == b'\r') {
-                end -= 1;
-            }
-            if end > 0 && prev_bytes[end - 1] == b'\\' {
-                line = prev_line;
-                continue;
-            }
+        if line_ends_with_backslash(line - 1) {
+            line -= 1;
+            continue;
         }
         break;
     }
@@ -118,12 +176,103 @@ fn adjusted_keyword_offset(source: &SourceFile, opening_offset: usize) -> usize 
     }
 }
 
+fn legacy_layout_colon_directive_mentions_department(cop_list_raw: &str) -> bool {
+    let cop_list = match cop_list_raw.find("--") {
+        Some(idx) => &cop_list_raw[..idx],
+        None => cop_list_raw,
+    };
+
+    cop_list.split(',').any(|entry| {
+        let mut entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+
+        if let Some((name, _)) = entry.split_once(' ') {
+            entry = name;
+        }
+        if let Some((name, _)) = entry.split_once('(') {
+            entry = name;
+        }
+        if let Some(dept) = entry.strip_suffix("/*") {
+            entry = dept;
+        }
+
+        let entry = entry.trim_end_matches(|c: char| {
+            !c.is_ascii_alphanumeric() && c != '_' && c != '/' && c != ':'
+        });
+        entry.starts_with("Layout:")
+    })
+}
+
+fn legacy_layout_colon_directive_disables_line(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    let mut disabled = false;
+
+    for comment in parse_result.comments() {
+        let loc = comment.location();
+        let (comment_line, col) = source.offset_to_line_col(loc.start_offset());
+        if comment_line > line {
+            break;
+        }
+
+        let comment_bytes = &source.as_bytes()[loc.start_offset()..loc.end_offset()];
+        let Ok(comment_str) = std::str::from_utf8(comment_bytes) else {
+            continue;
+        };
+
+        let Some(caps) = DIRECTIVE_RE.captures(comment_str) else {
+            continue;
+        };
+        if !legacy_layout_colon_directive_mentions_department(&caps[2]) {
+            continue;
+        }
+
+        let is_inline = if comment_line >= 1 && comment_line <= lines.len() {
+            let line_bytes = lines[comment_line - 1];
+            let before_comment = &line_bytes[..col.min(line_bytes.len())];
+            before_comment.iter().any(|b| !b.is_ascii_whitespace())
+        } else {
+            false
+        };
+
+        match &caps[1] {
+            "disable" | "todo" => {
+                if is_inline {
+                    if comment_line == line {
+                        disabled = true;
+                    }
+                } else {
+                    disabled = true;
+                }
+            }
+            "enable" => {
+                if !is_inline {
+                    disabled = false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    disabled
+}
+
 fn missing_beginning_empty_line_diagnostic(
     cop_name: &'static str,
     source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
     line: usize,
     mut corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
     let line_bytes = util::line_at(source, line)?;
     if util::is_blank_line(line_bytes) {
         return None;
@@ -154,53 +303,296 @@ fn missing_beginning_empty_line_diagnostic(
     Some(diag)
 }
 
-fn check_empty_lines_style_with_rubocop_edge_cases(
+fn missing_end_empty_line_diagnostic(
     cop_name: &'static str,
     source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
+    let line_bytes = util::line_at(source, line.saturating_sub(1))?;
+    if util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Empty line missing at block body end.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let Some(offset) = source.line_col_to_offset(line, 0) {
+            corr.push(crate::correction::Correction {
+                start: offset,
+                end: offset,
+                replacement: "\n".to_string(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn extra_beginning_empty_line_diagnostic(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
+    let line_bytes = util::line_at(source, line)?;
+    if !util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Extra empty line detected at block body beginning.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let (Some(start), Some(end)) = (
+            source.line_col_to_offset(line, 0),
+            source.line_col_to_offset(line + 1, 0),
+        ) {
+            corr.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: String::new(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn extra_end_empty_line_diagnostic(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    line: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Option<Diagnostic> {
+    if legacy_layout_colon_directive_disables_line(source, parse_result, line) {
+        return None;
+    }
+
+    let line_bytes = util::line_at(source, line)?;
+    if !util::is_blank_line(line_bytes) {
+        return None;
+    }
+
+    let mut diag = Diagnostic {
+        path: source.path_str().to_string(),
+        location: Location { line, column: 0 },
+        severity: Severity::Convention,
+        cop_name: cop_name.to_string(),
+        message: "Extra empty line detected at block body end.".to_string(),
+        corrected: false,
+    };
+
+    if let Some(ref mut corr) = corrections {
+        if let (Some(start), Some(end)) = (
+            source.line_col_to_offset(line, 0),
+            source.line_col_to_offset(line + 1, 0),
+        ) {
+            corr.push(crate::correction::Correction {
+                start,
+                end,
+                replacement: String::new(),
+                cop_name,
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+    }
+
+    Some(diag)
+}
+
+fn check_empty_lines_around_body_with_legacy_layout_disable(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    keyword_offset: usize,
+    end_offset: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Vec<Diagnostic> {
+    let (keyword_line, _) = source.offset_to_line_col(keyword_offset);
+    let (end_line, _) = source.offset_to_line_col(end_offset);
+
+    if keyword_line == end_line {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+
+    let after_keyword = keyword_line + 1;
+    if after_keyword < end_line {
+        if let Some(diag) = extra_beginning_empty_line_diagnostic(
+            cop_name,
+            source,
+            parse_result,
+            after_keyword,
+            corrections.as_deref_mut(),
+        ) {
+            diagnostics.push(diag);
+        }
+    }
+
+    if end_line > 1 {
+        let before_end = end_line - 1;
+        if before_end > keyword_line {
+            if let Some(diag) = extra_end_empty_line_diagnostic(
+                cop_name,
+                source,
+                parse_result,
+                before_end,
+                corrections,
+            ) {
+                diagnostics.push(diag);
+            }
+        }
+    }
+
+    diagnostics
+}
+
+fn check_missing_empty_lines_around_body_with_legacy_layout_disable(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    keyword_offset: usize,
+    end_offset: usize,
+    mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+) -> Vec<Diagnostic> {
+    let (keyword_line, _) = source.offset_to_line_col(keyword_offset);
+    let (end_line, _) = source.offset_to_line_col(end_offset);
+
+    if end_line <= keyword_line + 1 {
+        return Vec::new();
+    }
+
+    let mut diagnostics = Vec::new();
+
+    let after_keyword = keyword_line + 1;
+    if after_keyword < end_line {
+        if let Some(diag) = missing_beginning_empty_line_diagnostic(
+            cop_name,
+            source,
+            parse_result,
+            after_keyword,
+            corrections.as_deref_mut(),
+        ) {
+            diagnostics.push(diag);
+        }
+    }
+
+    if end_line > 1 {
+        let before_end = end_line - 1;
+        if before_end > keyword_line {
+            if let Some(diag) = missing_end_empty_line_diagnostic(
+                cop_name,
+                source,
+                parse_result,
+                end_line,
+                corrections,
+            ) {
+                diagnostics.push(diag);
+            }
+        }
+    }
+
+    diagnostics
+}
+
+struct EmptyLinesStyleCheckContext {
     effective_opening: usize,
     opening_offset: usize,
     closing_offset: usize,
     body_start_offset: Option<usize>,
+}
+
+fn check_empty_lines_style_with_rubocop_edge_cases(
+    cop_name: &'static str,
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    context: EmptyLinesStyleCheckContext,
     corrections: Option<&mut Vec<crate::correction::Correction>>,
 ) -> Vec<Diagnostic> {
-    if body_start_offset.is_none() {
+    if context.body_start_offset.is_none() {
         return Vec::new();
     }
 
-    let (keyword_line, _) = source.offset_to_line_col(effective_opening);
-    let (opening_line, _) = source.offset_to_line_col(opening_offset);
-    let (closing_line, _) = source.offset_to_line_col(closing_offset);
+    let (keyword_line, _) = source.offset_to_line_col(context.effective_opening);
+    let (opening_line, _) = source.offset_to_line_col(context.opening_offset);
+    let (closing_line, _) = source.offset_to_line_col(context.closing_offset);
 
     if keyword_line == closing_line {
         return Vec::new();
     }
 
-    let Some(body_start_offset) = body_start_offset else {
+    let Some(body_start_offset) = context.body_start_offset else {
         return Vec::new();
     };
     let (body_start_line, _) = source.offset_to_line_col(body_start_offset);
 
-    // RuboCop still flags the "beginning" offense for multiline brace/do blocks
-    // whose body starts on the opening line and the closing delimiter is alone
-    // on the next line, e.g. `it { foo.\n  bar }`. The shared helper skips these
-    // because `end_line == keyword_line + 1`, so handle only this narrow shape
-    // locally and let the shared helper cover all other cases.
-    if body_start_line == opening_line && closing_line == opening_line + 1 {
+    // RuboCop still flags only the "beginning" offense for two-line blocks
+    // where exactly one delimiter shares a body line, but only when the
+    // effective opening line is the physical `do`/`{` line. When multiline
+    // lambda params move the effective opening back to the `->` line, the
+    // shared helper still matches RuboCop and may require an end offense too.
+    // Two-line blocks where exactly one delimiter shares a body line only need
+    // the "beginning" offense. This applies when the effective opening is the
+    // physical `do`/`{` line — either body starts on the opening line
+    // (`it { foo.\n  bar }`) or on the closing line (`items.each { |x|\n  puts x }`).
+    // When multiline lambda params move the effective opening back to `->`,
+    // the shared helper handles it and may require an end offense too.
+    if keyword_line == opening_line
+        && closing_line == opening_line + 1
+        && (body_start_line == opening_line || body_start_line == closing_line)
+    {
         let mut diagnostics = Vec::new();
-        if let Some(diag) =
-            missing_beginning_empty_line_diagnostic(cop_name, source, keyword_line + 1, corrections)
-        {
+        if let Some(diag) = missing_beginning_empty_line_diagnostic(
+            cop_name,
+            source,
+            parse_result,
+            keyword_line + 1,
+            corrections,
+        ) {
             diagnostics.push(diag);
         }
         return diagnostics;
     }
 
-    util::check_missing_empty_lines_around_body_with_corrections(
+    check_missing_empty_lines_around_body_with_legacy_layout_disable(
         cop_name,
         source,
-        effective_opening,
-        closing_offset,
-        "block",
+        parse_result,
+        context.effective_opening,
+        context.closing_offset,
         corrections,
     )
 }
@@ -222,7 +614,7 @@ impl Cop for EmptyLinesAroundBlockBody {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -279,6 +671,12 @@ impl Cop for EmptyLinesAroundBlockBody {
         // When a lambda has multiline params (`-> (a,\n b) do`), the `->` is
         // on an earlier line than `do`/`{`. Using `->` as the reference means
         // the line after `->` is a param continuation, not blank, so no FP.
+        //
+        // For `no_empty_lines`, we walk ALL the way back through `\` so the
+        // next line after the reference is a continuation string (never blank).
+        // For `empty_lines`, we step back only one line (matching
+        // `send_node.last_line`) so the `do` line is what gets checked.
+        let full_walkback = style != "empty_lines";
         let effective_opening = if let Some(op_offset) = lambda_operator_offset {
             let (op_line, _) = source.offset_to_line_col(op_offset);
             let (opening_line, _) = source.offset_to_line_col(opening_offset);
@@ -287,11 +685,11 @@ impl Cop for EmptyLinesAroundBlockBody {
                 op_offset
             } else {
                 // Single-line: -> and do/{ on same line, use normal logic
-                adjusted_keyword_offset(source, opening_offset)
+                adjusted_keyword_offset(source, opening_offset, full_walkback)
             }
         } else {
             // Regular block: walk backward through backslash continuations
-            adjusted_keyword_offset(source, opening_offset)
+            adjusted_keyword_offset(source, opening_offset, full_walkback)
         };
 
         match style {
@@ -299,20 +697,23 @@ impl Cop for EmptyLinesAroundBlockBody {
                 diagnostics.extend(check_empty_lines_style_with_rubocop_edge_cases(
                     self.name(),
                     source,
-                    effective_opening,
-                    opening_offset,
-                    closing_offset,
-                    body_start_offset,
+                    parse_result,
+                    EmptyLinesStyleCheckContext {
+                        effective_opening,
+                        opening_offset,
+                        closing_offset,
+                        body_start_offset,
+                    },
                     corrections,
                 ));
             }
             _ => {
-                diagnostics.extend(util::check_empty_lines_around_body_with_corrections(
+                diagnostics.extend(check_empty_lines_around_body_with_legacy_layout_disable(
                     self.name(),
                     source,
+                    parse_result,
                     effective_opening,
                     closing_offset,
-                    "block",
                     corrections,
                 ));
             }
@@ -417,6 +818,26 @@ mod tests {
             1,
             "Lambda with single-line params should flag blank line after do"
         );
+    }
+
+    #[test]
+    fn empty_lines_multiline_lambda_body_on_opening_line_still_requires_end() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let src = b"handler = -> (first:,\n              second:) { do_something.\n  call_it }\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundBlockBody, src, empty_lines_config());
+
+        assert_eq!(
+            diags.len(),
+            2,
+            "multiline lambda params should still require both beginning and end offenses"
+        );
+        assert!(diags.iter().any(|d| {
+            d.location.line == 2 && d.message == "Empty line missing at block body beginning."
+        }));
+        assert!(diags.iter().any(|d| {
+            d.location.line == 3 && d.message == "Empty line missing at block body end."
+        }));
     }
 
     #[test]

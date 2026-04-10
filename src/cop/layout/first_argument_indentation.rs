@@ -95,6 +95,41 @@ use crate::parse::source::SourceFile;
 /// path. Fixed by treating only `BlockNode` values as attached blocks and
 /// keeping `BlockArgumentNode` (`&blk`) eligible for special inner-call
 /// indentation and the quoted base-range message.
+///
+/// ## Investigation (2026-04-08)
+///
+/// **Variant fix (`consistent_relative_to_receiver`):** RuboCop does not always
+/// indent relative to `node.source_range.begin_pos`. It uses
+/// `column_of(base_range(node, first_argument))`, which falls back to the
+/// previous code line when the base range spans multiple lines and also starts
+/// from a `*`/`**` wrapper when the call is splatted. nitrocop previously used
+/// the call start column unconditionally, which produced false positives like
+/// `puts x.\n  merge(\n    b: 2` and `*Dir.glob(\n    File.expand_path(`.
+/// RuboCop only includes the splat marker when the immediate parent is the
+/// splat node. A chained inner call like
+/// `*incoming_exchange.variants.merge(...).map(&:id)` still bases indentation
+/// on `incoming_exchange.variants.merge(`, not on `*`.
+///
+/// **Variant fix (`special_for_inner_method_call`):** RuboCop's
+/// `eligible_method_call?` for the outer send excludes only `[]=`. nitrocop was
+/// reusing the child-call skip logic and incorrectly rejected bare-operator and
+/// setter parents like `<<` and `foo.bar =`, which caused inner-call variant
+/// divergence under the non-default style. RuboCop also treats a call as
+/// "inner" when it is the receiver of an eligible parent send that starts
+/// earlier, such as `!!ActiveModel::Type::Boolean.new.cast(...)`.
+///
+/// **Variant FN fix (`consistent_relative_to_receiver`, 1 FN):** Calls with
+/// only a block argument like `foo.map(&method(:bar))` were missed because
+/// Prism stores `&expr` in `node.block()` as a `BlockArgumentNode`, not in
+/// `node.arguments()`. RuboCop's parser gem treats block_pass as a regular
+/// argument. Fixed by checking `block_arg_start_offset` as a fallback when
+/// `arguments` is None.
+///
+/// **Remaining variant FP (`consistent_relative_to_receiver`, 1 FP):**
+/// `jruby__jruby__0303464: test/mri/ruby/test_regexp.rb:2086` — RuboCop's
+/// parser gem crashes on this file (`invalid byte sequence in UTF-8`) and
+/// reports 0 offenses. Prism parses it fine, so nitrocop correctly flags the
+/// offense. This is a parser difference, not a detection bug.
 pub struct FirstArgumentIndentation;
 
 impl Cop for FirstArgumentIndentation {
@@ -143,18 +178,26 @@ struct FirstArgVisitor<'a> {
 }
 
 struct ParentCallInfo {
+    /// The start offset of the entire parent call expression.
+    call_start_offset: usize,
+    /// The start offset of the parent receiver when it is present.
+    receiver_start_offset: Option<usize>,
     /// Whether the parent call has parenthesized arguments
     is_parenthesized: bool,
     /// The start offsets of each argument in the parent call, so we can check
-    /// if the current call node is one of the parent's arguments
+    /// if the current call node is one of the parent's direct arguments.
     arg_start_offsets: Vec<usize>,
-    /// Not a setter or bare operator
+    /// RuboCop outer-send eligibility: any send except `[]=`
     is_eligible: bool,
 }
 
 struct CallMetadata<'a> {
     name: &'a str,
     has_attached_block: bool,
+    /// Start offset of a block argument (`&expr`) when no regular arguments exist.
+    /// In Prism, `foo(&block)` stores the block arg in `node.block()`, not
+    /// `node.arguments()`, while RuboCop's parser gem treats it as a regular argument.
+    block_arg_start_offset: Option<usize>,
 }
 
 impl FirstArgVisitor<'_> {
@@ -167,21 +210,24 @@ impl FirstArgVisitor<'_> {
         arguments: Option<ruby_prism::ArgumentsNode<'_>>,
         metadata: CallMetadata<'_>,
     ) {
-        // Must have arguments (parenthesized or not)
-        let args_node = match arguments {
-            Some(a) => a,
-            None => return,
+        // Must have arguments (parenthesized or not).
+        // In Prism, `foo(&block)` stores the block arg in `node.block()`, not
+        // `node.arguments()`. Use block_arg_start_offset as a fallback.
+        let first_arg_start_offset = if let Some(args_node) = arguments {
+            let args: Vec<_> = args_node.arguments().iter().collect();
+            if args.is_empty() {
+                return;
+            }
+            args[0].location().start_offset()
+        } else if let Some(offset) = metadata.block_arg_start_offset {
+            offset
+        } else {
+            return;
         };
+
         let has_regular_dot = call_operator_loc
             .as_ref()
             .is_some_and(|loc| loc.as_slice() == b".");
-
-        let args: Vec<_> = args_node.arguments().iter().collect();
-        if args.is_empty() {
-            return;
-        }
-
-        let first_arg = &args[0];
 
         // Use message_loc (method name) for determining the call line.
         // This handles chained calls where call_start_offset would be on
@@ -196,8 +242,7 @@ impl FirstArgVisitor<'_> {
             .unwrap_or(call_start_offset);
         let (call_line, _) = self.source.offset_to_line_col(call_line_offset);
 
-        let first_arg_loc = first_arg.location();
-        let (arg_line, arg_col) = self.source.offset_to_line_col(first_arg_loc.start_offset());
+        let (arg_line, arg_col) = self.source.offset_to_line_col(first_arg_start_offset);
 
         // Skip if first arg is on same line as method call
         if arg_line == call_line {
@@ -211,7 +256,7 @@ impl FirstArgVisitor<'_> {
 
         let expected = self.compute_expected_indent(
             call_start_offset,
-            first_arg_loc.start_offset(),
+            first_arg_start_offset,
             arg_line,
             metadata.has_attached_block,
         );
@@ -223,7 +268,7 @@ impl FirstArgVisitor<'_> {
                 arg_col,
                 self.message(
                     call_start_offset,
-                    first_arg_loc.start_offset(),
+                    first_arg_start_offset,
                     metadata.has_attached_block,
                 ),
             ));
@@ -243,36 +288,43 @@ impl FirstArgVisitor<'_> {
         }
 
         if self.style == "consistent_relative_to_receiver" {
-            // Use the column of the call node start (includes receiver) + width
-            let (_, call_col) = self.source.offset_to_line_col(call_start_offset);
-            return call_col + self.width;
+            return self.base_range_indent(call_start_offset, first_arg_start_offset, arg_line)
+                + self.width;
         }
 
         // special_for_inner_method_call or special_for_inner_method_call_in_parentheses
         if self.is_special_inner_call(call_start_offset, has_attached_block) {
-            // Check if base_range (from call start to first arg) spans multiple lines
-            let (call_start_line, call_start_col) =
-                self.source.offset_to_line_col(call_start_offset);
-            let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
-
-            // Determine if the range from call start to arg start is "single line"
-            // after stripping whitespace (matching RuboCop's column_of behavior)
-            if is_single_line_base_range(
-                self.source,
-                call_start_offset,
-                first_arg_start_offset,
-                call_start_line,
-                arg_start_line,
-            ) {
-                // Single-line: use the column of the call expression start
-                call_start_col + self.width
-            } else {
-                // Multi-line: use previous code line indent
-                previous_code_line_indent(self.source, arg_line) + self.width
-            }
+            self.base_range_indent(call_start_offset, first_arg_start_offset, arg_line) + self.width
         } else {
             // Not a special inner call: use previous code line indent + width
             previous_code_line_indent(self.source, arg_line) + self.width
+        }
+    }
+
+    fn base_range_indent(
+        &self,
+        call_start_offset: usize,
+        first_arg_start_offset: usize,
+        arg_line: usize,
+    ) -> usize {
+        let base_start_offset = base_range_start_offset(
+            self.source,
+            call_start_offset,
+            self.has_same_start_parent_call(call_start_offset),
+        );
+        let (base_start_line, base_start_col) = self.source.offset_to_line_col(base_start_offset);
+        let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
+
+        if is_single_line_base_range(
+            self.source,
+            base_start_offset,
+            first_arg_start_offset,
+            base_start_line,
+            arg_start_line,
+        ) {
+            base_start_col
+        } else {
+            previous_code_line_indent(self.source, arg_line)
         }
     }
 
@@ -295,26 +347,18 @@ impl FirstArgVisitor<'_> {
                 return false;
             }
 
-            // The call must be an argument of the parent (not just any descendant).
-            // We check if call_start_offset matches any of the parent's argument
-            // start offsets or is contained within one of them.
-            // Actually, RuboCop checks: node.source_range.begin_pos > parent.source_range.begin_pos
-            // which means the inner call starts inside the parent call (not being the
-            // first part of a chained call).
-            // Since we're inside the parent's argument visitor, we know we're a descendant.
-            // We just need to verify the call starts after the parent call start
-            // (which is always true for arguments).
-            // But we also need to make sure the current call IS a direct argument,
-            // not just a deeply nested expression. For simplicity, we check if
-            // call_start_offset appears in the parent's arg_start_offsets.
-            // Actually, RuboCop just checks that the node is a direct child argument
-            // of the parent. It walks up one level via node.parent. We can simulate
-            // this by checking if the call_start_offset matches one of the parent's
-            // argument start offsets.
             parent.arg_start_offsets.contains(&call_start_offset)
+                || (parent.receiver_start_offset == Some(call_start_offset)
+                    && call_start_offset > parent.call_start_offset)
         } else {
             false
         }
+    }
+
+    fn has_same_start_parent_call(&self, call_start_offset: usize) -> bool {
+        self.parent_call_stack
+            .last()
+            .is_some_and(|parent| parent.call_start_offset == call_start_offset)
     }
 
     fn uses_base_range_message(&self, call_start_offset: usize, has_attached_block: bool) -> bool {
@@ -331,21 +375,26 @@ impl FirstArgVisitor<'_> {
         first_arg_start_offset: usize,
         has_attached_block: bool,
     ) -> String {
+        let base_start_offset = base_range_start_offset(
+            self.source,
+            call_start_offset,
+            self.has_same_start_parent_call(call_start_offset),
+        );
         let base_text = self
             .source
-            .try_byte_slice(call_start_offset, first_arg_start_offset)
+            .try_byte_slice(base_start_offset, first_arg_start_offset)
             .unwrap_or("")
             .trim();
-        let (call_start_line, _) = self.source.offset_to_line_col(call_start_offset);
+        let (base_start_line, _) = self.source.offset_to_line_col(base_start_offset);
         let (arg_start_line, _) = self.source.offset_to_line_col(first_arg_start_offset);
 
         let base = if self.uses_base_range_message(call_start_offset, has_attached_block)
             && !base_text.contains('\n')
             && is_single_line_base_range(
                 self.source,
-                call_start_offset,
+                base_start_offset,
                 first_arg_start_offset,
-                call_start_line,
+                base_start_line,
                 arg_start_line,
             ) {
             format!("`{base_text}`")
@@ -443,6 +492,40 @@ fn leading_whitespace_count(line: &[u8]) -> usize {
         .count()
 }
 
+fn base_range_start_offset(
+    source: &SourceFile,
+    call_start_offset: usize,
+    has_same_start_parent_call: bool,
+) -> usize {
+    let bytes = source.as_bytes();
+
+    if !has_same_start_parent_call
+        && call_start_offset >= 2
+        && bytes.get(call_start_offset - 2) == Some(&b'*')
+        && bytes.get(call_start_offset - 1) == Some(&b'*')
+        && is_splat_boundary(bytes.get(call_start_offset - 3).copied())
+    {
+        return call_start_offset - 2;
+    }
+
+    if !has_same_start_parent_call
+        && call_start_offset >= 1
+        && bytes.get(call_start_offset - 1) == Some(&b'*')
+        && is_splat_boundary(bytes.get(call_start_offset - 2).copied())
+    {
+        return call_start_offset - 1;
+    }
+
+    call_start_offset
+}
+
+fn is_splat_boundary(byte: Option<u8>) -> bool {
+    matches!(
+        byte,
+        None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{' | b',')
+    )
+}
+
 fn is_bare_operator(name: &str, has_regular_dot: bool) -> bool {
     method_identifier_predicates::is_operator_method(name.as_bytes()) && !has_regular_dot
 }
@@ -456,15 +539,29 @@ fn is_setter_method(name: &str) -> bool {
     method_identifier_predicates::is_setter_method(name.as_bytes())
 }
 
+fn is_eligible_parent_call(name: &str) -> bool {
+    name != "[]="
+}
+
 impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let call_start_offset = node.location().start_offset();
         let name_bytes = node.name().as_slice();
         let name_str = std::str::from_utf8(name_bytes).unwrap_or("");
         let call_operator_loc = node.call_operator_loc();
-        let has_regular_dot = call_operator_loc
-            .as_ref()
-            .is_some_and(|loc| loc.as_slice() == b".");
+
+        let block = node.block();
+        let has_attached_block = block.as_ref().and_then(|b| b.as_block_node()).is_some();
+        // In Prism, `foo(&expr)` with no regular args stores the block arg
+        // in node.block() as a BlockArgumentNode, not in node.arguments().
+        let block_arg_start_offset = if node.arguments().is_none() {
+            block
+                .as_ref()
+                .and_then(|b| b.as_block_argument_node())
+                .map(|ba| ba.location().start_offset())
+        } else {
+            None
+        };
 
         // Check this call node for first argument indentation
         self.check_call(
@@ -475,18 +572,18 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             node.arguments(),
             CallMetadata {
                 name: name_str,
-                has_attached_block: node.block().and_then(|b| b.as_block_node()).is_some(),
+                has_attached_block,
+                block_arg_start_offset,
             },
         );
 
         // Determine if this call is parenthesized and eligible for being a
         // "parent call" context for inner calls
         let is_parenthesized = node.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
-        let is_eligible =
-            !is_bare_operator(name_str, has_regular_dot) && !is_setter_method(name_str);
+        let is_eligible = is_eligible_parent_call(name_str);
 
-        // Collect argument start offsets
-        let arg_start_offsets: Vec<usize> = node
+        // Collect argument start offsets (including block argument when no regular args)
+        let mut arg_start_offsets: Vec<usize> = node
             .arguments()
             .map(|args| {
                 args.arguments()
@@ -495,8 +592,15 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
                     .collect()
             })
             .unwrap_or_default();
+        if let Some(offset) = block_arg_start_offset {
+            arg_start_offsets.push(offset);
+        }
 
         let parent_info = ParentCallInfo {
+            call_start_offset,
+            receiver_start_offset: node
+                .receiver()
+                .map(|receiver| receiver.location().start_offset()),
             is_parenthesized,
             arg_start_offsets,
             is_eligible,
@@ -520,6 +624,7 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             CallMetadata {
                 name: "super",
                 has_attached_block: false,
+                block_arg_start_offset: None,
             },
         );
 
@@ -540,6 +645,8 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
             .unwrap_or_default();
 
         let parent_info = ParentCallInfo {
+            call_start_offset,
+            receiver_start_offset: None,
             is_parenthesized,
             arg_start_offsets,
             is_eligible: false,
@@ -554,12 +661,23 @@ impl<'pr> Visit<'pr> for FirstArgVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::run_cop_full;
+    use crate::testutil::{run_cop_full, run_cop_full_with_config};
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(
         FirstArgumentIndentation,
         "cops/layout/first_argument_indentation"
     );
+
+    fn config_with_enforced_style(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
 
     #[test]
     fn args_on_same_line_ignored() {
@@ -646,6 +764,83 @@ mod tests {
         assert_eq!(
             diags[0].message,
             "Indent the first argument one step more than `foo.bar(`."
+        );
+    }
+
+    #[test]
+    fn consistent_relative_to_receiver_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/consistent_relative_to_receiver_no_offense.rb"
+            ),
+            config_with_enforced_style("consistent_relative_to_receiver"),
+        );
+    }
+
+    #[test]
+    fn consistent_relative_to_receiver_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/consistent_relative_to_receiver_offense.rb"
+            ),
+            config_with_enforced_style("consistent_relative_to_receiver"),
+        );
+    }
+
+    #[test]
+    fn special_for_inner_method_call_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/special_for_inner_method_call_no_offense.rb"
+            ),
+            config_with_enforced_style("special_for_inner_method_call"),
+        );
+    }
+
+    #[test]
+    fn special_for_inner_method_call_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FirstArgumentIndentation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/first_argument_indentation/special_for_inner_method_call_offense.rb"
+            ),
+            config_with_enforced_style("special_for_inner_method_call"),
+        );
+    }
+
+    #[test]
+    fn special_for_inner_method_call_treats_operator_parent_receiver_as_inner_call() {
+        let source =
+            b"foo = !!ActiveModel::Type::Boolean.new.cast(\n  params[:include_staged_users],\n)\n";
+        let diags = run_cop_full_with_config(
+            &FirstArgumentIndentation,
+            source,
+            config_with_enforced_style("special_for_inner_method_call"),
+        );
+
+        assert_eq!(diags.len(), 1, "expected one offense, got: {:?}", diags);
+        assert_eq!(
+            diags[0].message,
+            "Indent the first argument one step more than `ActiveModel::Type::Boolean.new.cast(`."
+        );
+    }
+
+    #[test]
+    fn consistent_relative_to_receiver_ignores_outer_splat_for_inner_chain_call() {
+        let source = b"values.push(\n  *incoming_exchange.variants.merge(\n    visible_incoming_variants(incoming_exchange.sender)\n  ).map(&:id).to_a\n)\n";
+        let diags = run_cop_full_with_config(
+            &FirstArgumentIndentation,
+            source,
+            config_with_enforced_style("consistent_relative_to_receiver"),
+        );
+
+        assert_eq!(diags.len(), 1, "expected one offense, got: {:?}", diags);
+        assert_eq!(
+            diags[0].message,
+            "Indent the first argument one step more than `incoming_exchange.variants.merge(`."
         );
     }
 }

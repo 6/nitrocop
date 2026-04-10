@@ -7,6 +7,10 @@
 block { |x| do_something(x) }
                          ^ Style/ItBlockParameter: Use `it` block parameter.
 
+# Named param with trailing comma still counts as a single block argument
+block { |arg,| do_something(arg) }
+                            ^^^ Style/ItBlockParameter: Use `it` block parameter.
+
 # Named param used inside nested block
 items.each do |item|
   context "something" do

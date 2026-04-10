@@ -1,4 +1,4 @@
-use crate::cop::shared::util::{RSPEC_DEFAULT_INCLUDE, is_camel_case, is_rspec_example_group};
+use crate::cop::shared::util::{RSPEC_DEFAULT_INCLUDE, is_rspec_example_group};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::codemap::CodeMap;
@@ -11,8 +11,9 @@ use std::sync::OnceLock;
 /// treated as valid `snake_case` because the shared helper allows `=` suffixes.
 /// Fixed false positives for blank helper names such as `let(:"")`, which
 /// RuboCop accepts and which appear in rswag request-spec parameter helpers.
-/// Fixed false positives for lowercase-starting camelCase names (e.g., `userName`)
-/// which RuboCop's camelCase regex accepts but the old is_camel_case() rejected.
+/// Fixed camelCase variant divergence by matching RuboCop's configurable naming
+/// regex exactly: names like `number?` and `userName?` are valid, while
+/// uppercase-leading helpers like `Authorization` remain offenses.
 pub struct VariableName;
 
 impl Cop for VariableName {
@@ -82,7 +83,7 @@ impl VariableNameVisitor<'_> {
 
     fn check_style(&self, name: &[u8]) -> bool {
         if self.enforced_camel_case {
-            is_camel_case(name)
+            is_rubocop_camel_case(name)
         } else {
             is_rubocop_snake_case(name)
         }
@@ -106,6 +107,21 @@ fn is_rubocop_snake_case(name: &[u8]) -> bool {
 
     REGEX
         .get_or_init(|| regex::Regex::new(r"^@{0,2}[\p{Ll}\d_]+[!?=]?$").unwrap())
+        .is_match(name)
+}
+
+fn is_rubocop_camel_case(name: &[u8]) -> bool {
+    static REGEX: OnceLock<regex::Regex> = OnceLock::new();
+
+    let name = match std::str::from_utf8(name) {
+        Ok(name) => name,
+        Err(_) => return false,
+    };
+
+    REGEX
+        .get_or_init(|| {
+            regex::Regex::new(r"^@{0,2}(?:_|_?[\p{Ll}][\p{Ll}\p{Lu}\d]*)[!?=]?$").unwrap()
+        })
         .is_match(name)
 }
 
@@ -199,39 +215,55 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(VariableName, "cops/rspec/variable_name");
 
-    #[test]
-    fn camel_case_style_flags_snake_case() {
-        use crate::cop::CopConfig;
+    fn camel_case_config() -> CopConfig {
         use std::collections::HashMap;
 
-        let config = CopConfig {
+        CopConfig {
             options: HashMap::from([(
                 "EnforcedStyle".into(),
                 serde_yml::Value::String("camelCase".into()),
             )]),
             ..CopConfig::default()
-        };
+        }
+    }
+
+    #[test]
+    fn camel_case_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &VariableName,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/variable_name/camel_case_offense.rb"
+            ),
+            camel_case_config(),
+        );
+    }
+
+    #[test]
+    fn camel_case_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &VariableName,
+            include_bytes!(
+                "../../../tests/fixtures/cops/rspec/variable_name/camel_case_no_offense.rb"
+            ),
+            camel_case_config(),
+        );
+    }
+
+    #[test]
+    fn camel_case_style_flags_snake_case() {
         let source = b"RSpec.describe Foo do\n  let(:my_var) { 'x' }\nend\n";
-        let diags = crate::testutil::run_cop_full_with_config(&VariableName, source, config);
+        let diags =
+            crate::testutil::run_cop_full_with_config(&VariableName, source, camel_case_config());
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("camelCase"));
     }
 
     #[test]
     fn camel_case_style_accepts_lowercase_starting_camel() {
-        use crate::cop::CopConfig;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("camelCase".into()),
-            )]),
-            ..CopConfig::default()
-        };
         // RuboCop's camelCase regex accepts lowercase-starting names like userName
         let source = b"RSpec.describe Foo do\n  let(:userName) { 'x' }\nend\n";
-        let diags = crate::testutil::run_cop_full_with_config(&VariableName, source, config);
+        let diags =
+            crate::testutil::run_cop_full_with_config(&VariableName, source, camel_case_config());
         assert!(
             diags.is_empty(),
             "camelCase style should accept lowercase-starting names like userName"

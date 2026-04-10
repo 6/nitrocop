@@ -428,10 +428,64 @@ def test_style_variant_rows_in_markdown():
         assert "Style/Perfect (double_quotes)" in md
 
 
+def test_rescued_crash_files_excluded_from_fp():
+    """Files where rescue_parser_crashes.rb caught a crash should not produce FPs."""
+    sys.path.insert(0, str(SCRIPT.parent))
+    import diff_results
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        nitrocop_dir = tmp / "nitrocop"
+        rubocop_dir = tmp / "rubocop"
+        nitrocop_dir.mkdir()
+        rubocop_dir.mkdir()
+
+        # nitrocop finds an offense on a file that RuboCop's parser crashed on
+        nitrocop_dir.joinpath("repo_x.json").write_text(json.dumps({
+            "offenses": [
+                {"path": "repos/repo_x/test_logger.rb", "line": 119,
+                 "cop_name": "Style/SignalException"}
+            ]
+        }))
+
+        # RuboCop JSON shows the file with 0 offenses (rescue returned [])
+        rubocop_dir.joinpath("repo_x.json").write_text(json.dumps({
+            "files": [
+                {"path": "repos/repo_x/test_logger.rb", "offenses": []},
+                {"path": "repos/repo_x/app.rb", "offenses": [
+                    {"location": {"line": 1},
+                     "cop_name": "Style/FrozenStringLiteralComment",
+                     "message": "Missing frozen string literal comment."}
+                ]}
+            ],
+            "summary": {"target_file_count": 2, "inspected_file_count": 2}
+        }))
+
+        # stderr from RuboCop shows the rescue_parser_crashes.rb warning
+        rubocop_dir.joinpath("repo_x.err").write_text(
+            "[corpus] parser crash rescued repos/repo_x/test_logger.rb: "
+            "RegexpError: invalid multibyte escape\n"
+        )
+
+        rescued = diff_results.read_rescued_crash_files(rubocop_dir / "repo_x.json")
+        assert rescued == {"test_logger.rb"}, f"Expected rescued file, got {rescued}"
+
+        rc_result = diff_results.parse_rubocop_json(
+            rubocop_dir / "repo_x.json", rescued_crash_files=rescued
+        )
+        assert rc_result is not None
+        _, _, inspected_files, _, _ = rc_result
+        assert "test_logger.rb" not in inspected_files, \
+            "Rescued crash file should be excluded from inspected_files"
+        assert "app.rb" in inspected_files, \
+            "Non-crashed file should remain in inspected_files"
+
+
 if __name__ == "__main__":
     test_end_to_end()
     test_match_rate_never_rounds_up_to_100()
     test_end_to_end_near_perfect_not_100()
     test_example_order_is_stable()
     test_style_variant_rows_in_markdown()
+    test_rescued_crash_files_excluded_from_fp()
     print("OK: all tests passed")

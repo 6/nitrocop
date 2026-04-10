@@ -21,6 +21,14 @@ use super::multiline_literal_brace_layout::{self, ARRAY_BRACE, BracePositions};
 /// was on a different line than the last element. RuboCop skips arrays where
 /// the last element contains a heredoc. Fixed by adding `contains_heredoc`
 /// check matching the sibling `MultilineHashBraceLayout` cop.
+///
+/// **Variant FP root cause (34 FPs under `EnforcedStyle: same_line`):**
+/// the shallow heredoc check missed descendants wrapped in nested arrays and
+/// hash-like containers, so Prism still reported the last element as ending on
+/// the heredoc opener line. RuboCop only skips when a descendant heredoc
+/// reaches the last line of the last array element. Fixed by using the shared
+/// `last_line_heredoc` visitor for that last element instead of the shallow
+/// container-specific check.
 pub struct MultilineArrayBraceLayout;
 
 impl Cop for MultilineArrayBraceLayout {
@@ -65,10 +73,10 @@ impl Cop for MultilineArrayBraceLayout {
 
         let last_elem = elements.iter().last().unwrap();
 
-        // Skip arrays where the last element contains a heredoc — the heredoc
-        // body forces the closing brace placement and adjusting it would
-        // produce invalid code.
-        if multiline_literal_brace_layout::contains_heredoc(&last_elem) {
+        // RuboCop only skips when a heredoc descendant in the last element
+        // reaches that element's last line and therefore forces the closing
+        // bracket placement.
+        if multiline_literal_brace_layout::last_line_heredoc(source, &last_elem) {
             return;
         }
 
@@ -105,4 +113,27 @@ mod tests {
         MultilineArrayBraceLayout,
         "cops/layout/multiline_array_brace_layout"
     );
+
+    fn style_config(style: &str) -> CopConfig {
+        let mut opts = std::collections::HashMap::new();
+        opts.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        CopConfig {
+            options: opts,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn same_line_no_offense() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MultilineArrayBraceLayout,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/multiline_array_brace_layout/same_line_no_offense.rb"
+            ),
+            style_config("same_line"),
+        );
+    }
 }

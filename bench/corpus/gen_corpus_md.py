@@ -62,7 +62,8 @@ def _emit_examples(md: list[str], fp_list: list, fn_list: list, limit: int) -> N
     md.append("")
 
 
-def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
+def generate_md(data: dict, variant_by_cop: dict[str, list[dict]],
+                synthetic: dict[str, dict] | None = None) -> str:
     """Generate corpus markdown from pre-computed JSON data."""
     summary = data["summary"]
     by_cop = data["by_cop"]
@@ -128,6 +129,15 @@ def generate_md(data: dict, variant_by_cop: dict[str, list[dict]]) -> str:
     md.append(f"| FN (nitrocop missing) | {total_fn:,} |")
     md.append(f"| Registered cops | {registered_cops:,} |")
     md.append(f"| Cops with exact match | {perfect_cops:,} |")
+    if synthetic:
+        synthetic_perfect = sum(
+            1 for c in by_cop
+            if c.get("matches", 0) + c.get("fp", 0) + c.get("fn", 0) == 0
+            and c["cop"] in synthetic
+            and synthetic[c["cop"]].get("perfect_match")
+        )
+        if synthetic_perfect > 0:
+            md.append(f"| Cops with exact match (incl. synthetic) | {perfect_cops + synthetic_perfect:,} |")
     md.append(f"| Cops with divergence | {diverging_cops_count:,} |")
     md.append(f"| Cops with no corpus data | {inactive_cops:,} |")
     md.append(f"| **Match rate (default config)** | **{fmt_pct_precise(overall_rate)}** |")
@@ -417,6 +427,8 @@ def main():
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--style-variant-results", type=Path, default=None)
+    parser.add_argument("--synthetic", type=Path, default=None,
+                        help="Path to synthetic-results.json")
     args = parser.parse_args()
 
     data = json.loads(args.input.read_text())
@@ -424,7 +436,12 @@ def main():
     if args.style_variant_results:
         variant_by_cop = load_variant_by_cop(args.style_variant_results)
 
-    md = generate_md(data, variant_by_cop)
+    synthetic = None
+    if args.synthetic:
+        syn_data = json.loads(args.synthetic.read_text())
+        synthetic = {entry["cop"]: entry for entry in syn_data.get("by_cop", [])}
+
+    md = generate_md(data, variant_by_cop, synthetic)
     args.output.write_text(md)
     print(f"Generated {args.output} ({len(md):,} bytes)", file=sys.stderr)
 

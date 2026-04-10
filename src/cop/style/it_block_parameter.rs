@@ -83,6 +83,24 @@ use ruby_prism::Visit;
 /// `NamedParamFinder`, restoring the default traversal behavior that descends into
 /// all child nodes. `ItReferenceFinder` and `NumberedParamFinder` retain their
 /// nested-block stops because `it`/`_1` are lexically scoped to their block.
+///
+/// ## Investigation findings (2026-04-08, implicit rest)
+///
+/// Variant `always` style FN: blocks like `|arg,|` were skipped even though RuboCop
+/// flags them. In Prism, the trailing comma is represented as an `ImplicitRestNode`,
+/// so the current "single named parameter" gate incorrectly rejected these blocks by
+/// treating any `rest()` as multi-arg. RuboCop's `node.arguments.one?` still counts
+/// `|arg,|` as one block argument.
+///
+/// Fix: allow `ImplicitRestNode` in the named-parameter gate, while still rejecting
+/// explicit rest parameters like `|arg, *rest|`.
+///
+/// ## Investigation findings (2026-04-08, block locals)
+///
+/// Variant `always` style FP: blocks with semicolon-declared block locals like
+/// `|arg; tmp|` were flagged, but RuboCop does not register an offense. These
+/// blocks cannot be rewritten to implicit `it` without dropping the block-local
+/// declarations, so they must be rejected by the single named-parameter gate.
 pub struct ItBlockParameter;
 
 impl Cop for ItBlockParameter {
@@ -148,6 +166,40 @@ impl Cop for ItBlockParameter {
 }
 
 impl ItBlockParameter {
+    /// Return the sole named block parameter for `EnforcedStyle: always`, if the
+    /// block shape matches RuboCop's `node.arguments.one?` / `first_argument.arg_type?`.
+    ///
+    /// Prism represents `|arg,|` with a `RequiredParameterNode` plus an
+    /// `ImplicitRestNode`, but RuboCop still treats that as a single block argument.
+    fn single_named_param_name<'pr>(
+        block_params: &ruby_prism::BlockParametersNode<'pr>,
+    ) -> Option<&'pr [u8]> {
+        if !block_params.locals().is_empty() {
+            return None;
+        }
+
+        let parameters = block_params.parameters()?;
+        let requireds = parameters.requireds();
+        if requireds.len() != 1 {
+            return None;
+        }
+        if !parameters.optionals().is_empty()
+            || !parameters.posts().is_empty()
+            || !parameters.keywords().is_empty()
+            || parameters.keyword_rest().is_some()
+            || parameters.block().is_some()
+        {
+            return None;
+        }
+        if let Some(rest) = parameters.rest() {
+            rest.as_implicit_rest_node()?;
+        }
+
+        let param = requireds.iter().next()?;
+        let req_param = param.as_required_parameter_node()?;
+        Some(req_param.name().as_slice())
+    }
+
     /// Dispatch to itblock/numblock/named-block checks based on block parameters.
     fn check_block_params(
         &self,
@@ -334,43 +386,21 @@ impl ItBlockParameter {
             return;
         }
         if let Some(block_params) = params.as_block_parameters_node() {
-            let parameters = match block_params.parameters() {
-                Some(p) => p,
+            let param_name = match Self::single_named_param_name(&block_params) {
+                Some(name) => name,
                 None => return,
             };
-            let requireds = parameters.requireds();
-            if requireds.len() != 1 {
-                return;
-            }
-            if !parameters.optionals().is_empty()
-                || parameters.rest().is_some()
-                || !parameters.posts().is_empty()
-                || !parameters.keywords().is_empty()
-                || parameters.keyword_rest().is_some()
-                || parameters.block().is_some()
-            {
-                return;
-            }
-            let param = match requireds.iter().next() {
-                Some(p) => p,
-                None => return,
-            };
-            let req_param = match param.as_required_parameter_node() {
-                Some(rp) => rp,
-                None => return,
-            };
-            let param_name = req_param.name();
             let body = match lambda.body() {
                 Some(b) => b,
                 None => return,
             };
             // RuboCop's find_block_variables uses each_descendant which doesn't include body
             // itself when it's a bare lvar. Match that behavior.
-            if Self::is_body_bare_named_param(&body, param_name.as_slice()) {
+            if Self::is_body_bare_named_param(&body, param_name) {
                 return;
             }
             let mut finder = NamedParamFinder {
-                name: param_name.as_slice(),
+                name: param_name,
                 locations: Vec::new(),
             };
             finder.visit(&body);
@@ -491,37 +521,10 @@ impl ItBlockParameter {
             return;
         }
 
-        let parameters = match block_params.parameters() {
-            Some(p) => p,
+        let param_name = match Self::single_named_param_name(block_params) {
+            Some(name) => name,
             None => return,
         };
-
-        // Must have exactly one required parameter and no other params
-        let requireds = parameters.requireds();
-        if requireds.len() != 1 {
-            return;
-        }
-        if !parameters.optionals().is_empty()
-            || parameters.rest().is_some()
-            || !parameters.posts().is_empty()
-            || !parameters.keywords().is_empty()
-            || parameters.keyword_rest().is_some()
-            || parameters.block().is_some()
-        {
-            return;
-        }
-
-        let param = match requireds.iter().next() {
-            Some(p) => p,
-            None => return,
-        };
-
-        let req_param = match param.as_required_parameter_node() {
-            Some(rp) => rp,
-            None => return,
-        };
-
-        let param_name = req_param.name();
 
         // Need a body to find references
         let body = match block_node.body() {
@@ -531,13 +534,13 @@ impl ItBlockParameter {
 
         // RuboCop's find_block_variables uses each_descendant which doesn't include body
         // itself when it's a bare lvar. Match that behavior.
-        if Self::is_body_bare_named_param(&body, param_name.as_slice()) {
+        if Self::is_body_bare_named_param(&body, param_name) {
             return;
         }
 
         // Find all references to this parameter name in the body
         let mut finder = NamedParamFinder {
-            name: param_name.as_slice(),
+            name: param_name,
             locations: Vec::new(),
         };
         finder.visit(&body);
@@ -713,5 +716,16 @@ mod tests {
             ),
             always_style_config(),
         );
+    }
+
+    #[test]
+    fn no_offense_always_style_explicit_rest_param() {
+        let source = b"block { |x, *rest| do_something(x) }\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ItBlockParameter,
+            source,
+            always_style_config(),
+        );
+        assert!(diags.is_empty(), "Expected 0 offenses: {:?}", diags);
     }
 }

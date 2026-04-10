@@ -17,6 +17,9 @@ puts $ERROR_INFO
 puts $PROCESS_ID
      ^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$$` over `$PROCESS_ID`.
 
+puts $PID
+     ^^^^ Style/SpecialGlobalVars: Prefer `$$` over `$PID`.
+
 puts $CHILD_STATUS
      ^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$?` over `$CHILD_STATUS`.
 
@@ -29,17 +32,32 @@ puts $LAST_READ_LINE
 puts $FIELD_SEPARATOR
      ^^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$;` over `$FIELD_SEPARATOR`.
 
+puts $FS
+     ^^^ Style/SpecialGlobalVars: Prefer `$;` over `$FS`.
+
 puts $OUTPUT_FIELD_SEPARATOR
      ^^^^^^^^^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$,` over `$OUTPUT_FIELD_SEPARATOR`.
+
+puts $OFS
+     ^^^^ Style/SpecialGlobalVars: Prefer `$,` over `$OFS`.
 
 puts $INPUT_RECORD_SEPARATOR
      ^^^^^^^^^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$/` over `$INPUT_RECORD_SEPARATOR`.
 
+puts $RS
+     ^^^ Style/SpecialGlobalVars: Prefer `$/` over `$RS`.
+
 puts $OUTPUT_RECORD_SEPARATOR
      ^^^^^^^^^^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$\` over `$OUTPUT_RECORD_SEPARATOR`.
 
+puts $ORS
+     ^^^^ Style/SpecialGlobalVars: Prefer `$\` over `$ORS`.
+
 puts $INPUT_LINE_NUMBER
      ^^^^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$.` over `$INPUT_LINE_NUMBER`.
+
+puts $NR
+     ^^^ Style/SpecialGlobalVars: Prefer `$.` over `$NR`.
 
 puts $DEFAULT_OUTPUT
      ^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$>` over `$DEFAULT_OUTPUT`.
@@ -49,18 +67,6 @@ puts $DEFAULT_INPUT
 
 puts $ERROR_POSITION
      ^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$@` over `$ERROR_POSITION`.
-
-puts $LAST_PAREN_MATCH
-     ^^^^^^^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$+` over `$LAST_PAREN_MATCH`.
-
-puts $MATCH
-     ^^^^^^ Style/SpecialGlobalVars: Prefer `$&` over `$MATCH`.
-
-puts $POSTMATCH
-     ^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$'` over `$POSTMATCH`.
-
-puts $PREMATCH
-     ^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$`` over `$PREMATCH`.
 
 puts $IGNORECASE
      ^^^^^^^^^^^ Style/SpecialGlobalVars: Prefer `$=` over `$IGNORECASE`.

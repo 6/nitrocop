@@ -178,3 +178,133 @@ def ensure_writes_are_allowed(sql) # :nodoc:
     raise ActiveRecord::ReadOnlyError, "Write query attempted while in readonly mode: #{sql}"
   end
 end
+
+        (environment['DD_TRACE_AGENT_URL'] = "#{trace_agent_url_protocol}://agent_hostname:1234") if with_trace_agent_url
+        ^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+(request_http_basic_authentication(realm_name_by_controller) and (session[:http_authentication_used] = true) and return) if (request.authorization.nil? || session[:http_authentication_used].nil?)
+^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+if account.balance != account.available_balance
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  say "Available: #{account.available_balance.format}", :yellow
+end
+
+if @study.study_shares.any?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  SingleCellMailer.share_update_notification(@study, changes, current_user).deliver_now
+end
+
+if @study.study_shares.any?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  SingleCellMailer.share_update_notification(@study, changes, current_user).deliver_now
+end
+
+if default_org.in_summary? and default_org.parent_id.present?
+^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  ret_orgs = default_org.parent.children - [default_org]
+end
+
+(raise SugarCRM::MultipleSessions, "There are multiple active sessions: use the session namespace instead of SugarCRM") if @@sessions.size > 1
+^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+(raise SugarCRM::NoActiveSession, "No session is active. Create a new session with 'SugarCRM.connect(...)'") if @@sessions.size < 1
+^ Style/IfUnlessModifier: Modifier form of `if` makes the line too long.
+
+# FN: interpolation on previous line is not a trailing comment
+          say "Balance: #{account.balance.format}", :green
+          if account.balance != account.available_balance
+          ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+            say "Available: #{account.available_balance.format}", :yellow
+          end
+
+# FN: interpolation on previous line inside an array literal should not force parens
+      changes = ["Study file updated: #{@study_file.upload_file_name}"]
+      if @study.study_shares.any?
+      ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+        SingleCellMailer.share_update_notification(@study, changes, current_user).deliver_now
+      end
+
+# FN: nested indentation near MaxLineLength should still flag when previous line has interpolation
+            Rails.logger.info "Apnotic exception raised: #{exception}"
+            if config[:error_handler].respond_to?(:call)
+            ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+              notification.instance_exec(exception, &config[:error_handler])
+            end
+
+def unlock!
+  if update_columns(locked_at: nil, locked_by: nil)
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    Current.preview_page = nil
+  end
+end
+
+parser.parse!
+unless options.key?(:extensions)
+^^^^^^ Style/IfUnlessModifier: Favor modifier `unless` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  raise ArgumentError, 'must provide the files extensions to watch for'
+end
+
+m.load_bundler!
+if m.invoked_as_script?
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  load Gem.bin_path("bundler", "bundle")
+end
+
+item.strip!
+if (item[0] == "'" || item[0] == '"') && (item[-1] == "'" || item[-1] == '"')
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  @src_keywords << item[1..-2]
+end
+
+# FN: previous line ends with a percent string delimiter, not a chained receiver
+execute %!CREATE STATISTICS my_stats ON "Id", "UserId" FROM "Posts"!
+if !trigger_based
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  execute %!ALTER TABLE "Posts" ADD COLUMN "Gen" INTEGER GENERATED ALWAYS AS ("Id" * 10) STORED!
+end
+
+# FN: previous line ending in `def !` is not operator chaining
+def !
+  if dtype == Boolean
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    return Utils.wrap_s(_s.not_)
+  end
+  raise NotImplementedError
+end
+
+# FN: previous line ending in `$!` is not operator chaining
+def initialize(template)
+  super($!.message)
+  @cause = $!
+  if @cause.is_a?(SyntaxError)
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    @cause = ActiveSupport::SyntaxErrorProxy.new(@cause)
+  end
+  @template, @sub_templates = template, nil
+end
+
+# FN: previous line ending in a character literal `?!` should still allow inner if
+if safe_channel?(ch) && ch[1] != ?!
+  if @config.channel_info[ch] && @config.channel_info[ch][:auto_create]
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    @manager.join_to_channel("!" + ch)
+  end
+end
+
+# FN: previous line ending in `+` makes the if an argument, not a chained receiver
+list = (data[:title_popular] || []) + (data[:title_exact] || []) + (data[:title_substring] || []) +
+if !list # as a last resort
+^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+  list = (data[:title_approximate] || []) + (data[:title_approx] || [])
+end
+
+# FN: previous line ending in a character literal `?-` should still allow inner if
+if order
+  order = order.to_s
+  order = '-' << order if order[0] != ?-
+  if order.length < 2
+  ^^ Style/IfUnlessModifier: Favor modifier `if` usage when having a single-line body. Another good alternative is the usage of control flow `&&`/`||`.
+    order = nil
+  end
+end

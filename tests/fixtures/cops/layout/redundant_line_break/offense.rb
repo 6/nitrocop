@@ -80,15 +80,6 @@ $counter +=
 ^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
   check_flag
 
-# Multiline regex — RuboCop's safe_to_split? does not check :regexp,
-# so assignments containing multiline regexps are still flaggable.
-pattern = /
-^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
-  \A
-  (?<key>.+)
-  \z
-/x
-
 # Multiline %w array — RuboCop's safe_to_split? does not check arrays.
 names = %w[
 ^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
@@ -280,3 +271,57 @@ end
 results.add_warning('summary', 'The summary should be a short ' \
 ^ Layout/RedundantLineBreak: Redundant line break detected.
   'version of `description` (max 140 characters).')
+
+raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "for attribute: #{inspect}" unless acceptable
+
+raise "[Xcodeproj] unsupported key `#{key}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
+
+return if !checks.values.
+          ^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  find { |c| c.check? page, [Element::Form::DOM, Element::Cookie::DOM], true }
+
+# CJK characters: combined line is under 120 chars but over 120 bytes.
+# RuboCop measures character length, not byte length.
+DiceTable::Table.new(
+^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  "奇跡の触媒（エレメント）",
+  "1D6",
+  ["ワンド", "水晶玉", "カード", "ステッキ", "手鏡", "宝石"]
+)
+
+raise ArgumentError,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+      "error message"
+
+it 'fails to resolve a dependency with an explicit source even if it can be ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+   'resolved using the global sources' do
+end
+
+results.add_warning('summary', 'The summary should be a short ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'version of `description` (max 140 characters).')
+
+raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "for attribute: #{inspect}" unless acceptable
+
+raise "[Xcodeproj] unsupported key `#{key}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
+
+!current_course_user&.
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  email_unsubscribed
+
+), public: File.read(
+           ^ Layout/RedundantLineBreak: Redundant line break detected.
+  path
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)
