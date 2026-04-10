@@ -211,6 +211,29 @@ is_found ? found += [c] : found
 is_found ? found += [c] : found
            ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `found`.
 
+# FN fix: sequential overwrites before block capture — the variable is later
+# captured by a block, but earlier overwrites are still useless.
+def sequential_then_block_capture
+  exec_resp = perform_action(:red_off)
+  ^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `exec_resp`.
+  exec_resp = perform_action(:yellow_off)
+  ^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `exec_resp`.
+  exec_resp = perform_action(:green_on)
+  items.each do |item|
+    exec_resp = perform_action(item)
+    puts exec_resp
+  end
+end
+
+# FN fix: single overwrite before block capture
+def single_overwrite_then_block
+  result = compute_initial
+  ^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `result`.
+  result = compute_final
+  [1, 2].each { |x| result = x }
+  puts result
+end
+
 # An exclusive outer-branch read must not suppress the earlier rescue-clause
 # offense in the rescue chain.
 def rescue_chain_read_in_else(flag)

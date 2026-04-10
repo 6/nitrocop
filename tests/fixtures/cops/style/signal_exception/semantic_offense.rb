@@ -70,6 +70,10 @@ rescue Exception
          ^^^^ Style/SignalException: Use `raise` instead of `fail` to rethrow exceptions.
 end
 
+# fail in rescue modifier → use raise
+JSON.parse(response.body, symbolize_names: true) rescue fail InvalidJsonError, "Api request returned invalid json"
+                                                        ^^^^ Style/SignalException: Use `raise` instead of `fail` to rethrow exceptions.
+
 # ::Kernel.raise outside rescue → use fail
 def test
   ::Kernel.raise
@@ -92,4 +96,16 @@ begin
   end
 rescue Exception
   # handle it
+end
+
+# raise in nested begin inside rescue body → use fail
+begin
+  fail
+rescue Exception
+  begin
+    raise Draft::OutOfSequence
+    ^^^^^ Style/SignalException: Use `fail` instead of `raise` to signal exceptions.
+  rescue Draft::OutOfSequence
+    raise
+  end
 end

@@ -11,8 +11,14 @@ bundle lock \
 foo \
   "string"
 
+foo \
+  (bar)
+
 super \
   bar
+
+super \
+  (bar)
 
 x = 'hello' \
   'world'
@@ -73,3 +79,21 @@ helper_method \
   def ordergroups_for_adding
   Ordergroup.undeleted.order(:name)
 end
+
+def foo
+  yield \
+    (bar)
+end
+
+existing_autoload_paths = \
+  deps.autoload_paths.select { |dir| File.directory?(dir) } -
+  deps.autoload_once_paths
+
+expect(view.include_gon(need_tag: false)).to eq( \
+  'window.gon={};' +
+  'gon.int=1;'
+)
+
+gsub_file "config/rubber/rubber-percona.yml", /^db_backup_cmd.*$/, \
+  "backup command" +
+  " updated"

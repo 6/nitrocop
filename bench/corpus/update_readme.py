@@ -228,11 +228,10 @@ def build_department_stats(data: dict, synthetic: dict[str, dict] | None = None)
 
 
 
-def build_cops_section(data: dict, synthetic: dict[str, dict] | None = None) -> str:
+def build_cops_section(data: dict, by_department: dict[str, dict]) -> str:
     """Build the generated README Cops section."""
     summary = data.get("summary", {})
     baseline = data.get("baseline", {})
-    by_department = build_department_stats(data, synthetic)
 
     total_repos = summary.get("total_repos", 0)
     total_files = summary.get("total_files_inspected", 0)
@@ -341,11 +340,12 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
     files_str = format_files(files) if files > 0 else None
 
     # 0. Generated Cops section between explicit markers
+    by_department = build_department_stats(data, synthetic)
     readme_text = replace_marked_section(
         readme_text,
         COPS_SECTION_START,
         COPS_SECTION_END,
-        build_cops_section(data, synthetic),
+        build_cops_section(data, by_department),
     )
 
     # 1. Features bullet: cops count
@@ -358,10 +358,11 @@ def update_readme(readme_text: str, data: dict, synthetic: dict[str, dict] | Non
         )
 
     # 2. Corpus bullet: tested on N repos, X of Y cops match exactly
-    perfect_cops = summary.get("perfect_cops", 0)
+    # Derive from build_department_stats so synthetic boosts are included
+    perfect_cops = sum(d["perfect_cops"] for d in by_department.values())
     variant_perfect = sum(
         d.get("variant_perfect_cops") or 0
-        for d in data.get("by_department", [])
+        for d in by_department.values()
     )
     total_compared = summary.get("total_offenses_compared", 0)
     total_matches = summary.get("matches", 0)

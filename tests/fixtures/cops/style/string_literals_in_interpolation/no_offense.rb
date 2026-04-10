@@ -19,3 +19,10 @@ x = "#{42}"
 "#{CGI.escape("A&(! 234k !@ kasdj232\#$ kjw35")}"
 # Strings directly inside backtick xstr interpolation are not flagged
 `passbolt #{config["database"]} --json`
+# RuboCop skips multiline quoted literals inside interpolation because parser emits dstr, not str
+"#{"foo
+bar"}"
+"#{condition ? 'a' : "b
+c"}"
+"#{"sql
+fragment" if enabled}"

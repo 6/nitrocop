@@ -42,6 +42,26 @@ it { is_expected.to validate_uniqueness_of(:github_url).
   case_insensitive.with_message('Project has already been suggested.') }
 ^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body beginning.
 
+# Backslash continuation before do — offense at the do line, not the continuation
+# RuboCop uses send_node.last_line (the last arg line), not the first continuation
+it "from date" \
+   "to date" \
+   "result" \
+do
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body beginning.
+  expect(true).to be true
+end
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body end.
+
+# Same pattern with method call and backslash continuation
+option(:precision, 3, 'description ' \
+                      'more text') \
+                      do |v, opt_def|
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body beginning.
+  process(v, opt_def)
+end
+^ Layout/EmptyLinesAroundBlockBody: Empty line missing at block body end.
+
 # Forwarding super blocks also need blank lines in empty_lines style
 def method_missing(*, &block)
   super do |klass, names, options|

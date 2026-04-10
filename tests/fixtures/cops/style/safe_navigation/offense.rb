@@ -256,3 +256,38 @@ outer.wrap do
     end if items
   end
 end
+
+options && options.each do |option, value|
+^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  option
+end
+
+new(
+  input_attributes: {
+    error: (errors.to_sentence.capitalize if errors),
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+  }
+)
+
+component("ui/forms/select").new(
+  error: (errors.to_sentence.capitalize if errors),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+)
+
+a && a.b && c && c.d && e && (f && f.g)
+^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+            ^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+                              ^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+@with.map do |mapping|
+  options && options.each do |option, value|
+  ^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+    option
+  end
+end.join(", ")
+
+options && options.each do |option, value|
+^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
+
+@errors = Array(root && root.errors.map(&:to_s))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/SafeNavigation: Use safe navigation (`&.`) instead of checking if an object exists before calling the method.
