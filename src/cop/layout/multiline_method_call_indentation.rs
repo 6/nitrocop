@@ -537,9 +537,7 @@ fn find_current_node_block_continuation(
 ) -> Option<usize> {
     // Current node must have a real block (do..end or { }), not a block argument (&:foo)
     let block = call_node.block()?;
-    if block.as_block_node().is_none() {
-        return None;
-    }
+    block.as_block_node()?;
 
     let recv_call = receiver.as_call_node()?;
 
