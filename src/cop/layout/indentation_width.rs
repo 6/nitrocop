@@ -119,6 +119,7 @@ use crate::parse::source::SourceFile;
 ///   the `end` keyword column only. This fixes cases like:
 ///   - `begin..end` where `end` is misindented (body at begin+2 passes alt check)
 ///   - `result = begin..end` where body aligns with `begin` keyword, not `end`
+///
 ///   Resolved 16+ FN (Netflix Scumblr, DManga, idb, redcar, commitgpt, etc.).
 pub struct IndentationWidth;
 
