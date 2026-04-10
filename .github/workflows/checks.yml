@@ -30,9 +30,7 @@ jobs:
         with:
           submodules: true
           ref: ${{ inputs.ref || '' }}
-      - uses: jdx/mise-action@v4
-        with:
-          install_args: rust
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       - name: Build release binary
         run: cargo build --release
@@ -51,10 +49,9 @@ jobs:
           submodules: true
           ref: ${{ inputs.ref || '' }}
 
-      - uses: jdx/mise-action@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
-          install_args: rust
-      - run: rustup component add rustfmt clippy
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
@@ -109,9 +106,7 @@ jobs:
         with:
           submodules: true
           ref: ${{ inputs.ref || '' }}
-      - uses: jdx/mise-action@v4
-        with:
-          install_args: rust
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --profile ci
