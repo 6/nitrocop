@@ -370,3 +370,17 @@ module Jb
     end
   end
 end
+
+# Comments inside a Class.new block passed as a call argument belong to the method
+stub_const(
+  "ActiveJob::QueueAdapters::AppsignalTestAdapter",
+  Class.new(ActiveJob::QueueAdapters::InlineAdapter) do
+    # Adapter used in our test suite to add provider data to the job
+    # data, as is done by Rails provided ActiveJob adapters.
+    #
+    # This implementation is based on the inline adapter.
+    def enqueue(job)
+      ActiveJob::Base.execute(job.serialize)
+    end
+  end
+)
