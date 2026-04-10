@@ -349,6 +349,7 @@ enum ParentKind {
     Block,
     BlockArgument,
     RescueModifier,
+    RescueBody,
     MultipleAssignment,
     Interpolation,
     Other,
@@ -366,6 +367,9 @@ struct ParentInfo {
     is_operator: bool,
     is_unary_plus_minus: bool,
     is_match_operator: bool,
+    /// True when the parent is a `=~` call AND the receiver (LHS) is a regex literal.
+    /// RuboCop only exempts the RHS parens for regex-literal `=~` (Parser's `match_with_lvasgn`).
+    is_regex_match_operator: bool,
     is_endless_def: bool,
     is_assignment_parent: bool,
     /// The start offset of this parent node.
@@ -393,6 +397,10 @@ struct ParentInfo {
     /// which corresponds to the rescue_expression in Prism. The expression
     /// (left side) is still flagged.
     rescue_expression_start_offset: Option<usize>,
+    /// For RescueBody parents, the start offset of the statements (body) node.
+    /// Parens in the exception list (`rescue *(Err)`) are NOT exempt — only
+    /// parens inside the body are.
+    rescue_body_start_offset: Option<usize>,
     /// For conditional parents, the source range of the predicate expression.
     /// Used to distinguish parens in the condition from parens in the body.
     conditional_predicate_range: Option<(usize, usize)>,
@@ -462,15 +470,12 @@ impl RedundantParensVisitor<'_> {
             }
         }
 
-        // multiline_control_flow_statements? — applies to return, next, break, super, yield
+        // multiline_control_flow_statements? — RuboCop only checks return, next, break.
+        // Super and yield are NOT included (they use like_method_argument_parentheses? instead).
         if let Some(p) = parent {
             if matches!(
                 p.kind,
-                ParentKind::Return
-                    | ParentKind::Next
-                    | ParentKind::Break
-                    | ParentKind::Super
-                    | ParentKind::Yield
+                ParentKind::Return | ParentKind::Next | ParentKind::Break
             ) && p.multiline
             {
                 return;
@@ -562,6 +567,15 @@ impl RedundantParensVisitor<'_> {
                 && p.rescue_expression_start_offset
                     .is_some_and(|off| node.location().start_offset() >= off)
         }) {
+            return;
+        }
+
+        // RuboCop's rescue? also matches parens inside a full rescue clause body
+        // (`begin ... rescue ... (expr) ... end`). The matcher `'{^resbody ^^resbody}'`
+        // checks parent or grandparent is a resbody node. In Prism, the rescue clause
+        // is a RescueNode whose body is a StatementsNode — so the paren can be a child
+        // (parent = StatementsNode under RescueBody) or grandchild.
+        if self.has_rescue_body_ancestor(node) {
             return;
         }
 
@@ -741,7 +755,7 @@ impl RedundantParensVisitor<'_> {
         // len <= 2 approximates "no parent" (program root only).
         if is_comparison(inner)
             && !is_receiver
-            && !is_chained(&self.source.content, node)
+            && !is_chained_or_indexed(&self.source.content, node)
             && self.parent_stack.len() <= 2
             && parent.is_none_or(|p| matches!(p.kind, ParentKind::Other))
         {
@@ -808,6 +822,35 @@ impl RedundantParensVisitor<'_> {
                 && !info.is_operator;
         }
 
+        false
+    }
+
+    /// RuboCop's `rescue?` matcher: `'{^resbody ^^resbody}'`.
+    /// Returns true if the paren is inside a rescue clause body (up to 2 levels deep).
+    /// Only suppresses parens whose offset is within the rescue body (statements),
+    /// not parens in the exception list (`rescue *(Err)`).
+    fn has_rescue_body_ancestor(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+        let paren_offset = node.location().start_offset();
+        // parent_stack.last() is the ParenthesesNode itself.
+        // We need to check parent (len-2) and grandparent (len-3).
+        let len = self.parent_stack.len();
+        if len >= 2
+            && matches!(self.parent_stack[len - 2].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 2]
+                .rescue_body_start_offset
+                .is_some_and(|off| paren_offset >= off)
+        {
+            return true;
+        }
+        // Grandparent check: paren inside StatementsNode inside RescueBody
+        if len >= 3
+            && matches!(self.parent_stack[len - 3].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 3]
+                .rescue_body_start_offset
+                .is_some_and(|off| paren_offset >= off)
+        {
+            return true;
+        }
         false
     }
 
@@ -1114,9 +1157,9 @@ impl RedundantParensVisitor<'_> {
             return None;
         }
 
-        // If the paren is chained (followed by `.` or `&.`), it's the receiver of
+        // If the paren is chained (followed by `.`, `&.`, or `[`), it's the receiver of
         // the parent call, not an argument. RuboCop checks `parent.receiver != begin_node`.
-        if is_chained(&self.source.content, node) {
+        if is_chained_or_indexed(&self.source.content, node) {
             return None;
         }
 
@@ -1227,6 +1270,7 @@ impl RedundantParensVisitor<'_> {
             is_operator: false,
             is_unary_plus_minus: false,
             is_match_operator: false,
+            is_regex_match_operator: false,
             is_endless_def: false,
             is_assignment_parent: false,
             node_start_offset,
@@ -1237,6 +1281,7 @@ impl RedundantParensVisitor<'_> {
             call_first_arg_is_begin: false,
             statements_child_count: 0,
             rescue_expression_start_offset: None,
+            rescue_body_start_offset: None,
             conditional_predicate_range: None,
             is_post_condition_loop: false,
         });
@@ -1290,7 +1335,8 @@ fn check_logical<'a>(
     parent: Option<&ParentInfo>,
     is_receiver: bool,
 ) -> Option<&'a str> {
-    if is_receiver || is_chained(content, paren_node) {
+    // RuboCop's chained? check — includes `[` indexing since (a && b)['key'] is chained
+    if is_receiver || is_chained_or_indexed(content, paren_node) {
         return None;
     }
 
@@ -1361,9 +1407,9 @@ fn check_method_call<'a>(
         return None;
     }
 
-    // RuboCop accepts parenthesized RHS method calls for `=~`.
-    // Example: `/regexp/ =~ (line.strip)`
-    if parent.is_some_and(|p| p.is_match_operator) && !is_receiver {
+    // RuboCop only exempts the RHS parens for regex-literal `=~` (Parser's `match_with_lvasgn`).
+    // Example: `/regexp/ =~ (line.strip)` — exempt; `var =~ (line.strip)` — NOT exempt.
+    if parent.is_some_and(|p| p.is_regex_match_operator) && !is_receiver {
         return None;
     }
 
@@ -1384,7 +1430,14 @@ fn check_method_call<'a>(
         .block()
         .is_some_and(|b| b.as_block_argument_node().is_some());
     let call_has_parens = call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
-    let is_square_brackets = call.name().as_slice() == b"[]" && call.call_operator_loc().is_none();
+    // RuboCop's `square_brackets?` matcher only treats `[]` calls as square brackets
+    // when the receiver is one of: send, str, array, hash, const, or variable.
+    // Notably, `self` is NOT in the list — `(self[0, n]).to_s` keeps its parens.
+    let is_square_brackets = call.name().as_slice() == b"[]"
+        && call.call_operator_loc().is_none()
+        && call
+            .receiver()
+            .is_some_and(|r| is_square_brackets_receiver(&r));
 
     // RuboCop does not fall back to "a method call" for comparisons used as the
     // direct return value of a method or block body, but it still does for nested
@@ -1431,8 +1484,8 @@ fn check_unary<'a>(
     parent: Option<&ParentInfo>,
     is_receiver: bool,
 ) -> Option<&'a str> {
-    // RuboCop: `return if begin_node.chained?`
-    if is_receiver || is_chained(content, paren_node) {
+    // RuboCop: `return if begin_node.chained?` — includes `[` indexing
+    if is_receiver || is_chained_or_indexed(content, paren_node) {
         return None;
     }
 
@@ -1607,6 +1660,24 @@ fn is_chained(content: &[u8], paren_node: &ruby_prism::ParenthesesNode<'_>) -> b
     false
 }
 
+/// Like `is_chained` but also considers `[` as chaining. Used for logical and
+/// comparison expressions where `(expr)[key]` means parens are required.
+/// RuboCop's `begin_node.chained?` returns true when the begin node is a
+/// receiver of its parent call, which includes `[]` calls.
+fn is_chained_or_indexed(content: &[u8], paren_node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+    if is_chained(content, paren_node) {
+        return true;
+    }
+    let end_offset = paren_node.location().end_offset();
+    let mut i = end_offset;
+    // Only skip horizontal whitespace — a `[` on the next line is an array literal,
+    // not indexing into the parenthesized expression.
+    while i < content.len() && matches!(content[i], b' ' | b'\t') {
+        i += 1;
+    }
+    i < content.len() && content[i] == b'['
+}
+
 /// Returns true if the call node has a do..end block attached to it.
 fn has_do_end_block(call: &ruby_prism::CallNode<'_>) -> bool {
     if let Some(block) = call.block() {
@@ -1715,6 +1786,20 @@ fn is_literal(node: &ruby_prism::Node<'_>) -> bool {
         || node.as_false_node().is_some()
         || node.as_regular_expression_node().is_some()
         || node.as_interpolated_regular_expression_node().is_some()
+}
+
+/// RuboCop's `square_brackets?` matcher checks the receiver of `[]` calls.
+/// Only these receiver types count: send (method call), str, array, hash, const, variable.
+/// Notably, `self` is NOT in this list.
+fn is_square_brackets_receiver(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_call_node().is_some()
+        || node.as_string_node().is_some()
+        || node.as_interpolated_string_node().is_some()
+        || node.as_array_node().is_some()
+        || node.as_hash_node().is_some()
+        || node.as_constant_read_node().is_some()
+        || node.as_constant_path_node().is_some()
+        || is_variable(node)
 }
 
 fn is_xstring(node: &ruby_prism::Node<'_>) -> bool {
@@ -1918,6 +2003,13 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.is_unary_plus_minus =
                 matches!(node.name().as_slice(), b"-@" | b"+@") && node.arguments().is_none();
             top.is_match_operator = node.name().as_slice() == b"=~";
+            // RuboCop's match_with_lvasgn only applies when LHS is a regex literal.
+            // Only these forms exempt the RHS parens: `/regex/ =~ (expr)`
+            top.is_regex_match_operator = top.is_match_operator
+                && node.receiver().is_some_and(|r| {
+                    r.as_regular_expression_node().is_some()
+                        || r.as_interpolated_regular_expression_node().is_some()
+                });
             top.is_assignment_parent = node.equal_loc().is_some();
             top.call_receiver_start_offset = node.receiver().map(|r| r.location().start_offset());
             let receiver_range_offsets = node
@@ -2113,6 +2205,16 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
                 Some(node.rescue_expression().location().start_offset());
         }
         ruby_prism::visit_rescue_modifier_node(self, node);
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.kind = ParentKind::RescueBody;
+            // Store the body start offset so has_rescue_body_ancestor() can
+            // distinguish exception-list parens from body parens.
+            top.rescue_body_start_offset = node.statements().map(|s| s.location().start_offset());
+        }
+        ruby_prism::visit_rescue_node(self, node);
     }
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
