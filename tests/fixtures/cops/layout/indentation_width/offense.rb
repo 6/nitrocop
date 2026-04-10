@@ -329,3 +329,32 @@ result = begin
            compute_value
            ^ Layout/IndentationWidth: Use 2 (not 11) spaces for indentation.
 end
+
+# Multiline rescue modifier — fallback expression is indented from `rescue`
+def rescue_modifier_method
+  primary_call rescue
+    fallback_call
+    ^^^^^^^^^^^^^ Layout/IndentationWidth: Use 2 (not -11) spaces for indentation.
+end
+
+# Nested multiline rescue modifiers — each fallback expression is checked
+result = first_call rescue
+  second_call rescue
+  ^^^^^^^^^^^^^^^^^^ Layout/IndentationWidth: Use 2 (not -18) spaces for indentation.
+  third_call
+  ^^^^^^^^^^ Layout/IndentationWidth: Use 2 (not -12) spaces for indentation.
+
+# Class body with implicit begin/rescue still checks the main body indentation
+  class RescueWrappedClass
+ raise "bar"
+ ^^^^^ Layout/IndentationWidth: Use 2 (not -1) spaces for indentation.
+ rescue StandardError
+ end
+
+# Forwarding super with block — body still checked
+def around_template
+  super do
+   i { "3" }
+   ^ Layout/IndentationWidth: Use 2 (not 1) spaces for indentation.
+  end
+end

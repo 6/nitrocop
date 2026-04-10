@@ -1,8 +1,9 @@
 use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{
     BEGIN_NODE, BLOCK_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, FOR_NODE,
-    IF_NODE, IN_NODE, LAMBDA_NODE, MODULE_NODE, SINGLETON_CLASS_NODE, STATEMENTS_NODE, SUPER_NODE,
-    UNLESS_NODE, UNTIL_NODE, WHEN_NODE, WHILE_NODE,
+    FORWARDING_SUPER_NODE, IF_NODE, IN_NODE, LAMBDA_NODE, MODULE_NODE, RESCUE_MODIFIER_NODE,
+    SINGLETON_CLASS_NODE, STATEMENTS_NODE, SUPER_NODE, UNLESS_NODE, UNTIL_NODE, WHEN_NODE,
+    WHILE_NODE,
 };
 use crate::cop::shared::util::{assignment_context_base_col, expected_indent_for_body};
 use crate::cop::{Cop, CopConfig};
@@ -121,6 +122,21 @@ use crate::parse::source::SourceFile;
 ///   - `result = begin..end` where body aligns with `begin` keyword, not `end`
 ///
 ///   Resolved 16+ FN (Netflix Scumblr, DManga, idb, redcar, commitgpt, etc.).
+///
+/// 2026-04-10:
+/// - Fixed multiline modifier `rescue` bodies (`expr rescue\n  fallback`). Prism
+///   exposes these as `RescueModifierNode`, but RuboCop's Parser AST checks the
+///   fallback expression like a rescue body indented from the `rescue` keyword.
+///   We now check `rescue_expression()` against `keyword_loc()`, which also fixes
+///   chained rescue modifiers where each fallback starts a new wrapped node.
+/// - Fixed class/module/sclass bodies wrapped in an implicit `BeginNode` by
+///   `rescue`/`ensure`. The member walker previously treated the whole implicit
+///   begin wrapper as one member, so the first real statement on the next line
+///   was never checked. We now unwrap implicit begin bodies to their statements
+///   and check rescue/ensure/else clauses from the wrapper as well.
+/// - Fixed forwarding `super do ... end` blocks. Prism uses `ForwardingSuperNode`
+///   for bare `super` with a block, not `SuperNode`, so those block bodies were
+///   skipped entirely. The block handler now covers both node types.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -426,7 +442,17 @@ impl IndentationWidth {
             None => return Vec::new(),
         };
 
-        let members = body_members(body);
+        let implicit_begin = body
+            .as_begin_node()
+            .filter(|begin_node| begin_node.begin_keyword_loc().is_none());
+        let members = if let Some(ref begin_node) = implicit_begin {
+            begin_node
+                .statements()
+                .map(|stmts| stmts.body().iter().collect())
+                .unwrap_or_default()
+        } else {
+            body_members(body)
+        };
         if members.is_empty() {
             return Vec::new();
         }
@@ -511,6 +537,10 @@ impl IndentationWidth {
             {
                 diagnostics.push(diagnostic);
             }
+        }
+
+        if let Some(begin_node) = implicit_begin {
+            self.check_begin_clauses(source, &begin_node, options, &mut diagnostics);
         }
 
         diagnostics
@@ -817,10 +847,12 @@ impl Cop for IndentationWidth {
             CLASS_NODE,
             DEF_NODE,
             FOR_NODE,
+            FORWARDING_SUPER_NODE,
             IF_NODE,
             IN_NODE,
             LAMBDA_NODE,
             MODULE_NODE,
+            RESCUE_MODIFIER_NODE,
             SINGLETON_CLASS_NODE,
             STATEMENTS_NODE,
             SUPER_NODE,
@@ -967,6 +999,23 @@ impl Cop for IndentationWidth {
                     consistency: consistency_style,
                 },
             ));
+            return;
+        }
+
+        if let Some(rescue_modifier_node) = node.as_rescue_modifier_node() {
+            let kw_offset = rescue_modifier_node.keyword_loc().start_offset();
+            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            let rescue_expression = rescue_modifier_node.rescue_expression();
+            if let Some(diagnostic) = self.check_member_indentation(
+                source,
+                kw_offset,
+                kw_col,
+                &rescue_expression,
+                options,
+                None,
+            ) {
+                diagnostics.push(diagnostic);
+            }
             return;
         }
 
@@ -1282,6 +1331,51 @@ impl Cop for IndentationWidth {
                                 options,
                             ));
                         }
+                    }
+                }
+            }
+            return;
+        }
+
+        // Forwarding super with block (`super do ... end`). Prism represents
+        // bare super-with-block separately from SuperNode.
+        if let Some(forwarding_super_node) = node.as_forwarding_super_node() {
+            if let Some(block) = forwarding_super_node.block() {
+                let opening_offset = block.opening_loc().start_offset();
+                let closing_offset = block.closing_loc().start_offset();
+                let (_, closing_col) = source.offset_to_line_col(closing_offset);
+
+                let bytes = source.as_bytes();
+                let mut line_start = closing_offset;
+                while line_start > 0 && bytes[line_start - 1] != b'\n' {
+                    line_start -= 1;
+                }
+                if !bytes[line_start..closing_offset]
+                    .iter()
+                    .all(|&b| b == b' ' || b == b'\t')
+                {
+                    return;
+                }
+
+                if let Some(body) = block.body() {
+                    if let Some(begin_node) = body.as_begin_node() {
+                        diagnostics.extend(self.check_statements_indentation(
+                            source,
+                            opening_offset,
+                            closing_col,
+                            None,
+                            begin_node.statements(),
+                            options,
+                        ));
+                        self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                    } else {
+                        diagnostics.extend(self.check_body_indentation(
+                            source,
+                            opening_offset,
+                            closing_col,
+                            Some(body),
+                            options,
+                        ));
                     }
                 }
             }
