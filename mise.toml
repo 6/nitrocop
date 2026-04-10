@@ -1,5 +1,5 @@
 [tools]
-"rust" = { version = "1.93.1", profile = "default" }
+"rust" = { version = "1.93.1", components = "rustfmt,clippy" }
 hyperfine = "1.20.0"
 ruby = "4.0"
 uv = "latest"
