@@ -199,12 +199,13 @@ use crate::parse::source::SourceFile;
 /// Two remaining `omit_parentheses` mismatches came from Prism context that
 /// only shows up under explicit variant-config tests:
 ///
-/// 1. `if`/`unless` branch bodies were missing the surrounding conditional
-///    parent for omit-style checks. RuboCop allows parentheses for assignment
-///    RHS calls when the assignment expression is the value of a conditional
-///    branch, such as `@x = Foo.new(...)` under `if`/`else` and modifier
-///    conditionals. Added conditional-branch tracking so those RHS calls are no
-///    longer flagged.
+/// 1. Single-statement `if`/`unless`/`when` bodies were missing the direct
+///    parent node RuboCop sees in Parser AST. RuboCop allows parentheses for
+///    assignment RHS calls when the assignment expression is the value of a
+///    single-statement conditional/when branch, such as `@x = Foo.new(...)`
+///    under `if`/`else` and modifier conditionals. Model that parent only for
+///    single-statement branch bodies; multi-statement bodies still behave like
+///    Parser's synthetic `begin`.
 ///
 /// 2. Hash-value-omission calls (`foo(value:)`) were treated as always
 ///    exempt. RuboCop only keeps parentheses when the call is in a
@@ -292,9 +293,11 @@ enum ParentKind {
     KwOptArg,
     ClassSingleLine,
     When,
+    WhenBody,
     MatchPattern,
     Assignment,
     Conditional,
+    ConditionalBody,
     ClassConstructor,
     ConstantPath,
     Grouped,
@@ -354,7 +357,6 @@ impl Cop for MethodCallWithArgsParentheses {
             parent_stack: vec![],
             in_interpolation: false,
             in_endless_def: false,
-            conditional_branch_depth: 0,
             non_last_expression_depth: 0,
         };
         visitor.visit(&parse_result.node());
@@ -383,7 +385,6 @@ struct ParenVisitor<'a> {
     parent_stack: Vec<ParentKind>,
     in_interpolation: bool,
     in_endless_def: bool,
-    conditional_branch_depth: usize,
     non_last_expression_depth: usize,
 }
 
@@ -400,10 +401,6 @@ impl ParenVisitor<'_> {
 
     fn immediate_parent(&self) -> Option<ParentKind> {
         self.parent_stack.last().copied()
-    }
-
-    fn in_conditional_branch(&self) -> bool {
-        self.conditional_branch_depth > 0
     }
 
     fn in_non_last_expression(&self) -> bool {
@@ -425,9 +422,46 @@ impl ParenVisitor<'_> {
         self.parent_stack[baseline..].iter().any(|kind| {
             !matches!(
                 kind,
-                ParentKind::TernaryBranch | ParentKind::ClassConstructor | ParentKind::Grouped
+                ParentKind::TernaryBranch
+                    | ParentKind::ClassConstructor
+                    | ParentKind::Grouped
+                    | ParentKind::ConditionalBody
+                    | ParentKind::WhenBody
             )
         })
+    }
+
+    fn visit_statements_with_parent<'pr>(
+        &mut self,
+        node: &ruby_prism::StatementsNode<'pr>,
+        parent_kind: ParentKind,
+    ) {
+        let body = node.body();
+        let single_statement = body.len() == 1;
+        let can_inherit_direct_parent = single_statement
+            && body
+                .iter()
+                .next()
+                .is_some_and(|stmt| stmt.as_begin_node().is_none());
+
+        for (index, stmt) in body.iter().enumerate() {
+            let is_not_last = index + 1 < body.len();
+            if is_not_last {
+                self.non_last_expression_depth += 1;
+            }
+
+            if can_inherit_direct_parent {
+                self.parent_stack.push(parent_kind);
+            }
+            self.visit(&stmt);
+            if can_inherit_direct_parent {
+                self.parent_stack.pop();
+            }
+
+            if is_not_last {
+                self.non_last_expression_depth -= 1;
+            }
+        }
     }
 
     /// Derive child scope for wrapper nodes (begin, block, if branches).
@@ -588,8 +622,7 @@ impl ParenVisitor<'_> {
         ));
     }
 
-    /// Check require_parentheses_for_hash_value_omission?
-    fn require_parentheses_for_hash_value_omission(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+    fn call_has_hash_value_omission(&self, call: &ruby_prism::CallNode<'_>) -> bool {
         let args = match call.arguments() {
             Some(a) => a,
             None => return false,
@@ -609,7 +642,12 @@ impl ParenVisitor<'_> {
             return false;
         };
 
-        if !has_value_omission {
+        has_value_omission
+    }
+
+    /// Check require_parentheses_for_hash_value_omission?
+    fn require_parentheses_for_hash_value_omission(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        if !self.call_has_hash_value_omission(call) {
             return false;
         }
 
@@ -617,7 +655,10 @@ impl ParenVisitor<'_> {
         // is the direct value of a conditional-style parent, or when another
         // sibling expression follows.
         let parent = self.immediate_parent();
-        if parent == Some(ParentKind::Conditional) || self.in_conditional_branch() {
+        if matches!(
+            parent,
+            Some(ParentKind::Conditional | ParentKind::ConditionalBody)
+        ) {
             return true;
         }
 
@@ -626,7 +667,10 @@ impl ParenVisitor<'_> {
 
     fn legitimate_call_with_parentheses(&self, call: &ruby_prism::CallNode<'_>) -> bool {
         self.call_in_literals()
-            || self.immediate_parent() == Some(ParentKind::When)
+            || matches!(
+                self.immediate_parent(),
+                Some(ParentKind::When | ParentKind::WhenBody)
+            )
             || self.call_with_ambiguous_arguments(call)
             || self.call_in_logical_operators()
             || self.call_in_optional_arguments()
@@ -711,11 +755,7 @@ impl ParenVisitor<'_> {
     }
 
     fn call_in_argument_with_block(&self, _call: &ruby_prism::CallNode<'_>) -> bool {
-        // Check if call is inside a block whose parent is a call/super/yield
-        // We approximate this by checking parent stack: block inside call
-        // This is already handled by the block visitor pushing scope, but
-        // the parent_stack check for Call covers this case too
-        false // covered by call_as_argument_or_chain
+        false
     }
 
     fn call_as_argument_or_chain(&self) -> bool {
@@ -828,13 +868,19 @@ impl ParenVisitor<'_> {
             let parent = self.parent_stack[self.parent_stack.len() - 1];
             let grandparent = self.parent_stack[self.parent_stack.len() - 2];
             if parent == ParentKind::Assignment
-                && (grandparent == ParentKind::Conditional || grandparent == ParentKind::When)
+                && matches!(
+                    grandparent,
+                    ParentKind::Conditional
+                        | ParentKind::ConditionalBody
+                        | ParentKind::When
+                        | ParentKind::WhenBody
+                )
             {
                 return true;
             }
         }
 
-        self.immediate_parent() == Some(ParentKind::Assignment) && self.in_conditional_branch()
+        false
     }
 
     fn visit_call_common(&mut self, call: &ruby_prism::CallNode<'_>) {
@@ -1468,28 +1514,28 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
         if let Some(stmts) = node.statements() {
             self.push_macro_scope(child_scope);
-            self.conditional_branch_depth += 1;
             if is_ternary {
                 self.parent_stack.push(ParentKind::TernaryBranch);
-            }
-            self.visit_statements_node(&stmts);
-            if is_ternary {
+                self.visit_statements_node(&stmts);
                 self.parent_stack.pop();
+            } else {
+                self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
             }
-            self.conditional_branch_depth -= 1;
             self.pop_scope();
         }
         if let Some(subsequent) = node.subsequent() {
             self.push_macro_scope(child_scope);
-            self.conditional_branch_depth += 1;
             if is_ternary {
                 self.parent_stack.push(ParentKind::TernaryBranch);
-            }
-            self.visit(&subsequent);
-            if is_ternary {
+                self.visit(&subsequent);
                 self.parent_stack.pop();
+            } else if let Some(else_node) = subsequent.as_else_node() {
+                if let Some(stmts) = else_node.statements() {
+                    self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
+                }
+            } else {
+                self.visit(&subsequent);
             }
-            self.conditional_branch_depth -= 1;
             self.pop_scope();
         }
     }
@@ -1513,16 +1559,14 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
         if let Some(stmts) = node.statements() {
             self.push_macro_scope(child_scope);
-            self.conditional_branch_depth += 1;
-            self.visit_statements_node(&stmts);
-            self.conditional_branch_depth -= 1;
+            self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
             self.pop_scope();
         }
         if let Some(consequent) = node.else_clause() {
             self.push_macro_scope(child_scope);
-            self.conditional_branch_depth += 1;
-            self.visit_else_node(&consequent);
-            self.conditional_branch_depth -= 1;
+            if let Some(stmts) = consequent.statements() {
+                self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
+            }
             self.pop_scope();
         }
     }
@@ -1661,9 +1705,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // Push When before visiting statements so calls in the when body
         // have When as parent (matching RuboCop's node.parent.when_type? check)
         if let Some(stmts) = node.statements() {
-            self.parent_stack.push(ParentKind::When);
-            self.visit_statements_node(&stmts);
-            self.parent_stack.pop();
+            self.visit_statements_with_parent(&stmts, ParentKind::WhenBody);
         }
     }
 
@@ -2434,6 +2476,65 @@ mod tests {
         let source = b"case condition\nwhen do_something(arg)\nend\n";
         let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
         assert!(diags.is_empty(), "Should allow parens in when clause");
+    }
+
+    #[test]
+    fn omit_accepts_parens_in_single_statement_when_body() {
+        let source = b"case condition\nwhen :match then do_something(arg)\nend\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Should allow parens in single-statement when bodies"
+        );
+    }
+
+    #[test]
+    fn omit_flags_assignment_rhs_in_multi_statement_when_body() {
+        let source = b"case condition\nwhen :match\n  keypair = KeyPair.from_public_key(asset.issuer.value)\n  [:alphanum4, asset.code, keypair, amount]\nend\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag assignment RHS calls in multi-statement when bodies"
+        );
+    }
+
+    #[test]
+    fn omit_flags_assignment_rhs_in_multi_statement_if_branch() {
+        let source = b"if cond\n  prepare\n  value = lookup(arg)\nend\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should flag assignment RHS calls in multi-statement conditional branches"
+        );
+    }
+
+    #[test]
+    fn omit_flags_assignment_rhs_inside_single_statement_begin_branch() {
+        let source = b"if cond\n  begin\n    value = lookup(arg)\n  rescue StandardError\n    nil\n  end\nend\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should not inherit the conditional parent through a single begin/rescue wrapper"
+        );
     }
 
     #[test]
