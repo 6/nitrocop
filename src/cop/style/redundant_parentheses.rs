@@ -836,22 +836,22 @@ impl RedundantParensVisitor<'_> {
         // parent_stack.last() is the ParenthesesNode itself.
         // We need to check parent (len-2) and grandparent (len-3).
         let len = self.parent_stack.len();
-        if len >= 2 && matches!(self.parent_stack[len - 2].kind, ParentKind::RescueBody) {
-            if self.parent_stack[len - 2]
+        if len >= 2
+            && matches!(self.parent_stack[len - 2].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 2]
                 .rescue_body_start_offset
                 .is_some_and(|off| paren_offset >= off)
-            {
-                return true;
-            }
+        {
+            return true;
         }
         // Grandparent check: paren inside StatementsNode inside RescueBody
-        if len >= 3 && matches!(self.parent_stack[len - 3].kind, ParentKind::RescueBody) {
-            if self.parent_stack[len - 3]
+        if len >= 3
+            && matches!(self.parent_stack[len - 3].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 3]
                 .rescue_body_start_offset
                 .is_some_and(|off| paren_offset >= off)
-            {
-                return true;
-            }
+        {
+            return true;
         }
         false
     }
