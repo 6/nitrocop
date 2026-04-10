@@ -11,3 +11,7 @@
 # Complex condition without parens — should flag
 x && y ? 1 : 0
 ^ Style/TernaryParentheses: Use parentheses for ternary expressions with complex conditions.
+
+# Calls with real blocks are complex without parens
+[1, 2, 3].any? { |value| value.odd? } ? :odd : :even
+^ Style/TernaryParentheses: Use parentheses for ternary expressions with complex conditions.
