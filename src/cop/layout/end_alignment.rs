@@ -2,10 +2,10 @@ use crate::cop::shared::node_type::{
     CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, IF_NODE, MODULE_NODE, SINGLETON_CLASS_NODE,
     UNLESS_NODE, UNTIL_NODE, WHILE_NODE,
 };
-use crate::cop::shared::util::assignment_context_base_col;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Layout/EndAlignment: checks that `end` keywords are aligned with their opening keyword.
 ///
@@ -31,33 +31,396 @@ use crate::parse::source::SourceFile;
 /// per-cop disable, so all subsequent offenses were incorrectly suppressed.
 /// Fixed in `directives.rs`: `enable all` now drains all open disables;
 /// department enables now close both the department and its individual cops.
+///
+/// ## Variant style investigation (2026-04-08)
+///
+/// - `EnforcedStyleAlignWith: start_of_line` had large tab-indented divergence because
+///   the expected column was computed by counting only ASCII spaces. RuboCop aligns to
+///   the first non-whitespace character on the line, so `\tif ...` / `\tend` is valid
+///   and mixed leading whitespace like `" \tif"` still expects column 2.
+/// - `EnforcedStyleAlignWith: variable` was using broad line scans for `=`/`<<`, which
+///   incorrectly treated nested expressions like `content = label || if ... end` as
+///   assignment-aligned and missed real operator/send contexts like `model == if ... end`
+///   and `raise Informative, if ... end`. Fixed by matching RuboCop's narrower context:
+///   only align to an outer assignment/send when the conditional is the extracted RHS /
+///   last-argument target after peeling call chains and grouping wrappers. Other same-line
+///   parents like `return case`, hash pairs, `when ... then case`, and `foo || case`
+///   still fall back to keyword alignment. `class`/`module` also stay keyword-aligned
+///   under `variable`, while `case`/`case in` only align to an immediate same-line
+///   send/assignment parent when Prism exposes a real `predicate`.
+///
+/// ## Variant fix round 2 (2026-04-08)
+///
+/// **variable style — 23 FP, 63 FN:**
+/// - FPs: case nodes under `!!` (double-not) were treated as arguments of the `!`
+///   send, causing alignment with the `!` position instead of keyword. Root cause:
+///   the case-with-predicate check used `AncestorKind::Send` broadly but didn't
+///   distinguish argument-of-send from receiver-of-send. Fixed by adding
+///   `arguments_span` to `AncestorContext` and only aligning with parent sends when
+///   the case's start offset falls within the arguments span.
+/// - FNs: bare `case` (no predicate) under assignment (`var = case when ...`) was
+///   always falling back to keyword alignment because `variable_context_start_offset`
+///   returned `None` early for bare case. Fixed by removing the early return and
+///   letting bare case fall through to the general rhs-matching logic, which correctly
+///   detects the assignment parent via `extracted_rhs`.
+///
+/// **start_of_line style — 5 FN:**
+/// - All from BOM (U+FEFF) at file start. RuboCop's `effective_column` subtracts 1
+///   from columns on line 1 with BOM, making the start-of-line alignment position
+///   effectively -1 (unreachable). Fixed by detecting when the alignment offset falls
+///   within the BOM (offset < 3 on line 1 with BOM) and forcing a mismatch.
 pub struct EndAlignment;
 
-/// Check if a specific operator (like `<<`) appears on the same line before `keyword_offset`.
-fn has_operator_before_keyword(source: &SourceFile, keyword_offset: usize, op: &[u8]) -> bool {
-    let bytes = source.as_bytes();
-    let mut line_start = keyword_offset;
-    while line_start > 0 && bytes[line_start - 1] != b'\n' {
-        line_start -= 1;
+fn alignment_column(source: &SourceFile, offset: usize) -> usize {
+    let (line, col) = source.offset_to_line_col(offset);
+    if line == 1 {
+        let bytes = source.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0] == 0xEF
+            && bytes[1] == 0xBB
+            && bytes[2] == 0xBF
+            && offset >= 3
+        {
+            return col.saturating_sub(1);
+        }
     }
-    let before = &bytes[line_start..keyword_offset];
-    before.windows(op.len()).any(|w| w == op)
+    col
 }
 
-/// Get the indentation level (first non-whitespace column) of the line containing `offset`.
-fn line_indent(source: &SourceFile, offset: usize) -> usize {
+fn start_of_line_alignment_offset(source: &SourceFile, offset: usize) -> usize {
     let bytes = source.as_bytes();
-    let mut line_start = offset;
-    while line_start > 0 && bytes[line_start - 1] != b'\n' {
-        line_start -= 1;
+    let (line, _) = source.offset_to_line_col(offset);
+    let mut pos = source.line_start_offset(line);
+    while pos < bytes.len() && bytes[pos] != b'\n' && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
+        pos += 1;
     }
-    let mut indent = 0;
-    while line_start + indent < bytes.len()
-        && (bytes[line_start + indent] == b' ' || bytes[line_start + indent] == b'\t')
-    {
-        indent += 1;
+    pos
+}
+
+fn first_part_of_call_chain(mut node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
+    while let Some(call) = node.as_call_node() {
+        let Some(receiver) = call.receiver() else {
+            break;
+        };
+        node = receiver;
     }
-    indent
+    node
+}
+
+fn unwrap_grouping(mut node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
+    loop {
+        if let Some(parentheses) = node.as_parentheses_node() {
+            let Some(body) = parentheses.body() else {
+                break;
+            };
+            let Some(stmts) = body.as_statements_node() else {
+                break;
+            };
+            let body = stmts.body();
+            if body.len() != 1 {
+                break;
+            }
+            let Some(single) = body.iter().next() else {
+                break;
+            };
+            node = single;
+            continue;
+        }
+
+        if let Some(stmts) = node.as_statements_node() {
+            let body = stmts.body();
+            if body.len() != 1 {
+                break;
+            }
+            let Some(single) = body.iter().next() else {
+                break;
+            };
+            node = single;
+            continue;
+        }
+
+        if let Some(begin_node) = node.as_begin_node() {
+            if begin_node.begin_keyword_loc().is_some()
+                || begin_node.rescue_clause().is_some()
+                || begin_node.else_clause().is_some()
+                || begin_node.ensure_clause().is_some()
+            {
+                break;
+            }
+
+            let Some(stmts) = begin_node.statements() else {
+                break;
+            };
+            let body = stmts.body();
+            if body.len() != 1 {
+                break;
+            }
+            let Some(single) = body.iter().next() else {
+                break;
+            };
+            node = single;
+            continue;
+        }
+
+        break;
+    }
+
+    node
+}
+
+fn extracted_rhs<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(call) = node.as_call_node() {
+        return call.arguments()?.arguments().last();
+    }
+    if let Some(asgn) = node.as_local_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_local_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_local_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_local_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_multi_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_call_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_call_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_call_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_index_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_index_and_write_node() {
+        return Some(asgn.value());
+    }
+    node.as_index_operator_write_node().map(|asgn| asgn.value())
+}
+
+#[derive(Clone, Copy)]
+enum AncestorKind {
+    Other,
+    Send,
+    AssignmentLike,
+}
+
+#[derive(Clone, Copy)]
+struct AncestorContext {
+    start_offset: usize,
+    rhs_span: Option<(usize, usize)>,
+    kind: AncestorKind,
+    /// For Send (CallNode) ancestors, the span of the arguments list.
+    /// Used to distinguish "case is argument of send" from "case is receiver of send".
+    arguments_span: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Copy)]
+struct KeywordEndContext<'a> {
+    kw_offset: usize,
+    end_offset: usize,
+    keyword: &'a str,
+    style: &'a str,
+}
+
+struct AncestorFinder {
+    target_span: (usize, usize),
+    stack: Vec<AncestorContext>,
+    found: Option<Vec<AncestorContext>>,
+}
+
+fn ancestor_kind(node: &ruby_prism::Node<'_>) -> AncestorKind {
+    if node.as_call_node().is_some() {
+        AncestorKind::Send
+    } else if extracted_rhs(node).is_some() {
+        AncestorKind::AssignmentLike
+    } else {
+        AncestorKind::Other
+    }
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for AncestorFinder {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let node_span = (node.location().start_offset(), node.location().end_offset());
+        if self.found.is_none() && node_span == self.target_span {
+            self.found = Some(self.stack.clone());
+        }
+
+        let rhs_span = extracted_rhs(&node).map(|rhs| {
+            let rhs = unwrap_grouping(first_part_of_call_chain(rhs));
+            (rhs.location().start_offset(), rhs.location().end_offset())
+        });
+
+        let arguments_span = node.as_call_node().and_then(|call| {
+            let args = call.arguments()?;
+            Some((args.location().start_offset(), args.location().end_offset()))
+        });
+
+        self.stack.push(AncestorContext {
+            start_offset: node.location().start_offset(),
+            rhs_span,
+            kind: ancestor_kind(&node),
+            arguments_span,
+        });
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.stack.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let node_span = (node.location().start_offset(), node.location().end_offset());
+        if self.found.is_none() && node_span == self.target_span {
+            self.found = Some(self.stack.clone());
+        }
+    }
+}
+
+fn ancestors_for_node(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    node: &ruby_prism::Node<'_>,
+) -> Vec<AncestorContext> {
+    let mut finder = AncestorFinder {
+        target_span: (node.location().start_offset(), node.location().end_offset()),
+        stack: Vec::new(),
+        found: None,
+    };
+    finder.visit(&parse_result.node());
+    finder.found.unwrap_or_default()
+}
+
+fn variable_context_start_offset(
+    source: &SourceFile,
+    ancestors: &[AncestorContext],
+    node: &ruby_prism::Node<'_>,
+    kw_offset: usize,
+) -> Option<usize> {
+    let (kw_line, _) = source.offset_to_line_col(kw_offset);
+    let immediate_parent_start_offset = |predicate: fn(&AncestorContext) -> bool| {
+        let parent = ancestors.last()?;
+        let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
+        if parent_line == kw_line && predicate(parent) {
+            Some(parent.start_offset)
+        } else {
+            None
+        }
+    };
+
+    if node.as_class_node().is_some() || node.as_module_node().is_some() {
+        return None;
+    }
+
+    if node.as_singleton_class_node().is_some() {
+        return immediate_parent_start_offset(|parent| {
+            matches!(parent.kind, AncestorKind::AssignmentLike)
+        });
+    }
+
+    // For case/case_match nodes:
+    // 1. If case is an argument of a parent send (not the receiver) on the same line,
+    //    align with the parent send (matches RuboCop's `node.argument?` check).
+    // 2. Otherwise, fall through to the general rhs-matching logic, which handles
+    //    case as RHS of assignments (both bare case and case-with-predicate).
+    // 3. If no parent matches, returns None → keyword alignment.
+    let is_case = node.as_case_node().is_some() || node.as_case_match_node().is_some();
+    if is_case {
+        if let Some(parent) = ancestors.last() {
+            if matches!(parent.kind, AncestorKind::Send) {
+                let node_start = node.location().start_offset();
+                let is_argument = parent.arguments_span.is_some_and(|(arg_start, arg_end)| {
+                    node_start >= arg_start && node_start < arg_end
+                });
+                if is_argument {
+                    let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
+                    if parent_line == kw_line {
+                        return Some(parent.start_offset);
+                    }
+                    return None; // line break before keyword → keyword alignment
+                }
+            }
+        }
+        // Fall through to general rhs-matching logic (handles assignments, etc.)
+    }
+
+    let target_span = (node.location().start_offset(), node.location().end_offset());
+    for parent in ancestors.iter().rev() {
+        if parent.rhs_span == Some(target_span) {
+            let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
+            if parent_line == kw_line {
+                return Some(parent.start_offset);
+            }
+            return None;
+        }
+    }
+
+    None
 }
 
 impl Cop for EndAlignment {
@@ -83,7 +446,7 @@ impl Cop for EndAlignment {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -92,10 +455,14 @@ impl Cop for EndAlignment {
         if let Some(class_node) = node.as_class_node() {
             diagnostics.extend(self.check_keyword_end(
                 source,
-                class_node.class_keyword_loc().start_offset(),
-                class_node.end_keyword_loc().start_offset(),
-                "class",
-                style,
+                node,
+                parse_result,
+                KeywordEndContext {
+                    kw_offset: class_node.class_keyword_loc().start_offset(),
+                    end_offset: class_node.end_keyword_loc().start_offset(),
+                    keyword: "class",
+                    style,
+                },
             ));
             return;
         }
@@ -103,10 +470,14 @@ impl Cop for EndAlignment {
         if let Some(module_node) = node.as_module_node() {
             diagnostics.extend(self.check_keyword_end(
                 source,
-                module_node.module_keyword_loc().start_offset(),
-                module_node.end_keyword_loc().start_offset(),
-                "module",
-                style,
+                node,
+                parse_result,
+                KeywordEndContext {
+                    kw_offset: module_node.module_keyword_loc().start_offset(),
+                    end_offset: module_node.end_keyword_loc().start_offset(),
+                    keyword: "module",
+                    style,
+                },
             ));
             return;
         }
@@ -128,10 +499,14 @@ impl Cop for EndAlignment {
             let keyword = if kw_slice == b"if" { "if" } else { "unless" };
             diagnostics.extend(self.check_keyword_end(
                 source,
-                kw_loc.start_offset(),
-                end_kw_loc.start_offset(),
-                keyword,
-                style,
+                node,
+                parse_result,
+                KeywordEndContext {
+                    kw_offset: kw_loc.start_offset(),
+                    end_offset: end_kw_loc.start_offset(),
+                    keyword,
+                    style,
+                },
             ));
             return;
         }
@@ -141,10 +516,14 @@ impl Cop for EndAlignment {
             if let Some(end_loc) = while_node.closing_loc() {
                 diagnostics.extend(self.check_keyword_end(
                     source,
-                    kw_loc.start_offset(),
-                    end_loc.start_offset(),
-                    "while",
-                    style,
+                    node,
+                    parse_result,
+                    KeywordEndContext {
+                        kw_offset: kw_loc.start_offset(),
+                        end_offset: end_loc.start_offset(),
+                        keyword: "while",
+                        style,
+                    },
                 ));
                 return;
             }
@@ -155,10 +534,14 @@ impl Cop for EndAlignment {
             if let Some(end_loc) = until_node.closing_loc() {
                 diagnostics.extend(self.check_keyword_end(
                     source,
-                    kw_loc.start_offset(),
-                    end_loc.start_offset(),
-                    "until",
-                    style,
+                    node,
+                    parse_result,
+                    KeywordEndContext {
+                        kw_offset: kw_loc.start_offset(),
+                        end_offset: end_loc.start_offset(),
+                        keyword: "until",
+                        style,
+                    },
                 ));
                 return;
             }
@@ -169,10 +552,14 @@ impl Cop for EndAlignment {
             let end_loc = case_node.end_keyword_loc();
             diagnostics.extend(self.check_keyword_end(
                 source,
-                kw_loc.start_offset(),
-                end_loc.start_offset(),
-                "case",
-                style,
+                node,
+                parse_result,
+                KeywordEndContext {
+                    kw_offset: kw_loc.start_offset(),
+                    end_offset: end_loc.start_offset(),
+                    keyword: "case",
+                    style,
+                },
             ));
             return;
         }
@@ -182,10 +569,14 @@ impl Cop for EndAlignment {
             let end_loc = case_match_node.end_keyword_loc();
             diagnostics.extend(self.check_keyword_end(
                 source,
-                kw_loc.start_offset(),
-                end_loc.start_offset(),
-                "case",
-                style,
+                node,
+                parse_result,
+                KeywordEndContext {
+                    kw_offset: kw_loc.start_offset(),
+                    end_offset: end_loc.start_offset(),
+                    keyword: "case",
+                    style,
+                },
             ));
             return;
         }
@@ -196,10 +587,14 @@ impl Cop for EndAlignment {
             if let Some(end_loc) = unless_node.end_keyword_loc() {
                 diagnostics.extend(self.check_keyword_end(
                     source,
-                    kw_loc.start_offset(),
-                    end_loc.start_offset(),
-                    "unless",
-                    style,
+                    node,
+                    parse_result,
+                    KeywordEndContext {
+                        kw_offset: kw_loc.start_offset(),
+                        end_offset: end_loc.start_offset(),
+                        keyword: "unless",
+                        style,
+                    },
                 ));
             }
             return;
@@ -208,10 +603,14 @@ impl Cop for EndAlignment {
         if let Some(sclass_node) = node.as_singleton_class_node() {
             diagnostics.extend(self.check_keyword_end(
                 source,
-                sclass_node.class_keyword_loc().start_offset(),
-                sclass_node.end_keyword_loc().start_offset(),
-                "class",
-                style,
+                node,
+                parse_result,
+                KeywordEndContext {
+                    kw_offset: sclass_node.class_keyword_loc().start_offset(),
+                    end_offset: sclass_node.end_keyword_loc().start_offset(),
+                    keyword: "class",
+                    style,
+                },
             ));
         }
 
@@ -224,66 +623,50 @@ impl EndAlignment {
     fn check_keyword_end(
         &self,
         source: &SourceFile,
-        kw_offset: usize,
-        end_offset: usize,
-        keyword: &str,
-        style: &str,
+        node: &ruby_prism::Node<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        context: KeywordEndContext<'_>,
     ) -> Vec<Diagnostic> {
-        let (kw_line, mut kw_col) = source.offset_to_line_col(kw_offset);
+        let KeywordEndContext {
+            kw_offset,
+            end_offset,
+            keyword,
+            style,
+        } = context;
+        let (kw_line, _) = source.offset_to_line_col(kw_offset);
         let (end_line, end_col) = source.offset_to_line_col(end_offset);
-
-        // If the keyword is on the first line and the file starts with a UTF-8 BOM
-        // (\xEF\xBB\xBF), subtract the BOM character from the column so that
-        // alignment comparisons work correctly. RuboCop strips the BOM during
-        // source processing, so `module` after BOM is at column 0, not 1.
-        if kw_line == 1 {
-            let bytes = source.as_bytes();
-            if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
-                kw_col = kw_col.saturating_sub(1);
-            }
-        }
 
         // Skip single-line constructs (e.g., `class Foo; end`)
         if kw_line == end_line {
             return Vec::new();
         }
 
-        let expected_col = match style {
-            "variable" => {
-                // Variable alignment: if keyword is RHS of an assignment
-                // or operator like `<<`, align end with the line start
-                // (the variable). Otherwise fall back to keyword alignment.
-                if let Some(base_col) = assignment_context_base_col(source, kw_offset) {
-                    base_col
-                } else if has_operator_before_keyword(source, kw_offset, b"<<") {
-                    line_indent(source, kw_offset)
-                } else {
-                    kw_col
-                }
-            }
-            "start_of_line" => {
-                // Align with the start of the line where the keyword appears
-                let bytes = source.as_bytes();
-                let mut line_start = kw_offset;
-                while line_start > 0 && bytes[line_start - 1] != b'\n' {
-                    line_start -= 1;
-                }
-                let mut indent = 0;
-                while line_start + indent < bytes.len() && bytes[line_start + indent] == b' ' {
-                    indent += 1;
-                }
-                indent
-            }
-            _ => kw_col, // "keyword" (default): align with keyword
+        let ancestors = ancestors_for_node(parse_result, node);
+        let expected_offset = match style {
+            "variable" => variable_context_start_offset(source, &ancestors, node, kw_offset)
+                .unwrap_or(kw_offset),
+            "start_of_line" => start_of_line_alignment_offset(source, kw_offset),
+            _ => kw_offset,
+        };
+        let expected_col = alignment_column(source, expected_offset);
+
+        // RuboCop's effective_column subtracts 1 from all columns on line 1 when
+        // there's a BOM. When the alignment target is the BOM itself (offset < 3
+        // on line 1), this produces -1, which can never match an `end` on another
+        // line. Replicate this by forcing a mismatch.
+        let bom_forces_mismatch = {
+            let bytes = source.as_bytes();
+            let (exp_line, _) = source.offset_to_line_col(expected_offset);
+            exp_line == 1
+                && expected_offset < 3
+                && bytes.len() >= 3
+                && bytes[0] == 0xEF
+                && bytes[1] == 0xBB
+                && bytes[2] == 0xBF
         };
 
-        if end_col != expected_col {
-            let msg = match style {
-                "variable" | "start_of_line" => {
-                    format!("Align `end` with `{keyword}`.")
-                }
-                _ => format!("Align `end` with `{keyword}`."),
-            };
+        if end_col != expected_col || bom_forces_mismatch {
+            let msg = format!("Align `end` with `{keyword}`.");
             return vec![self.diagnostic(source, end_line, end_col, msg)];
         }
 
@@ -295,8 +678,22 @@ impl EndAlignment {
 mod tests {
     use super::*;
     use crate::testutil::run_cop_full;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+    };
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(EndAlignment, "cops/layout/end_alignment");
+
+    fn config_with_align_style(style: &str) -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyleAlignWith".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
 
     #[test]
     fn modifier_if_no_offense() {
@@ -558,15 +955,8 @@ mod tests {
     #[test]
     fn variable_style_no_assignment_flags_misaligned() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
 
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyleAlignWith".into(),
-                serde_yml::Value::String("variable".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = config_with_align_style("variable");
         // `super || if ...` — end NOT aligned with if (should flag)
         let src = b"  def foo\n    super || if true\n                   1\n  end\n  end\n";
         let diags = run_cop_full_with_config(&EndAlignment, src, config);
@@ -574,6 +964,193 @@ mod tests {
             diags.len(),
             1,
             "variable style should flag end not aligned with keyword when no assignment"
+        );
+    }
+
+    #[test]
+    fn start_of_line_style_allows_tabbed_alignment_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &EndAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/end_alignment/start_of_line_no_offense.rb"
+            ),
+            config_with_align_style("start_of_line"),
+        );
+    }
+
+    #[test]
+    fn start_of_line_style_flags_extra_tab_fixture() {
+        assert_cop_offenses_full_with_config(
+            &EndAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/end_alignment/start_of_line_offense.rb"
+            ),
+            config_with_align_style("start_of_line"),
+        );
+    }
+
+    #[test]
+    fn variable_style_ignores_outer_assignment_when_if_is_under_or_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &EndAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/end_alignment/variable_no_offense.rb"
+            ),
+            config_with_align_style("variable"),
+        );
+    }
+
+    #[test]
+    fn variable_style_aligns_with_operator_method_fixture() {
+        assert_cop_offenses_full_with_config(
+            &EndAlignment,
+            include_bytes!("../../../tests/fixtures/cops/layout/end_alignment/variable_offense.rb"),
+            config_with_align_style("variable"),
+        );
+    }
+
+    #[test]
+    fn variable_style_return_case_falls_back_to_keyword() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"def lookup(controller)\n  return case controller\n         when 'resources'\n           :resource\n         else\n           :other\n         end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should keep keyword alignment for return case: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_hash_value_case_falls_back_to_keyword() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"mapping = {\n  'type' => case kind\n            when :a\n              1\n            else\n              2\n            end\n}\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should not align case with a hash pair: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_case_under_boolean_parent_flags_parent_aligned_end() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"def to_s\n  @string || case\n    when @object.nan?\n      'NaN'\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`case`")),
+            "variable style should fall back to case keyword under ||: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_case_in_same_line_send_aligns_with_parent() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"_add_rule(case role_checks.size\n          when 0\n            raise ArgumentError, 'allow/deny should have at least 1 argument'\n          when 1 then role_checks.first\n          else\n            _either_of(role_checks)\n          end, condition)\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`case`")),
+            "variable style should align same-line send(case ...) with the send: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_module_under_assignment_stays_keyword_aligned() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"REFINEMENT = module RefineString\n  refine String do\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`module`")),
+            "variable style should keep keyword alignment for module assignment: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_module_under_send_stays_keyword_aligned() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        let src = b"expect(module LibTest\n  extend FFI::Library\nend).to be_an_instance_of FFI::Function\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`module`")),
+            "variable style should keep keyword alignment for module under send: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn start_of_line_bom_flags_end() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("start_of_line");
+        // BOM at file start + module/end both at col 0 — RuboCop flags because
+        // effective_column is -1 for line 1 with BOM.
+        let src = b"\xEF\xBB\xBFmodule Dryrun\n  VERSION = '1.0'\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`module`")),
+            "start_of_line should flag end on BOM-prefixed file: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_bare_case_under_assignment_aligns_with_var() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        // `field_class = case` (bare case) with `end` at keyword col — should flag
+        let src = b"def test\n  field_class = case\n                when :a then 1\n                else 2\n                end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.iter().any(|d| d.message.contains("`case`")),
+            "variable style should flag bare case end at keyword col: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_bare_case_under_assignment_no_offense_at_var_col() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        // `field_class = case` (bare case) with `end` at variable col — no offense
+        let src = b"def test\n  field_class = case\n  when :a then 1\n  else 2\n  end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should accept bare case end at variable col: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn variable_style_bang_bang_case_no_offense() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let config = config_with_align_style("variable");
+        // `!! case x` — case is receiver, not argument. Keyword alignment.
+        let src = b"def test\n  !! case destroy_option\n     when Symbol, String\n       1\n     else\n       2\n     end\nend\n";
+        let diags = run_cop_full_with_config(&EndAlignment, src, config);
+        assert!(
+            diags.is_empty(),
+            "variable style should not flag !! case end at keyword col: {:?}",
+            diags
         );
     }
 }

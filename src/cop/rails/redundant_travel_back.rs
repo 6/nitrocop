@@ -3,34 +3,20 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-/// ## Corpus investigation (2026-04-04)
+/// Matches RuboCop's `Rails/RedundantTravelBack` for Rails 5.2+ test files.
 ///
-/// Prior FN=7 came from two separate gaps (fixed in a3cfbaa8):
+/// Corpus fixes for this cop fell into three buckets:
 ///
-/// - `default_include` only matched `spec/**/*.rb`, so the cop never ran on
-///   Minitest files under `test/**/*.rb` even though the vendor default config
-///   includes both.
-/// - `after` context detection required a receiverless call, so
-///   `config.after do ... end` and `config.after { ... }` were missed even
-///   though RuboCop matches any block method named `after`.
+/// - The fallback include list has to cover both `spec/**/*.rb` and
+///   `test/**/*.rb`, because RuboCop's default config includes both.
+/// - `after` matching must allow receivers such as `config.after`, because
+///   RuboCop treats any block method named `after` as eligible.
+/// - The Rails version gate must still go through `rails_version_at_least(5.2)`,
+///   not `target_rails_version()` directly. RuboCop's
+///   `minimum_target_rails_version 5.2` also implies `requires_gem 'railties'`,
+///   so repos with `TargetRailsVersion` set but no `railties` in `Gemfile.lock`
+///   must be skipped. Bypassing that gate caused the reported false positives.
 ///
-/// Remaining FN=62 are a corpus-runner Include resolution issue, not a
-/// detection bug. The vendor default config has `Include: [spec/**/*.rb,
-/// test/**/*.rb]` which overrides `default_include`. When the corpus runner
-/// CWD is `/tmp` (not the repo root), these non-`**/` prefixed patterns
-/// fail to match because paths relativize to `nitrocop_cop_check_.../repos/
-/// .../spec/...` instead of `spec/...`. Confirmed: `check_cop.py --repo-cwd`
-/// resolves all 62 FN (62/62 detected, 0 FP). The `is_include_gated_cop`
-/// auto-enable in `check_cop.py` doesn't trigger because it requires
-/// `zero_baseline` but this cop has 62 expected RuboCop offenses. Fix:
-/// broaden the auto-enable condition to also trigger when the cop is
-/// include-gated AND nitrocop baseline is 0 AND expected > 0.
-///
-/// Additionally, `rails_version_at_least()` requires `railties_in_lockfile`,
-/// but no Gemfile.lock exists at CWD=/tmp. Changed to use
-/// `target_rails_version()` directly (bypasses lockfile gate) and
-/// `default_include` to `**/spec/**/*.rb` (fallback when vendor gem not
-/// resolved).
 pub struct RedundantTravelBack;
 
 impl Cop for RedundantTravelBack {
@@ -56,11 +42,7 @@ impl Cop for RedundantTravelBack {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.2
-        // Use target_rails_version() directly instead of rails_version_at_least()
-        // to avoid the railties_in_lockfile gate, which fails in corpus CI where
-        // CWD is /tmp and no Gemfile.lock is found. The TargetRailsVersion config
-        // value alone is sufficient to enable the cop.
-        if !config.target_rails_version().is_some_and(|v| v >= 5.2) {
+        if !config.rails_version_at_least(5.2) {
             return;
         }
 
@@ -144,5 +126,33 @@ impl<'a, 'pr> Visit<'pr> for TravelBackVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
+    use std::collections::HashMap;
+
     crate::cop_rails_fixture_tests!(RedundantTravelBack, "cops/rails/redundant_travel_back", 5.2);
+
+    #[test]
+    fn skipped_when_railties_not_in_lockfile() {
+        let source = b"RSpec.describe 'x' do\n  after do\n    travel_back\n  end\nend\n";
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::Number::from(5.2)),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+
+        let diagnostics = crate::testutil::run_cop_full_internal(
+            &RedundantTravelBack,
+            source,
+            config,
+            "spec/example_spec.rb",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "Should not fire when railties is not in Gemfile.lock (matches RuboCop's requires_gem gate)"
+        );
+    }
 }

@@ -152,3 +152,15 @@ class ClassBodyLambdaParamIntoCallback
     end
   end
 end
+
+# source-order `unless` body locals should not leak into the source `else`
+def unless_else_branch_order
+  unless cond
+    actors.each do |actor|
+      actor
+    end
+  else
+    self.actor
+    ^^^^ Style/RedundantSelf: Redundant `self` detected.
+  end
+end

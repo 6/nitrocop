@@ -61,6 +61,28 @@ use crate::parse::source::SourceFile;
 ///    `BlockNode` to check only the block delimiters (`{`/`}`), not the full
 ///    expression. A multiline receiver with single-line block braces counts as
 ///    single-line for the body check.
+///
+/// ## Variant-style fixes (2026-04-08)
+///
+/// Two bugs in `endless_replacement_length` causing FN in `require_single_line`:
+///
+/// 6. **Byte vs character length**: Rust `str.len()` counts bytes, but RuboCop's
+///    Ruby `.length` counts Unicode characters. For files with non-ASCII content
+///    (Cyrillic, CJK, etc.), multi-byte chars inflated the computed replacement
+///    length, making `too_long_when_made_endless?` return true too often.
+///    Fix: use `.chars().count()` for all length components.
+///
+/// 7. **Leading space for non-parenthesized args**: `arguments_source` added a
+///    leading space before params (e.g., `" a, b"`), but the parser gem's
+///    `node.arguments.source` returns just `"a, b"` (no space). This made
+///    nitrocop's length 1 char longer than RuboCop's at boundary cases.
+///    Fix: compute argument length directly from the parameter source location
+///    without adding a leading space.
+///
+/// Remaining FP (33): files with parser-gem-incompatible encoding (e.g., jruby's
+/// `# coding: US-ASCII` test files with `[\x0-\xff]` regex) fail to parse in the
+/// parser gem, so RuboCop skips them entirely. Prism parses them fine, so nitrocop
+/// flags methods. This is a systemic Prism-vs-parser divergence not fixable per-cop.
 pub struct EndlessMethod;
 
 impl EndlessMethod {
@@ -224,26 +246,16 @@ impl EndlessMethod {
         stmt.as_begin_node().is_none() && stmt.as_parentheses_node().is_none()
     }
 
-    fn arguments_source(source: &SourceFile, def_node: &ruby_prism::DefNode<'_>) -> String {
-        let Some(params) = def_node.parameters() else {
-            return String::new();
-        };
-
-        if let (Some(lparen), Some(rparen)) = (def_node.lparen_loc(), def_node.rparen_loc()) {
-            return source
-                .byte_slice(lparen.start_offset(), rparen.end_offset(), "")
-                .to_string();
-        }
-
-        let params_loc = params.location();
-        let params_src = source.byte_slice(params_loc.start_offset(), params_loc.end_offset(), "");
-        if params_src.is_empty() {
-            String::new()
-        } else {
-            format!(" {params_src}")
-        }
-    }
-
+    /// Compute the replacement length matching RuboCop's
+    /// `endless_replacement(node).length + offset`.
+    ///
+    /// Two key differences from a naive Rust `.len()`:
+    /// 1. RuboCop's `.length` counts Unicode characters, not bytes.
+    ///    Multi-byte chars (Cyrillic, CJK, etc.) count as 1.
+    /// 2. RuboCop's `arguments(node)` returns `node.arguments.source` which,
+    ///    for non-parenthesized params, does NOT include a leading space.
+    ///    The resulting replacement `def foobar = x` runs the method name
+    ///    and args together, but the length is what matters for the check.
     fn endless_replacement_length(
         source: &SourceFile,
         def_node: &ruby_prism::DefNode<'_>,
@@ -255,9 +267,29 @@ impl EndlessMethod {
         let body_loc = body.location();
         let body_src = source.byte_slice(body_loc.start_offset(), body_loc.end_offset(), "");
         let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
-        let arguments = Self::arguments_source(source, def_node);
 
-        "def ".len() + method_name.len() + arguments.len() + " = ".len() + body_src.len()
+        // Match RuboCop: arguments source without leading space for
+        // non-parenthesized params (parser gem's args node location
+        // starts at the first arg character, not the preceding space).
+        let arguments_len = if let Some(params) = def_node.parameters() {
+            if let (Some(lparen), Some(rparen)) = (def_node.lparen_loc(), def_node.rparen_loc()) {
+                let src = source.byte_slice(lparen.start_offset(), rparen.end_offset(), "");
+                src.chars().count()
+            } else {
+                let params_loc = params.location();
+                let src = source.byte_slice(params_loc.start_offset(), params_loc.end_offset(), "");
+                src.chars().count()
+            }
+        } else {
+            0
+        };
+
+        // Use .chars().count() for character length (matching Ruby's .length)
+        "def ".len()
+            + method_name.chars().count()
+            + arguments_len
+            + " = ".len()
+            + body_src.chars().count()
     }
 
     /// Compute the modifier offset, matching RuboCop's `modifier_offset(node)`.

@@ -228,3 +228,24 @@ BFIND = -2
 return { "json_class" => Float, "raw" => "Infinity" }  if self.infinite? ==  1
 return { "json_class" => Float, "raw" => "-Infinity" } if self.infinite? == -1
 return { "json_class" => Float, "raw" => "NaN" }       if self.nan?
+
+# Endless method definitions — the `=` is def syntax, not an assignment operator
+def key?(key)       = @attributes.key?(key)
+alias include? key?
+def size            = @attributes.size
+alias length size
+def empty?          = @attributes.empty?
+
+# Extra leading space before = aligned with PRECEDING assignment (non-assignment lines between)
+options   = foo
+quux()
+new_line  = true
+
+# Index write with spaced key token: RuboCop uses the key position for
+# alignment on []= calls, so the extra space after = is allowed here.
+case kind
+when 'web_search_call'
+  web_search_call_action = response_item[ :action ] || {}
+  content[ :query  ] =  web_search_call_action[ :query ]
+  content[ :status ] =  :complete
+end

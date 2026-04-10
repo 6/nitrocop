@@ -17,8 +17,17 @@ def main():
     result_path, repo_dir = sys.argv[1], sys.argv[2]
     prefix = repo_dir.rstrip("/") + "/"
 
-    with open(result_path) as f:
-        data = json.load(f)
+    try:
+        with open(result_path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, ValueError) as e:
+        # TODO(corpus): This fires every run for jruby__jruby__0303464 because
+        # rubocop produces empty JSON (suspected OOM on 7,445 .rb files).
+        # The empty file causes the caller's "out-of-repo paths" warning,
+        # which is misleading. Once the rubocop failure is diagnosed (see
+        # corpus-oracle.yml TODO), this can be simplified.
+        print(f"INVALID JSON in {result_path}: {e}", file=sys.stderr)
+        sys.exit(1)
 
     for fobj in data.get("files", []):
         path = fobj.get("path", "")

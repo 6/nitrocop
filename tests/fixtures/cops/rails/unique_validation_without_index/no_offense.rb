@@ -23,3 +23,11 @@ class User < ApplicationRecord
   # Conditional inside uniqueness hash — skipped
   validates :account, uniqueness: { unless: :draft? }
 end
+
+module Budget
+  class IndexedContentBlock < ApplicationRecord
+    validates :heading, uniqueness: { scope: :locale }
+
+    belongs_to :heading
+  end
+end

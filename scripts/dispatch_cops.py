@@ -1607,12 +1607,27 @@ def generate_audit_task(cops: list[str], mode: str = "fix") -> str:
     return "\n".join(sections)
 
 
+# Cops that should not be dispatched to agents. These have structural
+# dependencies on other cops reaching full conformance first.
+BLOCKED_COPS = {
+    "Lint/RedundantCopDisableDirective": (
+        "This cop's accuracy depends on all other cops having zero detection "
+        "gaps. Fix the underlying cops first — this one should be the last "
+        "to reach conformance."
+    ),
+}
+
+
 def generate_task(
     cop: str,
     input_path: Path | None = None,
     binary_path: Path | None = None,
 ) -> str:
     """Generate the full task markdown for a cop."""
+    if cop in BLOCKED_COPS:
+        reason = BLOCKED_COPS[cop]
+        print(f"Error: {cop} is blocked from agent dispatch: {reason}", file=sys.stderr)
+        sys.exit(1)
     dept, name, snake = parse_cop_name(cop)
     dept_snake = dept_dir_name(dept)
 

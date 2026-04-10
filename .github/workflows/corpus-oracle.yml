@@ -33,7 +33,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
@@ -208,7 +208,7 @@ jobs:
 
             # Skip repos that failed to clone
             if [ ! -d "repos/${REPO_ID}" ]; then
-              echo "Skipping ${REPO_ID} (clone failed)"
+              echo "::warning::Skipping ${REPO_ID} (clone failed — repo may be deleted or private)"
               echo "::endgroup::"
               continue
             fi
@@ -260,7 +260,8 @@ jobs:
 
             if [ "$rc" -eq 124 ]; then
               echo "::error::nitrocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
-            elif [ "$rc" -ne 0 ]; then
+            elif [ "$rc" -gt 1 ]; then
+              # Exit code 1 = offenses found (normal). Only warn on actual failures.
               echo "::warning::nitrocop exited with code ${rc} for ${REPO_ID}"
               cat "$WORKSPACE/results/nitrocop/${REPO_ID}.err" 2>/dev/null || true
             fi
@@ -295,6 +296,11 @@ jobs:
 
               if [ "$rc" -eq 124 ]; then
                 echo "::error::rubocop TIMED OUT after ${REPO_TIMEOUT}s for ${REPO_ID} — this repo will show as 100% FN in corpus results"
+              elif [ "$rc" -gt 1 ]; then
+                # Exit code 1 = offenses found (normal for corpus repos).
+                # Only warn on actual failures (OOM=137, crashes, etc.).
+                echo "::warning::rubocop exited with code ${rc} for ${REPO_ID}"
+                cat "$WORKSPACE/results/rubocop/${REPO_ID}.err" 2>/dev/null || true
               fi
             fi
 
@@ -323,7 +329,9 @@ jobs:
             # Save rubocop result to cache dir (will be persisted after the batch).
             # Validate file paths are within the repo to prevent cache poisoning.
             if [ "$RUBOCOP_CACHED" = false ] && [ -f "results/rubocop/${REPO_ID}.json" ]; then
-              if python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
+              if [ ! -s "results/rubocop/${REPO_ID}.json" ]; then
+                echo "::warning::Rubocop result for ${REPO_ID} is empty (rubocop likely crashed) — not caching"
+              elif python3 bench/corpus/validate_rubocop_result.py "results/rubocop/${REPO_ID}.json" "$ABS_DEST"; then
                 cp "results/rubocop/${REPO_ID}.json" "rubocop-cache/${REPO_ID}_${REPO_SHA}.json"
               else
                 echo "::warning::Rubocop result for ${REPO_ID} contains out-of-repo paths — not caching"

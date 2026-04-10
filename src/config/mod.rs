@@ -2330,6 +2330,19 @@ impl ResolvedConfig {
                 .or_insert_with(|| Value::String(aa_style.to_string()));
         }
         // Inject sibling Layout cop styles that other cops consult at runtime.
+        if name == "Layout/FirstHashElementIndentation" {
+            let hash_alignment_config = self.cop_configs.get("Layout/HashAlignment");
+            for (key, default) in [
+                ("EnforcedColonStyle", "key"),
+                ("EnforcedHashRocketStyle", "key"),
+            ] {
+                let style = hash_alignment_config
+                    .and_then(|cc| cc.options.get(key))
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(default.to_string()));
+                config.options.entry(key.to_string()).or_insert(style);
+            }
+        }
         if name == "Layout/ElseAlignment" || name == "Layout/IndentationWidth" {
             let end_config = self.cop_configs.get("Layout/EndAlignment");
             let end_style = end_config
@@ -3304,6 +3317,32 @@ mod tests {
         let cc = config.cop_config("Layout/LineLength");
         assert_eq!(cc.options.get("Max").and_then(|v| v.as_u64()), Some(120));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn first_hash_element_indentation_inherits_hash_alignment_styles() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+        let path = write_config(
+            dir,
+            "Layout/HashAlignment:\n  EnforcedColonStyle: separator\n  EnforcedHashRocketStyle:\n    - key\n    - separator\n",
+        );
+        let config = load_config(Some(&path), None, None).unwrap();
+        let cc = config.cop_config("Layout/FirstHashElementIndentation");
+        assert_eq!(
+            cc.options
+                .get("EnforcedColonStyle")
+                .and_then(|v| v.as_str()),
+            Some("separator")
+        );
+        let rocket_styles = cc
+            .options
+            .get("EnforcedHashRocketStyle")
+            .and_then(|v| v.as_sequence())
+            .expect("EnforcedHashRocketStyle should be inherited as a sequence");
+        assert_eq!(rocket_styles.len(), 2);
+        assert_eq!(rocket_styles[0].as_str(), Some("key"));
+        assert_eq!(rocket_styles[1].as_str(), Some("separator"));
     }
 
     #[test]

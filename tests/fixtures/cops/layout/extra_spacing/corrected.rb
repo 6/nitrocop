@@ -1,3 +1,10 @@
+# FN: spaces before a heredoc interpolation closing `}` are still offenses
+template = <<-EOS
+  #{"
+  body
+  " }
+EOS
+
 set_app("RuboCop")
 website = "https://github.com/rubocop"
 

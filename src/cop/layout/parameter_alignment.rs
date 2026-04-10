@@ -12,6 +12,22 @@ use crate::parse::source::SourceFile;
 ///   checking because Prism stores them separately via `params.block()` rather
 ///   than in the regular parameter lists. Fixed by collecting all parameter
 ///   offsets including block params. Also added `keyword_rest` params.
+/// - `with_fixed_indentation` FN: the loop always skipped the first parameter,
+///   but RuboCop checks every parameter in this style because the expected
+///   column is derived from the `def` line, not from the first parameter.
+///   That hid offenses when the first parameter started its own continuation
+///   line (for example `def method(\n      a,\n      b)`). Fixed by only
+///   skipping the first parameter in `with_first_parameter` mode.
+/// - `with_fixed_indentation` variant divergence: Prism stores required params
+///   that come after an optional (`def f(a = nil, b)`) in `params.posts()`,
+///   so they were never checked and only showed up as FNs in the non-default
+///   style where those continuation lines can be offenses. Fixed by collecting
+///   `posts()` in source order.
+/// - `with_fixed_indentation` tabbed defs: the base column used spaces-only
+///   indentation from the `def` line, but RuboCop counts all leading
+///   indentation characters before adding `IndentationWidth`. That made
+///   tab-indented definitions under-report offenses. Fixed by counting tabs in
+///   the `def` line indentation for this style.
 pub struct ParameterAlignment;
 
 impl Cop for ParameterAlignment {
@@ -33,7 +49,7 @@ impl Cop for ParameterAlignment {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "with_first_parameter");
-        let _indent_width = config.get_usize("IndentationWidth", 2);
+        let indent_width = config.get_usize("IndentationWidth", 2);
 
         let def_node = match node.as_def_node() {
             Some(d) => d,
@@ -58,6 +74,9 @@ impl Cop for ParameterAlignment {
         if let Some(rest) = params.rest() {
             param_offsets.push(rest.location().start_offset());
         }
+        for p in params.posts().iter() {
+            param_offsets.push(p.location().start_offset());
+        }
         for kw in params.keywords().iter() {
             param_offsets.push(kw.location().start_offset());
         }
@@ -79,7 +98,11 @@ impl Cop for ParameterAlignment {
                 let def_keyword_loc = def_node.def_keyword_loc();
                 let (def_line, _) = source.offset_to_line_col(def_keyword_loc.start_offset());
                 let def_line_bytes = util::line_at(source, def_line).unwrap_or(b"");
-                util::indentation_of(def_line_bytes) + 2
+                def_line_bytes
+                    .iter()
+                    .take_while(|&&b| b == b' ' || b == b'\t')
+                    .count()
+                    + indent_width
             }
             _ => first_col, // with_first_parameter
         };
@@ -88,13 +111,19 @@ impl Cop for ParameterAlignment {
         // on the same continuation line should not be checked individually.
         // Also skip parameters that don't begin their line (e.g., after a
         // closing paren of a multi-line default value: `), adapter: ...`).
-        let mut last_checked_line = first_line;
-        for &offset in param_offsets.iter().skip(1) {
+        let skip_first_parameter = style != "with_fixed_indentation";
+        let mut last_checked_line = if skip_first_parameter {
+            Some(first_line)
+        } else {
+            None
+        };
+
+        for &offset in param_offsets.iter().skip(usize::from(skip_first_parameter)) {
             let (param_line, param_col) = source.offset_to_line_col(offset);
-            if param_line == last_checked_line {
+            if last_checked_line == Some(param_line) {
                 continue; // Same line as a previously checked param, skip
             }
-            last_checked_line = param_line;
+            last_checked_line = Some(param_line);
             if !util::begins_its_line(source, offset) {
                 continue; // Parameter doesn't begin its line (e.g., after `)` of a default value)
             }
@@ -115,4 +144,38 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(ParameterAlignment, "cops/layout/parameter_alignment");
+
+    #[test]
+    fn with_fixed_indentation_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ParameterAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/parameter_alignment/with_fixed_indentation_offense.rb"
+            ),
+            CopConfig {
+                options: std::collections::HashMap::from([(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("with_fixed_indentation".into()),
+                )]),
+                ..CopConfig::default()
+            },
+        );
+    }
+
+    #[test]
+    fn with_fixed_indentation_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &ParameterAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/parameter_alignment/with_fixed_indentation_no_offense.rb"
+            ),
+            CopConfig {
+                options: std::collections::HashMap::from([(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("with_fixed_indentation".into()),
+                )]),
+                ..CopConfig::default()
+            },
+        );
+    }
 }

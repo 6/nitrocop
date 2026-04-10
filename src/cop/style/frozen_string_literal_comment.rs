@@ -1,4 +1,4 @@
-use crate::cop::{Cop, CopConfig};
+use crate::cop::{Cop, CopConfig, EnabledState};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
@@ -18,19 +18,23 @@ use crate::parse::source::SourceFile;
 ///
 /// ### Variant: `EnforcedStyle: never`
 ///
-/// The `never` style now correctly limits its scan to the leading comment section (lines before the
-/// first code token), matching RuboCop's behavior. Previously, nitrocop scanned ALL lines in the
-/// file, causing 519 false positives where `frozen_string_literal` comments appearing AFTER code
-/// were incorrectly flagged. RuboCop only considers leading comments for the `never` style.
+/// RuboCop only inspects the leading comment block for `never`, then reports the FIRST valid
+/// `frozen_string_literal` magic comment it finds there. nitrocop previously diverged in three
+/// ways: it flagged every matching leading comment, it missed Emacs-style combined
+/// `encoding`/`frozen_string_literal` comments because the encoding fast-path returned early, and
+/// it still reported files where RuboCop emitted only `Lint/Syntax`. The `never` branch now scans
+/// the full leading comment section once, flags only the first matching magic comment, and skips
+/// parse-error files for that style.
+///
+/// ActiveAdmin `.arb` templates have another RuboCop quirk: the vendor default config excludes
+/// them for this cop, but ANY explicit cop config entry drops that default exclusion. nitrocop
+/// mirrors that inside `check_lines()` instead of via `default_exclude()` so variant style
+/// overrides still inspect `.arb` files.
 pub struct FrozenStringLiteralComment;
 
 impl Cop for FrozenStringLiteralComment {
     fn name(&self) -> &'static str {
         "Style/FrozenStringLiteralComment"
-    }
-
-    fn default_exclude(&self) -> &'static [&'static str] {
-        &["**/*.arb"]
     }
 
     fn supports_autocorrect(&self) -> bool {
@@ -45,6 +49,10 @@ impl Cop for FrozenStringLiteralComment {
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "always");
+
+        if should_skip_default_active_admin_template(source, config) {
+            return;
+        }
 
         let lines: Vec<&[u8]> = source.lines().collect();
         let has_null_bytes = source.as_bytes().contains(&0x00);
@@ -96,6 +104,41 @@ impl Cop for FrozenStringLiteralComment {
             idx += 1;
         }
 
+        if enforced_style == "never" {
+            // RuboCop suppresses this cop when parsing fails and only `Lint/Syntax` is emitted.
+            if has_parse_errors(source) {
+                return;
+            }
+
+            let leading_end = leading_comment_section_end(&lines, 0);
+            if let Some(i) = first_frozen_string_literal_comment_index(&lines, leading_end) {
+                let mut diag = self.diagnostic(
+                    source,
+                    i + 1,
+                    0,
+                    "Unnecessary frozen string literal comment.".to_string(),
+                );
+                if let Some(ref mut corr) = corrections {
+                    // Delete the entire line including its newline.
+                    if let Some(start) = source.line_col_to_offset(i + 1, 0) {
+                        let end = source
+                            .line_col_to_offset(i + 2, 0)
+                            .unwrap_or(source.as_bytes().len());
+                        corr.push(crate::correction::Correction {
+                            start,
+                            end,
+                            replacement: String::new(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                }
+                diagnostics.push(diag);
+            }
+            return;
+        }
+
         // Skip encoding comment, but check if it also contains frozen_string_literal
         // (Emacs-style: # -*- encoding: utf-8; frozen_string_literal: true -*-)
         if idx < lines.len() && is_encoding_comment(lines[idx]) {
@@ -117,63 +160,6 @@ impl Cop for FrozenStringLiteralComment {
         let insert_after_line = idx; // 0-indexed line number
 
         // Compute where the leading comment section ends (before first code line).
-        // This is used for the 'never' style which should only check leading comments.
-        let mut leading_end = idx;
-        while leading_end < lines.len() {
-            if is_blank_line(lines[leading_end]) {
-                leading_end += 1;
-                continue;
-            }
-            if is_comment_line(lines[leading_end]) {
-                leading_end += 1;
-                continue;
-            }
-            if is_embedded_doc_begin(lines[leading_end]) {
-                leading_end += 1;
-                while leading_end < lines.len() && !is_embedded_doc_end(lines[leading_end]) {
-                    leading_end += 1;
-                }
-                if leading_end < lines.len() {
-                    leading_end += 1;
-                }
-                continue;
-            }
-            break;
-        }
-
-        if enforced_style == "never" {
-            // RuboCop's 'never' style only checks leading comments (before first code token),
-            // not frozen_string_literal comments that appear after code.
-            for (i, line) in lines.iter().enumerate().take(leading_end) {
-                if is_frozen_string_literal_comment(line) {
-                    let mut diag = self.diagnostic(
-                        source,
-                        i + 1,
-                        0,
-                        "Unnecessary frozen string literal comment.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        // Delete the entire line including its newline
-                        if let Some(start) = source.line_col_to_offset(i + 1, 0) {
-                            let end = source
-                                .line_col_to_offset(i + 2, 0)
-                                .unwrap_or(source.as_bytes().len());
-                            corr.push(crate::correction::Correction {
-                                start,
-                                end,
-                                replacement: String::new(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                    }
-                    diagnostics.push(diag);
-                }
-            }
-            return;
-        }
-
         // Scan leading comment and blank lines for the frozen_string_literal magic comment.
         // RuboCop's `leading_comment_lines` returns all lines before the first non-comment
         // token — blank lines are included since they don't produce tokens.
@@ -345,6 +331,57 @@ fn has_invalid_retry_parse_error(source: &SourceFile) -> bool {
     crate::parse::parse_source(source.as_bytes())
         .errors()
         .any(|err| err.message().starts_with("Invalid retry"))
+}
+
+fn has_parse_errors(source: &SourceFile) -> bool {
+    crate::parse::parse_source(source.as_bytes())
+        .errors()
+        .next()
+        .is_some()
+}
+
+fn should_skip_default_active_admin_template(source: &SourceFile, config: &CopConfig) -> bool {
+    source.path.extension().is_some_and(|ext| ext == "arb") && !has_explicit_cop_config(config)
+}
+
+fn has_explicit_cop_config(config: &CopConfig) -> bool {
+    config.enabled != EnabledState::Unset
+        || !config.include.is_empty()
+        || !config.exclude.is_empty()
+        || !config.options.is_empty()
+}
+
+fn leading_comment_section_end(lines: &[&[u8]], mut idx: usize) -> usize {
+    while idx < lines.len() {
+        if is_blank_line(lines[idx]) {
+            idx += 1;
+            continue;
+        }
+        if is_comment_line(lines[idx]) {
+            idx += 1;
+            continue;
+        }
+        if is_embedded_doc_begin(lines[idx]) {
+            idx += 1;
+            while idx < lines.len() && !is_embedded_doc_end(lines[idx]) {
+                idx += 1;
+            }
+            if idx < lines.len() {
+                idx += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    idx
+}
+
+fn first_frozen_string_literal_comment_index(lines: &[&[u8]], leading_end: usize) -> Option<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .take(leading_end)
+        .find_map(|(i, line)| is_frozen_string_literal_comment(line).then_some(i))
 }
 
 fn starts_with_embedded_doc_keyword(line: &[u8], keyword: &[u8]) -> bool {
@@ -541,6 +578,53 @@ mod tests {
     }
 
     #[test]
+    fn default_config_skips_active_admin_arb_templates() {
+        let source =
+            SourceFile::from_bytes("admin/history.html.arb", b"panel 'History'\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(&source, &CopConfig::default(), &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "default config should skip ActiveAdmin .arb files"
+        );
+    }
+
+    #[test]
+    fn explicit_config_checks_active_admin_arb_templates() {
+        let source =
+            SourceFile::from_bytes("admin/history.html.arb", b"panel 'History'\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_enforced_style("always_true"),
+            &mut diags,
+            None,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "Missing magic comment `# frozen_string_literal: true`."
+        );
+    }
+
+    #[test]
+    fn enabled_override_checks_active_admin_arb_templates() {
+        let source =
+            SourceFile::from_bytes("admin/history.html.arb", b"panel 'History'\n".to_vec());
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &CopConfig {
+                enabled: EnabledState::True,
+                ..CopConfig::default()
+            },
+            &mut diags,
+            None,
+        );
+        assert_eq!(diags.len(), 1);
+    }
+
+    #[test]
     fn with_shebang_and_frozen() {
         let source = SourceFile::from_bytes(
             "test.rb",
@@ -593,6 +677,51 @@ mod tests {
             options,
             ..CopConfig::default()
         }
+    }
+
+    fn config_with_enforced_style(style: &str) -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn never_style_combined_encoding_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/offense/never_combined_encoding_frozen.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn never_style_duplicate_leading_comments_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/offense/never_duplicate_leading_comments.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn never_style_syntax_error_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_syntax_error_no_offense.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
     }
 
     #[test]

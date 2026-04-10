@@ -9,3 +9,8 @@ foo(a,
 foo(a,
   &:to_s)
         ^ Layout/MultilineMethodCallBraceLayout: Closing method call brace must be on the line after the last argument.
+
+# Block argument as the only argument on same line as closing brace
+map(
+  &:to_s)
+        ^ Layout/MultilineMethodCallBraceLayout: Closing method call brace must be on the line after the last argument.

@@ -57,6 +57,16 @@ use ruby_prism::Visit;
 ///   rejects the whole array. Prism keeps it as a `SymbolNode`, so nitrocop had to
 ///   explicitly exclude empty symbol elements when deciding whether a bracket array
 ///   is a plain symbol array eligible for `%i`/`%I`.
+///
+/// ## Variant style investigation (2026-04-09)
+///
+/// Variant oracle reported 0 FP, 17,172 FN for `EnforcedStyle: brackets`.
+///
+/// Root cause: the `brackets` style path returned early without visiting the AST
+/// at all. In brackets mode, `%i[...]` and `%I[...]` arrays should be flagged
+/// with a message suggesting the equivalent bracket notation. Fixed by passing the
+/// enforced style to the visitor and branching: percent arrays are flagged in
+/// brackets mode (with the bracket array message), and bracket arrays are skipped.
 pub struct SymbolArray;
 
 /// Delimiter characters that cannot appear unmatched in %i arrays.
@@ -394,15 +404,12 @@ impl Cop for SymbolArray {
         let min_size = config.get_usize("MinSize", 2);
         let enforced_style = config.get_str("EnforcedStyle", "percent");
 
-        if enforced_style == "brackets" {
-            return;
-        }
-
         let mut visitor = SymbolArrayVisitor {
             cop: self,
             source,
             parse_result,
             min_size,
+            enforced_style,
             diagnostics: Vec::new(),
             ambiguous_array_arg_start_offset: None,
         };
@@ -416,6 +423,7 @@ struct SymbolArrayVisitor<'a, 'src, 'pr> {
     source: &'src SourceFile,
     parse_result: &'a ruby_prism::ParseResult<'pr>,
     min_size: usize,
+    enforced_style: &'a str,
     diagnostics: Vec<Diagnostic>,
     /// Start offset of the direct array argument currently exempted by
     /// `invalid_percent_array_context?`.
@@ -430,7 +438,10 @@ impl<'pr> SymbolArrayVisitor<'_, '_, 'pr> {
         };
 
         if opening.as_slice().starts_with(b"%i") || opening.as_slice().starts_with(b"%I") {
-            if !array_has_complex_content(self.source, node) {
+            // In brackets mode: all %i/%I arrays are offenses.
+            // In percent mode: only flag %i/%I with complex content that needs brackets.
+            let is_complex = array_has_complex_content(self.source, node);
+            if self.enforced_style != "brackets" && !is_complex {
                 return;
             }
 
@@ -445,6 +456,11 @@ impl<'pr> SymbolArrayVisitor<'_, '_, 'pr> {
 
         // Must have `[` opening (not %i or %I)
         if opening.as_slice() != b"[" {
+            return;
+        }
+
+        // In brackets mode, bracket arrays are the desired style — no offense.
+        if self.enforced_style == "brackets" {
             return;
         }
 
@@ -612,6 +628,39 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not flag brackets with brackets style"
+        );
+    }
+
+    fn brackets_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("brackets".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn brackets_offense() {
+        use crate::testutil::assert_cop_offenses_full_with_config;
+        assert_cop_offenses_full_with_config(
+            &SymbolArray,
+            include_bytes!("../../../tests/fixtures/cops/style/symbol_array/brackets_offense.rb"),
+            brackets_config(),
+        );
+    }
+
+    #[test]
+    fn brackets_no_offense() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        assert_cop_no_offenses_full_with_config(
+            &SymbolArray,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/symbol_array/brackets_no_offense.rb"
+            ),
+            brackets_config(),
         );
     }
 }
