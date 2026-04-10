@@ -507,3 +507,52 @@ def rescue_chain_value
   end
   puts score
 end
+
+# FP fix: assignment in || condition — short-circuit means only one branch executes
+def assign_in_or_condition(item, request)
+  if item.respond_to?(method = "#{request}_path") || item.respond_to?(method = "path")
+    item.send(method)
+  end
+end
+
+# FP fix: assignment in || condition — variable used after
+def assign_in_or_with_key(expression, fields)
+  fields.each do |field|
+    if expression.key?(key = field.to_s) || expression.key?(key = field.to_sym)
+      expression.delete(key)
+    end
+  end
+end
+
+# FP fix: assignment in || condition — XPath fallback pattern
+def assign_in_or_xpath(xml)
+  if (root = search(xml, '//Response')) || (root = search(xml, '//AltResponse'))
+    root.elements.to_a
+  end
+end
+
+# FP fix: begin/end until (do-while) loop — assignment in body feeds the condition
+def begin_end_until_loop(flatfile)
+  begin
+    line = flatfile.gets
+  end until line.nil?
+end
+
+# FP fix: begin/end while (do-while) loop — same pattern
+def begin_end_while_loop(socket, endpoint)
+  begin
+    rc = socket.connect(endpoint)
+  end while rc == -1
+end
+
+# FP fix: inline rescue modifier — assignment in rescue path, read later
+def inline_rescue_assign
+  params = ["a", "1.0", "2.0", "3.0", "4.0"]
+  err = nil
+  red_low = Float(params[1]) rescue err = "red low"
+  yellow_low = Float(params[2]) rescue err = "yellow low"
+  yellow_high = Float(params[3]) rescue err = "yellow high"
+  red_high = Float(params[4]) rescue err = "red high"
+  raise "Invalid #{err}" if err
+  [red_low, yellow_low, yellow_high, red_high]
+end

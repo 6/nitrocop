@@ -57,7 +57,6 @@ jobs:
       # --- Shared environment setup (Rust, Ruby, mold, corpus) ---
       - uses: ./.github/actions/setup-agent-env
         with:
-          rust_components: rustfmt
           install_vendor_gems: 'true'
 
       - name: Set up cargo cache

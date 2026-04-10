@@ -22,15 +22,18 @@ use crate::parse::source::SourceFile;
 ///   The BOM is now removed before processing the line content.
 ///
 /// Investigation findings (2026-04-08):
-/// - FP root cause (kebab_case variant): comment-only template files were still
-///   inspected even though RuboCop returns early when Prism produces no AST.
-///   This caused false positives for files that only contain generated comments
-///   plus a `frozen_string_literal` header.
-/// - FN root cause (kebab_case variant): `rbs_inline` was missing from the
-///   recognized directive set, so valid `# rbs_inline: enabled` comments were
-///   never style-checked.
-/// - Fix: skip comment-only files and recognize `rbs_inline` only when its
-///   value is RuboCop-valid (`enabled` or `disabled`).
+/// - FP root cause (kebab_case variant): nitrocop only matched directive names,
+///   so invalid simple comments like `# frozen_string_literal:` and
+///   `# frozen_string_literal: true.` were treated as style offenses even though
+///   RuboCop only style-checks simple magic comments whose value matches its
+///   token rules.
+/// - FP root cause (kebab_case variant): comment-only files that ended with an
+///   embedded-doc block (`=begin`/`=end`) were treated as having code, so the
+///   leading `frozen_string_literal` comment was still inspected. RuboCop skips
+///   those files because they are comment-only.
+/// - Fix: validate simple magic-comment values before style-checking them, and
+///   treat embedded-doc blocks as comments when deciding whether a file has any
+///   real code before running this cop.
 pub struct MagicCommentFormat;
 
 const MAGIC_COMMENT_DIRECTIVES: &[&str] = &[
@@ -53,8 +56,36 @@ impl MagicCommentFormat {
         s.strip_prefix(Self::UTF8_BOM).unwrap_or(s)
     }
 
+    fn is_embdoc_begin(line: &str) -> bool {
+        line.strip_prefix("=begin").is_some_and(|rest| {
+            rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
+        })
+    }
+
+    fn is_embdoc_end(line: &str) -> bool {
+        line.strip_prefix("=end").is_some_and(|rest| {
+            rest.is_empty() || rest.chars().next().is_some_and(char::is_whitespace)
+        })
+    }
+
     fn has_code(lines: &[&str]) -> bool {
+        let mut in_embdoc = false;
+
         lines.iter().any(|line| {
+            let line = Self::strip_bom(line);
+
+            if in_embdoc {
+                if Self::is_embdoc_end(line) {
+                    in_embdoc = false;
+                }
+                return false;
+            }
+
+            if Self::is_embdoc_begin(line) {
+                in_embdoc = true;
+                return false;
+            }
+
             let trimmed = Self::strip_bom(line).trim();
             !trimmed.is_empty() && !trimmed.starts_with('#')
         })
@@ -74,11 +105,24 @@ impl MagicCommentFormat {
         )
     }
 
+    fn valid_magic_comment_token(value: &str) -> bool {
+        let value = value.trim();
+
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    }
+
     fn is_magic_comment_directive(word: &str, value: &str) -> bool {
         let normalized = word.replace(['-', '_'], "_").to_lowercase();
 
         if normalized == "rbs_inline" {
             return Self::valid_rbs_inline_value(value);
+        }
+
+        if normalized != "encoding" && !Self::valid_magic_comment_token(value) {
+            return false;
         }
 
         MAGIC_COMMENT_DIRECTIVES
@@ -145,10 +189,24 @@ impl Cop for MagicCommentFormat {
         let style = config.get_str("EnforcedStyle", "snake_case");
         let directive_capitalization = Self::directive_capitalization(config);
         let _value_capitalization = config.get_str("ValueCapitalization", "");
+        let mut in_embdoc = false;
 
         // Only check lines before the first code statement
         for (i, line) in lines.iter().enumerate() {
             let line = Self::strip_bom(line);
+
+            if in_embdoc {
+                if Self::is_embdoc_end(line) {
+                    in_embdoc = false;
+                }
+                continue;
+            }
+
+            if Self::is_embdoc_begin(line) {
+                in_embdoc = true;
+                continue;
+            }
+
             let trimmed = line.trim();
 
             // Stop at first non-comment, non-blank line

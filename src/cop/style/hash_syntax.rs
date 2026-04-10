@@ -37,6 +37,22 @@ use crate::parse::source::SourceFile;
 /// requiring explicit values unless the enclosing call is parenthesized. That
 /// includes outer wrappers like `end if cond`, so shorthand analysis now runs
 /// in a visitor that can see modifier ancestors before classifying each pair.
+///
+/// Fixed remaining variant quirks:
+/// RuboCop's `PairNode#value_omission?` is `source.end_with?(':')`, so explicit
+/// pairs like `gvar: :$:` are still treated as omitted shorthand and flagged by
+/// `EnforcedShorthandSyntax: never`. The cop now mirrors that source-based
+/// quirk and reports the diagnostic at the explicit value token, matching the
+/// RuboCop location.
+///
+/// Also, some US-ASCII corpus files contain regex literals with high-byte `\x`
+/// escapes that crash RuboCop's Prism translation before it reaches
+/// `Style/HashSyntax`. The crash only occurs when the decoded hex escape bytes
+/// form invalid UTF-8 (e.g. standalone `\xff` or `\x9F`). Consecutive escapes
+/// that form valid UTF-8 (e.g. `\xef\xbb\xbf` = BOM) are handled fine by
+/// RuboCop. The skip heuristic now checks UTF-8 validity of grouped `\xHH`
+/// sequences so that files like `ruby/rdoc/encoding.rb` (which uses
+/// `\xef\xbb\xbf`) are correctly analyzed under non-default style variants.
 pub struct HashSyntax;
 
 const MSG_19: &str = "Use the new Ruby 1.9 hash syntax.";
@@ -100,6 +116,10 @@ impl Cop for HashSyntax {
         let prefer_rockets_nonalnum =
             config.get_bool("PreferHashRocketsForNonAlnumEndingSymbols", false);
         let target_ruby_version = target_ruby_version(config);
+
+        if enforced_style != "ruby19" && rubocop_skips_hash_syntax_file(source) {
+            return;
+        }
 
         match enforced_style {
             "ruby19" => {
@@ -192,6 +212,10 @@ impl Cop for HashSyntax {
             return;
         }
 
+        if rubocop_skips_hash_syntax_file(source) {
+            return;
+        }
+
         let mut visitor = HashSyntaxShorthandVisitor {
             cop: self,
             source,
@@ -249,10 +273,10 @@ fn check_shorthand_syntax(
         "never" => {
             for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
                 if *kind == ShorthandKind::Omitted {
-                    push_diagnostic_at_node(
+                    push_omitted_shorthand_diagnostic(
                         cop,
                         source,
-                        &assoc.key(),
+                        assoc,
                         INCLUDE_HASH_VALUE_MSG,
                         diags,
                     );
@@ -270,10 +294,10 @@ fn check_shorthand_syntax(
                 if has_needed {
                     for (assoc, kind) in pairs.iter().zip(kinds.iter()) {
                         if *kind == ShorthandKind::Omitted {
-                            push_diagnostic_at_node(
+                            push_omitted_shorthand_diagnostic(
                                 cop,
                                 source,
-                                &assoc.key(),
+                                assoc,
                                 DO_NOT_MIX_INCLUDE_VALUE_MSG,
                                 diags,
                             );
@@ -315,7 +339,7 @@ fn shorthand_kind(
     hash_is_braced: bool,
     ancestors: &[ruby_prism::Node<'_>],
 ) -> ShorthandKind {
-    if assoc.value().as_implicit_node().is_some() {
+    if rubocop_value_omission(assoc) {
         return ShorthandKind::Omitted;
     }
 
@@ -346,6 +370,21 @@ fn shorthand_kind(
     } else {
         ShorthandKind::Needed
     }
+}
+
+fn push_omitted_shorthand_diagnostic(
+    cop: &HashSyntax,
+    source: &SourceFile,
+    assoc: &ruby_prism::AssocNode<'_>,
+    message: &str,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let node = if rubocop_omitted_pair_uses_explicit_value(assoc) {
+        assoc.value()
+    } else {
+        assoc.key()
+    };
+    push_diagnostic_at_node(cop, source, &node, message, diags);
 }
 
 struct HashSyntaxShorthandVisitor<'a, 'pr> {
@@ -488,6 +527,171 @@ fn enclosing_method_dispatch<'pr>(
     }
 
     None
+}
+
+fn rubocop_value_omission(assoc: &ruby_prism::AssocNode<'_>) -> bool {
+    assoc.location().as_slice().ends_with(b":")
+}
+
+fn rubocop_omitted_pair_uses_explicit_value(assoc: &ruby_prism::AssocNode<'_>) -> bool {
+    rubocop_value_omission(assoc) && assoc.value().as_implicit_node().is_none()
+}
+
+fn rubocop_skips_hash_syntax_file(source: &SourceFile) -> bool {
+    source_declares_us_ascii(source.as_bytes())
+        && source
+            .lines()
+            .any(line_contains_high_hex_escape_in_regex_literal)
+}
+
+fn source_declares_us_ascii(source: &[u8]) -> bool {
+    source.split(|&byte| byte == b'\n').take(2).any(|line| {
+        contains_ascii_case_insensitive(line, b"coding")
+            && contains_ascii_case_insensitive(line, b"us-ascii")
+    })
+}
+
+fn contains_ascii_case_insensitive(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+fn line_contains_high_hex_escape_in_regex_literal(line: &[u8]) -> bool {
+    let mut start = 0;
+
+    while start < line.len() {
+        let Some(open_idx) = line[start..].iter().position(|&byte| byte == b'/') else {
+            return false;
+        };
+        let slash_idx = start + open_idx;
+        if !looks_like_regex_open(line, slash_idx) {
+            start = slash_idx + 1;
+            continue;
+        }
+
+        let body_start = slash_idx + 1;
+        let mut idx = body_start;
+        let mut escaped = false;
+
+        while idx < line.len() {
+            let byte = line[idx];
+
+            if escaped {
+                escaped = false;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'\\' {
+                escaped = true;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'/' {
+                if contains_non_utf8_hex_escape(&line[body_start..idx]) {
+                    return true;
+                }
+                start = idx + 1;
+                break;
+            }
+
+            idx += 1;
+        }
+
+        if idx >= line.len() {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn looks_like_regex_open(line: &[u8], slash_idx: usize) -> bool {
+    let prev = line[..slash_idx]
+        .iter()
+        .rfind(|&&byte| !byte.is_ascii_whitespace())
+        .copied();
+
+    !matches!(
+        prev,
+        Some(
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b')'
+            | b']'
+            | b'}'
+            | b'"'
+            | b'\''
+            | b'/',
+        )
+    )
+}
+
+/// Check if a regex body contains `\xHH` escape sequences with high bytes (>= 0x80)
+/// that do NOT form valid UTF-8 when grouped as consecutive escapes.
+///
+/// RuboCop crashes on US-ASCII files with regex high-byte escapes that form
+/// invalid UTF-8 (e.g. standalone `\xff`), but handles valid UTF-8 sequences
+/// fine (e.g. `\xef\xbb\xbf` = BOM).
+fn contains_non_utf8_hex_escape(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < body.len() {
+        if body[i] == b'\\' && body[i + 1] == b'x' {
+            let (d1, d2) = (body[i + 2], body[i + 3]);
+            if d1.is_ascii_hexdigit() && d2.is_ascii_hexdigit() {
+                let byte = hex_pair_to_byte(d1, d2);
+                if byte >= 0x80 {
+                    // Collect consecutive \xHH escapes with high bytes
+                    let mut bytes = vec![byte];
+                    let mut j = i + 4;
+                    while j + 3 < body.len()
+                        && body[j] == b'\\'
+                        && body[j + 1] == b'x'
+                        && body[j + 2].is_ascii_hexdigit()
+                        && body[j + 3].is_ascii_hexdigit()
+                    {
+                        let b = hex_pair_to_byte(body[j + 2], body[j + 3]);
+                        if b >= 0x80 {
+                            bytes.push(b);
+                            j += 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    if std::str::from_utf8(&bytes).is_err() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn hex_pair_to_byte(h1: u8, h2: u8) -> u8 {
+    hex_digit_val(h1) * 16 + hex_digit_val(h2)
+}
+
+fn hex_digit_val(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    }
 }
 
 fn sym_indices(
@@ -824,6 +1028,18 @@ mod tests {
             "../../../tests/fixtures/cops/style/hash_syntax/offense.consistent_ruby19_no_mixed_keys.rb"
         );
         assert_cop_offenses_full_with_config(
+            &HashSyntax,
+            fixture,
+            shorthand_style_config("ruby19_no_mixed_keys", "consistent"),
+        );
+    }
+
+    #[test]
+    fn consistent_ruby19_no_mixed_keys_no_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/style/hash_syntax/no_offense.consistent_ruby19_no_mixed_keys.rb"
+        );
+        assert_cop_no_offenses_full_with_config(
             &HashSyntax,
             fixture,
             shorthand_style_config("ruby19_no_mixed_keys", "consistent"),

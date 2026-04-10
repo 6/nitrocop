@@ -129,22 +129,29 @@ The canonical reference for RuboCop's AST node predicates is vendored at `vendor
 
 ## Corpus Quick Reference
 
-Start with cached corpus tools before rerunning expensive checks:
+`investigate_cop.py`, `check_cop.py`, and `verify_cop_locations.py` are **CI-only** (guarded by `CI` env var). Do not run them locally. Pass `--force` to override in exceptional cases.
+
+For local cop investigation, use these sources instead:
+
+- **`docs/corpus.md`** — FP/FN examples with repo IDs, file paths, and line numbers.
+- **CI cop-check PR comments / CI logs** — contain per-repo breakdowns and specific offense locations.
+- **`gh api`** — fetch source files at pinned commits using repo info from `bench/corpus/manifest.jsonl`.
+- **`reduce_mismatch.py`** — for reducing a specific mismatch to a minimal reproducer:
 
 ```bash
-python3 scripts/investigate_cop.py Department/CopName
-python3 scripts/investigate_cop.py Department/CopName --context
-python3 scripts/investigate_repo.py rails
 python3 scripts/reduce_mismatch.py Department/CopName repo_id path/to/file.rb:line
 ```
 
-Use `check_cop.py` for aggregate regression checks after a fix:
+The CI-only scripts (for reference in CI workflows and skills):
 
 ```bash
-python3 scripts/check_cop.py Department/CopName
-python3 scripts/check_cop.py Department/CopName --verbose --rerun
-python3 scripts/verify_cop_locations.py Department/CopName
-python3 scripts/verify_cop_locations.py Department/CopName --style EnforcedStyle=never
+python3 scripts/investigate_cop.py Department/CopName           # FP/FN details from corpus oracle
+python3 scripts/investigate_cop.py Department/CopName --context  # with source snippets
+python3 scripts/investigate_repo.py rails                        # per-repo investigation
+python3 scripts/check_cop.py Department/CopName                  # aggregate count check
+python3 scripts/check_cop.py Department/CopName --verbose --rerun  # re-execute with per-repo breakdown
+python3 scripts/verify_cop_locations.py Department/CopName       # per-line location verification
+python3 scripts/verify_cop_locations.py Department/CopName --style EnforcedStyle=never  # variant check
 ```
 
 Important:

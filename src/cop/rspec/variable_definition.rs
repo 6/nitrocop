@@ -36,6 +36,20 @@ use ruby_prism::Visit;
 /// Only flags `let`/`subject` calls when `in_example_group` is true.
 /// The Mail.new-inside-example-group case still fires correctly because `in_example_group`
 /// is inherited by all nested blocks within the example group.
+///
+/// ## Variant investigation (2026-04-09, `EnforcedStyle: strings`)
+///
+/// FP=978 came from treating example groups nested under `module`/`class` bodies as
+/// inside_example_group?. RuboCop's `InsideExampleGroup` mixin does NOT descend into
+/// wrapper modules or classes when it searches for the example-group root; it only
+/// recognizes spec groups that are direct top-level statements. That means:
+///
+/// - `RSpec.describe Foo do; let(:bar) { ... }; end` is still an offense for `strings`
+/// - `module X; RSpec.describe Foo do; let(:bar) { ... }; end; end` is NOT an offense
+///
+/// Fix: keep the top-level offset tracking, but only mark direct program statements as
+/// example-group roots. Nested groups inside those roots still inherit `in_example_group`,
+/// so existing default-style detections remain intact.
 pub struct VariableDefinition;
 
 impl Cop for VariableDefinition {
@@ -163,18 +177,12 @@ impl VariableDefinitionChecker<'_> {
 }
 
 /// Find the byte offsets of all top-level spec group call nodes.
-/// Matches RuboCop's TopLevelGroup logic (same as RSpec/InstanceVariable).
+/// This intentionally matches RuboCop RSpec's `InsideExampleGroup` root detection:
+/// only direct program statements count, and module/class wrappers are not unwrapped.
 fn find_top_level_group_offsets(program: &ruby_prism::ProgramNode<'_>) -> HashSet<usize> {
     let mut offsets = HashSet::new();
-    let body = program.statements();
-    let stmts: Vec<_> = body.body().iter().collect();
-
-    if stmts.len() == 1 {
-        collect_top_level_groups(&stmts[0], &mut offsets);
-    } else {
-        for stmt in &stmts {
-            check_direct_spec_group(stmt, &mut offsets);
-        }
+    for stmt in program.statements().body().iter() {
+        check_direct_spec_group(&stmt, &mut offsets);
     }
     offsets
 }
@@ -185,37 +193,6 @@ fn check_direct_spec_group(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<us
             offsets.insert(call.location().start_offset());
         }
     }
-}
-
-fn collect_top_level_groups(node: &ruby_prism::Node<'_>, offsets: &mut HashSet<usize>) {
-    if let Some(call) = node.as_call_node() {
-        if call.block().is_some() && is_spec_group_call(&call) {
-            offsets.insert(call.location().start_offset());
-            return;
-        }
-    }
-
-    if let Some(module_node) = node.as_module_node() {
-        if let Some(body) = module_node.body() {
-            if let Some(stmts) = body.as_statements_node() {
-                for child in stmts.body().iter() {
-                    collect_top_level_groups(&child, offsets);
-                }
-            }
-        }
-        return;
-    }
-
-    if let Some(class_node) = node.as_class_node() {
-        if let Some(body) = class_node.body() {
-            if let Some(stmts) = body.as_statements_node() {
-                for child in stmts.body().iter() {
-                    collect_top_level_groups(&child, offsets);
-                }
-            }
-        }
-    }
-    // NOTE: BeginNode is NOT unwrapped. RuboCop treats begin..rescue as :kwbegin.
 }
 
 fn is_spec_group_call(call: &ruby_prism::CallNode<'_>) -> bool {
@@ -305,6 +282,33 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&VariableDefinition, source, config);
         assert_eq!(diags.len(), 1, "should flag dsym when style is strings");
         assert!(diags[0].message.contains("strings"));
+    }
+
+    #[test]
+    fn strings_style_does_not_flag_module_wrapped_example_group() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("strings".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = concat!(
+            "module DatabaseCleaner\n",
+            "  RSpec.describe Cleaner do\n",
+            "    subject(:cleaner) { Cleaner.new(:active_record, db: :my_db) }\n",
+            "  end\n",
+            "end\n"
+        )
+        .as_bytes();
+        let diags = crate::testutil::run_cop_full_with_config(&VariableDefinition, source, config);
+        assert!(
+            diags.is_empty(),
+            "module-wrapped example groups should not count for inside_example_group?"
+        );
     }
 
     #[test]

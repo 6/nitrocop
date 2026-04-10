@@ -139,12 +139,37 @@ use ruby_prism::Visit;
 /// parenthesization. Comments like `# :nodoc:` on the previous line falsely
 /// matched `:`. Fixed by stripping trailing comments before the check.
 ///
+/// FN root cause (2026-04-08): that trailing-comment stripper also treated
+/// string interpolation markers like `#{...}` as comments when they were
+/// preceded by whitespace on the previous line. That truncated lines such as
+/// `changes = ["Study file updated: #{@study_file.upload_file_name}"]` to a
+/// trailing `:`, incorrectly forced `(body if cond)`, and pushed several
+/// nested modifier forms from 119 chars to 121 chars. Fixed by ignoring
+/// interpolation markers (`#{...}`, `#@ivar`, `#$gvar`) in
+/// `strip_trailing_comment`.
+///
 /// FN root cause (2026-04-08): `first_line_comment_text` only found comments
 /// that were the first non-whitespace after the condition/predicate end. Comments
 /// after `then` keyword (e.g. `if cond then # comment`) were missed because
 /// `then` appeared first. Fixed by searching for `#` anywhere after the
 /// predicate (skipping `#{` interpolation markers), matching RuboCop's behavior
 /// of finding any comment on the same line as the node.
+///
+/// FN root cause (2026-04-09): `previous_line_chains_to_if` treated any
+/// previous line ending in `!` as an operator continuation. That falsely
+/// skipped ordinary offenses after bang method names like `def unlock!`,
+/// `parser.parse!`, `m.load_bundler!`, and `item.strip!`. RuboCop's
+/// `node.chained?` only skips real operator/receiver chaining, so the fix keeps
+/// standalone `!` chaining but ignores `!` when it is just method-name
+/// punctuation.
+///
+/// FN root cause (2026-04-09): the broader previous-line punctuation heuristic
+/// was still skipping real offenses after percent-string delimiters (`%!...!`),
+/// exception globals (`$!`), character literals (`?!` / `?-`), `def !`, and
+/// binary operators where the `if` is the ARGUMENT (`foo +\nif cond`) rather
+/// than the receiver. RuboCop's `node.chained?` only skips true receiver
+/// chains, so the fix narrows the heuristic to receiver-looking previous-line
+/// shapes only: bare unary-operator lines and explicit `.` / `&.` continuations.
 pub struct IfUnlessModifier;
 
 /// Check if a node (or any descendant) contains a heredoc.
@@ -416,11 +441,16 @@ impl<'pr> Visit<'pr> for NestedConditionalFinder {
 /// Strip trailing comment from a line. Finds the first `#` preceded by
 /// whitespace (or at position 0) and returns the trimmed text before it.
 /// This prevents comment text like `# :nodoc:` from falsely matching
-/// operators like `=`, `:`, or `=>`.
+/// operators like `=`, `:`, or `=>`. Ignore interpolation markers like
+/// `#{...}`, `#@ivar`, and `#$gvar` — they are part of string content,
+/// not Ruby comments.
 fn strip_trailing_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        if b == b'#' && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t') {
+        if b == b'#'
+            && (i == 0 || bytes[i - 1] == b' ' || bytes[i - 1] == b'\t')
+            && !matches!(bytes.get(i + 1), Some(b'{' | b'@' | b'$'))
+        {
             return line[..i].trim_end();
         }
     }
@@ -848,6 +878,80 @@ fn has_another_statement_on_same_line(source: &SourceFile, node: &ruby_prism::No
         return true;
     }
 
+    // Also check through closing tokens (like `}`, `]`, `)`) for semicolons
+    // that indicate sibling statements in enclosing scopes. RuboCop's AST-based
+    // `another_statement_on_same_line?` traverses upward to find `begin` nodes
+    // with siblings; we detect this textually.
+    // Example: `{ |fn| bool = true if cond } ; bool`
+    //   After the if-node: ` } ; bool` — the `}` closes the block, and `; bool`
+    //   is a sibling statement in the enclosing parenthesized expression.
+    {
+        let mut remaining = &trimmed[..];
+        // Skip closing tokens and whitespace
+        while let Some(&b) = remaining.first() {
+            if b == b'}' || b == b']' || b == b')' || b == b' ' || b == b'\t' {
+                remaining = &remaining[1..];
+            } else {
+                break;
+            }
+        }
+        if remaining.first() == Some(&b';') {
+            let after_semi: Vec<_> = remaining[1..]
+                .iter()
+                .copied()
+                .skip_while(|&b| b == b' ' || b == b'\t')
+                .collect();
+            if !after_semi.is_empty() && !is_only_closing_tokens(&after_semi) {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// Check if the if/unless keyword is at the start of a line and the previous
+/// non-empty, non-comment line looks like a true receiver continuation:
+/// a bare unary operator (`-`, `+`, `!`, `~`) or an explicit call chain
+/// continuation (`foo.` / `foo&.`).
+///
+/// This intentionally does NOT treat generic trailing punctuation as chaining.
+/// Examples RuboCop still flags:
+/// - `%!...!` percent-string delimiters
+/// - `$!` exception globals
+/// - `?!` / `?-` character literals
+/// - `def !`
+/// - `foo +` where the if-expression is an argument, not the receiver
+fn previous_line_chains_to_if(source: &SourceFile, kw_loc: &ruby_prism::Location<'_>) -> bool {
+    let (kw_line, kw_col) = source.offset_to_line_col(kw_loc.start_offset());
+    let kw_line_start = kw_loc.start_offset().saturating_sub(kw_col);
+    let before_kw = &source.as_bytes()[kw_line_start..kw_loc.start_offset()];
+
+    // Only applies when the if/unless keyword is at the start of the line.
+    if !before_kw.iter().all(|&b| b == b' ' || b == b'\t') || kw_line < 2 {
+        return false;
+    }
+
+    let lines: Vec<&[u8]> = source.lines().collect();
+    for prev_idx in (0..kw_line - 1).rev() {
+        let prev_line = lines[prev_idx];
+        let prev_str = String::from_utf8_lossy(prev_line);
+        let prev_trimmed = prev_str.trim();
+        let prev_trimmed = prev_trimmed.strip_suffix('\r').unwrap_or(prev_trimmed);
+        if prev_trimmed.is_empty() {
+            continue;
+        }
+
+        let prev_code = strip_trailing_comment(prev_trimmed);
+        if prev_code.is_empty() {
+            continue;
+        }
+
+        return matches!(prev_code, "-" | "+" | "!" | "~")
+            || prev_code.ends_with('.')
+            || prev_code.ends_with("&.");
+    }
+
     false
 }
 
@@ -946,7 +1050,9 @@ fn code_after_end(source: &SourceFile, end_loc: ruby_prism::Location<'_>) -> Opt
         return None;
     }
 
-    let end_line_bytes = lines[end_line - 1];
+    let raw_line = lines[end_line - 1];
+    // Strip CRLF: \r at end of line inflates modifier form length by 1 character
+    let end_line_bytes = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
     let after_end_col = end_col + end_loc.as_slice().len();
     if after_end_col >= end_line_bytes.len() {
         return None;
@@ -1119,6 +1225,12 @@ impl Cop for IfUnlessModifier {
             return;
         }
 
+        // Skip if the if/unless is chained from the previous line, matching
+        // the narrow receiver cases RuboCop covers via `node.chained?`.
+        if previous_line_chains_to_if(source, &kw_loc) {
+            return;
+        }
+
         // If there are standalone comment lines between keyword and body, don't suggest
         // modifier form — converting would lose the comments. But blank lines and
         // multiline condition continuation lines are OK.
@@ -1250,7 +1362,8 @@ impl Cop for IfUnlessModifier {
         .into_owned();
 
         let mut expression = format!("{body_text} {keyword} {cond_text}");
-        if parenthesize_modifier_form(source, &kw_loc) {
+        let needs_parens = parenthesize_modifier_form(source, &kw_loc);
+        if needs_parens {
             expression = format!("({expression})");
         }
         if let Some(comment) = first_line_comment_text(source, kw_line, &predicate) {
@@ -1356,6 +1469,30 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "Semicolon before closing brace should not suppress modifier suggestion"
+        );
+    }
+
+    #[test]
+    fn previous_line_bang_method_is_not_treated_as_chaining() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"m.load_bundler!\nif m.invoked_as_script?\n  load Gem.bin_path(\"bundler\", \"bundle\")\nend\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Bang method names on the previous line should not suppress modifier suggestion"
+        );
+    }
+
+    #[test]
+    fn previous_line_binary_operator_argument_is_not_treated_as_chaining() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"list = a +\nif foo\n  bar\nend\n";
+        let diags = run_cop_full(&IfUnlessModifier, source);
+        assert!(
+            !diags.is_empty(),
+            "Binary operators on the previous line should not suppress modifier suggestion"
         );
     }
 }

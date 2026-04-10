@@ -1,8 +1,14 @@
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::node_type::{CALL_NODE, NIL_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Matches RuboCop's `RESTRICT_ON_SEND` behavior and ignores safe-navigation
+/// calls. Under `EnforcedStyle: comparison`, nitrocop was falsely flagging
+/// `region&.nil?` in `twilio__twilio-ruby__42c76f5` at
+/// `lib/twilio-ruby/jwt/access_token.rb:82`, but RuboCop only inspects normal
+/// `send` nodes for this cop.
 pub struct NilComparison;
 
 impl Cop for NilComparison {
@@ -38,6 +44,10 @@ impl Cop for NilComparison {
         let method_bytes = method_name.as_slice();
 
         if call_node.receiver().is_none() {
+            return;
+        }
+
+        if method_dispatch_predicates::is_safe_navigation(&call_node) {
             return;
         }
 
@@ -126,4 +136,21 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(NilComparison, "cops/style/nil_comparison");
     crate::cop_autocorrect_fixture_tests!(NilComparison, "cops/style/nil_comparison");
+
+    #[test]
+    fn comparison_style_ignores_safe_navigation_nil_checks() {
+        let config = CopConfig {
+            options: std::collections::HashMap::from([(
+                "EnforcedStyle".to_string(),
+                serde_yml::Value::String("comparison".to_string()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &NilComparison,
+            b"headers[:twr] = region unless region&.nil?\n",
+            config,
+        );
+    }
 }

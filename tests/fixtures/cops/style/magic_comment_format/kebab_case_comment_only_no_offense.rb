@@ -9,3 +9,8 @@
 #     https: false
 #   )
 # end
+
+=begin
+All remaining content is an embedded comment, so RuboCop treats this as a
+comment-only file and skips Style/MagicCommentFormat entirely.
+=end
