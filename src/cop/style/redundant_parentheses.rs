@@ -3,6 +3,7 @@ use ruby_prism::Visit;
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::PINNED_EXPRESSION_NODE;
 use crate::cop::shared::predicate_operator_predicates;
+use crate::cop::shared::util::begins_its_line;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -844,7 +845,7 @@ impl RedundantParensVisitor<'_> {
     /// rescue-body statement; nested parens like `var = (a || b)` still report.
     fn has_rescue_body_ancestor(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
         let paren_offset = node.location().start_offset();
-        if !is_first_non_whitespace_on_line(&self.source.content, paren_offset) {
+        if !begins_its_line(self.source, paren_offset) {
             return false;
         }
         // parent_stack.last() is the ParenthesesNode itself.
@@ -1342,19 +1343,6 @@ impl RedundantParensVisitor<'_> {
 
         false
     }
-}
-
-fn is_first_non_whitespace_on_line(content: &[u8], offset: usize) -> bool {
-    let mut i = offset;
-    while i > 0 {
-        match content[i - 1] {
-            b' ' | b'\t' => i -= 1,
-            b'\n' | b'\r' => return true,
-            _ => return false,
-        }
-    }
-
-    true
 }
 
 fn check_logical<'a>(
