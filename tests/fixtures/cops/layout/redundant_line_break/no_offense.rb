@@ -133,6 +133,21 @@ end.join
 e.select { |i| i.cond? }
  .join
 
+# Backslash continuation where the expression continues across comma-terminated
+# lines. RuboCop measures the full attr_reader call, not just the first symbol.
+class PhaseTwoLongAttrReader
+  attr_reader \
+    :health_metrics,
+    :settings,
+    :agent_settings,
+    :logger,
+    :remote,
+    :profiler,
+    :runtime_metrics,
+    :telemetry,
+    :crashtracker
+end
+
 # Index access call chained — see RuboCop's index_access_call_chained? check
 # hash[:foo] \
 #   [:bar]

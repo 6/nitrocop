@@ -199,6 +199,12 @@ use crate::parse::source::SourceFile;
 ///   a 4-level-deep nesting would measure 124 chars (nitrocop) vs 117 chars (RuboCop).
 ///   Added `merge_string_continuation()` helper and `prev_had_backslash` tracking in
 ///   `too_long` to match RuboCop's merging behavior.
+/// - **Phase 2 comma-tail span**: the text-based backslash pass now keeps walking
+///   through immediately-following comma-terminated lines before measuring length.
+///   RuboCop judges the whole continued call (for example `attr_reader \` followed
+///   by many symbol arguments), but nitrocop previously only joined the backslash
+///   line with the very next line. That produced false positives for long DSL-style
+///   argument lists that still obviously continued after the first continuation line.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -1299,9 +1305,34 @@ fn check_backslash_continuations(
             continue;
         }
 
+        // Phase 2 starts from explicit backslash continuations, but the Ruby
+        // expression can keep going across later comma-terminated lines:
+        //
+        //   attr_reader \
+        //     :foo,
+        //     :bar,
+        //     :baz
+        //
+        // RuboCop measures the full continued call here, not just `attr_reader :foo,`.
+        let mut expression_end_idx = final_line_idx;
+        while expression_end_idx + 1 < lines.len() {
+            let current = trim_trailing_whitespace(lines[expression_end_idx]);
+            if current.is_empty() || !current.ends_with(b",") {
+                break;
+            }
+
+            let next_trimmed_content =
+                trim_leading_whitespace(trim_trailing_whitespace(lines[expression_end_idx + 1]));
+            if next_trimmed_content.starts_with(b"#") {
+                break;
+            }
+
+            expression_end_idx += 1;
+        }
+
         let report_line = group_start + 1; // 1-indexed
         if already_reported.contains(&report_line) {
-            i = final_line_idx + 1;
+            i = expression_end_idx + 1;
             continue;
         }
 
@@ -1310,8 +1341,8 @@ fn check_backslash_continuations(
         // This matches RuboCop's AST-level checks that prevent collapsing
         // expressions containing these constructs.
         let group_byte_start = line_starts[group_start];
-        let group_byte_end = if final_line_idx < line_starts.len() {
-            line_starts[final_line_idx] + lines[final_line_idx].len()
+        let group_byte_end = if expression_end_idx < line_starts.len() {
+            line_starts[expression_end_idx] + lines[expression_end_idx].len()
         } else {
             content.len()
         };
@@ -1351,13 +1382,17 @@ fn check_backslash_continuations(
         let mut combined = Vec::new();
         combined.extend_from_slice(&lines[group_start][..indent]);
 
-        for (j, bline) in lines[group_start..=group_end].iter().enumerate() {
-            let t = trim_trailing_whitespace(bline);
+        for (j, line_idx) in (group_start..=expression_end_idx).enumerate() {
+            let t = trim_trailing_whitespace(lines[line_idx]);
             if t.is_empty() {
                 continue;
             }
-            let before_bs = trim_trailing_whitespace(&t[..t.len() - 1]);
-            let content_part = trim_leading_whitespace(before_bs);
+            let content_part = if line_idx <= group_end {
+                let before_bs = trim_trailing_whitespace(&t[..t.len() - 1]);
+                trim_leading_whitespace(before_bs)
+            } else {
+                trim_leading_whitespace(t)
+            };
 
             if j == 0 {
                 combined.extend_from_slice(content_part);
@@ -1367,25 +1402,19 @@ fn check_backslash_continuations(
             }
         }
 
-        let final_content = trim_leading_whitespace(lines[final_line_idx]);
-        if !final_content.is_empty() {
-            combined.push(b' ');
-            combined.extend_from_slice(trim_trailing_whitespace(final_content));
-        }
-
         if utf8_char_count(&combined) > max_line_length {
-            i = final_line_idx + 1;
+            i = expression_end_idx + 1;
             continue;
         }
 
         let next_content = trim_leading_whitespace(lines[group_start + 1]);
         if next_content.starts_with(b"&&") || next_content.starts_with(b"||") {
-            i = final_line_idx + 1;
+            i = expression_end_idx + 1;
             continue;
         }
 
         if is_string_concat_continuation(&lines, group_start, group_end) {
-            i = final_line_idx + 1;
+            i = expression_end_idx + 1;
             continue;
         }
 
@@ -1396,7 +1425,7 @@ fn check_backslash_continuations(
             "Redundant line break detected.".to_string(),
         ));
 
-        i = final_line_idx + 1;
+        i = expression_end_idx + 1;
     }
 }
 
