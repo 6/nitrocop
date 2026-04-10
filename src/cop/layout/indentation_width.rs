@@ -110,6 +110,17 @@ use crate::parse::source::SourceFile;
 ///   is on the same line as `rescue NameError;`), RuboCop's `on_kwbegin` skips the
 ///   indentation check entirely. Added `end_begins_its_line` helper and the check
 ///   to the BeginNode handler. Resolved 8+ FP (neo4jrb, foodsoft, activescaffold).
+///
+/// 2026-04-08:
+/// - Fixed begin block alt_base FN. The begin handler used `alt_base = Some(kw_col)`
+///   when `end` was at a different column than `begin`, accepting body indentation
+///   relative to EITHER `end` or `begin`. But RuboCop's `on_kwbegin` only checks
+///   against `node.loc.end`. Removed the alt_base so body is always checked against
+///   the `end` keyword column only. This fixes cases like:
+///   - `begin..end` where `end` is misindented (body at begin+2 passes alt check)
+///   - `result = begin..end` where body aligns with `begin` keyword, not `end`
+///
+///   Resolved 16+ FN (Netflix Scumblr, DManga, idb, redcar, commitgpt, etc.).
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -892,16 +903,11 @@ impl Cop for IndentationWidth {
                         return;
                     }
                 }
-                let alt_base = if base_col != kw_col {
-                    Some(kw_col)
-                } else {
-                    None
-                };
                 diagnostics.extend(self.check_statements_indentation(
                     source,
                     kw_offset,
                     base_col,
-                    alt_base,
+                    None,
                     begin_node.statements(),
                     options,
                 ));
