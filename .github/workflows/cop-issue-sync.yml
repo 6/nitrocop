@@ -28,7 +28,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: rust
       - uses: Swatinem/rust-cache@v2
 
       - name: Install mold linker
