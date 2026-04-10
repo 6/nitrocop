@@ -75,8 +75,13 @@ impl Assignment {
 
     /// Whether this assignment's value is used (referenced or captured by block).
     /// The `captured_by_block` parameter comes from the parent Variable.
+    ///
+    /// Matches RuboCop's logic: `(!reassigned? && captured_by_block?) || referenced`.
+    /// When a variable is captured by a block, only non-reassigned assignments
+    /// are treated as "used" — assignments that were already overwritten before
+    /// the block capture are still dead.
     pub fn used(&self, captured_by_block: bool) -> bool {
-        self.referenced || captured_by_block
+        self.referenced || (!self.reassigned && captured_by_block)
     }
 
     /// Whether this is an operator assignment (`+=`, `-=`, etc.) which reads
