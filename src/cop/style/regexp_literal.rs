@@ -156,6 +156,10 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
                         self.add_offense(node_start, "Use `%r` around regular expression.");
                     }
                 } else if is_percent_r {
+                    // Multiline %r is always correct in mixed style
+                    if is_multiline {
+                        return;
+                    }
                     if has_slash && !allow_inner_slashes {
                         return;
                     }
@@ -352,6 +356,17 @@ mod tests {
             &RegexpLiteral,
             include_bytes!("../../../tests/fixtures/cops/style/regexp_literal/mixed_no_offense.rb"),
             config,
+        );
+    }
+
+    #[test]
+    fn mixed_style_allows_multiline_percent_r() {
+        let source = b"regex = %r{\n  foo\n  bar\n}x\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&RegexpLiteral, source, mixed_config());
+        assert!(
+            diags.is_empty(),
+            "Multiline %r is always correct in mixed style"
         );
     }
 
