@@ -525,3 +525,57 @@ def handle_grouped_chunk(grouped_chunk)
     end
   end
 end
+
+# FP fix: case/in pattern matching — variable captured in `in` clause, block in `else`
+# (corpus: dry-rb/dry-schema schema_compiler.rb:77)
+def visit_implication(node, opts)
+  case node
+  in [:not, [:predicate, [:nil?, _]]], el
+    visit(el, opts)
+  else
+    node.each do |el|
+      visit(el, opts)
+    end
+  end
+end
+
+# FP fix: begin/end until — block param in body, var assignment in until condition
+# (corpus: pascal-za/migrant migration_generator.rb:172)
+def ask_user(message, choices)
+  mappings = choices.uniq.inject({}) do |mappings, choice|
+    mappings.merge!(choice.to_s => choice)
+    mappings
+  end
+  begin
+    prompt = mappings.collect { |shortcut, choice| choice.to_s.sub(shortcut, shortcut) }.join(' / ')
+    input = gets
+  end until (choice = mappings.detect { |shortcut, choice| shortcut.downcase == input.strip })
+  choice.last
+end
+
+# FP fix: if/else — variable in if-branch, block param in assignment RHS in else-branch
+# (corpus: randy-girard/app_perf latency_bands_service.rb:37)
+def process_data(data)
+  data.each do |datum|
+    item = datum.last
+    if item == 0
+      d = { count: 0 }
+    else
+      d = item.find {|d| d[:range] == "foo" }
+    end
+    puts d[:count]
+  end
+end
+
+# Suppressed: unless/else — block in RHS of assignment in unless body, var in else clause.
+# Structurally identical to if/else FP3: in parser gem, the unless body IS the if's
+# else_branch. RuboCop's Check 6 fires: variable_node (lvasgn) == if.else_branch.
+def echo(major, minor)
+  unless minor
+    item = storage.items.detect do |item|
+      item.name == major
+    end
+  else
+    item = list.find_item(minor)
+  end
+end
