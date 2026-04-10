@@ -1,6 +1,10 @@
 use crate::cop::{Cop, CopConfig, EnabledState};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::{
+    InterpolatedRegularExpressionNode, RegularExpressionNode, Visit,
+    visit_interpolated_regular_expression_node, visit_regular_expression_node,
+};
 
 /// Matches RuboCop's leading magic-comment scan more closely in encoded files.
 ///
@@ -22,9 +26,11 @@ use crate::parse::source::SourceFile;
 /// `frozen_string_literal` magic comment it finds there. nitrocop previously diverged in three
 /// ways: it flagged every matching leading comment, it missed Emacs-style combined
 /// `encoding`/`frozen_string_literal` comments because the encoding fast-path returned early, and
-/// it still reported files where RuboCop emitted only `Lint/Syntax`. The `never` branch now scans
-/// the full leading comment section once, flags only the first matching magic comment, and skips
-/// parse-error files for that style.
+/// it treated all Prism parse errors as syntax-only skips even when RuboCop still had enough
+/// tokens to flag the comment. The `never` branch now scans the full leading comment section once,
+/// flags only the first matching magic comment, keeps reporting semantic `Invalid ...` errors like
+/// top-level `yield`, and suppresses the encoded-regexp parser gap where RuboCop's parser emits
+/// only `Lint/Syntax` for short `\\xNN` escapes under non-UTF-8 encodings.
 ///
 /// ActiveAdmin `.arb` templates have another RuboCop quirk: the vendor default config excludes
 /// them for this cop, but ANY explicit cop config entry drops that default exclusion. nitrocop
@@ -105,8 +111,7 @@ impl Cop for FrozenStringLiteralComment {
         }
 
         if enforced_style == "never" {
-            // RuboCop suppresses this cop when parsing fails and only `Lint/Syntax` is emitted.
-            if has_parse_errors(source) {
+            if should_skip_never_style(source) {
                 return;
             }
 
@@ -319,6 +324,114 @@ fn is_blank_line(line: &[u8]) -> bool {
     first_non_padding_byte(line).is_none()
 }
 
+fn has_non_utf8_regexp_escape_parser_gap(parse_result: &ruby_prism::ParseResult<'_>) -> bool {
+    let Some(encoding) = declared_encoding(parse_result) else {
+        return false;
+    };
+
+    if encoding_is_rubocop_safe_for_short_hex_regex_escapes(&encoding) {
+        return false;
+    }
+
+    regexp_contains_short_non_ascii_hex_escape(parse_result)
+}
+
+fn declared_encoding(parse_result: &ruby_prism::ParseResult<'_>) -> Option<Vec<u8>> {
+    parse_result.magic_comments().find_map(|comment| {
+        let key = comment.key();
+        if key.eq_ignore_ascii_case(b"encoding") || key.eq_ignore_ascii_case(b"coding") {
+            Some(normalize_encoding_name(comment.value()))
+        } else {
+            None
+        }
+    })
+}
+
+fn normalize_encoding_name(value: &[u8]) -> Vec<u8> {
+    value
+        .iter()
+        .copied()
+        .filter(|byte| byte.is_ascii_alphanumeric())
+        .map(|byte| byte.to_ascii_lowercase())
+        .collect()
+}
+
+fn encoding_is_rubocop_safe_for_short_hex_regex_escapes(encoding: &[u8]) -> bool {
+    matches!(encoding, b"utf8" | b"ascii8bit" | b"binary")
+}
+
+fn regexp_contains_short_non_ascii_hex_escape(parse_result: &ruby_prism::ParseResult<'_>) -> bool {
+    struct RegexpEscapeVisitor {
+        found: bool,
+    }
+
+    impl<'pr> Visit<'pr> for RegexpEscapeVisitor {
+        fn visit_interpolated_regular_expression_node(
+            &mut self,
+            node: &InterpolatedRegularExpressionNode<'pr>,
+        ) {
+            if node
+                .parts()
+                .iter()
+                .filter(|part| part.as_embedded_statements_node().is_none())
+                .any(|part| contains_short_non_ascii_hex_escape(part.location().as_slice()))
+            {
+                self.found = true;
+                return;
+            }
+            visit_interpolated_regular_expression_node(self, node);
+        }
+
+        fn visit_regular_expression_node(&mut self, node: &RegularExpressionNode<'pr>) {
+            if contains_short_non_ascii_hex_escape(node.content_loc().as_slice()) {
+                self.found = true;
+                return;
+            }
+            visit_regular_expression_node(self, node);
+        }
+    }
+
+    let mut visitor = RegexpEscapeVisitor { found: false };
+    visitor.visit(&parse_result.node());
+    visitor.found
+}
+
+fn contains_short_non_ascii_hex_escape(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == b'\\'
+            && matches!(bytes[i + 1], b'x' | b'X')
+            && bytes[i + 2].is_ascii_hexdigit()
+            && bytes[i + 3].is_ascii_hexdigit()
+            && !is_escaped_backslash(bytes, i)
+            && hex_value(bytes[i + 2]).is_some_and(|value| value >= 8)
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_escaped_backslash(bytes: &[u8], idx: usize) -> bool {
+    let mut backslashes = 0;
+    let mut cursor = idx;
+    while cursor > 0 && bytes[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn target_ruby_version(config: &CopConfig) -> f64 {
     config
         .options
@@ -333,11 +446,22 @@ fn has_invalid_retry_parse_error(source: &SourceFile) -> bool {
         .any(|err| err.message().starts_with("Invalid retry"))
 }
 
-fn has_parse_errors(source: &SourceFile) -> bool {
-    crate::parse::parse_source(source.as_bytes())
+fn should_skip_never_style(source: &SourceFile) -> bool {
+    let parse_result = crate::parse::parse_source(source.as_bytes());
+
+    if has_non_utf8_regexp_escape_parser_gap(&parse_result) {
+        return true;
+    }
+
+    let error_messages: Vec<String> = parse_result
         .errors()
-        .next()
-        .is_some()
+        .map(|err| err.message().to_string())
+        .collect();
+
+    !error_messages.is_empty()
+        && !error_messages
+            .iter()
+            .all(|message| message.starts_with("Invalid "))
 }
 
 fn should_skip_default_active_admin_template(source: &SourceFile, config: &CopConfig) -> bool {
@@ -721,6 +845,49 @@ mod tests {
                 "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_syntax_error_no_offense.rb"
             ),
             config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn never_style_windows1252_regexp_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_windows1252_regex_no_offense.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn never_style_invalid_yield_builder_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/offense/never_invalid_yield_builder.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn never_style_ascii8bit_regexp_escape_still_offense() {
+        let source = SourceFile::from_bytes(
+            "test.rb",
+            b"# encoding: ascii-8bit\n# frozen_string_literal: false\n/^\\xdf$/\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_enforced_style("never"),
+            &mut diags,
+            None,
+        );
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "Unnecessary frozen string literal comment."
         );
     }
 
