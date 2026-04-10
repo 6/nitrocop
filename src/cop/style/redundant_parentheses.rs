@@ -3,6 +3,7 @@ use ruby_prism::Visit;
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::PINNED_EXPRESSION_NODE;
 use crate::cop::shared::predicate_operator_predicates;
+use crate::cop::shared::util::begins_its_line;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -264,6 +265,17 @@ use crate::parse::source::SourceFile;
 /// - **Pin operator simple variables:** `foo in { bar: ^(var) }` is redundant, but
 ///   `foo in { bar: ^(var.to_i) }` is allowed. Prism stores these delimiters on
 ///   `PinnedExpressionNode`, so the cop now inspects that node directly.
+///
+/// ## Investigation findings (2026-04-10)
+///
+/// ### FN root causes fixed:
+/// - **Nested parens inside rescue bodies were over-exempted:** RuboCop only keeps rescue-body
+///   parens when the parenthesized expression starts the rescue-body statement, such as
+///   `(foo.bar).to_s` or `(x && y)`. nitrocop was exempting deeper nested parens too, which hid
+///   real offenses like `is_gss_error = (a || b)` and
+///   `raise ASSERTION_CLASS, e.message, (e.backtrace.reject { ... })` inside multi-statement
+///   `rescue` clauses. The exemption now stays limited to parens that are the first
+///   non-whitespace token of the rescue-body statement.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -828,9 +840,14 @@ impl RedundantParensVisitor<'_> {
     /// RuboCop's `rescue?` matcher: `'{^resbody ^^resbody}'`.
     /// Returns true if the paren is inside a rescue clause body (up to 2 levels deep).
     /// Only suppresses parens whose offset is within the rescue body (statements),
-    /// not parens in the exception list (`rescue *(Err)`).
+    /// not parens in the exception list (`rescue *(Err)`). RuboCop only keeps
+    /// rescue-body parens when the parenthesized expression itself starts the
+    /// rescue-body statement; nested parens like `var = (a || b)` still report.
     fn has_rescue_body_ancestor(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
         let paren_offset = node.location().start_offset();
+        if !begins_its_line(self.source, paren_offset) {
+            return false;
+        }
         // parent_stack.last() is the ParenthesesNode itself.
         // We need to check parent (len-2) and grandparent (len-3).
         let len = self.parent_stack.len();
