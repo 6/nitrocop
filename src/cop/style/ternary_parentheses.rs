@@ -22,6 +22,12 @@ use crate::parse::source::SourceFile;
 /// (always "complex") instead of unwrapping it to check the inner expression.
 /// Added `complex_condition()` which mirrors RuboCop's `complex_condition?`
 /// by recursing into `begin`-type (parenthesized) nodes before testing.
+///
+/// 2026-04-10: method calls with real attached blocks like `.any? { ... }`
+/// are complex in RuboCop, but Prism still exposes them as `CallNode`.
+/// Treating every non-operator call as simple caused variant-only divergence:
+/// parenthesized block calls were false positives and unparenthesized block
+/// calls were false negatives under `require_parentheses_when_complex`.
 pub struct TernaryParentheses;
 
 /// Check if a parenthesized node contains a safe assignment (=) in ternary context.
@@ -104,6 +110,13 @@ fn is_complex_condition(node: &ruby_prism::Node<'_>) -> bool {
     }
     // Method calls without operators are simple
     if let Some(call) = node.as_call_node() {
+        if call
+            .block()
+            .and_then(|block| block.as_block_node())
+            .is_some()
+        {
+            return true;
+        }
         let name = call.name().as_slice();
         // Operator methods (except []) are complex
         if !name[0].is_ascii_alphabetic() && name[0] != b'_' && name != b"[]" {

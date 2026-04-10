@@ -11,3 +11,6 @@ defined?(Foo) ? Foo : nil
 
 # yield is non-complex — no parens OK
 yield ? 1 : 0
+
+# Calls with real blocks are complex — parens required
+([1, 2, 3].any? { |value| value.odd? }) ? :odd : :even
