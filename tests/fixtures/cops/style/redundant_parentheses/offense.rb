@@ -317,3 +317,10 @@ assert no_results_div.text =~ (Regexp.new(I18n.translate("bento_search.no_result
 
 mail && Regexp.new(regexp) =~ (mail[field.to_sym])
                               ^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+begin
+  raise "raise"
+rescue *(RuntimeError) => e
+        ^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a constant.
+  :expected
+end

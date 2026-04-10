@@ -397,6 +397,10 @@ struct ParentInfo {
     /// which corresponds to the rescue_expression in Prism. The expression
     /// (left side) is still flagged.
     rescue_expression_start_offset: Option<usize>,
+    /// For RescueBody parents, the start offset of the statements (body) node.
+    /// Parens in the exception list (`rescue *(Err)`) are NOT exempt — only
+    /// parens inside the body are.
+    rescue_body_start_offset: Option<usize>,
     /// For conditional parents, the source range of the predicate expression.
     /// Used to distinguish parens in the condition from parens in the body.
     conditional_predicate_range: Option<(usize, usize)>,
@@ -571,7 +575,7 @@ impl RedundantParensVisitor<'_> {
         // checks parent or grandparent is a resbody node. In Prism, the rescue clause
         // is a RescueNode whose body is a StatementsNode — so the paren can be a child
         // (parent = StatementsNode under RescueBody) or grandchild.
-        if self.has_rescue_body_ancestor() {
+        if self.has_rescue_body_ancestor(node) {
             return;
         }
 
@@ -825,16 +829,29 @@ impl RedundantParensVisitor<'_> {
     /// wrapper nodes (StatementsNode, ElseNode) that Prism inserts.
     /// RuboCop's `rescue?` matcher: `'{^resbody ^^resbody}'`.
     /// Returns true if the paren is inside a rescue clause body (up to 2 levels deep).
-    fn has_rescue_body_ancestor(&self) -> bool {
+    /// Only suppresses parens whose offset is within the rescue body (statements),
+    /// not parens in the exception list (`rescue *(Err)`).
+    fn has_rescue_body_ancestor(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+        let paren_offset = node.location().start_offset();
         // parent_stack.last() is the ParenthesesNode itself.
         // We need to check parent (len-2) and grandparent (len-3).
         let len = self.parent_stack.len();
         if len >= 2 && matches!(self.parent_stack[len - 2].kind, ParentKind::RescueBody) {
-            return true;
+            if self.parent_stack[len - 2]
+                .rescue_body_start_offset
+                .is_some_and(|off| paren_offset >= off)
+            {
+                return true;
+            }
         }
         // Grandparent check: paren inside StatementsNode inside RescueBody
         if len >= 3 && matches!(self.parent_stack[len - 3].kind, ParentKind::RescueBody) {
-            return true;
+            if self.parent_stack[len - 3]
+                .rescue_body_start_offset
+                .is_some_and(|off| paren_offset >= off)
+            {
+                return true;
+            }
         }
         false
     }
@@ -1264,6 +1281,7 @@ impl RedundantParensVisitor<'_> {
             call_first_arg_is_begin: false,
             statements_child_count: 0,
             rescue_expression_start_offset: None,
+            rescue_body_start_offset: None,
             conditional_predicate_range: None,
             is_post_condition_loop: false,
         });
@@ -1652,7 +1670,9 @@ fn is_chained_or_indexed(content: &[u8], paren_node: &ruby_prism::ParenthesesNod
     }
     let end_offset = paren_node.location().end_offset();
     let mut i = end_offset;
-    while i < content.len() && matches!(content[i], b' ' | b'\t' | b'\n' | b'\r') {
+    // Only skip horizontal whitespace — a `[` on the next line is an array literal,
+    // not indexing into the parenthesized expression.
+    while i < content.len() && matches!(content[i], b' ' | b'\t') {
         i += 1;
     }
     i < content.len() && content[i] == b'['
@@ -2190,6 +2210,9 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(top) = self.parent_stack.last_mut() {
             top.kind = ParentKind::RescueBody;
+            // Store the body start offset so has_rescue_body_ancestor() can
+            // distinguish exception-list parens from body parens.
+            top.rescue_body_start_offset = node.statements().map(|s| s.location().start_offset());
         }
         ruby_prism::visit_rescue_node(self, node);
     }
