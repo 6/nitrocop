@@ -292,3 +292,36 @@ DiceTable::Table.new(
   "1D6",
   ["ワンド", "水晶玉", "カード", "ステッキ", "手鏡", "宝石"]
 )
+
+raise ArgumentError,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+      "error message"
+
+it 'fails to resolve a dependency with an explicit source even if it can be ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+   'resolved using the global sources' do
+end
+
+results.add_warning('summary', 'The summary should be a short ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'version of `description` (max 140 characters).')
+
+raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "for attribute: #{inspect}" unless acceptable
+
+raise "[Xcodeproj] unsupported key `#{key}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
+
+!current_course_user&.
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  email_unsubscribed
+
+), public: File.read(
+           ^ Layout/RedundantLineBreak: Redundant line break detected.
+  path
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)
