@@ -128,7 +128,7 @@ Show a table of actions taken:
   - Close doc-only or doc+test-only PRs only if the code is clearly wrong; otherwise label for investigation
   - Verify the change has a real behavioral impact — refactors that rewrite logic without changing corpus results should be labeled for investigation
 - **Flag changes to global/infrastructure files**: If the diff touches files outside `src/cop/` and `tests/fixtures/cops/` that affect the broader corpus or build pipeline, **stop and flag to the user** before approving. These files require human judgment because they can mask bugs or have repo-wide side effects. Examples:
-  - `bench/corpus/repo_excludes.json` — adding file exclusions can hide real FPs instead of fixing them in code. Verify the exclusion is justified (e.g., RuboCop parser crash on the file, not just inconvenient offenses).
+  - `bench/corpus/repo_excludes.json` — the **only** valid reason to add a file here is a confirmed RuboCop parser crash (where RuboCop itself fails to parse the file, producing 0 offenses and phantom FP/FN). If nitrocop crashes on a file, fix the crash in code. If it's a true FP/FN divergence, fix the cop logic. Never add excludes to hide inconvenient offenses — remove any such entries added by the agent.
   - `bench/corpus/*.py`, `scripts/*.py` — changes to corpus tooling or CI scripts are out of scope for cop-fix PRs.
   - `Cargo.toml`, `Cargo.lock` — dependency changes are suspicious in a cop-fix PR.
   - `src/resources/tiers.json` — tier changes affect which cops run by default.
