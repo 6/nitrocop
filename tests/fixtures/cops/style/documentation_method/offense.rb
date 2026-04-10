@@ -199,3 +199,24 @@ end
 # Comment above belongs to the singleton class, not the inner def
 class << some_obj; def singleton_stolen; end; end
                    ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+
+def json!
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def reload!
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def self.supports_ranges?
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def __id__
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def self.compile(str, options)
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def helper.append_javascript_pack_tag(name, **options)
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def cocoapods_generate_specs_cp_repos_dir
+^ Style/DocumentationMethod: Missing method documentation comment.

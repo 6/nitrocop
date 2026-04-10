@@ -119,6 +119,13 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 ///    is a CallNode (not a DefNode), so `visit_statements_node` didn't register
 ///    it in `pending_visibility`. Fix: detect modifier calls wrapping DefNode
 ///    arguments and register the inner def with the enclosing visibility.
+///
+/// **Investigation (2026-04-10, block wrappers):** Remaining FPs in `stub_const(...,
+/// Class.new do ...)`, `extend(Module.new do ...)`, and similar DSL wrappers came from
+/// `wrapped_comment_depth` leaking from the outer call argument into the nested
+/// `BlockNode` body. RuboCop associates comments inside the block with the inner `def`,
+/// not the outer call argument. Fix: reset both `wrapped_comment_depth` and
+/// `inline_non_public_depth` at real block boundaries, just like class/module/def scopes.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -427,6 +434,17 @@ struct DocumentationMethodVisitor<'a> {
 }
 
 impl DocumentationMethodVisitor<'_> {
+    fn with_fresh_wrapper_state<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved_wrapped = self.wrapped_comment_depth;
+        let saved_inline = self.inline_non_public_depth;
+        self.wrapped_comment_depth = 0;
+        self.inline_non_public_depth = 0;
+        let result = f(self);
+        self.wrapped_comment_depth = saved_wrapped;
+        self.inline_non_public_depth = saved_inline;
+        result
+    }
+
     fn check_def(
         &mut self,
         def_node: &ruby_prism::DefNode<'_>,
@@ -561,43 +579,23 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
         // `public_class_method def self.pry ... end` would leak wrapped_comment_depth
         // into all methods defined in the def body, and `private def foo ... end`
         // would leak inline_non_public_depth into nested singleton method defs.
-        let saved_wrapped = self.wrapped_comment_depth;
-        let saved_inline = self.inline_non_public_depth;
-        self.wrapped_comment_depth = 0;
-        self.inline_non_public_depth = 0;
-        ruby_prism::visit_def_node(self, node);
-        self.wrapped_comment_depth = saved_wrapped;
-        self.inline_non_public_depth = saved_inline;
+        self.with_fresh_wrapper_state(|this| ruby_prism::visit_def_node(this, node));
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
-        let saved_wrapped = self.wrapped_comment_depth;
-        let saved_inline = self.inline_non_public_depth;
-        self.wrapped_comment_depth = 0;
-        self.inline_non_public_depth = 0;
-        ruby_prism::visit_class_node(self, node);
-        self.wrapped_comment_depth = saved_wrapped;
-        self.inline_non_public_depth = saved_inline;
+        self.with_fresh_wrapper_state(|this| ruby_prism::visit_class_node(this, node));
     }
 
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
-        let saved_wrapped = self.wrapped_comment_depth;
-        let saved_inline = self.inline_non_public_depth;
-        self.wrapped_comment_depth = 0;
-        self.inline_non_public_depth = 0;
-        ruby_prism::visit_module_node(self, node);
-        self.wrapped_comment_depth = saved_wrapped;
-        self.inline_non_public_depth = saved_inline;
+        self.with_fresh_wrapper_state(|this| ruby_prism::visit_module_node(this, node));
     }
 
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
-        let saved_wrapped = self.wrapped_comment_depth;
-        let saved_inline = self.inline_non_public_depth;
-        self.wrapped_comment_depth = 0;
-        self.inline_non_public_depth = 0;
-        ruby_prism::visit_singleton_class_node(self, node);
-        self.wrapped_comment_depth = saved_wrapped;
-        self.inline_non_public_depth = saved_inline;
+        self.with_fresh_wrapper_state(|this| ruby_prism::visit_singleton_class_node(this, node));
+    }
+
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        self.with_fresh_wrapper_state(|this| ruby_prism::visit_block_node(this, node));
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
