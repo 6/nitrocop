@@ -193,6 +193,23 @@ use crate::parse::source::SourceFile;
 /// direct argument is a send, a braced hash descendant anywhere under the outer
 /// call keeps the outer parentheses. Grouped direct arguments still do not
 /// satisfy the direct-send gate.
+///
+/// ## Variant fix (2026-04-10)
+///
+/// Two remaining `omit_parentheses` mismatches came from Prism context that
+/// only shows up under explicit variant-config tests:
+///
+/// 1. `if`/`unless` branch bodies were missing the surrounding conditional
+///    parent for omit-style checks. RuboCop allows parentheses for assignment
+///    RHS calls when the assignment expression is the value of a conditional
+///    branch, such as `@x = Foo.new(...)` under `if`/`else` and modifier
+///    conditionals. Added conditional-branch tracking so those RHS calls are no
+///    longer flagged.
+///
+/// 2. Hash-value-omission calls (`foo(value:)`) were treated as always
+///    exempt. RuboCop only keeps parentheses when the call is in a
+///    conditional-style parent or is not the last expression. Added explicit
+///    non-last-expression tracking and narrowed the exemption to those cases.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -337,6 +354,8 @@ impl Cop for MethodCallWithArgsParentheses {
             parent_stack: vec![],
             in_interpolation: false,
             in_endless_def: false,
+            conditional_branch_depth: 0,
+            non_last_expression_depth: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -364,6 +383,8 @@ struct ParenVisitor<'a> {
     parent_stack: Vec<ParentKind>,
     in_interpolation: bool,
     in_endless_def: bool,
+    conditional_branch_depth: usize,
+    non_last_expression_depth: usize,
 }
 
 impl ParenVisitor<'_> {
@@ -379,6 +400,14 @@ impl ParenVisitor<'_> {
 
     fn immediate_parent(&self) -> Option<ParentKind> {
         self.parent_stack.last().copied()
+    }
+
+    fn in_conditional_branch(&self) -> bool {
+        self.conditional_branch_depth > 0
+    }
+
+    fn in_non_last_expression(&self) -> bool {
+        self.non_last_expression_depth > 0
     }
 
     fn is_macro_scope(&self) -> bool {
@@ -584,13 +613,15 @@ impl ParenVisitor<'_> {
             return false;
         }
 
-        // parent&.conditional? || parent&.single_line? || !last_expression?
+        // Match RuboCop's narrower allowance: keep parens only when the call
+        // is the direct value of a conditional-style parent, or when another
+        // sibling expression follows.
         let parent = self.immediate_parent();
-        if parent == Some(ParentKind::Conditional) || parent == Some(ParentKind::When) {
+        if parent == Some(ParentKind::Conditional) || self.in_conditional_branch() {
             return true;
         }
 
-        true // Conservative: keep parens when hash value omission is present
+        self.in_non_last_expression()
     }
 
     fn legitimate_call_with_parentheses(&self, call: &ruby_prism::CallNode<'_>) -> bool {
@@ -802,7 +833,8 @@ impl ParenVisitor<'_> {
                 return true;
             }
         }
-        false
+
+        self.immediate_parent() == Some(ParentKind::Assignment) && self.in_conditional_branch()
     }
 
     fn visit_call_common(&mut self, call: &ruby_prism::CallNode<'_>) {
@@ -1183,6 +1215,20 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
 }
 
 impl<'pr> Visit<'pr> for ParenVisitor<'_> {
+    fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        let body = node.body();
+        for (index, stmt) in body.iter().enumerate() {
+            let is_not_last = index + 1 < body.len();
+            if is_not_last {
+                self.non_last_expression_depth += 1;
+            }
+            self.visit(&stmt);
+            if is_not_last {
+                self.non_last_expression_depth -= 1;
+            }
+        }
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         self.visit_call_common(node);
 
@@ -1422,6 +1468,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
         if let Some(stmts) = node.statements() {
             self.push_macro_scope(child_scope);
+            self.conditional_branch_depth += 1;
             if is_ternary {
                 self.parent_stack.push(ParentKind::TernaryBranch);
             }
@@ -1429,10 +1476,12 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             if is_ternary {
                 self.parent_stack.pop();
             }
+            self.conditional_branch_depth -= 1;
             self.pop_scope();
         }
         if let Some(subsequent) = node.subsequent() {
             self.push_macro_scope(child_scope);
+            self.conditional_branch_depth += 1;
             if is_ternary {
                 self.parent_stack.push(ParentKind::TernaryBranch);
             }
@@ -1440,6 +1489,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             if is_ternary {
                 self.parent_stack.pop();
             }
+            self.conditional_branch_depth -= 1;
             self.pop_scope();
         }
     }
@@ -1463,12 +1513,16 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
         if let Some(stmts) = node.statements() {
             self.push_macro_scope(child_scope);
+            self.conditional_branch_depth += 1;
             self.visit_statements_node(&stmts);
+            self.conditional_branch_depth -= 1;
             self.pop_scope();
         }
         if let Some(consequent) = node.else_clause() {
             self.push_macro_scope(child_scope);
+            self.conditional_branch_depth += 1;
             self.visit_else_node(&consequent);
+            self.conditional_branch_depth -= 1;
             self.pop_scope();
         }
     }
@@ -2038,12 +2092,49 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 mod tests {
     use super::*;
     use crate::cop::CopConfig;
-    use crate::testutil::{run_cop_full, run_cop_full_with_config};
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+        run_cop_full, run_cop_full_with_config,
+    };
 
     crate::cop_fixture_tests!(
         MethodCallWithArgsParentheses,
         "cops/style/method_call_with_args_parentheses"
     );
+
+    fn omit_parentheses_config() -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn omit_parentheses_variant_offense_fixture() {
+        assert_cop_offenses_full_with_config(
+            &MethodCallWithArgsParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/method_call_with_args_parentheses/omit_parentheses_offense.rb"
+            ),
+            omit_parentheses_config(),
+        );
+    }
+
+    #[test]
+    fn omit_parentheses_variant_no_offense_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &MethodCallWithArgsParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/method_call_with_args_parentheses/omit_parentheses_no_offense.rb"
+            ),
+            omit_parentheses_config(),
+        );
+    }
 
     #[test]
     fn operators_are_ignored() {
