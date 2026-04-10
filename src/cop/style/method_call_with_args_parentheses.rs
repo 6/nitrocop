@@ -211,23 +211,6 @@ use crate::parse::source::SourceFile;
 ///    exempt. RuboCop only keeps parentheses when the call is in a
 ///    conditional-style parent or is not the last expression. Added explicit
 ///    non-last-expression tracking and narrowed the exemption to those cases.
-///
-/// ## Variant fix (2026-04-10, follow-up)
-///
-/// Two more Prism/Parser parent mismatches remained in `omit_parentheses`:
-///
-/// 1. `node.descendants` in RuboCop walks the whole send subtree, including
-///    receiver-side splats/blocks such as `new(*args).send(...)` and
-///    `env.map { ... }.join(...)`. nitrocop only checked argument descendants,
-///    so it falsely flagged parenthesized outer calls whose ambiguity lived in
-///    the receiver chain.
-///
-/// 2. Block and lambda bodies inherited the surrounding Prism traversal parent
-///    stack. That made inner calls inside `describe do ... end` or
-///    `filter_map do ... end.reverse` look like direct children of outer
-///    conditionals/chained sends, unlike Parser AST where the block body starts
-///    under the block node itself. Visit those bodies with a fresh parent stack
-///    while keeping the already-derived macro scope.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -418,13 +401,6 @@ impl ParenVisitor<'_> {
 
     fn immediate_parent(&self) -> Option<ParentKind> {
         self.parent_stack.last().copied()
-    }
-
-    fn with_fresh_parent_stack<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let saved_parent_stack = std::mem::take(&mut self.parent_stack);
-        let result = f(self);
-        self.parent_stack = saved_parent_stack;
-        result
     }
 
     fn in_non_last_expression(&self) -> bool {
@@ -658,13 +634,15 @@ impl ParenVisitor<'_> {
         };
 
         // Check if last arg is a hash with value omission
-        if let Some(hash) = last_arg.as_hash_node() {
+        let has_value_omission = if let Some(hash) = last_arg.as_hash_node() {
             has_hash_value_omission(&hash)
         } else if let Some(kw_hash) = last_arg.as_keyword_hash_node() {
             has_keyword_hash_value_omission(&kw_hash)
         } else {
-            false
-        }
+            return false;
+        };
+
+        has_value_omission
     }
 
     /// Check require_parentheses_for_hash_value_omission?
@@ -848,12 +826,6 @@ impl ParenVisitor<'_> {
 
     /// Check for forwarded args, ambiguous literals, logical operators, and blocks in descendants
     fn has_ambiguous_content_in_descendants(&self, call: &ruby_prism::CallNode<'_>) -> bool {
-        if let Some(recv) = call.receiver() {
-            if is_ambiguous_descendant(&recv, self.source) {
-                return true;
-            }
-        }
-
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
                 if is_ambiguous_descendant(&arg, self.source) {
@@ -1345,16 +1317,14 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     // ordinary call-attached blocks only keep macro scope when
                     // the whole block expression is itself in macro scope.
                     let child_scope = self.call_block_child_scope();
-                    self.with_fresh_parent_stack(|this| {
-                        this.push_macro_scope(child_scope);
-                        if let Some(params) = block_node.parameters() {
-                            this.visit(&params);
-                        }
-                        if let Some(body) = block_node.body() {
-                            this.visit(&body);
-                        }
-                        this.pop_scope();
-                    });
+                    self.push_macro_scope(child_scope);
+                    if let Some(params) = block_node.parameters() {
+                        self.visit(&params);
+                    }
+                    if let Some(body) = block_node.body() {
+                        self.visit(&body);
+                    }
+                    self.pop_scope();
                 }
             } else {
                 // BlockArgumentNode (&block) — this IS a call argument
@@ -1435,16 +1405,14 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         let child_scope = self.wrapper_child_scope();
-        self.with_fresh_parent_stack(|this| {
-            this.push_macro_scope(child_scope);
-            if let Some(params) = node.parameters() {
-                this.visit(&params);
-            }
-            if let Some(body) = node.body() {
-                this.visit(&body);
-            }
-            this.pop_scope();
-        });
+        self.push_macro_scope(child_scope);
+        if let Some(params) = node.parameters() {
+            self.visit(&params);
+        }
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.pop_scope();
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
@@ -1459,13 +1427,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // while lambdas inside wrapper blocks (`subject { -> { get :idx } }`)
         // preserve it.
         let child_scope = self.call_block_child_scope();
-        self.with_fresh_parent_stack(|this| {
-            this.push_macro_scope(child_scope);
-            if let Some(body) = node.body() {
-                this.visit(&body);
-            }
-            this.pop_scope();
-        });
+        self.push_macro_scope(child_scope);
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.pop_scope();
     }
 
     fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'pr>) {
@@ -2568,64 +2534,6 @@ mod tests {
             diags.len(),
             1,
             "Should not inherit the conditional parent through a single begin/rescue wrapper"
-        );
-    }
-
-    #[test]
-    fn omit_accepts_parens_when_receiver_contains_splat_ambiguity() {
-        let source = b"new(*args).send(:install_package)\n";
-        let diags = run_cop_full_with_config(
-            &MethodCallWithArgsParentheses,
-            source,
-            omit_parentheses_config(),
-        );
-        assert!(
-            diags.is_empty(),
-            "Should allow parens when ambiguity comes from a splat in the receiver chain"
-        );
-    }
-
-    #[test]
-    fn omit_accepts_parens_when_receiver_contains_block_ambiguity() {
-        let source = b"env.map { |key, value| value }.join(' ')\n";
-        let diags = run_cop_full_with_config(
-            &MethodCallWithArgsParentheses,
-            source,
-            omit_parentheses_config(),
-        );
-        assert!(
-            diags.is_empty(),
-            "Should allow parens when the receiver chain contains a block descendant"
-        );
-    }
-
-    #[test]
-    fn omit_flags_calls_inside_block_body_when_outer_call_is_chained() {
-        let source = b"items.each do |item|\n  log(item)\n  item\nend.reverse\n";
-        let diags = run_cop_full_with_config(
-            &MethodCallWithArgsParentheses,
-            source,
-            omit_parentheses_config(),
-        );
-        assert_eq!(
-            diags.len(),
-            1,
-            "Should not inherit the outer chained call as the block-body parent"
-        );
-    }
-
-    #[test]
-    fn omit_flags_block_body_calls_inside_single_statement_if_branch() {
-        let source = b"if cond\n  describe 'example' do\n    value = lookup(arg)\n  end\nend\n";
-        let diags = run_cop_full_with_config(
-            &MethodCallWithArgsParentheses,
-            source,
-            omit_parentheses_config(),
-        );
-        assert_eq!(
-            diags.len(),
-            1,
-            "Should not leak the single-statement conditional parent into nested block bodies"
         );
     }
 
