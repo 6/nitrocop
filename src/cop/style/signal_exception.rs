@@ -198,16 +198,14 @@ impl Visit<'_> for SignalExceptionVisitor<'_> {
                                 "Use `raise` instead of `fail` to rethrow exceptions.".to_string(),
                             ));
                         }
-                    } else {
-                        if name == b"raise" {
-                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                            self.raise_diagnostics.push(self.cop.diagnostic(
-                                self.source,
-                                line,
-                                column,
-                                "Use `fail` instead of `raise` to signal exceptions.".to_string(),
-                            ));
-                        }
+                    } else if name == b"raise" {
+                        let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                        self.raise_diagnostics.push(self.cop.diagnostic(
+                            self.source,
+                            line,
+                            column,
+                            "Use `fail` instead of `raise` to signal exceptions.".to_string(),
+                        ));
                     }
                 }
             }
