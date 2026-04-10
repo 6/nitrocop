@@ -199,6 +199,17 @@ use ruby_prism::Visit;
 /// anchor. This matches RuboCop's `on_setter_method` behavior closely enough to
 /// accept spaced-key cases like `content[ :query  ] =  ...` without weakening
 /// existing plain-assignment or wide-padding checks.
+///
+/// ## Corpus fix (2026-04-10)
+///
+/// Two false-positive patterns needed narrower RuboCop matching:
+/// - mixed `tab + spaces` before `=` (for example `Base32\t     = ...`) are
+///   accepted because RuboCop only treats leading whitespace as "excessive"
+///   when the entire whitespace run starts with two spaces.
+/// - plain-assignment alignment search must only treat `=` and operator-write
+///   tokens as assignment neighbors. Comparisons like `>=` and `===` do not
+///   participate in RuboCop's `aligned_with_preceding/subsequent_equals_operator`
+///   checks, and counting them caused standalone `=` assignments to be flagged.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -455,9 +466,8 @@ impl Cop for SpaceAroundOperators {
                     } else if allow_for_alignment && space_before && (space_after || newline_after)
                     {
                         // Check for extra spaces around operator (alignment check)
-                        let multi_before = i >= 2 && bytes[i - 1] == b' ' && bytes[i - 2] == b' ';
-                        let multi_after =
-                            i + 3 < len && bytes[i + 2] == b' ' && bytes[i + 3] == b' ';
+                        let multi_before = has_excessive_leading_space(bytes, i);
+                        let multi_after = has_excessive_trailing_space(bytes, i + 2);
                         if multi_before || multi_after {
                             check_text_scanner_extra_space(
                                 self,
@@ -584,8 +594,8 @@ impl Cop for SpaceAroundOperators {
                     diagnostics.push(diag);
                 } else if allow_for_alignment && space_before && (space_after || newline_after) {
                     // Check for extra spaces around `=` (alignment check)
-                    let multi_before = i >= 2 && bytes[i - 1] == b' ' && bytes[i - 2] == b' ';
-                    let multi_after = i + 2 < len && bytes[i + 1] == b' ' && bytes[i + 2] == b' ';
+                    let multi_before = has_excessive_leading_space(bytes, i);
+                    let multi_after = has_excessive_trailing_space(bytes, i + 1);
                     if multi_before || multi_after {
                         check_text_scanner_extra_space(
                             self,
@@ -629,8 +639,8 @@ fn check_text_scanner_extra_space(
     corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
 ) {
     let bytes = source.as_bytes();
-    let mut multi_before = multi_before;
-    let mut multi_after = multi_after;
+    let mut multi_before = multi_before && has_excessive_leading_space(bytes, op_start);
+    let mut multi_after = multi_after && has_excessive_trailing_space(bytes, op_end);
 
     // Skip if operator is at start of line (spaces are indentation)
     if multi_before {
@@ -695,20 +705,12 @@ fn check_text_scanner_extra_space(
     }
 
     let ws_start = if multi_before {
-        let mut s = op_start - 1;
-        while s > 0 && bytes[s - 1] == b' ' {
-            s -= 1;
-        }
-        s
+        whitespace_run_start(bytes, op_start)
     } else {
         op_start
     };
     let ws_end = if multi_after {
-        let mut e = op_end;
-        while e < bytes.len() && bytes[e] == b' ' {
-            e += 1;
-        }
-        e
+        whitespace_run_end(bytes, op_end)
     } else {
         op_end
     };
@@ -741,6 +743,32 @@ fn check_text_scanner_extra_space(
         diag.corrected = true;
     }
     diagnostics.push(diag);
+}
+
+fn whitespace_run_start(bytes: &[u8], offset: usize) -> usize {
+    let mut start = offset;
+    while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
+        start -= 1;
+    }
+    start
+}
+
+fn whitespace_run_end(bytes: &[u8], offset: usize) -> usize {
+    let mut end = offset;
+    while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
+        end += 1;
+    }
+    end
+}
+
+fn has_excessive_leading_space(bytes: &[u8], op_start: usize) -> bool {
+    let ws_start = whitespace_run_start(bytes, op_start);
+    op_start.saturating_sub(ws_start) >= 2 && bytes[ws_start] == b' ' && bytes[ws_start + 1] == b' '
+}
+
+fn has_excessive_trailing_space(bytes: &[u8], op_end: usize) -> bool {
+    let ws_end = whitespace_run_end(bytes, op_end);
+    ws_end.saturating_sub(op_end) >= 2 && bytes[ws_end - 2] == b' ' && bytes[ws_end - 1] == b' '
 }
 
 /// Count UTF-8 codepoints from the start of `line` up to `byte_col` bytes.
@@ -1083,7 +1111,7 @@ fn find_assignment_aligned_in_direction(
                     relevant_indent_at_level = true;
                     // Check if this line has an assignment `=` in code
                     let abs_start = line_starts[check_idx];
-                    if line_has_equals_sign_in_code(line_bytes, abs_start, code_map) {
+                    if line_has_assignment_equals_sign_in_code(line_bytes, abs_start, code_map) {
                         // Found assignment — check alignment via end column
                         let aligned =
                             line_has_operator_ending_at_char_col(line_bytes, char_end_col);
@@ -1119,44 +1147,45 @@ fn compute_line_starts(bytes: &[u8]) -> Vec<usize> {
     starts
 }
 
-/// Check if a line contains an `=` sign that looks like an assignment or
-/// comparison operator, using the code_map to ensure the `=` is in code
-/// (not inside a string, comment, or regexp).
-fn line_has_equals_sign_in_code(line: &[u8], line_abs_start: usize, code_map: &CodeMap) -> bool {
+/// Check if a line contains an assignment-like `=` token (`=` or operator
+/// assignment like `+=`/`||=`), using the code map to skip strings/comments.
+///
+/// This intentionally excludes comparison operators such as `==`, `>=`, and
+/// `===`, matching RuboCop's `assignment_tokens.select(&:equal_sign?)`.
+fn line_has_assignment_equals_sign_in_code(
+    line: &[u8],
+    line_abs_start: usize,
+    code_map: &CodeMap,
+) -> bool {
     for i in 0..line.len() {
         if line[i] == b'=' {
             let abs_offset = line_abs_start + i;
             if !code_map.is_code(abs_offset) {
                 continue;
             }
-            // Skip `=` that is part of `=>` (hash rocket) — we only care about
-            // assignment-like `=`
-            if i + 1 < line.len() && line[i + 1] == b'>' {
+
+            if i + 1 < line.len() && matches!(line[i + 1], b'>' | b'=' | b'~') {
                 continue;
             }
-            // Check that `=` is preceded by a valid operator/word character
-            // (not a `!`, `<`, `>`, or another `=` which would make it `!=`, `<=`, `>=`, `==`)
-            if i > 0 {
-                let prev = line[i - 1];
-                if prev == b' '
-                    || prev == b'\t'
-                    || prev.is_ascii_alphanumeric()
-                    || prev == b'_'
-                    || prev == b')'
-                    || prev == b']'
-                    || prev == b'|'
-                    || prev == b'&'
-                    || prev == b'*'
-                    || prev == b'+'
-                    || prev == b'-'
-                    || prev == b'/'
-                    || prev == b'%'
-                    || prev == b'^'
-                    || prev == b'<'
-                    || prev == b'>'
-                {
-                    return true;
-                }
+
+            if i == 0 {
+                continue;
+            }
+
+            let prev = line[i - 1];
+            if matches!(prev, b' ' | b'\t')
+                || prev.is_ascii_alphanumeric()
+                || matches!(prev, b'_' | b')' | b']')
+            {
+                return true;
+            }
+
+            if matches!(prev, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'&') {
+                return true;
+            }
+
+            if matches!(prev, b'<' | b'>') && i >= 2 && line[i - 2] == prev {
+                return true;
             }
         }
     }
@@ -1431,10 +1460,8 @@ impl OperatorChecker<'_> {
         trailing_anchor: Option<usize>,
     ) {
         let bytes = self.source.as_bytes();
-        let mut multi_space_before =
-            start >= 2 && bytes[start - 1] == b' ' && bytes[start - 2] == b' ';
-        let mut multi_space_after =
-            end + 1 < bytes.len() && bytes[end] == b' ' && bytes[end + 1] == b' ';
+        let mut multi_space_before = has_excessive_leading_space(bytes, start);
+        let mut multi_space_after = has_excessive_trailing_space(bytes, end);
 
         if !multi_space_before && !multi_space_after {
             return;
@@ -1487,21 +1514,13 @@ impl OperatorChecker<'_> {
 
         // Find the extent of extra spaces before the operator
         let ws_start_before = if multi_space_before {
-            let mut s = start - 1;
-            while s > 0 && bytes[s - 1] == b' ' {
-                s -= 1;
-            }
-            s
+            whitespace_run_start(bytes, start)
         } else {
             start
         };
         // Find the extent of extra spaces after the operator
         let ws_end_after = if multi_space_after {
-            let mut e = end;
-            while e < bytes.len() && bytes[e] == b' ' {
-                e += 1;
-            }
-            e
+            whitespace_run_end(bytes, end)
         } else {
             end
         };

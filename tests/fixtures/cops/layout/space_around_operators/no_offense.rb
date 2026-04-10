@@ -240,3 +240,14 @@ def empty?          = @attributes.empty?
 options   = foo
 quux()
 new_line  = true
+
+# Mixed tab + spaces after a tab-aligned identifier are accepted
+Base32	     = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+Alpha	     = UpperAlpha + LowerAlpha
+
+# Comparison operators do not count as assignment neighbors
+loop do
+  return false if Time.now >= timeoutTime
+  data, inetAddr  = @ClientSocket.recvfrom_nonblock(READ_SIZE)
+  break
+end
