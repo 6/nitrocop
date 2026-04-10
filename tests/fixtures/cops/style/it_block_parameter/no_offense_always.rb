@@ -9,3 +9,6 @@ block do
   |n|
   n
 end
+
+# Block-local vars after `;` cannot be preserved when converting to implicit `it`
+block { |v; s, g| g = do_something(v) }

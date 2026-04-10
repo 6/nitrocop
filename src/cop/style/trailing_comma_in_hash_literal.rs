@@ -26,7 +26,43 @@ use super::trailing_comma;
 /// whose last value is another hash containing a heredoc still scans through
 /// the nested heredoc body and can mistake commas in embedded Ruby for a
 /// trailing comma on the outer hash.
+///
+/// ## Variant divergence (2026-04)
+///
+/// The remaining `diff_comma` corpus drift came from Windows line endings.
+/// Those repos use `\r\n`, but the newline predicate only accepted `\n`, so a
+/// last item followed by `,\r\n` was treated as an illegal trailing comma and a
+/// missing comma before `\r\n}` was missed entirely. The corpus examples from
+/// timetrap and canine reproduced both sides of that split.
+///
+/// Fix: keep RuboCop's `diff_comma` behavior, but accept either `\n` or
+/// `\r\n` as the newline immediately following the last item. Also fall back to
+/// `EnforcedStyle` when `EnforcedStyleForMultiline` is absent so the local
+/// variant harness can still exercise the non-default style through a generic
+/// override.
 pub struct TrailingCommaInHashLiteral;
+
+fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: usize) -> bool {
+    let region = &bytes[last_end..closing_start];
+    let mut i = 0;
+
+    if i < region.len() && region[i] == b',' {
+        i += 1;
+    }
+
+    while i < region.len() && matches!(region[i], b' ' | b'\t') {
+        i += 1;
+    }
+
+    if i < region.len() && region[i] == b'#' {
+        while i < region.len() && !matches!(region[i], b'\n' | b'\r') {
+            i += 1;
+        }
+    }
+
+    matches!(region.get(i), Some(b'\n'))
+        || (matches!(region.get(i), Some(b'\r')) && matches!(region.get(i + 1), Some(b'\n')))
+}
 
 impl Cop for TrailingCommaInHashLiteral {
     fn name(&self) -> &'static str {
@@ -68,7 +104,10 @@ impl Cop for TrailingCommaInHashLiteral {
         let has_comma =
             trailing_comma::detect_trailing_comma(bytes, last_end, closing_start, has_heredoc);
 
-        let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
 
         // Multiline check: the hash node spans multiple lines. For single-element
         // hashes, use the allowed_multiline_argument exception (closing bracket on
@@ -119,8 +158,40 @@ impl Cop for TrailingCommaInHashLiteral {
                 }
             }
             "consistent_comma" => {
-                // Require trailing comma in multiline; no opinion on single-line
-                if is_multiline && !has_comma {
+                if has_comma && !is_multiline {
+                    if let Some(abs_offset) = find_comma_offset() {
+                        let (line, column) = source.offset_to_line_col(abs_offset);
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid comma after the last item of a hash, unless items are split onto multiple lines.".to_string(),
+                        ));
+                    }
+                } else if !has_comma && is_multiline {
+                    let (line, column) = source.offset_to_line_col(last_end);
+                    diagnostics.push(self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        "Put a comma after the last item of a multiline hash.".to_string(),
+                    ));
+                }
+            }
+            "diff_comma" => {
+                let last_precedes_newline =
+                    is_multiline && last_item_precedes_newline(bytes, last_end, closing_start);
+                if has_comma && !last_precedes_newline {
+                    if let Some(abs_offset) = find_comma_offset() {
+                        let (line, column) = source.offset_to_line_col(abs_offset);
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid comma after the last item of a hash, unless that item immediately precedes a newline.".to_string(),
+                        ));
+                    }
+                } else if !has_comma && last_precedes_newline {
                     let (line, column) = source.offset_to_line_col(last_end);
                     diagnostics.push(self.diagnostic(
                         source,
@@ -169,6 +240,18 @@ mod tests {
         }
     }
 
+    fn alias_style_config(style: &str) -> crate::cop::CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
+        );
+        crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
     #[test]
     fn offense_comma() {
         crate::testutil::assert_cop_offenses_full_with_config(
@@ -199,6 +282,85 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/offense.consistent_comma.rb"
             ),
             multiline_config("consistent_comma"),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/offense.diff_comma.rb"
+            ),
+            multiline_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/no_offense.diff_comma.rb"
+            ),
+            multiline_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma_via_enforced_style_alias() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_via_enforced_style_alias() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInHashLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_hash_literal/no_offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn diff_comma_accepts_crlf_trailing_comma_before_newline() {
+        let source = b"CodeblockDelimiters = {\r\n  '{'     => '}',\r\n  'begin' => 'end',\r\n  'do'    => 'end',\r\n}\r\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &TrailingCommaInHashLiteral,
+            source,
+            multiline_config("diff_comma"),
+        );
+        assert!(
+            diags.is_empty(),
+            "CRLF diff_comma hash should accept trailing comma before newline"
+        );
+    }
+
+    #[test]
+    fn diff_comma_flags_missing_comma_before_crlf_newline() {
+        let source = b"auth_data = {\r\n  provider: auth.provider,\r\n  uid: auth.uid,\r\n  auth: auth_hash.to_json,\r\n  expires_at: expires_at,\r\n  access_token: auth.credentials.token,\r\n  access_token_secret: auth.credentials.secret\r\n}\r\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &TrailingCommaInHashLiteral,
+            source,
+            multiline_config("diff_comma"),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "CRLF diff_comma hash should require the trailing comma"
+        );
+        assert_eq!(diags[0].location.line, 7);
+        assert_eq!(diags[0].location.column, 46);
+        assert_eq!(
+            diags[0].message,
+            "Put a comma after the last item of a multiline hash."
         );
     }
 }

@@ -68,6 +68,36 @@ use crate::parse::source::SourceFile;
 /// reports the encoding syntax error there, so line-based cops should skip the
 /// file entirely. Fixed by reusing the same guard pattern already applied to
 /// `Layout/LeadingEmptyLines` and `Naming/FileName`.
+///
+/// ## Corpus investigation (2026-04-09)
+///
+/// Variant gate for `EnforcedStyle: final_blank_line` reported FP=31, FN=30
+/// with paired locations on adjacent lines (for example, RuboCop at `:9`
+/// vs nitrocop at `:10`). The offense itself was correct; the divergence was
+/// only the reported range when a file ended with exactly one newline and the
+/// last code line also had trailing whitespace, e.g. `"...end \n"` or
+/// `"...end \r\n"`.
+///
+/// RuboCop reports `Trailing blank line missing.` on the last real line when
+/// the trailing whitespace starts with spaces/tabs before the final line ending,
+/// but still reports on the phantom next line for a pure final `\n` or `\r\n`.
+/// Nitrocop was sending every `blank_lines == 0` case to the phantom line.
+///
+/// ## Corpus investigation (2026-04-09, syntax-error follow-up)
+///
+/// Variant gate still had 1 FP on `ruby-formatter/rufo`'s `retry.rb.spec`
+/// under `EnforcedStyle: final_blank_line`. With the corpus RuboCop wrapper
+/// (`--require bench/corpus/rescue_parser_crashes.rb`), files that make
+/// RuboCop's `valid_syntax?` return false only emit `Lint/Syntax`, so
+/// `Layout/TrailingEmptyLines` is suppressed for fatal semantic errors like
+/// `Invalid retry without rescue`.
+///
+/// Nitrocop's linter intentionally keeps other cops running on most semantic
+/// parse errors to avoid false negatives elsewhere (`break`/`next`/`redo`
+/// should still reach this cop). This cop therefore reparses only when it
+/// would otherwise report and returns early only for the narrow semantic
+/// errors that RuboCop also treats as fatal (`retry`, `return in
+/// class/module body`).
 pub struct TrailingEmptyLines;
 
 /// Check if the source contains `__END__` (with optional leading whitespace).
@@ -108,6 +138,19 @@ fn first_trailing_blank_line_offset(bytes: &[u8], trailing_start: usize) -> usiz
     offset.min(bytes.len().saturating_sub(1))
 }
 
+fn missing_blank_line_report_location(
+    source: &SourceFile,
+    bytes: &[u8],
+    trailing_start: usize,
+) -> (usize, usize) {
+    if matches!(bytes.get(trailing_start), Some(b'\n' | b'\r')) {
+        let (last_line, _) = source.offset_to_line_col(trailing_start);
+        (last_line + 1, 0)
+    } else {
+        source.offset_to_line_col(trailing_start + 1)
+    }
+}
+
 fn skip_for_invalid_utf8_without_magic_encoding(source: &SourceFile) -> bool {
     if std::str::from_utf8(source.as_bytes()).is_ok() {
         return false;
@@ -126,6 +169,12 @@ fn has_magic_encoding_comment(source: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn has_rubocop_fatal_semantic_parse_error(bytes: &[u8]) -> bool {
+    crate::parse::parse_source(bytes)
+        .errors()
+        .any(|err| crate::cop::lint::syntax::is_rubocop_reported_semantic_error(err.message()))
 }
 
 impl Cop for TrailingEmptyLines {
@@ -174,6 +223,13 @@ impl Cop for TrailingEmptyLines {
             return;
         }
 
+        // Structural parse errors never reach this cop through the real linter
+        // pipeline, but fatal semantic errors like bare `retry` still do.
+        // RuboCop suppresses non-syntax cops for those two cases, so match it.
+        if has_rubocop_fatal_semantic_parse_error(bytes) {
+            return;
+        }
+
         // Determine offense location and message
         let message = match blank_lines {
             -1 => "Final newline missing.".to_string(),
@@ -193,12 +249,10 @@ impl Cop for TrailingEmptyLines {
         // last non-whitespace content.
         let begin_pos = bytes.len() - ws_len;
         let (report_line, report_col) = if blank_lines == 0 {
-            // "Trailing blank line missing." — report on the phantom line after
-            // the final newline, matching RuboCop which uses range_between(len, len).
-            // offset_to_line_col can't represent this position because
-            // compute_line_starts omits the phantom line, so compute directly.
-            let (last_line, _) = source.offset_to_line_col(begin_pos);
-            (last_line + 1, 0)
+            // RuboCop reports on the phantom line for a pure trailing line
+            // ending, but on the last real line if spaces/tabs precede that
+            // line ending (for example, `end \n`).
+            missing_blank_line_report_location(source, bytes, begin_pos)
         } else if blank_lines > 0 {
             source.offset_to_line_col(first_trailing_blank_line_offset(bytes, begin_pos))
         } else if ws_len > 0 {
@@ -376,9 +430,28 @@ mod tests {
         TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "Trailing blank line missing.");
-        // RuboCop reports on the phantom line after the final newline
+        // Pure trailing "\n" still reports on the phantom line.
         assert_eq!(diags[0].location.line, 2);
         assert_eq!(diags[0].location.column, 0);
+    }
+
+    #[test]
+    fn final_blank_line_style_flags_missing_blank_with_trailing_space() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = SourceFile::from_bytes("test.rb", b"module A\nend \n".to_vec());
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Trailing blank line missing.");
+        assert_eq!(diags[0].location.line, 2);
+        assert_eq!(diags[0].location.column, 4);
     }
 
     #[test]
@@ -442,6 +515,62 @@ mod tests {
             diags[0].message,
             "2 trailing blank lines instead of 1 detected."
         );
+    }
+
+    #[test]
+    fn final_blank_line_style_syntax_error_fixture_no_offense() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/trailing_empty_lines/no_offense.final_blank_line.rb"
+        );
+        let fixture = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture
+            .strip_prefix("# nitrocop-config: EnforcedStyle: final_blank_line\n")
+            .expect("fixture should start with final_blank_line config directive");
+        let parsed = crate::testutil::parse_fixture(source.as_bytes());
+        let filename = parsed.filename.as_deref().unwrap_or("test.rb");
+        let source = SourceFile::from_bytes(filename, parsed.source);
+        let mut diags = Vec::new();
+        TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "syntax-error fixture should not trigger TrailingEmptyLines: got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn final_blank_line_style_invalid_break_still_reports_offense() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("final_blank_line".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        for source_bytes in [
+            b"break\n".as_slice(),
+            b"next\n".as_slice(),
+            b"redo\n".as_slice(),
+        ] {
+            let source = SourceFile::from_bytes("test.rb", source_bytes.to_vec());
+            let mut diags = Vec::new();
+            TrailingEmptyLines.check_lines(&source, &config, &mut diags, None);
+            assert_eq!(diags.len(), 1, "expected offense for {:?}", source_bytes);
+            assert_eq!(diags[0].message, "Trailing blank line missing.");
+        }
     }
 
     #[test]

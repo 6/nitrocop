@@ -342,6 +342,24 @@ module PWN
   end
 end
 
+# ruby2_keywords in a private section: method is non-public, no docs needed
+class PrivateRuby2Keywords
+  private
+
+  ruby2_keywords def method_missing(method, *args, &block)
+    42
+  end
+end
+
+# module_function in a private section: method is non-public per RuboCop
+class PrivateModuleFunction
+  private
+
+  module_function def internal_helper
+    42
+  end
+end
+
 # Methods inside private def wrapper body are NOT themselves private
 module Jb
   module CollectionRendererExtension

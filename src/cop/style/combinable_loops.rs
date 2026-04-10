@@ -271,6 +271,23 @@ fn node_key(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<String> 
         return interpolated_string_node_key(source, &string);
     }
 
+    // Symbols: include ":" prefix to distinguish from bare strings (e.g. %i vs %w elements)
+    if let Some(sym) = node.as_symbol_node() {
+        let name = std::str::from_utf8(sym.unescaped()).ok()?;
+        return Some(format!(":{name}"));
+    }
+
+    // Boolean/nil literals: prefix to distinguish from %w string elements with same text
+    if node.as_true_node().is_some() {
+        return Some("kw:true".to_string());
+    }
+    if node.as_false_node().is_some() {
+        return Some("kw:false".to_string());
+    }
+    if node.as_nil_node().is_some() {
+        return Some("kw:nil".to_string());
+    }
+
     source
         .try_byte_slice(node.location().start_offset(), node.location().end_offset())
         .map(ToOwned::to_owned)

@@ -9,7 +9,6 @@ use ruby_prism::Visit;
 use crate::cache::ResultCache;
 use crate::cli::Args;
 use crate::config::{CopFilterSet, ResolvedConfig};
-use crate::cop::lint::redundant_cop_disable_directive::allow_redundant_disable_flagging_for_known_gap_cop;
 use crate::cop::registry::CopRegistry;
 use crate::cop::tiers::{SkipSummary, TierMap};
 use crate::cop::walker::BatchedCopWalker;
@@ -536,76 +535,8 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
 /// Name of the redundant cop disable directive cop.
 const REDUNDANT_DISABLE_COP: &str = "Lint/RedundantCopDisableDirective";
 
-/// Cops with known detection gaps (FN > 0 in corpus) that cause false
-/// positives when flagging unused disable directives. When `all_cops_ran`
-/// is true, unused directives for these cops are NOT flagged — the cop may
-/// have missed an offense that the directive legitimately suppresses.
-///
-/// Generated from corpus oracle data. A cop belongs here if and only if it
-/// has FN > 0 in the corpus baseline. As cop detection improves, entries
-/// should be removed. Cops not in the registry (plugin-only) are handled
-/// separately via the "unknown cop" path.
-const REDUNDANT_DISABLE_SKIP_COPS: &[&str] = &[
-    // Layout
-    "Layout/ExtraSpacing",                   // FN=20
-    "Layout/IndentationConsistency",         // FN=47
-    "Layout/IndentationWidth",               // FN=739
-    "Layout/LineLength",                     // FN=90
-    "Layout/MultilineMethodCallIndentation", // FN=7992
-    "Layout/MultilineOperationIndentation",  // FN=5590
-    "Layout/RedundantLineBreak",             // FN=22466
-    "Layout/SpaceAroundOperators",           // FN=2280
-    // Lint
-    "Lint/ShadowingOuterLocalVariable", // FN=3
-    "Lint/Syntax",                      // FN=4
-    "Lint/UnusedMethodArgument",        // FN=8
-    "Lint/UselessAssignment",           // FN=523
-    // Rails
-    "Rails/AddColumnIndex",                      // FN=4
-    "Rails/BulkChangeTable",                     // FN=2469
-    "Rails/CreateTableWithTimestamps",           // FN=1462
-    "Rails/EnumSyntax",                          // FN=3
-    "Rails/HttpPositionalArguments",             // FN=977
-    "Rails/NotNullColumn",                       // FN=129
-    "Rails/RedundantTravelBack",                 // FN=7
-    "Rails/ReversibleMigration",                 // FN=6
-    "Rails/ReversibleMigrationMethodDefinition", // FN=2350
-    "Rails/SaveBang",                            // FN=241
-    "Rails/ThreeStateBooleanColumn",             // FN=25
-    "Rails/TimeZoneAssignment",                  // FN=3
-    "Rails/UniqueValidationWithoutIndex",        // FN=22
-    "Rails/UnusedIgnoredColumns",                // FN=29
-    // Rake
-    "Rake/DuplicateNamespace", // FN=4
-    // Security
-    "Security/YAMLLoad", // stub (never fires)
-    // Style
-    "Style/AccessModifierDeclarations",   // FN=16
-    "Style/ConditionalAssignment",        // FN=5951
-    "Style/Documentation",                // FN=22
-    "Style/DocumentationMethod",          // FN=63
-    "Style/FrozenStringLiteralComment",   // FN=13
-    "Style/IdenticalConditionalBranches", // FN=9
-    "Style/IfUnlessModifier",             // FN=1216
-    "Style/NonNilCheck",                  // FN=2
-    "Style/RedundantLineContinuation",    // FN=87
-    "Style/RedundantParentheses",         // FN=811
-    "Style/RedundantSelf",                // FN=228
-    "Style/SafeNavigation",               // FN=205
-    "Style/Semicolon",                    // FN=60
-];
-
-fn redundant_disable_target_ruby_version(config: &CopConfig) -> f64 {
-    config
-        .options
-        .get("TargetRubyVersion")
-        .and_then(|value| value.as_f64())
-        .unwrap_or(2.7)
-}
-
 struct RedundantDirectiveCheck<'a> {
     registry: &'a CopRegistry,
-    base_configs: &'a [CopConfig],
     cop_filters: &'a CopFilterSet,
     path: &'a Path,
     has_only_filter: bool,
@@ -619,13 +550,12 @@ struct RedundantDirectiveCheck<'a> {
 /// where `suffix` is appended to the message (e.g. `" (unknown cop)"`).
 /// Returns `None` if we should skip it.
 ///
-/// The logic is conservative to avoid false positives:
+/// The logic:
 ///   - "all" or department-only directives: never flag (too broad to check)
 ///   - Known cop that is explicitly disabled (Enabled: false): flag as redundant
-///   - Known cop that is enabled + all_cops_ran + file matched + NOT in skip
-///     list: flag as redundant (cop ran and didn't fire)
-///   - Known cop in `REDUNDANT_DISABLE_SKIP_COPS`: never flag (detection gaps)
-///   - Renamed cop: flag, unless new-name cop is in skip list
+///   - Known cop that is enabled + all_cops_ran + file matched: flag as redundant
+///     (cop ran and didn't fire)
+///   - Renamed cop: flag, with conservative handling in --only mode
 ///   - Completely unknown cop: flag with "(unknown cop)" suffix, except during
 ///     unrelated `--only` runs where it would leak into another cop's results
 fn is_directive_redundant(
@@ -641,6 +571,13 @@ fn is_directive_redundant(
 
     // Department-only name (no '/') — never flag (too broad to check)
     if !cop_name.contains('/') {
+        return None;
+    }
+
+    // Malformed cop name (e.g. "/BlockLength") — the first character must be
+    // an ASCII uppercase letter to form a valid Department/CopName.  RuboCop
+    // silently ignores these, so we should too.
+    if !cop_name.starts_with(|c: char| c.is_ascii_uppercase()) {
         return None;
     }
 
@@ -675,25 +612,11 @@ fn is_directive_redundant(
         }
         // Cop is enabled and not explicitly excluded.
         if context.all_cops_ran && context.cop_filters.is_cop_match(idx, context.path) {
-            let target_ruby_version =
-                redundant_disable_target_ruby_version(&context.base_configs[idx]);
             // All cops ran AND this specific cop matched the file (Include
             // patterns matched), so we have reliable usage data — if the
             // directive is still unused, the cop genuinely didn't fire and
             // the directive is redundant.
-            //
-            // Skip cops with known detection gaps vs RuboCop, where
-            // nitrocop may miss an offense that the directive legitimately
-            // suppresses.
-            if !REDUNDANT_DISABLE_SKIP_COPS.contains(&cop_name)
-                || allow_redundant_disable_flagging_for_known_gap_cop(
-                    cop_name,
-                    target_ruby_version,
-                    directive.is_inline,
-                )
-            {
-                return Some("");
-            }
+            return Some("");
         }
         // Conservative: in --only mode for other cops, the target cop may
         // not have run, so we can't tell if the directive is needed.
@@ -720,28 +643,6 @@ fn is_directive_redundant(
                     && !context.all_cops_ran
                     && context.cop_filters.cop_filter(new_idx).is_enabled()
                     && !context.cop_filters.is_cop_excluded(new_idx, context.path)
-                {
-                    return None;
-                }
-                // In run_all_for_redundant mode, the new-name cop ran. If it
-                // has known detection gaps (in REDUNDANT_DISABLE_SKIP_COPS),
-                // the old-name directive might legitimately suppress an offense
-                // that nitrocop missed — don't flag it.
-                if context.all_cops_ran
-                    && context.cop_filters.is_cop_match(new_idx, context.path)
-                    && REDUNDANT_DISABLE_SKIP_COPS.contains(&new_name.as_str())
-                    && !allow_redundant_disable_flagging_for_known_gap_cop(
-                        new_name,
-                        redundant_disable_target_ruby_version(&context.base_configs[new_idx]),
-                        directive.is_inline,
-                    )
-                {
-                    return None;
-                }
-                // Even without all_cops_ran (e.g. --except mode), don't flag
-                // if the new-name cop has known detection gaps — the directive
-                // may legitimately suppress an offense nitrocop misses.
-                if !context.all_cops_ran && REDUNDANT_DISABLE_SKIP_COPS.contains(&new_name.as_str())
                 {
                     return None;
                 }
@@ -1162,7 +1063,7 @@ fn lint_source_once(
     // All cops ran if: (a) run_all_for_redundant mode, or (b) normal mode
     // with no --only/--except filters. In these cases, every enabled cop that
     // matched the file executed, so unused disable directives are reliable
-    // indicators of redundancy (modulo REDUNDANT_DISABLE_SKIP_COPS).
+    // indicators of redundancy.
     let all_cops_ran = run_all_for_redundant || (!has_only && args.except.is_empty());
 
     // Pass 1: Universal cops
@@ -1350,7 +1251,6 @@ fn lint_source_once(
                 args.only.iter().any(|o| o == REDUNDANT_DISABLE_COP);
             let redundant_check = RedundantDirectiveCheck {
                 registry,
-                base_configs: active_base_configs,
                 cop_filters: active_filters,
                 path: &source.path,
                 has_only_filter: !args.only.is_empty(),

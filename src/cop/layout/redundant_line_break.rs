@@ -127,6 +127,79 @@ use crate::parse::source::SourceFile;
 ///   invoked for these node types, enabling detection of redundant line breaks in
 ///   index/call operator write expressions. Resolves ~2 FNs with zero regressions.
 ///
+/// ## Fixes applied (2026-04-08)
+/// - **Direct argument walk-up**: nested multiline calls used as direct arguments
+///   of an outer multiline call are now suppressed when the outer call has already
+///   been checked. RuboCop's `on_send` walks from the inner send to its parent send
+///   even when that parent relation comes from an argument position, not only a
+///   receiver chain. Nitrocop previously only tracked receiver chains, which caused
+///   false positives for cases like `SeedDump.dump(EventInstance\n.where(...), ...)`
+///   and similar backslash-heavy argument lists.
+/// - **Multiline regexp safety**: Prism represents a plain regexp as a single
+///   `RegularExpressionNode`, but Parser exposes newline-containing regexp bodies
+///   through descendant `:str` nodes. RuboCop therefore treats multiline regexps as
+///   unsafe in `safe_to_split?`. Nitrocop now explicitly marks multiline regexp
+///   literals unsafe so assignments like `GROUPED_INPUT_PATTERN = /.../x.freeze`
+///   are no longer falsely flagged.
+///
+/// ## Fixes applied (2026-04-08, second batch)
+/// - **Binary operator walk-up**: RuboCop's `on_send` walks up through parent
+///   `OrNode`/`AndNode` (both `||`/`&&` and `or`/`and`). After walking up,
+///   `operator_keyword?` returns true for these nodes, and `require_backslash?`
+///   gates the offense on the operator line ending with `\`. Without `\`, no
+///   offense is registered on ANY send inside the expression. Nitrocop did not
+///   perform this walk-up, so multiline calls that were the RHS of `||`/`&&`
+///   (e.g., `destroy || raise(...)`, `must_not_cache? || stale?(...)`) were
+///   incorrectly flagged. The fix adds `inside_binary_op_without_backslash()`
+///   which walks up the ancestor stack following RuboCop's walk-up rules and
+///   suppresses offenses when the binary operator line lacks a trailing `\`.
+///   Resolves ~144 FPs and ~51 FNs with zero regressions.
+///
+/// ## Fixes applied (2026-04-09)
+/// - **Trailing `&.` join length**: RuboCop's single-line suitability
+///   check collapses safe-navigation chains split after a trailing `&.` like
+///   `foo&.\n  bar` without inserting a space. Nitrocop only handled the
+///   leading-dot form (`foo\n  .bar`), so it overestimated joined length for
+///   these safe-navigation chains and skipped real offenses when the true
+///   joined line fit under the configured maximum.
+/// - **Unary `!` wrapper anchoring**: Prism exposes `!foo&.\n  bar` as an
+///   outer unary-`!` call wrapped around the multiline send, but RuboCop
+///   reports the underlying send start (`foo`, not `!`). Nitrocop now skips
+///   that wrapper so the inner call is checked and anchored like RuboCop.
+/// - **Unary `!` wrapper narrowing**: that skip only applies to safe-navigation
+///   receiver chains. RuboCop still reports ordinary unary-negated multiline
+///   sends such as `!foo.\n  bar` and `!checks.values.\n  find { ... }`, but
+///   nitrocop was skipping every unary-`!` wrapper and missing those offenses.
+///
+/// ## Fixes applied (2026-04-09, second batch)
+/// - **UTF-8 character counting**: `too_long()` and Phase 2's combined-line check
+///   now measure character length instead of byte length, matching RuboCop's
+///   `String#length` which counts characters. Previously, multi-byte characters
+///   (CJK, accented, etc.) inflated the measured length, causing FNs for lines
+///   that fit within 120 characters but exceeded 120 bytes. Fixed by adding
+///   `utf8_char_count()` which counts non-continuation bytes. Resolves ~92 FNs
+///   (e.g., BCDice repo with Japanese text).
+/// - **Phase 2 unsafe range overlap**: Phase 2's `has_unsafe` check now detects
+///   unsafe ranges that START within the backslash group but extend beyond it
+///   (e.g., case/until/while expressions on the continuation line). Previously
+///   only ranges fully contained within the group were detected, causing FPs for
+///   patterns like `foo || \ case @mode ... end` and `parent \ until cond`.
+///   Resolves ~41 FPs (e.g., ruby2js repo). Added `UntilNode`, `WhileNode`, and
+///   `ForNode` visitors to `UnsafeRangeCollector` to support modifier keywords.
+///
+/// ## Fixes applied (2026-04-10)
+/// - **String continuation merging in `too_long`**: RuboCop's `to_single_line`
+///   merges adjacent string literals across backslash continuations:
+///   `"foo" \ "bar"` → `"foobar"` (same quotes), `"foo" \ 'bar'` → `"foo" + 'bar'`
+///   (different quotes). Nitrocop's `too_long` previously joined these lines with
+///   a space, keeping both sets of quotes: `"foo" "bar"` — 2 extra characters per
+///   continuation. For deeply-indented expressions with string continuations, this
+///   caused the combined length to exceed 120 chars when RuboCop's version fit,
+///   resulting in FNs. For example, `raise ArgumentError, "long..." \ "msg"` inside
+///   a 4-level-deep nesting would measure 124 chars (nitrocop) vs 117 chars (RuboCop).
+///   Added `merge_string_continuation()` helper and `prev_had_backslash` tracking in
+///   `too_long` to match RuboCop's merging behavior.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -179,6 +252,7 @@ impl Cop for RedundantLineBreak {
         let mut sl_block_collector = SingleLineBlockCollector {
             ranges: Vec::new(),
             source,
+            ancestors: Vec::new(),
         };
         sl_block_collector.visit(&parse_result.node());
         let single_line_block_ranges = sl_block_collector.ranges;
@@ -226,10 +300,11 @@ impl Cop for RedundantLineBreak {
 ///     node.each_descendant(:dstr, :str).none? { |n| n.heredoc? || n.value.include?("\n") } &&
 ///     node.each_descendant(:begin, :sym).none? { |b| !b.single_line? }
 ///
-/// Notably, RuboCop does NOT check for `:regexp` or array literals (`%w`, `%i`)
-/// in `safe_to_split?`. Even though collapsing a multiline `/x` regex or `%w`
-/// array changes semantics, RuboCop still flags them. We match that behavior
-/// for corpus conformance.
+/// Parser exposes multiline regexp bodies through descendant `:str` nodes, so
+/// RuboCop's `safe_to_split?` implicitly treats multiline regexps as unsafe.
+/// Prism represents a plain regexp as a single `RegularExpressionNode`, so
+/// nitrocop must explicitly mark those ranges unsafe. Arrays (`%w`, `%i`) are
+/// still intentionally left alone because RuboCop does flag those.
 struct UnsafeRangeCollector {
     /// (start_offset, end_offset) of nodes that make their parent unsafe to merge.
     ranges: Vec<(usize, usize)>,
@@ -336,6 +411,43 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         // Still recurse into children to find nested unsafe constructs
         ruby_prism::visit_parentheses_node(self, node);
     }
+
+    fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+        let loc = node.location();
+        self.ranges.push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_until_node(self, node);
+    }
+
+    fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+        let loc = node.location();
+        self.ranges.push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_while_node(self, node);
+    }
+
+    fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
+        let loc = node.location();
+        self.ranges.push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_for_node(self, node);
+    }
+
+    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'pr>) {
+        if node.unescaped().contains(&b'\n') {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
+        ruby_prism::visit_regular_expression_node(self, node);
+    }
+
+    fn visit_interpolated_regular_expression_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
+    ) {
+        if node.location().as_slice().contains(&b'\n') {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
+        ruby_prism::visit_interpolated_regular_expression_node(self, node);
+    }
 }
 
 /// Collects byte ranges of block/lambda nodes, tracking whether each is multiline.
@@ -371,23 +483,86 @@ impl<'pr> Visit<'pr> for BlockRangeCollector<'_> {
     }
 }
 
-/// Collects byte ranges of single-line block nodes.
-struct SingleLineBlockCollector<'a> {
+/// Collects byte ranges of single-line block nodes whose parent (in Parser AST
+/// terms) is a send with a dot.
+///
+/// Matches RuboCop's `other_cop_takes_precedence?` which checks:
+///   `block_node.parent.send_type? && block_node.parent.loc.dot && !block_node.multiline?`
+///
+/// In Parser AST, `block_node.parent` is the CONTAINING node. For:
+///   - `foo.map { ... }.compact` → block parent is `.compact` send (has dot) ✓
+///   - `foo.bar(proc { ... })` → block parent is `.bar` send (has dot) ✓
+///   - `x = foo.map { ... }` → block parent is assignment (no dot) ✗
+///   - `bar(proc { ... })` → block parent is `bar` send (no dot) ✗
+///
+/// In Prism, a block is always a child of its "owning" CallNode. The "containing"
+/// node in Parser AST terms is found by skipping the owning CallNode and any
+/// ArgumentsNode wrapper in the ancestor stack.
+struct SingleLineBlockCollector<'a, 'pr> {
     ranges: Vec<(usize, usize)>,
     source: &'a SourceFile,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
 }
 
-impl<'pr> Visit<'pr> for SingleLineBlockCollector<'_> {
+impl<'pr> Visit<'pr> for SingleLineBlockCollector<'_, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         let loc = node.location();
         let (start_line, _) = self.source.offset_to_line_col(loc.start_offset());
         let (end_line, _) = self
             .source
             .offset_to_line_col(loc.end_offset().saturating_sub(1));
-        if start_line == end_line {
+        if start_line == end_line && self.containing_call_has_dot() {
             self.ranges.push((loc.start_offset(), loc.end_offset()));
         }
         ruby_prism::visit_block_node(self, node);
+    }
+}
+
+impl SingleLineBlockCollector<'_, '_> {
+    /// Check if the block's "parent" in Parser AST terms is a CallNode with a dot.
+    ///
+    /// Walk up ancestors, skipping the owning CallNode (immediate parent of the
+    /// block in Prism) and any ArgumentsNode wrapper (Prism-only, no Parser
+    /// equivalent). The next significant node is the "containing" context.
+    fn containing_call_has_dot(&self) -> bool {
+        let len = self.ancestors.len();
+        // Need at least 2 ancestors: the BlockNode itself (pushed by
+        // visit_branch_node_enter before visit_block_node runs) and
+        // the owning CallNode above it.
+        if len < 2 {
+            return false;
+        }
+        let mut skipped_owning_call = false;
+        // Start at len-2 to skip the current BlockNode at the top of the stack.
+        for i in (0..len - 1).rev() {
+            let ancestor = &self.ancestors[i];
+            // The first CallNode we encounter (nearest) is the "owning" call
+            // (e.g., `proc` for `proc { ... }`, or `.map` for `.map { ... }`).
+            // Skip it to find the containing context.
+            if !skipped_owning_call && ancestor.as_call_node().is_some() {
+                skipped_owning_call = true;
+                continue;
+            }
+            // ArgumentsNode is a Prism wrapper with no Parser AST equivalent.
+            if ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+            // Found the containing node. Check if it's a CallNode with a dot.
+            return ancestor
+                .as_call_node()
+                .is_some_and(|c| c.call_operator_loc().is_some());
+        }
+        false
     }
 }
 
@@ -421,6 +596,10 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
     }
 
     /// Check if combining lines of this span would exceed max_line_length.
+    ///
+    /// Matches RuboCop's `to_single_line` method which merges string
+    /// continuations across backslash: `"foo" \ "bar"` → `"foobar"` (same
+    /// quotes merged), `"foo" \ 'bar'` → `"foo" + 'bar'` (different quotes).
     fn too_long(&self, start_offset: usize, end_offset: usize) -> bool {
         let (start_line, _) = self.source.offset_to_line_col(start_offset);
         let (end_line, _) = self
@@ -429,6 +608,7 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
 
         let lines: Vec<&[u8]> = self.source.lines().collect();
         let mut combined = Vec::new();
+        let mut prev_had_backslash = false;
         for line_num in start_line..=end_line {
             if line_num > lines.len() {
                 break;
@@ -438,7 +618,8 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
             // Only remove the line-continuation backslash, NOT backslashes that are part of
             // content (e.g., \1_\2 in regex replacements, \d in character classes).
             let trimmed_end = trim_trailing_whitespace(line);
-            let without_continuation = if trimmed_end.ends_with(b"\\") {
+            let had_backslash = trimmed_end.ends_with(b"\\");
+            let without_continuation = if had_backslash {
                 trim_trailing_whitespace(&trimmed_end[..trimmed_end.len() - 1])
             } else {
                 trimmed_end
@@ -447,16 +628,25 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 combined.extend_from_slice(without_continuation);
             } else {
                 let trimmed = trim_leading_whitespace(without_continuation);
-                if starts_with_method_chain_dot(trimmed) {
+                // RuboCop's to_single_line merges string literals across backslash:
+                //   /(["']) *\\\n\s*\1/ → '' (same quote = merge)
+                //   /" *\\\n\s*'/ → '" + \'' (different quotes)
+                if prev_had_backslash && merge_string_continuation(&mut combined, trimmed) {
+                    // Merged string continuation — already handled
+                } else if starts_with_method_chain_dot(trimmed)
+                    || (ends_with_safe_navigation_operator(&combined)
+                        && trimmed.first().is_some_and(|b| is_word_char(*b)))
+                {
                     combined.extend_from_slice(trimmed);
                 } else {
                     combined.push(b' ');
                     combined.extend_from_slice(trimmed);
                 }
             }
+            prev_had_backslash = had_backslash;
         }
 
-        combined.len() > self.max_line_length
+        utf8_char_count(&combined) > self.max_line_length
     }
 
     fn comment_within(&self, start_offset: usize, end_offset: usize) -> bool {
@@ -570,6 +760,67 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
         false
     }
 
+    /// Returns true if the current call is inside a binary operator node
+    /// (`||`/`&&`/`or`/`and`) AND the operator's line does NOT end with `\`.
+    ///
+    /// In RuboCop, `on_send` walks up from the inner send through parent sends,
+    /// convertible blocks, AND `BinaryOperatorNode` parents (OrNode/AndNode).
+    /// The walked-up node then undergoes an `operator_keyword?` check: if true,
+    /// the offense is gated on `require_backslash?` (the operator line must end
+    /// with `\`). Since `operator_keyword?` returns true for both `||`/`or` and
+    /// `&&`/`and`, a multiline call inside `foo || bar(...)` is NOT flagged
+    /// unless the `||` line ends with `\`.
+    ///
+    /// Nitrocop's AST visitor doesn't walk up through OrNode/AndNode, so it
+    /// would incorrectly flag the inner call. This method detects the situation
+    /// and suppresses the offense.
+    fn inside_binary_op_without_backslash(&self) -> bool {
+        // Walk up ancestors following RuboCop's on_send walk-up rules:
+        //   - CallNode (parent send) → continue
+        //   - ArgumentsNode (Prism wrapper) → continue
+        //   - BlockNode (convertible block) → continue
+        //   - OrNode/AndNode → found! check backslash
+        //   - Anything else → stop
+        if self.ancestors.len() < 2 {
+            return false;
+        }
+        for i in (0..self.ancestors.len() - 1).rev() {
+            let ancestor = &self.ancestors[i];
+
+            if ancestor.as_call_node().is_some() || ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+
+            // Convertible blocks: in RuboCop, the walk-up goes through blocks
+            // whose send is parenthesized or has no args. Be a bit generous and
+            // continue through any BlockNode.
+            if ancestor.as_block_node().is_some() {
+                continue;
+            }
+
+            // Found an OrNode or AndNode — check if its operator line ends with `\`.
+            let operator_loc = ancestor
+                .as_or_node()
+                .map(|n| n.operator_loc())
+                .or_else(|| ancestor.as_and_node().map(|n| n.operator_loc()));
+
+            if let Some(op_loc) = operator_loc {
+                let (op_line, _) = self.source.offset_to_line_col(op_loc.start_offset());
+                let lines: Vec<&[u8]> = self.source.lines().collect();
+                if op_line > 0 && op_line <= lines.len() {
+                    let line = lines[op_line - 1];
+                    let trimmed = trim_trailing_whitespace(line);
+                    return !trimmed.ends_with(b"\\");
+                }
+                return true;
+            }
+
+            // Any other node type stops the walk-up.
+            break;
+        }
+        false
+    }
+
     /// Returns true if the node at (start, end) is inside a block body that
     /// itself is contained within the checked chain range (cs, ce).
     fn inside_block_body_within_chain(
@@ -601,6 +852,15 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
             message: "Redundant line break detected.".to_string(),
             corrected: false,
         });
+    }
+
+    fn receiver_chain_contains_safe_navigation(&self, node: &ruby_prism::CallNode<'pr>) -> bool {
+        node.call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b"&.")
+            || node
+                .receiver()
+                .and_then(|receiver| receiver.as_call_node())
+                .is_some_and(|receiver| self.receiver_chain_contains_safe_navigation(&receiver))
     }
 }
 
@@ -641,29 +901,41 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
         };
 
         let skip_for_checked_chain = self.part_of_checked_chain(start_offset, end_offset);
+        let unary_bang_wrapper = node.name().as_slice() == b"!"
+            && node.arguments().is_none()
+            && node.block().is_none()
+            && node.receiver().and_then(|r| r.as_call_node()).is_some();
+        let safe_navigation_unary_wrapper = unary_bang_wrapper
+            && node
+                .receiver()
+                .and_then(|receiver| receiver.as_call_node())
+                .is_some_and(|receiver| self.receiver_chain_contains_safe_navigation(&receiver));
+
+        if safe_navigation_unary_wrapper {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        }
 
         if self.is_multiline(start_offset, check_end)
             && !self.part_of_reported_node(start_offset, end_offset)
             && !skip_for_checked_chain
         {
-            // This is the outermost multiline CallNode in its chain (since we
-            // visit top-down and inner calls would be caught by part_of_checked_chain).
-            // Record it so inner CallNodes in the chain are skipped, matching
-            // RuboCop's walk-up-to-outermost behavior.
-            let has_call_receiver = node.receiver().and_then(|r| r.as_call_node()).is_some();
-            if has_call_receiver {
-                // This node has a call chain underneath. Mark the chain range
-                // so inner calls are not individually checked.
-                // Exclude block bodies: in RuboCop, the send node's range does
-                // not include the block (the block is a parent node). Calls
-                // inside block bodies should be checked independently.
-                let effective_end = node
-                    .block()
-                    .and_then(|b| b.as_block_node())
-                    .map_or(end_offset, |block| block.location().start_offset());
-                self.checked_chain_ranges
-                    .push((start_offset, effective_end));
-            }
+            // RuboCop's `on_send` walks up through parent sends even when the
+            // inner send is a direct argument of the outer one, not only when
+            // it is the receiver in a method chain. Record every multiline send
+            // range so nested direct-argument sends are skipped unless another
+            // structural boundary (hash/array/parentheses/block body) breaks
+            // the walk-up.
+            //
+            // Exclude block bodies: in RuboCop, the send node's range does not
+            // include the block (the block is a parent node). Calls inside
+            // block bodies should be checked independently.
+            let effective_end = node
+                .block()
+                .and_then(|b| b.as_block_node())
+                .map_or(end_offset, |block| block.location().start_offset());
+            self.checked_chain_ranges
+                .push((start_offset, effective_end));
 
             // Skip index access chains: hash[:foo][:bar]
             let is_index_chain = if node.name().as_slice() == b"[]" {
@@ -674,9 +946,19 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
                 false
             };
 
+            // When InspectBlocks is false and this CallNode has a convertible block,
+            // the node maps to a block_type in RuboCop's walk-up (on_send walks
+            // through convertible blocks, making the outermost node a :block).
+            // RuboCop's `node.any_block_type?` returns true → skip.
+            // A block is convertible when: parenthesized OR no explicit args.
+            let has_convertible_block = !has_non_convertible_block
+                && node.block().and_then(|b| b.as_block_node()).is_some();
+
             if !is_index_chain
+                && !self.inside_binary_op_without_backslash()
                 && self.suitable_as_single_line(start_offset, check_end)
                 && !self.configured_to_not_be_inspected(start_offset, check_end)
+                && (!has_convertible_block || self.inspect_blocks)
             {
                 self.register_offense(start_offset, check_end);
             }
@@ -1034,9 +1316,17 @@ fn check_backslash_continuations(
             content.len()
         };
 
+        // Check if any unsafe range is fully contained within the group OR
+        // starts within the group but extends beyond it. The latter catches
+        // backslash continuations followed by case/if(ternary)/until/while
+        // expressions: the construct starts in the continuation line but
+        // extends far past the group, so it can't be collapsed to one line.
+        // We intentionally don't check for unsafe ranges that merely CONTAIN
+        // the group (like def bodies) — those are legitimate contexts for
+        // backslash continuation offenses.
         let has_unsafe = unsafe_ranges
             .iter()
-            .any(|&(us, ue)| us >= group_byte_start && ue <= group_byte_end);
+            .any(|&(us, _ue)| us >= group_byte_start && us < group_byte_end);
         if has_unsafe {
             i = final_line_idx + 1;
             continue;
@@ -1083,7 +1373,7 @@ fn check_backslash_continuations(
             combined.extend_from_slice(trim_trailing_whitespace(final_content));
         }
 
-        if combined.len() > max_line_length {
+        if utf8_char_count(&combined) > max_line_length {
             i = final_line_idx + 1;
             continue;
         }
@@ -1179,6 +1469,43 @@ fn starts_with_method_chain_dot(trimmed: &[u8]) -> bool {
     }
 }
 
+/// Merge string continuation across a backslash line break, matching
+/// RuboCop's `to_single_line` regex patterns:
+///   - `/(["']) *\\\n\s*\1/` → `''` (same quote: merge the strings)
+///   - `/" *\\\n\s*'/` → `" + '` (different quotes: use concatenation)
+///   - `/' *\\\n\s*"/` → `' + "` (different quotes: use concatenation)
+///
+/// Returns true if a merge was performed, false otherwise.
+fn merge_string_continuation(combined: &mut Vec<u8>, next_trimmed: &[u8]) -> bool {
+    if combined.is_empty() || next_trimmed.is_empty() {
+        return false;
+    }
+    let last = combined[combined.len() - 1];
+    let first = next_trimmed[0];
+    if last != b'"' && last != b'\'' {
+        return false;
+    }
+    if first != b'"' && first != b'\'' {
+        return false;
+    }
+    if last == first {
+        // Same quote: merge the two string literals into one
+        // "foo" \ "bar" → "foobar"
+        combined.pop(); // Remove trailing quote
+        combined.extend_from_slice(&next_trimmed[1..]); // Skip leading quote
+    } else {
+        // Different quotes: use + operator
+        // "foo" \ 'bar' → "foo" + 'bar'
+        combined.extend_from_slice(b" + ");
+        combined.extend_from_slice(next_trimmed);
+    }
+    true
+}
+
+fn ends_with_safe_navigation_operator(trimmed: &[u8]) -> bool {
+    trimmed.ends_with(b"&.")
+}
+
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
@@ -1195,9 +1522,39 @@ fn leading_whitespace_len(line: &[u8]) -> usize {
     count
 }
 
+/// Count the number of Unicode characters (code points) in a UTF-8 byte slice.
+/// RuboCop measures line length in characters, not bytes. For multi-byte UTF-8
+/// (e.g. CJK characters), byte length > char length, causing FNs when using
+/// byte length.
+fn utf8_char_count(bytes: &[u8]) -> usize {
+    // UTF-8 continuation bytes match the pattern 10xxxxxx (0x80..0xBF).
+    // Every other byte is the start of a new character.
+    bytes.iter().filter(|&&b| (b & 0xC0) != 0x80).count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     crate::cop_fixture_tests!(RedundantLineBreak, "cops/layout/redundant_line_break");
+
+    #[test]
+    fn safe_navigation_chain_with_trailing_operator_uses_exact_joined_length() {
+        let source = b"!current_course_user&.\n  email_unsubscriptions&.\n  where(course_settings_email_id: email_setting_enabled(component, setting).id)&.exists?\n";
+        let config = CopConfig {
+            options: HashMap::from([(
+                "MaxLineLength".to_string(),
+                serde_yml::Value::Number(serde_yml::Number::from(132)),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, config);
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 1);
+        assert_eq!(diagnostics[0].location.column, 1);
+    }
 }

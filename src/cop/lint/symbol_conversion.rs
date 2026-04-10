@@ -1,5 +1,7 @@
 use crate::cop::shared::method_identifier_predicates;
-use crate::cop::shared::node_type::{CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE};
+use crate::cop::shared::node_type::{
+    CALL_NODE, HASH_NODE, HASH_PATTERN_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -252,6 +254,27 @@ use crate::parse::source::SourceFile;
 /// consistent mode to avoid double-flagging (they're handled by the hash-level
 /// check). The `properly_quoted_source` function now takes a `strict` parameter
 /// to control the early-return behavior.
+///
+/// ## Consistent variant fix (2026-04-09)
+///
+/// Variant divergence reported FP=2, FN=6 for `EnforcedStyle: consistent`.
+///
+/// FP=2: Both in rubocop/rubocop — `%i[... undef unless ...]` patterns where
+/// `is_in_undef` byte-scan found the text "undef" inside a `%i` array and
+/// falsely treated `unless` as a `undef` argument. Fix: added
+/// `is_undef_at_statement_start` check — after finding `undef`, verify it's
+/// preceded (past whitespace) by `\n`, `;`, `{`, or start of file.
+///
+/// FN=2 (:~@ symbols): Bare symbols with `:` opening were hitting `_ => return`
+/// in consistent mode. RuboCop's `properly_quoted?` doesn't short-circuit for
+/// non-quoted sources in consistent mode, so `:~@` (value `~`, correction `:~`)
+/// is flagged as a mismatch. Fix: allow bare symbols through in consistent mode.
+///
+/// FN=2 (hash patterns): `case/in` hash patterns use `HashPatternNode`, which
+/// wasn't registered in `interested_node_types`. Fix: added `HASH_PATTERN_NODE`.
+///
+/// FN=2 (binary encoding): `# encoding: binary` files where bare `:il_était`
+/// should be `:"il_\xC3\xA9tait"`. Not fixed — requires encoding-aware processing.
 pub struct SymbolConversion;
 
 /// Check if a character is a valid Ruby identifier start character.
@@ -483,6 +506,86 @@ fn value_starts_with_identifier(value: &[u8]) -> bool {
         .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// Check if `undef` at a given position is actually a keyword (at statement start),
+/// not just the text "undef" inside a `%i` array or similar context.
+/// Returns true if preceded (after skipping whitespace) by a statement boundary:
+/// newline, `;`, `{` (block opening), or start of file.
+fn is_undef_at_statement_start(src: &[u8], undef_start: usize) -> bool {
+    if undef_start == 0 {
+        return true;
+    }
+    let mut p = undef_start;
+    while p > 0 && matches!(src[p - 1], b' ' | b'\t') {
+        p -= 1;
+    }
+    p == 0 || matches!(src[p - 1], b'\n' | b'\r' | b';' | b'{')
+}
+
+/// Check if a symbol node is inside a `undef` statement.
+/// In `EnforcedStyle: consistent`, RuboCop's `properly_quoted?` doesn't
+/// short-circuit on quote-less sources, so bare symbols in `undef` are flagged
+/// (e.g., `undef is_a?` → "use `:is_a?` instead").
+///
+/// Handles both simple `undef foo` and comma-separated `undef foo, bar`.
+fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
+    let start = sym.location().start_offset();
+    let src = source.as_bytes();
+    if start < 6 {
+        return false;
+    }
+
+    let mut pos = start;
+
+    // Skip whitespace
+    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+        pos -= 1;
+    }
+
+    // Direct `undef foo`
+    if pos >= 5 && &src[pos - 5..pos] == b"undef" {
+        let undef_start = pos - 5;
+        return (pos == 5 || !is_identifier_continue(src[pos - 6]))
+            && is_undef_at_statement_start(src, undef_start);
+    }
+
+    // `undef foo, bar` — skip back over comma and previous arguments
+    while pos > 0 && src[pos - 1] == b',' {
+        pos -= 1; // skip comma
+
+        // Skip whitespace (including newlines for multi-line undef)
+        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
+            pos -= 1;
+        }
+
+        // Skip a bare symbol backward: optional suffix (?/!/=), then identifier body
+        let start_pos = pos;
+        if pos > 0 && matches!(src[pos - 1], b'?' | b'!' | b'=') {
+            pos -= 1;
+        }
+        while pos > 0 && is_identifier_continue(src[pos - 1]) {
+            pos -= 1;
+        }
+
+        if pos == start_pos {
+            return false;
+        }
+
+        // Skip whitespace
+        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+            pos -= 1;
+        }
+
+        // Check for `undef`
+        if pos >= 5 && &src[pos - 5..pos] == b"undef" {
+            let undef_start = pos - 5;
+            return (pos == 5 || !is_identifier_continue(src[pos - 6]))
+                && is_undef_at_statement_start(src, undef_start);
+        }
+    }
+
+    false
+}
+
 /// Check if a symbol node is an argument to the `alias` keyword.
 /// RuboCop skips alias arguments because a symbol requiring quoting is not a
 /// valid method identifier, so flagging it would be unhelpful.
@@ -604,7 +707,13 @@ impl Cop for SymbolConversion {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, HASH_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE]
+        &[
+            CALL_NODE,
+            HASH_NODE,
+            HASH_PATTERN_NODE,
+            KEYWORD_HASH_NODE,
+            SYMBOL_NODE,
+        ]
     }
 
     fn check_node(
@@ -618,7 +727,7 @@ impl Cop for SymbolConversion {
     ) {
         let style = config.get_str("EnforcedStyle", "strict");
 
-        // Check HashNode / KeywordHashNode: consistent style hash key checking
+        // Check HashNode / KeywordHashNode / HashPatternNode: consistent style hash key checking
         if style == "consistent" {
             if let Some(hash) = node.as_hash_node() {
                 self.check_hash_consistent(source, hash.elements(), diagnostics);
@@ -626,6 +735,10 @@ impl Cop for SymbolConversion {
             }
             if let Some(kw_hash) = node.as_keyword_hash_node() {
                 self.check_hash_consistent(source, kw_hash.elements(), diagnostics);
+                return;
+            }
+            if let Some(hash_pattern) = node.as_hash_pattern_node() {
+                self.check_hash_consistent(source, hash_pattern.elements(), diagnostics);
                 return;
             }
         }
@@ -680,6 +793,10 @@ impl SymbolConversion {
             if matches!(opening, Some(b":\"" | b":'")) && is_rocket_hash_key(source, sym) {
                 return;
             }
+            // Skip bare hash keys (e.g., `foo:` in `{ foo: 1 }`) — source ends with `:`
+            if opening.is_none() && src.ends_with(b":") {
+                return;
+            }
         }
 
         if is_colon_hash_key {
@@ -713,6 +830,14 @@ impl SymbolConversion {
         match opening {
             Some(b":\"" | b":'") => {}
             _ if is_percent_s => {}
+            // In consistent mode, bare symbols in `undef` should be checked.
+            // RuboCop's `properly_quoted?` doesn't short-circuit for quote-less
+            // sources, so `undef is_a?` fires ("use `:is_a?` instead").
+            _ if !is_strict && opening.is_none() && is_in_undef(source, sym) => {}
+            // In consistent mode, bare symbols with `:` prefix are also checked
+            // because `properly_quoted?` doesn't short-circuit. Source `:~@`
+            // (value `~`, correction `:~`) → mismatch → offense.
+            _ if !is_strict && matches!(opening, Some(b":")) => {}
             _ => return,
         }
 
@@ -1468,6 +1593,28 @@ mod tests {
                 diags[0].message
             );
         }
+    }
+
+    #[test]
+    fn consistent_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SymbolConversion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/lint/symbol_conversion/consistent_offense.rb"
+            ),
+            consistent_config(),
+        );
+    }
+
+    #[test]
+    fn consistent_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SymbolConversion,
+            include_bytes!(
+                "../../../tests/fixtures/cops/lint/symbol_conversion/consistent_no_offense.rb"
+            ),
+            consistent_config(),
+        );
     }
 
     fn consistent_config() -> crate::cop::CopConfig {

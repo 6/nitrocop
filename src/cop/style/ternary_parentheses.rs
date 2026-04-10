@@ -16,6 +16,12 @@ use crate::parse::source::SourceFile;
 ///
 /// 2026-03-31: parenthesized one-line pattern matching like
 /// `(foo in bar) ? a : b` is accepted by RuboCop and must not be flagged.
+///
+/// 2026-04-09: fixed `require_parentheses_when_complex` variant (318 FN).
+/// `is_complex_condition` was called on the ParenthesesNode wrapper itself
+/// (always "complex") instead of unwrapping it to check the inner expression.
+/// Added `complex_condition()` which mirrors RuboCop's `complex_condition?`
+/// by recursing into `begin`-type (parenthesized) nodes before testing.
 pub struct TernaryParentheses;
 
 /// Check if a parenthesized node contains a safe assignment (=) in ternary context.
@@ -109,6 +115,23 @@ fn is_complex_condition(node: &ruby_prism::Node<'_>) -> bool {
     true
 }
 
+/// Mirror RuboCop's `complex_condition?`: unwrap parentheses and check the
+/// inner expression. RuboCop checks `begin_type?` (its parenthesized wrapper)
+/// and recurses into children before testing complexity.
+fn complex_condition(node: &ruby_prism::Node<'_>) -> bool {
+    if let Some(paren) = node.as_parentheses_node() {
+        let body = match paren.body() {
+            Some(b) => b,
+            None => return false,
+        };
+        if let Some(stmts) = body.as_statements_node() {
+            return stmts.body().iter().any(|child| complex_condition(&child));
+        }
+        return complex_condition(&body);
+    }
+    is_complex_condition(node)
+}
+
 impl Cop for TernaryParentheses {
     fn name(&self) -> &'static str {
         "Style/TernaryParentheses"
@@ -193,7 +216,7 @@ impl Cop for TernaryParentheses {
                 }
             }
             "require_parentheses_when_complex" => {
-                let is_complex = is_complex_condition(&predicate);
+                let is_complex = complex_condition(&predicate);
                 if is_complex && !is_parenthesized {
                     let loc = predicate.location();
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
@@ -339,6 +362,48 @@ mod tests {
             diags.is_empty(),
             "Should allow parenthesized one-line pattern matching: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn require_parentheses_when_complex_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TernaryParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/ternary_parentheses/require_parentheses_when_complex_offense.rb"
+            ),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("require_parentheses_when_complex".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn require_parentheses_when_complex_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TernaryParentheses,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/ternary_parentheses/require_parentheses_when_complex_no_offense.rb"
+            ),
+            {
+                let mut options = std::collections::HashMap::new();
+                options.insert(
+                    "EnforcedStyle".into(),
+                    serde_yml::Value::String("require_parentheses_when_complex".into()),
+                );
+                CopConfig {
+                    options,
+                    ..CopConfig::default()
+                }
+            },
         );
     }
 }

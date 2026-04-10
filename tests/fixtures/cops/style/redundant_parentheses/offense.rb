@@ -104,6 +104,9 @@ x.y((a..b))
 x.y((1..42))
     ^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
 
+(0..10).send(@method, (3..7)).should be_true
+                      ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
+
 "#{(foo)}"
    ^^^^^ Style/RedundantParentheses: Don't use parentheses around an interpolated expression.
 
@@ -215,3 +218,109 @@ foo(&(bar))
 # Block argument with redundant parens around a literal
 m(&(:symbol))
    ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+body: ({ cmd: "_notify-validate" }.merge(paypal_event)).to_query,
+      ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+return (attributes[key] = value) unless Attributes::STYLES_MERGE.include?(key)
+       ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+if((ENV['PL_REDIS_URL'.freeze] ||= ENV['REDIS_URL'.freeze]))
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+end
+
+(self[field] = self[field].kind_of?(Numeric) ? (self[field] || 0) + value : value)
+^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+
+body: ({ cmd: "_notify-validate" }.merge(paypal_event)).to_query,
+      ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+[image_path, (resolve_image_options image_path, image_format, image_attrs, (({ background: true, container_size: [page_width, page_height] }.merge opts)))]
+                                                                            ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+after{(r.quit rescue nil) if defined?(r)}
+      ^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+smc_v=matrix.inverse.diagonal.map{|ii| 1-(1.quo(ii))}
+                                         ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+@initial_communalities=@matrix.inverse.diagonal.map{|i| 1-(1.quo(i))}
+                                                          ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+until($stdin.gets).include?("DONE1")
+     ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+until($stdin.gets).include?("DONE2")
+     ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+until($stdin.gets).include?("DONE3")
+     ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+if other
+  work
+elsif cond
+  (x += 1)
+  ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+  work
+end
+
+if (obj = (obj.reload rescue nil))
+          ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if (obj = (obj.reload rescue nil))
+          ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if hlp = (send("hlp_#{c}") rescue nil)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if value = (m[name] rescue nil)
+           ^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+if client = (UNIXSocket.open(socket) rescue nil)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+
+# Assignment inside string interpolation — Parser AST wraps interpolation in begin
+"value is #{(x = compute)}"
+            ^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+
+accumulator << ({ bar: element }.merge!(ORIGINAL_HASH){ |_key, left, _right| left })
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+yield ("Decompressing sparse image #{item.name}"), :percent, (i * 100) / sparse.count_chunks if block_given?
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+var = 0
+foo in { bar: ^(var) }
+               ^^^^^ Style/RedundantParentheses: Don't use parentheses around a variable.
+
+args = m ((0; 1))
+          ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+args = m ((0; 1)), ((2; 3))
+          ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+                    ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+assert_eq(false, (not true))
+                 ^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
+
+(not(true)).should be_false
+^ Style/RedundantParentheses: Don't use parentheses around a keyword.
+
+if value =~ (configuration[:format])
+            ^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+if Gem::Specification.any? { |s| (s.name == 'fastlane-plugin-trainer') && Gem::Requirement.default =~ (s.version) }
+                                                                                                      ^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+assert no_results_div.text =~ (Regexp.new(I18n.translate("bento_search.no_results")))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+mail && Regexp.new(regexp) =~ (mail[field.to_sym])
+                              ^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+begin
+  raise "raise"
+rescue *(RuntimeError) => e
+        ^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a constant.
+  :expected
+end

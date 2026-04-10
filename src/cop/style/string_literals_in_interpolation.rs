@@ -36,7 +36,30 @@ use crate::parse::source::SourceFile;
 /// separately: xstr embedded statements don't set `in_interpolation`, but
 /// entering a nested `InterpolatedStringNode` resets `in_xstr` so its
 /// embedded statements correctly set `in_interpolation`.
+///
+/// ## Investigation findings (2026-04-09)
+///
+/// RuboCop never checks multiline quoted literals inside interpolation because
+/// the `parser` gem emits them as nested `:dstr` nodes, while Prism keeps them
+/// as `StringNode`s with literal newlines in their source. To match RuboCop,
+/// this cop skips interpolated string nodes whose source spans a real newline.
+/// That fixes the remaining default-style FPs and the `double_quotes` variant's
+/// multiline FP cluster without suppressing ordinary single-line literals.
+///
+/// For `EnforcedStyle: double_quotes`, RuboCop also keeps single-quoted
+/// literals when rewriting them would change semantics by activating
+/// interpolation (`'#{'`, `'#@'`, `'#$'`), forcing extra escaping for literal
+/// double quotes, or changing backslash escapes that only double quotes
+/// interpret. This cop mirrors those exemptions from `wrong_quotes?`.
 pub struct StringLiteralsInInterpolation;
+
+fn single_quotes_allowed_under_double_quotes(source: &[u8]) -> bool {
+    source.contains(&b'"')
+        || source.windows(2).any(|w| {
+            (w[0] == b'\\' && w[1] != b'\'' && w[1] != b'\\')
+                || matches!(w, [b'#', b'@' | b'$' | b'{'])
+        })
+}
 
 impl Cop for StringLiteralsInInterpolation {
     fn name(&self) -> &'static str {
@@ -114,6 +137,14 @@ impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
             return;
         }
 
+        let loc = node.location();
+
+        // RuboCop never visits multiline quoted literals here because parser
+        // represents them as nested dstr nodes instead of str nodes.
+        if loc.as_slice().contains(&b'\n') || loc.as_slice().contains(&b'\r') {
+            return;
+        }
+
         let opening = match node.opening_loc() {
             Some(o) => o,
             None => return,
@@ -128,7 +159,6 @@ impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
                     // Check if it needs double quotes (has escape sequences)
                     let content = node.content_loc().as_slice();
                     if !util::double_quotes_required(content) {
-                        let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
@@ -140,8 +170,8 @@ impl<'pr> Visit<'pr> for InterpStringVisitor<'_> {
                 }
             }
             "double_quotes" => {
-                if open_bytes == b"'" {
-                    let loc = node.location();
+                if open_bytes == b"'" && !single_quotes_allowed_under_double_quotes(loc.as_slice())
+                {
                     let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                     self.diagnostics.push(self.cop.diagnostic(
                         self.source,
@@ -163,4 +193,37 @@ mod tests {
         StringLiteralsInInterpolation,
         "cops/style/string_literals_in_interpolation"
     );
+
+    fn double_quotes_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("double_quotes".into()),
+            )]),
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn double_quotes_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &StringLiteralsInInterpolation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/string_literals_in_interpolation/double_quotes_offense.rb"
+            ),
+            double_quotes_config(),
+        );
+    }
+
+    #[test]
+    fn double_quotes_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &StringLiteralsInInterpolation,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/string_literals_in_interpolation/double_quotes_no_offense.rb"
+            ),
+            double_quotes_config(),
+        );
+    }
 }

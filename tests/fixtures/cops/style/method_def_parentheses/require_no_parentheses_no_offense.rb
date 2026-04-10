@@ -11,3 +11,9 @@ end
 def baz
   42
 end
+
+def rest(*args)
+  args
+end
+
+def endless(x) = x

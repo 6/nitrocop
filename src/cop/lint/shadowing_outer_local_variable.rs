@@ -23,7 +23,8 @@ struct ShadowingContext {
     inherited_cond_map: Vec<InheritedCondEntry>,
     when_condition_ranges: Vec<(usize, usize, usize)>,
     when_body_ranges: Vec<(usize, usize, usize)>,
-    assignment_rhs_ranges: Vec<(usize, usize, usize)>,
+    /// (var_name, lhs_offset, rhs_start, rhs_end, rhs_content_hash).
+    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize, u64)>,
     block_body_ranges: Vec<(usize, usize, usize)>,
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
@@ -185,9 +186,60 @@ impl ShadowingContext {
     fn is_in_assignment_rhs(&self, lhs_offset: usize, param_offset: usize) -> bool {
         self.assignment_rhs_ranges
             .iter()
-            .any(|(lhs, rhs_start, rhs_end)| {
+            .any(|(_, lhs, rhs_start, rhs_end, _)| {
                 *lhs == lhs_offset && *rhs_start <= param_offset && param_offset < *rhs_end
             })
+    }
+
+    /// Check if a block param is in the RHS of a reassignment to the same
+    /// variable, where the first declaration is structurally equivalent.
+    ///
+    /// This replicates a RuboCop quirk: `variable_used_in_declaration_of_outer?`
+    /// uses `each_ancestor.any?(declaration_node)` which compares via `==`
+    /// (structural equality in parser gem). When `var = expr { |var| }` is
+    /// repeated with identical RHS, the lvasgn nodes are structurally equal,
+    /// causing suppression even though the block is in a different assignment.
+    fn is_in_reassignment_rhs_with_structural_match(
+        &self,
+        var_name: &[u8],
+        outer_offset: usize,
+        param_offset: usize,
+    ) -> bool {
+        // Find which reassignment the param is inside.
+        let current_rhs =
+            self.assignment_rhs_ranges
+                .iter()
+                .find(|(name, lhs, rhs_start, rhs_end, _)| {
+                    name == var_name
+                        && *lhs != outer_offset
+                        && *rhs_start <= param_offset
+                        && param_offset < *rhs_end
+                });
+        let Some((_, _, _, _, curr_hash)) = current_rhs else {
+            return false;
+        };
+
+        // Find the first declaration's RHS.
+        let original_rhs = self
+            .assignment_rhs_ranges
+            .iter()
+            .find(|(name, lhs, _, _, _)| name == var_name && *lhs == outer_offset);
+        let Some((_, _, orig_rhs_start, orig_rhs_end, orig_hash)) = original_rhs else {
+            return false;
+        };
+
+        // Check structural equivalence: both RHS must have identical content
+        // (same hash) AND the first declaration's RHS must also contain a block.
+        // Identical source bytes yield identical parser gem AST nodes, so
+        // content hash equality is a sound proxy for structural `==`.
+        if orig_hash != curr_hash {
+            return false;
+        }
+
+        // Verify the first declaration's RHS also contains a block.
+        self.block_body_ranges.iter().any(|(block_start, _, _)| {
+            *block_start >= *orig_rhs_start && *block_start < *orig_rhs_end
+        })
     }
 
     /// `def self.foo` and `class << self` are modeled as twisted scopes by
@@ -208,28 +260,6 @@ impl ShadowingContext {
                 *start <= param_offset
                     && param_offset < *end
                     && !(*start <= outer_offset && outer_offset < *end)
-            })
-    }
-
-    /// Check if a variable assignment at `lhs_offset` has a sibling-branch
-    /// assignment for the same variable name. Used to detect cases like
-    /// `unless cond; x = foo { |x| }; else; x = bar; end` where the sibling
-    /// branch's assignment means RuboCop's VF would see a different outer
-    /// variable (from the sibling), making the RHS suppression inapplicable.
-    fn has_sibling_branch_assignment(&self, lhs_offset: usize, var_name: &[u8]) -> bool {
-        // Find the branch write entry for this lhs_offset
-        let this_entry = self
-            .branch_var_writes
-            .iter()
-            .find(|(name, _, _, lhs)| *lhs == lhs_offset && name == var_name);
-        let Some((_, cond_offset, branch_offset, _)) = this_entry else {
-            return false;
-        };
-        // Check if any other entry has the same cond_offset but different branch_offset
-        self.branch_var_writes
-            .iter()
-            .any(|(name, cond, branch, _)| {
-                name == var_name && *cond == *cond_offset && *branch != *branch_offset
             })
     }
 
@@ -370,6 +400,40 @@ impl ShadowingContext {
             }
         }
 
+        // Check: block inside assignment RHS at branch top level (RuboCop Check 6
+        // for assignment-wrapped blocks). In parser gem, `d = expr { |d| }` in an
+        // else clause has block.parent = lvasgn = if.else_branch, so Check 6 fires.
+        // In Prism, the block is inside the call which is inside the assignment, so
+        // it's at expression_depth > 0 and the main Check 1 is blocked by
+        // is_nested_in_expression. Handle this by checking if the block param is
+        // inside an assignment RHS whose LHS is a top-level statement in a
+        // different branch of the same conditional as the outer variable.
+        if let Some(bi) = block_interval.as_ref() {
+            if let Some((outer_cond, outer_branch)) = outer_info.conditional_branch {
+                if bi.cond_offset == outer_cond
+                    && bi.branch_offset != outer_branch
+                    && bi.is_body
+                    && bi.is_if_type
+                    && bi.single_stmt
+                    && !has_block_boundary
+                {
+                    let in_top_level_assignment_rhs =
+                        self.assignment_rhs_ranges
+                            .iter()
+                            .any(|(_, lhs, rhs_start, rhs_end, _)| {
+                                *rhs_start <= param_offset
+                                    && param_offset < *rhs_end
+                                    && bi.start <= *lhs
+                                    && *lhs < bi.end
+                                    && !self.is_in_expression_at(*lhs, bi.expression_depth_base)
+                            });
+                    if in_top_level_assignment_rhs {
+                        return true;
+                    }
+                }
+            }
+        }
+
         false
     }
 }
@@ -394,11 +458,11 @@ impl ShadowingContext {
 ///    `is_in_assignment_rhs` check (for `foo = bar { |foo| }`) was gated behind an
 ///    `outer_in_branch_body` guard that blocked it whenever the outer variable was
 ///    inside a conditional branch body. This was too broad: the suppression is valid
-///    in branches (e.g. `elsif` body with `ami = items.find { |ami| }`). The only
-///    case where it should NOT apply is when a sibling branch of the same conditional
-///    also assigns the same variable (because our VF visit order differs from RuboCop's).
-///    Fix: replaced `outer_in_branch_body` guard with targeted `has_sibling_branch_assignment`
-///    check that tracks per-branch variable writes via the context collector.
+///    in branches (e.g. `elsif` body with `ami = items.find { |ami| }`). Fix: the
+///    VF engine's `visit_unless_node` was also visiting branches in wrong order
+///    (body then else) vs RuboCop (else then body via parser gem's `(if cond B A)`
+///    representation). Fixing the VF visit order + removing the over-broad guard
+///    makes `is_in_assignment_rhs` work correctly for all branch configurations.
 ///
 /// 4. **FP: `def self...` / `class << self` body leakage.** VariableForce keeps
 ///    `defs` and singleton-class nodes twisted so receiver expressions stay in the
@@ -634,14 +698,15 @@ impl variable_force::VariableForceConsumer for ShadowingOuterLocalVariable {
             // the RHS range of the SAME assignment node that declared the outer
             // variable, so it cannot suppress a different assignment or a block
             // in a separate statement.
-            //
-            // Exception: when a sibling branch of the same conditional also assigns
-            // the same variable. In RuboCop's VF (which may visit branches in a
-            // different order, e.g., else-first for unless), the outer variable
-            // would come from the sibling branch, making this suppression incorrect.
-            if ctx.is_in_assignment_rhs(outer_offset, param_offset)
-                && !ctx.has_sibling_branch_assignment(outer_offset, name)
-            {
+            if ctx.is_in_assignment_rhs(outer_offset, param_offset) {
+                return false;
+            }
+
+            // Check for reassignment RHS suppression (RuboCop structural equality
+            // quirk). When `var = expr { |var| }` is reassigned with the same pattern,
+            // RuboCop's `variable_used_in_declaration_of_outer?` suppresses because
+            // the parser gem's `==` considers the lvasgn nodes structurally equal.
+            if ctx.is_in_reassignment_rhs_with_structural_match(name, outer_offset, param_offset) {
                 return false;
             }
 
@@ -739,7 +804,7 @@ struct ContextCollector {
     inherited_cond_map: Vec<InheritedCondEntry>,
     when_condition_ranges: Vec<(usize, usize, usize)>,
     when_body_ranges: Vec<(usize, usize, usize)>,
-    assignment_rhs_ranges: Vec<(usize, usize, usize)>,
+    assignment_rhs_ranges: Vec<(Vec<u8>, usize, usize, usize, u64)>,
     block_body_ranges: Vec<(usize, usize, usize)>,
     defs_local_scope_ranges: Vec<(usize, usize)>,
     singleton_class_body_ranges: Vec<(usize, usize)>,
@@ -1030,10 +1095,13 @@ impl<'pr> Visit<'pr> for ContextCollector {
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let var_name = node.name().as_slice().to_vec();
         let lhs_offset = node.location().start_offset();
         let start = node.value().location().start_offset();
         let end = node.value().location().end_offset();
-        self.assignment_rhs_ranges.push((lhs_offset, start, end));
+        let rhs_hash = simple_hash(node.value().location().as_slice());
+        self.assignment_rhs_ranges
+            .push((var_name.clone(), lhs_offset, start, end, rhs_hash));
         // Record branch context for this variable write (used to detect
         // sibling-branch assignments for the same variable).
         if let Some(entry) = self.conditional_branch_stack.last() {
@@ -1092,11 +1160,17 @@ impl<'pr> Visit<'pr> for ContextCollector {
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
         let rhs_start = node.value().location().start_offset();
         let rhs_end = node.value().location().end_offset();
+        let rhs_hash = simple_hash(node.value().location().as_slice());
         // Record each LHS target's offset as mapping to the RHS range
         for target in node.lefts().iter() {
             if let Some(t) = target.as_local_variable_target_node() {
-                self.assignment_rhs_ranges
-                    .push((t.location().start_offset(), rhs_start, rhs_end));
+                self.assignment_rhs_ranges.push((
+                    t.name().as_slice().to_vec(),
+                    t.location().start_offset(),
+                    rhs_start,
+                    rhs_end,
+                    rhs_hash,
+                ));
             }
         }
         if let Some(rest) = node.rest() {
@@ -1104,9 +1178,11 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 if let Some(expr) = splat.expression() {
                     if let Some(t) = expr.as_local_variable_target_node() {
                         self.assignment_rhs_ranges.push((
+                            t.name().as_slice().to_vec(),
                             t.location().start_offset(),
                             rhs_start,
                             rhs_end,
+                            rhs_hash,
                         ));
                     }
                 }
@@ -1114,8 +1190,13 @@ impl<'pr> Visit<'pr> for ContextCollector {
         }
         for target in node.rights().iter() {
             if let Some(t) = target.as_local_variable_target_node() {
-                self.assignment_rhs_ranges
-                    .push((t.location().start_offset(), rhs_start, rhs_end));
+                self.assignment_rhs_ranges.push((
+                    t.name().as_slice().to_vec(),
+                    t.location().start_offset(),
+                    rhs_start,
+                    rhs_end,
+                    rhs_hash,
+                ));
             }
         }
         self.expression_depth += 1;
@@ -1182,19 +1263,38 @@ impl<'pr> Visit<'pr> for ContextCollector {
         // Record conditional parent info for blocks at statement level.
         // This enables RuboCop's check 5/6 suppression for blocks that are
         // direct children of conditional branch bodies.
+        //
+        // Propagate through single-statement ancestor chains: when a block is
+        // the sole statement in a when body, its "variable_node" in RuboCop
+        // terms is the case node (one level up). If that case is the sole
+        // statement in an else-branch, the variable_node IS the else-branch.
+        // Record entries for each ancestor body level as long as the chain
+        // remains single-statement (each intermediate branch has ≤1 statement).
         if self.expression_depth == 0 {
-            if let Some(entry) = self
+            let mut is_innermost = true;
+            for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
-                .find(|e| e.is_body)
+                .filter(|e| e.is_body)
             {
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
-                    is_single_stmt_branch: entry.single_stmt,
+                    // Only the innermost entry gets is_single_stmt_branch = true.
+                    // Propagated entries only propagate is_else_of_if_type (RuboCop
+                    // Check 6). This prevents over-suppression for case/when where
+                    // a block nested inside a single-stmt when body was incorrectly
+                    // treated as a direct child of the case node.
+                    is_single_stmt_branch: is_innermost && entry.single_stmt,
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
+                is_innermost = false;
+                // Stop propagating at multi-statement boundaries — the block
+                // no longer "represents" the branch at the next level.
+                if !entry.single_stmt {
+                    break;
+                }
             }
         }
 
@@ -1251,19 +1351,25 @@ impl<'pr> Visit<'pr> for ContextCollector {
         }
 
         // Record conditional parent info for lambdas at statement level.
+        // Same propagation logic as visit_block_node.
         if self.expression_depth == 0 {
-            if let Some(entry) = self
+            let mut is_innermost = true;
+            for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
-                .find(|e| e.is_body)
+                .filter(|e| e.is_body)
             {
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
-                    is_single_stmt_branch: entry.single_stmt,
+                    is_single_stmt_branch: is_innermost && entry.single_stmt,
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
+                is_innermost = false;
+                if !entry.single_stmt {
+                    break;
+                }
             }
         }
 
@@ -1441,9 +1547,77 @@ impl<'pr> Visit<'pr> for ContextCollector {
             self.pop_branch();
         }
     }
+
+    fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
+        let case_offset = node.location().start_offset();
+
+        // Visit predicate
+        if let Some(pred) = node.predicate() {
+            self.visit(&pred);
+        }
+
+        // Visit each `in` clause as a branch of the case_match conditional.
+        // Pattern variables captured in `in` clauses are visible in other
+        // branches (Ruby scoping), but RuboCop suppresses shadowing when
+        // the outer variable is in a different `in`/`else` branch via
+        // same_conditions_node_different_branch? (Check 5).
+        for condition in node.conditions().iter() {
+            let branch_offset = condition.location().start_offset();
+            let in_start = condition.location().start_offset();
+            let in_end = condition.location().end_offset();
+            let in_single_stmt = condition
+                .as_in_node()
+                .and_then(|n| n.statements())
+                .is_none_or(|s| s.body().len() <= 1);
+            let in_entry = CondBranchEntry {
+                cond_offset: case_offset,
+                branch_offset,
+                subsequent_offset: None,
+                is_body: true,
+                is_if_type: false,
+                single_stmt: in_single_stmt,
+                is_else_clause: false,
+                expression_depth_base: self.expression_depth,
+            };
+            self.push_branch(in_entry, in_start, in_end);
+            self.visit(&condition);
+            self.pop_branch();
+        }
+
+        // Visit else clause
+        if let Some(else_clause) = node.else_clause() {
+            let branch_offset = else_clause.location().start_offset();
+            let else_start = else_clause.location().start_offset();
+            let else_end = else_clause.location().end_offset();
+            let else_single_stmt = else_clause.statements().is_none_or(|s| s.body().len() <= 1);
+            let else_entry = CondBranchEntry {
+                cond_offset: case_offset,
+                branch_offset,
+                subsequent_offset: None,
+                is_body: true,
+                is_if_type: false,
+                single_stmt: else_single_stmt,
+                is_else_clause: true,
+                expression_depth_base: self.expression_depth,
+            };
+            self.push_branch(else_entry, else_start, else_end);
+            self.visit_else_node(&else_clause);
+            self.pop_branch();
+        }
+    }
 }
 
 /// Check if a CallNode is `Ractor.new(...)` or `::Ractor.new(...)`.
+/// Simple FNV-1a-style hash for comparing RHS source bytes.
+fn simple_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 fn is_ractor_new_call(node: &ruby_prism::CallNode<'_>) -> bool {
     let name = std::str::from_utf8(node.name().as_slice()).unwrap_or("");
     if name != "new" {

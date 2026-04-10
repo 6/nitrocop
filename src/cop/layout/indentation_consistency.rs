@@ -1,3 +1,5 @@
+use ruby_prism::Visit;
+
 use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{
     BEGIN_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, ELSE_NODE, FOR_NODE,
@@ -86,6 +88,25 @@ const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 ///     In Prism they are `ParenthesesNode`, which was not handled. Added a
 ///     handler to check consistency of statements inside parenthesized
 ///     expressions.
+///
+/// ## Variant style investigation (2026-04-08)
+///
+/// Fixed 20 FP and 4 FN for `EnforcedStyle: indented_internal_methods`:
+/// 14. `check_statements_consistency` (used for if/when/while/etc. bodies) was
+///     always using flat/normal-style checking, even when `indented_internal_methods`
+///     was configured. In that style, RuboCop's `on_begin` applies section-based
+///     checking (splitting by bare access modifiers) to ALL begin nodes, including
+///     if/when bodies inside class definitions. Added a `use_sections` parameter
+///     to `check_statements_consistency` so it can branch on style.
+/// 15. `is_bare_access_modifier` was not scope-aware: it returned true for
+///     `private`/`protected` calls regardless of context. RuboCop's
+///     `bare_access_modifier?` delegates to `macro?` → `in_macro_scope?`, which
+///     walks the ancestor chain and returns false if a `def` node is encountered
+///     before reaching a class/module. This caused blocks inside `def` bodies
+///     to incorrectly treat access modifiers as section dividers, missing
+///     indentation offenses (FN). Added `is_inside_def_body` which walks the
+///     parse tree to find the nearest scope boundary (def vs class/module/sclass
+///     or class constructor like `Class.new do...end`).
 pub struct IndentationConsistency;
 
 /// Check if a node is a bare access modifier call
@@ -93,6 +114,77 @@ pub struct IndentationConsistency;
 fn is_bare_access_modifier(node: &ruby_prism::Node<'_>) -> bool {
     node.as_call_node()
         .is_some_and(|call| access_modifier_predicates::is_bare_access_modifier(&call))
+}
+
+/// Check if a CallNode is a class constructor: `Class.new`, `Module.new`,
+/// `Struct.new`, or `Data.define` with a block. These reset macro scope
+/// like class/module definitions per RuboCop's `class_constructor?`.
+fn is_class_constructor_call(node: &ruby_prism::Node<'_>) -> bool {
+    let call = match node.as_call_node() {
+        Some(c) => c,
+        None => return false,
+    };
+    // Must have a block
+    if call.block().is_none() {
+        return false;
+    }
+    let receiver = match call.receiver() {
+        Some(r) => r,
+        None => return false,
+    };
+    let const_name = if let Some(c) = receiver.as_constant_read_node() {
+        c.name().as_slice()
+    } else if let Some(cp) = receiver.as_constant_path_node() {
+        // Handle ::Class.new, ::Struct.new, etc. (ConstantPathNode)
+        match cp.name() {
+            Some(n) => n.as_slice(),
+            None => return false,
+        }
+    } else {
+        return false;
+    };
+    let method = call.name().as_slice();
+    matches!(
+        (const_name, method),
+        (b"Class", b"new") | (b"Module", b"new") | (b"Struct", b"new") | (b"Data", b"define")
+    )
+}
+
+/// Check if a given byte offset is inside a `def` body (where access modifiers
+/// are NOT bare per RuboCop's `in_macro_scope?`). A nested class/module/sclass
+/// or class constructor (`Class.new do...end`) resets the scope.
+///
+/// Used to determine whether `indented_internal_methods` should treat access
+/// modifiers as section dividers at a given position.
+fn is_inside_def_body(parse_result: &ruby_prism::ParseResult<'_>, target_offset: usize) -> bool {
+    struct ScopeFinder {
+        target: usize,
+        nearest_scope_is_def: bool,
+    }
+
+    impl<'pr> Visit<'pr> for ScopeFinder {
+        fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+            let loc = node.location();
+            if self.target >= loc.start_offset() && self.target < loc.end_offset() {
+                if node.as_def_node().is_some() {
+                    self.nearest_scope_is_def = true;
+                } else if node.as_class_node().is_some()
+                    || node.as_module_node().is_some()
+                    || node.as_singleton_class_node().is_some()
+                    || is_class_constructor_call(&node)
+                {
+                    self.nearest_scope_is_def = false;
+                }
+            }
+        }
+    }
+
+    let mut finder = ScopeFinder {
+        target: target_offset,
+        nearest_scope_is_def: false,
+    };
+    finder.visit(&parse_result.node());
+    finder.nearest_scope_is_def
 }
 
 impl IndentationConsistency {
@@ -219,11 +311,16 @@ impl IndentationConsistency {
 
     /// Check consistency of a StatementsNode body (used for if/unless/when/while/etc
     /// where we get Option<StatementsNode> directly rather than Option<Node>).
+    ///
+    /// When `use_sections` is true (indented_internal_methods + macro scope),
+    /// access modifiers act as section dividers and consistency is checked
+    /// within each section independently.
     fn check_statements_consistency(
         &self,
         source: &SourceFile,
         keyword_offset: usize,
         stmts: Option<ruby_prism::StatementsNode<'_>>,
+        use_sections: bool,
     ) -> Vec<Diagnostic> {
         let stmts = match stmts {
             Some(s) => s,
@@ -233,6 +330,10 @@ impl IndentationConsistency {
         let children: Vec<_> = stmts.body().iter().collect();
         if children.len() < 2 {
             return Vec::new();
+        }
+
+        if use_sections {
+            return self.check_sections(source, &children);
         }
 
         let (kw_line, _) = source.offset_to_line_col(keyword_offset);
@@ -456,6 +557,15 @@ impl Cop for IndentationConsistency {
             return;
         }
 
+        // For remaining handlers (blocks, if/while/etc.), determine whether
+        // we're in "macro scope" for the indented_internal_methods style.
+        // Access modifiers are only section dividers when the nearest enclosing
+        // scope boundary (class/module vs def) is a class-like node.
+        // RuboCop's `bare_access_modifier?` calls `macro?` → `in_macro_scope?`
+        // which walks the ancestor chain: def breaks the scope, class/module resets it.
+        let use_sections =
+            indented && !is_inside_def_body(_parse_result, node.location().start_offset());
+
         // Blocks are handled through their parent CallNode so we can use
         // the call's start column (matching RuboCop's node.parent.source_range)
         // instead of the `do`/`{` keyword column for access modifier comparison.
@@ -466,7 +576,7 @@ impl Cop for IndentationConsistency {
                     block_node.opening_loc().start_offset(),
                     call_node.location().start_offset(),
                     block_node.body(),
-                    indented,
+                    use_sections,
                 ));
             }
             return;
@@ -479,7 +589,7 @@ impl Cop for IndentationConsistency {
                 lambda_node.opening_loc().start_offset(),
                 lambda_node.location().start_offset(),
                 lambda_node.body(),
-                indented,
+                use_sections,
             ));
             return;
         }
@@ -490,6 +600,7 @@ impl Cop for IndentationConsistency {
                 source,
                 pre_exec_node.opening_loc().start_offset(),
                 pre_exec_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -503,6 +614,7 @@ impl Cop for IndentationConsistency {
                     source,
                     parens_node.opening_loc().start_offset(),
                     Some(stmts),
+                    use_sections,
                 ));
             }
             return;
@@ -515,6 +627,7 @@ impl Cop for IndentationConsistency {
                     source,
                     kw_loc.start_offset(),
                     if_node.statements(),
+                    use_sections,
                 ));
             }
             return;
@@ -526,6 +639,7 @@ impl Cop for IndentationConsistency {
                 source,
                 unless_node.keyword_loc().start_offset(),
                 unless_node.statements(),
+                use_sections,
             ));
             // Prism's visit_unless_node calls visit_else_node directly,
             // bypassing visit_branch_node_enter, so the walker never sees
@@ -535,6 +649,7 @@ impl Cop for IndentationConsistency {
                     source,
                     else_clause.else_keyword_loc().start_offset(),
                     else_clause.statements(),
+                    use_sections,
                 ));
             }
             return;
@@ -546,6 +661,7 @@ impl Cop for IndentationConsistency {
                 source,
                 else_node.else_keyword_loc().start_offset(),
                 else_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -556,6 +672,7 @@ impl Cop for IndentationConsistency {
                 source,
                 when_node.keyword_loc().start_offset(),
                 when_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -566,6 +683,7 @@ impl Cop for IndentationConsistency {
                 source,
                 in_node.in_loc().start_offset(),
                 in_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -579,6 +697,7 @@ impl Cop for IndentationConsistency {
                     source,
                     else_clause.else_keyword_loc().start_offset(),
                     else_clause.statements(),
+                    use_sections,
                 ));
             }
             return;
@@ -591,6 +710,7 @@ impl Cop for IndentationConsistency {
                     source,
                     else_clause.else_keyword_loc().start_offset(),
                     else_clause.statements(),
+                    use_sections,
                 ));
             }
             return;
@@ -602,6 +722,7 @@ impl Cop for IndentationConsistency {
                 source,
                 while_node.keyword_loc().start_offset(),
                 while_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -612,6 +733,7 @@ impl Cop for IndentationConsistency {
                 source,
                 until_node.keyword_loc().start_offset(),
                 until_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -622,6 +744,7 @@ impl Cop for IndentationConsistency {
                 source,
                 for_node.for_keyword_loc().start_offset(),
                 for_node.statements(),
+                use_sections,
             ));
             return;
         }
@@ -633,6 +756,7 @@ impl Cop for IndentationConsistency {
                     source,
                     kw_loc.start_offset(),
                     begin_node.statements(),
+                    use_sections,
                 ));
             }
 
@@ -642,6 +766,7 @@ impl Cop for IndentationConsistency {
                     source,
                     rescue_node.keyword_loc().start_offset(),
                     rescue_node.statements(),
+                    use_sections,
                 ));
                 rescue_opt = rescue_node.subsequent();
             }
@@ -651,6 +776,7 @@ impl Cop for IndentationConsistency {
                     source,
                     ensure_node.ensure_keyword_loc().start_offset(),
                     ensure_node.statements(),
+                    use_sections,
                 ));
             }
 
@@ -661,6 +787,7 @@ impl Cop for IndentationConsistency {
                     source,
                     else_clause.else_keyword_loc().start_offset(),
                     else_clause.statements(),
+                    use_sections,
                 ));
             }
         }
@@ -783,6 +910,39 @@ mod tests {
         assert!(
             !diags.is_empty(),
             "should flag inconsistency within private section"
+        );
+    }
+
+    fn iim_config() -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("indented_internal_methods".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn indented_internal_methods_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &IndentationConsistency,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/indentation_consistency/indented_internal_methods_no_offense.rb"
+            ),
+            iim_config(),
+        );
+    }
+
+    #[test]
+    fn indented_internal_methods_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &IndentationConsistency,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/indentation_consistency/indented_internal_methods_offense.rb"
+            ),
+            iim_config(),
         );
     }
 }

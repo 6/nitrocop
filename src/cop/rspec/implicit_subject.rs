@@ -20,6 +20,11 @@ use ruby_prism::Visit;
 ///   `expect(subject)` in example contexts when style is `require_implicit`.
 ///   The RuboCop cop uses `explicit_unnamed_subject?` pattern to match
 ///   `(send nil? :expect (send nil? :subject))`.
+/// - `single_statement_only` is based on Parser's `begin_type?`, not source
+///   lines. In Prism that means grouped example bodies such as semicolon
+///   statements or parenthesized one-liners are not single-statement, even when
+///   they stay on one line. Fixed by mapping those grouped Prism bodies to
+///   RuboCop's `begin_type?` behavior.
 pub struct ImplicitSubject;
 
 /// RSpec example method names (it, specify, example, scenario, its, etc.)
@@ -74,10 +79,16 @@ fn is_single_statement_block(block: &ruby_prism::BlockNode<'_>) -> bool {
     };
 
     if let Some(stmts) = body.as_statements_node() {
-        stmts.body().len() <= 1
-    } else {
-        true
+        if stmts.body().len() != 1 {
+            return false;
+        }
+
+        return stmts.body().first().is_none_or(|stmt| {
+            stmt.as_parentheses_node().is_none() && stmt.as_begin_node().is_none()
+        });
     }
+
+    body.as_parentheses_node().is_none() && body.as_begin_node().is_none()
 }
 
 impl Cop for ImplicitSubject {
@@ -208,7 +219,7 @@ impl<'a, 'pr> Visit<'pr> for ImplicitSubjectVisitor<'a, 'pr> {
                         let is_single_statement = enclosing
                             .as_ref()
                             .is_none_or(|(_, block)| is_single_statement_block(block));
-                        if !is_single_line && !is_single_statement {
+                        if !is_single_statement {
                             self.add_offense(node, "Don't use implicit subject.");
                         }
                     }

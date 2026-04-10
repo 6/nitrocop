@@ -55,14 +55,19 @@ def strip_repo_prefix(filepath: str) -> str:
     return filepath
 
 
+def _read_err_text(json_path: Path) -> str:
+    """Read the .err file next to a .json file. Returns empty string if missing."""
+    err_path = json_path.with_suffix(".err")
+    try:
+        return err_path.read_text(errors="replace").strip()
+    except FileNotFoundError:
+        return ""
+
+
 def read_err_snippet(json_path: Path, tool: str) -> str:
     """Read the .err file next to a .json file and return the first meaningful error line.
     Returns empty string if no .err file or no meaningful content."""
-    err_path = json_path.with_suffix(".err")
-    try:
-        text = err_path.read_text(errors="replace").strip()
-    except FileNotFoundError:
-        return ""
+    text = _read_err_text(json_path)
     if not text:
         return ""
     # Return first non-trivial line (skip blanks, "N files inspected" summaries,
@@ -82,6 +87,36 @@ def read_err_snippet(json_path: Path, tool: str) -> str:
             line = line[:200] + "..."
         return line
     return ""
+
+
+def read_rescued_crash_files(json_path: Path) -> set[str]:
+    """Parse the .err file for files where rescue_parser_crashes.rb caught a crash.
+
+    These files appear in RuboCop JSON with 0 offenses but were never actually
+    analyzed — the parser bailed and the monkey-patch returned []. Any nitrocop
+    offenses on these files are parser-divergence phantom FPs, not cop logic bugs.
+
+    Returns a set of relative file paths (stripped of repo prefix)."""
+    text = _read_err_text(json_path)
+    if not text:
+        return set()
+    rescued = set()
+    marker = "[corpus] parser crash rescued"
+    for line in text.splitlines():
+        # Format: "[corpus] parser crash rescued <filepath>: <ExceptionClass>: <message>"
+        idx = line.find(marker)
+        if idx < 0:
+            continue
+        rest = line[idx + len(marker):].strip()
+        # filepath ends at the first ": " (separator before exception class)
+        colon_idx = rest.find(": ")
+        if colon_idx > 0:
+            filepath = strip_repo_prefix(rest[:colon_idx])
+        else:
+            filepath = strip_repo_prefix(rest)
+        if filepath:
+            rescued.add(filepath)
+    return rescued
 
 
 def parse_nitrocop_json(path: Path) -> tuple[set, dict] | None:
@@ -114,13 +149,17 @@ def parse_nitrocop_json(path: Path) -> tuple[set, dict] | None:
     return offenses, messages
 
 
-def parse_rubocop_json(path: Path) -> tuple[set, dict, set, int, int] | None:
+def parse_rubocop_json(path: Path, rescued_crash_files: set[str] | None = None) -> tuple[set, dict, set, int, int] | None:
     """Parse RuboCop JSON output. Format: {"files": [{"path": ..., "offenses": [...]}]}
     Returns (offenses, messages, inspected_files, target_file_count, inspected_file_count)
     or None if the file is missing/empty/unparseable.
     messages maps (filepath, line, cop) -> message.
     inspected_files is the set of relative file paths that RuboCop actually reported on.
-    This is needed because RuboCop silently drops files when its parser crashes mid-batch."""
+    This is needed because RuboCop silently drops files when its parser crashes mid-batch.
+
+    rescued_crash_files: file paths where rescue_parser_crashes.rb caught an error.
+    These files appear in JSON with 0 offenses but were never analyzed — they are
+    excluded from inspected_files to prevent phantom FPs."""
     try:
         text = path.read_text()
     except FileNotFoundError:
@@ -163,6 +202,13 @@ def parse_rubocop_json(path: Path) -> tuple[set, dict, set, int, int] | None:
     inspected = summary.get("inspected_file_count", 0)
     if target > 0 and inspected < target and zero_offense_files:
         inspected_files -= zero_offense_files
+
+    # Also exclude files where rescue_parser_crashes.rb caught an error.
+    # These files appear in the JSON with 0 offenses (the rescue returns [])
+    # but were never actually analyzed by RuboCop's cops. Without this,
+    # nitrocop offenses on these files show up as phantom FPs.
+    if rescued_crash_files:
+        inspected_files -= rescued_crash_files
 
     return offenses, messages, inspected_files, target, inspected
 
@@ -259,7 +305,8 @@ def main():
             continue
 
         tc_result = parse_nitrocop_json(tc_path)
-        rc_result = parse_rubocop_json(rc_path)
+        rescued_files = read_rescued_crash_files(rc_path) if rc_path else set()
+        rc_result = parse_rubocop_json(rc_path, rescued_crash_files=rescued_files)
 
         # Detect crashed/empty output — don't compare against phantom zero offenses
         if tc_result is None or rc_result is None:
@@ -404,6 +451,14 @@ def main():
             if err_msg:
                 result["rubocop_error"] = err_msg
             warning_repos.append(result)
+
+        # Track rescued parser crashes (files that appear in JSON with 0 offenses
+        # because rescue_parser_crashes.rb caught the error)
+        if rescued_files:
+            result["rubocop_parser_crash_rescued"] = len(rescued_files)
+            if result not in warning_repos:
+                result["rubocop_error"] = read_err_snippet(rc_path, "rubocop")
+                warning_repos.append(result)
 
         repo_results.append(result)
 

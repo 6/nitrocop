@@ -41,3 +41,10 @@ expect(foo).to include, 'fail'
 # Explicit style: include with multiple arguments should NOT be flagged
 # nitrocop-config: EnforcedStyle: explicit
 expect(foo).to include(foo, bar)
+
+# Explicit style: `is_expected` shorthand should NOT be flagged
+# RuboCop only checks explicit predicate matchers under `expect(...)`
+# nitrocop-config: EnforcedStyle: explicit
+it { is_expected.to include ['x', 1] }
+it { is_expected.not_to include foo }
+it { is_expected.to be_empty }

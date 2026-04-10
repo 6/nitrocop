@@ -1,3 +1,11 @@
+# FN: spaces before a heredoc interpolation closing `}` are still offenses
+template = <<-EOS
+  #{"
+  body
+  "  }
+   ^ Layout/ExtraSpacing: Unnecessary spacing detected.
+EOS
+
 set_app("RuboCop")
 website  = "https://github.com/rubocop"
        ^ Layout/ExtraSpacing: Unnecessary spacing detected.

@@ -5,14 +5,15 @@ use crate::parse::source::SourceFile;
 
 /// Style/SpecialGlobalVars: Flags Perl-style global variables and suggests English equivalents.
 ///
-/// FN fix: Added `$:` → `$LOAD_PATH`, `$"` → `$LOADED_FEATURES`, and `$=` → `$IGNORECASE`
-/// to the perl_to_english/english_to_perl maps (they were missing entirely).
-/// Also fixed message generation: builtin globals (`$LOAD_PATH`, `$LOADED_FEATURES`,
-/// `$PROGRAM_NAME`) do not need `require 'English'` — they are always available in Ruby.
-/// The "require 'English'" hint is now only appended for non-builtin English names.
+/// RuboCop treats secondary English aliases like `$PID`, `$FS`, `$OFS`, `$RS`,
+/// `$ORS`, and `$NR` as managed names for the non-default styles, but it does
+/// not manage `$MATCH`, `$PREMATCH`, `$POSTMATCH`, or `$LAST_PAREN_MATCH` in
+/// any style. The previous one-to-one reverse map missed the aliases and
+/// over-reported the match globals, which only showed up under
+/// `use_perl_names` / `use_builtin_english_names`.
 pub struct SpecialGlobalVars;
 
-fn perl_to_english(name: &[u8]) -> Option<&'static str> {
+fn english_style_preferred(name: &[u8]) -> Option<&'static str> {
     match name {
         b"$:" => Some("$LOAD_PATH"),
         b"$\"" => Some("$LOADED_FEATURES"),
@@ -27,10 +28,6 @@ fn perl_to_english(name: &[u8]) -> Option<&'static str> {
         b"$$" => Some("$PROCESS_ID"),
         b"$?" => Some("$CHILD_STATUS"),
         b"$~" => Some("$LAST_MATCH_INFO"),
-        b"$&" => Some("$MATCH"),
-        b"$'" => Some("$POSTMATCH"),
-        b"$`" => Some("$PREMATCH"),
-        b"$+" => Some("$LAST_PAREN_MATCH"),
         b"$_" => Some("$LAST_READ_LINE"),
         b"$>" => Some("$DEFAULT_OUTPUT"),
         b"$<" => Some("$DEFAULT_INPUT"),
@@ -46,30 +43,35 @@ fn is_builtin_english(english: &str) -> bool {
     matches!(english, "$LOAD_PATH" | "$LOADED_FEATURES" | "$PROGRAM_NAME")
 }
 
-fn english_to_perl(name: &[u8]) -> Option<&'static str> {
+fn perl_style_preferred(name: &[u8]) -> Option<&'static str> {
     match name {
-        b"$LOAD_PATH" => Some("$:"),
-        b"$LOADED_FEATURES" => Some("$\""),
-        b"$ERROR_INFO" => Some("$!"),
-        b"$ERROR_POSITION" => Some("$@"),
-        b"$FIELD_SEPARATOR" => Some("$;"),
-        b"$OUTPUT_FIELD_SEPARATOR" => Some("$,"),
-        b"$INPUT_RECORD_SEPARATOR" => Some("$/"),
-        b"$OUTPUT_RECORD_SEPARATOR" => Some("$\\"),
-        b"$INPUT_LINE_NUMBER" => Some("$."),
-        b"$PROGRAM_NAME" => Some("$0"),
-        b"$PROCESS_ID" => Some("$$"),
-        b"$CHILD_STATUS" => Some("$?"),
-        b"$LAST_MATCH_INFO" => Some("$~"),
-        b"$MATCH" => Some("$&"),
-        b"$POSTMATCH" => Some("$'"),
-        b"$PREMATCH" => Some("$`"),
-        b"$LAST_PAREN_MATCH" => Some("$+"),
-        b"$LAST_READ_LINE" => Some("$_"),
-        b"$DEFAULT_OUTPUT" => Some("$>"),
-        b"$DEFAULT_INPUT" => Some("$<"),
-        b"$IGNORECASE" => Some("$="),
-        b"$ARGV" => Some("$*"),
+        b"$:" | b"$LOAD_PATH" => Some("$:"),
+        b"$\"" | b"$LOADED_FEATURES" => Some("$\""),
+        b"$0" | b"$PROGRAM_NAME" => Some("$0"),
+        b"$!" | b"$ERROR_INFO" => Some("$!"),
+        b"$@" | b"$ERROR_POSITION" => Some("$@"),
+        b"$;" | b"$FIELD_SEPARATOR" | b"$FS" => Some("$;"),
+        b"$," | b"$OUTPUT_FIELD_SEPARATOR" | b"$OFS" => Some("$,"),
+        b"$/" | b"$INPUT_RECORD_SEPARATOR" | b"$RS" => Some("$/"),
+        b"$\\" | b"$OUTPUT_RECORD_SEPARATOR" | b"$ORS" => Some("$\\"),
+        b"$." | b"$INPUT_LINE_NUMBER" | b"$NR" => Some("$."),
+        b"$_" | b"$LAST_READ_LINE" => Some("$_"),
+        b"$>" | b"$DEFAULT_OUTPUT" => Some("$>"),
+        b"$<" | b"$DEFAULT_INPUT" => Some("$<"),
+        b"$$" | b"$PROCESS_ID" | b"$PID" => Some("$$"),
+        b"$?" | b"$CHILD_STATUS" => Some("$?"),
+        b"$~" | b"$LAST_MATCH_INFO" => Some("$~"),
+        b"$=" | b"$IGNORECASE" => Some("$="),
+        b"$*" | b"$ARGV" => Some("$*"),
+        _ => None,
+    }
+}
+
+fn builtin_english_preferred(name: &[u8]) -> Option<&'static str> {
+    match name {
+        b"$:" | b"$LOAD_PATH" => Some("$LOAD_PATH"),
+        b"$\"" | b"$LOADED_FEATURES" => Some("$LOADED_FEATURES"),
+        b"$0" | b"$PROGRAM_NAME" => Some("$PROGRAM_NAME"),
         _ => None,
     }
 }
@@ -108,8 +110,10 @@ impl Cop for SpecialGlobalVars {
 
         match enforced_style {
             "use_perl_names" => {
-                // Flag all English-style names, suggest perl equivalents
-                if let Some(perl) = english_to_perl(var_name) {
+                if let Some(perl) = perl_style_preferred(var_name) {
+                    if perl.as_bytes() == var_name {
+                        return;
+                    }
                     let english_name = std::str::from_utf8(var_name).unwrap_or("$?");
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
                     let mut diag = self.diagnostic(
@@ -132,17 +136,34 @@ impl Cop for SpecialGlobalVars {
                 }
             }
             "use_builtin_english_names" => {
-                // Like use_perl_names but allows builtin English globals
-                // ($LOAD_PATH, $LOADED_FEATURES, $PROGRAM_NAME).
-                // Also flags perl names that have builtin equivalents ($:, $", $0)
-                // and suggests the English builtin instead.
-                if let Some(perl) = english_to_perl(var_name) {
-                    let english_name = std::str::from_utf8(var_name).unwrap_or("$?");
-                    if is_builtin_english(english_name) {
-                        // Builtin English name — allowed
+                if let Some(english) = builtin_english_preferred(var_name) {
+                    if english.as_bytes() == var_name {
                         return;
                     }
-                    // Non-builtin English name → suggest perl
+                    let global_name = std::str::from_utf8(var_name).unwrap_or("$?");
+                    let (line, column) = source.offset_to_line_col(loc.start_offset());
+                    let mut diag = self.diagnostic(
+                        source,
+                        line,
+                        column,
+                        format!("Prefer `{}` over `{}`.", english, global_name),
+                    );
+                    if let Some(ref mut corr) = corrections {
+                        corr.push(crate::correction::Correction {
+                            start: loc.start_offset(),
+                            end: loc.end_offset(),
+                            replacement: english.to_string(),
+                            cop_name: self.name(),
+                            cop_index: 0,
+                        });
+                        diag.corrected = true;
+                    }
+                    diagnostics.push(diag);
+                } else if let Some(perl) = perl_style_preferred(var_name) {
+                    if perl.as_bytes() == var_name {
+                        return;
+                    }
+                    let english_name = std::str::from_utf8(var_name).unwrap_or("$?");
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
                     let mut diag = self.diagnostic(
                         source,
@@ -161,35 +182,11 @@ impl Cop for SpecialGlobalVars {
                         diag.corrected = true;
                     }
                     diagnostics.push(diag);
-                } else if let Some(english) = perl_to_english(var_name) {
-                    if is_builtin_english(english) {
-                        // Perl name for a builtin → suggest English builtin
-                        let perl_name = std::str::from_utf8(var_name).unwrap_or("$?");
-                        let (line, column) = source.offset_to_line_col(loc.start_offset());
-                        let mut diag = self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            format!("Prefer `{}` over `{}`.", english, perl_name),
-                        );
-                        if let Some(ref mut corr) = corrections {
-                            corr.push(crate::correction::Correction {
-                                start: loc.start_offset(),
-                                end: loc.end_offset(),
-                                replacement: english.to_string(),
-                                cop_name: self.name(),
-                                cop_index: 0,
-                            });
-                            diag.corrected = true;
-                        }
-                        diagnostics.push(diag);
-                    }
-                    // Perl name for non-builtin → allowed
                 }
             }
             _ => {
                 // "use_english_names" (default): flag Perl-style names
-                if let Some(english) = perl_to_english(var_name) {
+                if let Some(english) = english_style_preferred(var_name) {
                     let perl_name = std::str::from_utf8(var_name).unwrap_or("$?");
                     let (line, column) = source.offset_to_line_col(loc.start_offset());
                     let msg = if require_english && !is_builtin_english(english) {
@@ -226,6 +223,18 @@ mod tests {
     crate::cop_fixture_tests!(SpecialGlobalVars, "cops/style/special_global_vars");
     crate::cop_autocorrect_fixture_tests!(SpecialGlobalVars, "cops/style/special_global_vars");
 
+    fn enforced_style_config(style: &str) -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn regular_global_is_ignored() {
         let source = b"x = $foo\n";
@@ -243,15 +252,7 @@ mod tests {
     #[test]
     fn use_perl_names_flags_english() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("use_perl_names".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = enforced_style_config("use_perl_names");
         let source = b"puts $ERROR_INFO\n";
         let diags = run_cop_full_with_config(&SpecialGlobalVars, source, config);
         assert_eq!(
@@ -298,57 +299,57 @@ mod tests {
     #[test]
     fn use_builtin_english_names_offense_fixture() {
         use crate::testutil::assert_cop_offenses_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("use_builtin_english_names".into()),
-            )]),
-            ..CopConfig::default()
-        };
         assert_cop_offenses_full_with_config(
             &SpecialGlobalVars,
             include_bytes!(
                 "../../../tests/fixtures/cops/style/special_global_vars/use_builtin_english_names_offense.rb"
             ),
-            config,
+            enforced_style_config("use_builtin_english_names"),
         );
     }
 
     #[test]
     fn use_builtin_english_names_no_offense_fixture() {
         use crate::testutil::assert_cop_no_offenses_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("use_builtin_english_names".into()),
-            )]),
-            ..CopConfig::default()
-        };
         assert_cop_no_offenses_full_with_config(
             &SpecialGlobalVars,
             include_bytes!(
                 "../../../tests/fixtures/cops/style/special_global_vars/use_builtin_english_names_no_offense.rb"
             ),
-            config,
+            enforced_style_config("use_builtin_english_names"),
+        );
+    }
+
+    #[test]
+    fn use_perl_names_offense_fixture() {
+        use crate::testutil::assert_cop_offenses_full_with_config;
+
+        assert_cop_offenses_full_with_config(
+            &SpecialGlobalVars,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/special_global_vars/use_perl_names_offense.rb"
+            ),
+            enforced_style_config("use_perl_names"),
+        );
+    }
+
+    #[test]
+    fn use_perl_names_no_offense_fixture() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+
+        assert_cop_no_offenses_full_with_config(
+            &SpecialGlobalVars,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/special_global_vars/use_perl_names_no_offense.rb"
+            ),
+            enforced_style_config("use_perl_names"),
         );
     }
 
     #[test]
     fn use_perl_names_allows_perl() {
         use crate::testutil::run_cop_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("use_perl_names".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = enforced_style_config("use_perl_names");
         let source = b"puts $!\n";
         let diags = run_cop_full_with_config(&SpecialGlobalVars, source, config);
         assert!(

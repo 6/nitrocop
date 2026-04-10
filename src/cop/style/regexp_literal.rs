@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -25,6 +27,14 @@ use ruby_prism::Visit;
 /// such as `=~`, not only when it appears inside an argument list. Fixed by
 /// extending the existing call-context exemption to direct call parents while
 /// still rejecting standalone `%r/#{foo} bar/`.
+///
+/// Mixed-style fix (2026-04): RuboCop's `mixed` style still requires `%r` for
+/// single-line slash literals when the regexp body contains a disallowed `/`,
+/// so `/\/$/` must be flagged even though it is not multiline. `%r` literals in
+/// call contexts are also allowed when `Style/MethodCallWithArgsParentheses`
+/// uses `omit_parentheses`; the cop now honors an injected
+/// `MethodCallWithArgsParenthesesEnforcedStyle` override and falls back to the
+/// file's discovered RuboCop config to mirror that cross-cop allowance.
 pub struct RegexpLiteral;
 
 impl Cop for RegexpLiteral {
@@ -47,6 +57,7 @@ impl Cop for RegexpLiteral {
             config,
             diagnostics,
             ancestors: Vec::new(),
+            method_call_with_args_parentheses_omit: None,
         };
         visitor.visit(&parse_result.node());
     }
@@ -58,6 +69,7 @@ struct RegexpLiteralVisitor<'a, 'pr> {
     config: &'a CopConfig,
     diagnostics: &'a mut Vec<Diagnostic>,
     ancestors: Vec<ruby_prism::Node<'pr>>,
+    method_call_with_args_parentheses_omit: Option<bool>,
 }
 
 impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
@@ -115,8 +127,11 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
         //   do_something / regexp/    # syntax error
         let content_starts_with_space_or_eq =
             !content_bytes.is_empty() && (content_bytes[0] == b' ' || content_bytes[0] == b'=');
-        let allowed_percent_r_call_context = content_starts_with_space_or_eq
-            && self.allowed_percent_r_call_context(node_start, node_end);
+        let allowed_percent_r_call_context = self.allowed_percent_r_call_context(
+            node_start,
+            node_end,
+            content_starts_with_space_or_eq,
+        );
 
         match enforced_style {
             "slashes" => {
@@ -136,11 +151,15 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
                 }
             }
             "mixed" => {
-                if is_multiline {
-                    if is_slash {
+                if is_slash {
+                    if is_multiline || (has_slash && !allow_inner_slashes) {
                         self.add_offense(node_start, "Use `%r` around regular expression.");
                     }
                 } else if is_percent_r {
+                    // Multiline %r is always correct in mixed style
+                    if is_multiline {
+                        return;
+                    }
                     if has_slash && !allow_inner_slashes {
                         return;
                     }
@@ -158,7 +177,14 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
         }
     }
 
-    fn allowed_percent_r_call_context(&self, node_start: usize, node_end: usize) -> bool {
+    fn allowed_percent_r_call_context(
+        &mut self,
+        node_start: usize,
+        node_end: usize,
+        content_starts_with_space_or_eq: bool,
+    ) -> bool {
+        let allow_omit_parentheses = self.method_call_with_args_parentheses_omit();
+
         let Some(parent) = self.ancestors.last() else {
             return false;
         };
@@ -168,18 +194,23 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
                 let loc = receiver.location();
                 loc.start_offset() == node_start && loc.end_offset() == node_end
             }) {
-                return true;
+                return content_starts_with_space_or_eq || allow_omit_parentheses;
             }
 
             return call.arguments().is_some_and(|args| {
                 args.arguments().iter().any(|arg| {
                     let loc = arg.location();
-                    loc.start_offset() == node_start && loc.end_offset() == node_end
+                    loc.start_offset() == node_start
+                        && loc.end_offset() == node_end
+                        && (content_starts_with_space_or_eq || allow_omit_parentheses)
                 })
             });
         }
 
         if let Some(super_node) = parent.as_super_node() {
+            if !content_starts_with_space_or_eq {
+                return false;
+            }
             return super_node.arguments().is_some_and(|args| {
                 args.arguments().iter().any(|arg| {
                     let loc = arg.location();
@@ -189,6 +220,9 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
         }
 
         if let Some(yield_node) = parent.as_yield_node() {
+            if !content_starts_with_space_or_eq {
+                return false;
+            }
             return yield_node.arguments().is_some_and(|args| {
                 args.arguments().iter().any(|arg| {
                     let loc = arg.location();
@@ -202,13 +236,51 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
                 .ancestors
                 .get(self.ancestors.len().saturating_sub(2))
                 .is_some_and(|grandparent| {
-                    grandparent.as_call_node().is_some()
-                        || grandparent.as_super_node().is_some()
-                        || grandparent.as_yield_node().is_some()
+                    if grandparent.as_call_node().is_some() {
+                        content_starts_with_space_or_eq || allow_omit_parentheses
+                    } else {
+                        content_starts_with_space_or_eq
+                            && (grandparent.as_super_node().is_some()
+                                || grandparent.as_yield_node().is_some())
+                    }
                 });
         }
 
         false
+    }
+
+    fn method_call_with_args_parentheses_omit(&mut self) -> bool {
+        if let Some(omit) = self.method_call_with_args_parentheses_omit {
+            return omit;
+        }
+
+        let omit = self
+            .config
+            .options
+            .get("MethodCallWithArgsParenthesesEnforcedStyle")
+            .and_then(|value| value.as_str())
+            .map(|style| style == "omit_parentheses")
+            .unwrap_or_else(|| self.discover_method_call_with_args_parentheses_omit());
+
+        self.method_call_with_args_parentheses_omit = Some(omit);
+        omit
+    }
+
+    fn discover_method_call_with_args_parentheses_omit(&self) -> bool {
+        let path = Path::new(&self.source.path);
+        if !path.exists() {
+            return false;
+        }
+
+        crate::config::load_config(None, Some(path), None)
+            .ok()
+            .map(|resolved| {
+                resolved
+                    .cop_config_for_file("Style/MethodCallWithArgsParentheses", path)
+                    .get_str("EnforcedStyle", "require_parentheses")
+                    == "omit_parentheses"
+            })
+            .unwrap_or(false)
     }
 
     fn add_offense(&mut self, start_offset: usize, message: &str) {
@@ -238,7 +310,9 @@ impl<'pr> Visit<'pr> for RegexpLiteralVisitor<'_, 'pr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::run_cop_full;
+    use crate::testutil::{
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config, run_cop_full,
+    };
 
     crate::cop_fixture_tests!(RegexpLiteral, "cops/style/regexp_literal");
 
@@ -247,5 +321,61 @@ mod tests {
         let source = b"if %r/#{foo} bar/ =~ baz\n  nil\nend\n";
         let diags = run_cop_full(&RegexpLiteral, source);
         assert!(diags.is_empty());
+    }
+
+    fn mixed_config() -> CopConfig {
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("mixed".into()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn mixed_style_flags_single_line_slash_regex_with_inner_slash() {
+        assert_cop_offenses_full_with_config(
+            &RegexpLiteral,
+            include_bytes!("../../../tests/fixtures/cops/style/regexp_literal/mixed_offense.rb"),
+            mixed_config(),
+        );
+    }
+
+    #[test]
+    fn mixed_style_allows_percent_r_call_receiver_when_omit_parentheses_is_configured() {
+        let mut config = mixed_config();
+        config.options.insert(
+            "MethodCallWithArgsParenthesesEnforcedStyle".to_string(),
+            serde_yml::Value::String("omit_parentheses".into()),
+        );
+
+        assert_cop_no_offenses_full_with_config(
+            &RegexpLiteral,
+            include_bytes!("../../../tests/fixtures/cops/style/regexp_literal/mixed_no_offense.rb"),
+            config,
+        );
+    }
+
+    #[test]
+    fn mixed_style_allows_multiline_percent_r() {
+        let source = b"regex = %r{\n  foo\n  bar\n}x\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&RegexpLiteral, source, mixed_config());
+        assert!(
+            diags.is_empty(),
+            "Multiline %r is always correct in mixed style"
+        );
+    }
+
+    #[test]
+    fn mixed_style_still_flags_percent_r_call_receiver_without_omit_parentheses() {
+        let source = b"assert_equal(':', %r:\\::.source, bug5484)\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&RegexpLiteral, source, mixed_config());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Use `//` around regular expression.");
     }
 }

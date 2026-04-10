@@ -225,3 +225,50 @@ install_win(if parent then parent.path end, widgetname)
 [if condition then value end]
 
 { x: if condition then value end }
+
+# AllowURI: `scheme:` at end of line (RuboCop's URI regex matches scheme: without //)
+logger.warn "#{self.class} posting to plaintext endpoint, which is insecure" if logger unless endpoint.to_s =~ /^https:/
+
+# rubocop:disable Layout/LineLength — modifier form on a disabled line should not trigger "too long"
+Lighthouse::SubmitCareerCounselingJob.trigger_failure_events(msg, claim) if Flipper.enabled?(:pcpg_trigger_action_needed_email) # rubocop:disable Layout/LineLength
+
+# Block-level rubocop:disable Layout/LineLength — modifier form inside a disabled region
+# rubocop:disable Layout/LineLength
+pdf.text "\n<b>Veteran, claimant, or representative Email:</b>\n#{form_data.signing_appellant.email}\n", inline_format: true unless short_claimant_email?
+# rubocop:enable Layout/LineLength
+
+# Parenthesized body (begin_type? in RuboCop) — non_eligible_body
+if condition
+  (some_expression)
+end
+
+merged[index] = if first[index] || second[index]
+  (first[index].to_i + second[index].to_i)
+end
+
+if block_given? then (c = yield(c)) end
+
+# Body line has comment after semicolon — RuboCop's contains_comment? checks by line
+if condition
+  rxo = 8; # large data need skip of 8 bytes
+end
+
+# Comment after `then` on condition line makes modifier form too long (indented to exceed 120)
+        if annotation.destroy then # don't need no blank annotations cluttering up the db, this is extra long text here
+          puts "DELETED"
+        end
+
+# Operator on previous line chains to if — RuboCop skips via node.chained?
+-
+if foo
+  barrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+end
+
+# Operator on previous line chains to unless — same chained? skip
+-
+unless foo
+  barrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr
+end
+
+# Modifier if inside block with outer-scope semicolon-separated sibling — another_statement_on_same_line
+(bool = false ; di.block.each_from_normal { |fn| bool = true if @decoded[fn] and @decoded[fn].opcode.props[:saveip] } ; bool)

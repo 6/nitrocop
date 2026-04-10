@@ -13,12 +13,13 @@ static DIRECTIVE_RE: LazyLock<Regex> = LazyLock::new(|| {
 ///
 /// RuboCop's `DIRECTIVE_COMMENT_REGEXP` uses `COP_NAME_PATTERN` =
 /// `([A-Za-z]\w+/)*(?:[A-Za-z]\w+)`, which splits on `/` only — `:` is not
-/// part of `\w`.  When a user writes `Department::CopName`, the regex captures
-/// only `Department` (the part before `::`), and the `::CopName` suffix falls
+/// part of `\w`.  When a user writes `Department::CopName` or
+/// `Department:CopName`, the regex captures only `Department` (the part
+/// before the first `:`), and the `:CopName` / `::CopName` suffix falls
 /// outside the match.  RuboCop then treats `Department` as a department-level
 /// disable that suppresses every cop in that department.
 ///
-/// We replicate this by stripping the `::…` suffix and returning just the
+/// We replicate this by stripping the `:…` suffix and returning just the
 /// department token, so the range is stored under the department key and
 /// `is_disabled` matches via the department check.
 pub fn normalize_directive_cop_name(name: &str) -> String {
@@ -26,7 +27,10 @@ pub fn normalize_directive_cop_name(name: &str) -> String {
     // the department.  RuboCop treats `Metrics/` identically to `Metrics`.
     let name = name.strip_suffix('/').unwrap_or(name);
 
-    if let Some((dept, _cop)) = name.split_once("::") {
+    // Single or double colon: `:` is not part of `\w`, so RuboCop's regex
+    // captures only the part before the first `:`. Both `Layout:LineLength`
+    // and `Layout::LineLength` become department-level `Layout` disables.
+    if let Some((dept, _rest)) = name.split_once(':') {
         return dept.to_string();
     }
 
@@ -1305,6 +1309,28 @@ mod tests {
         assert!(
             dr.check_and_mark_used("Naming/PredicatePrefix", 1),
             "Naming::PredicateName should suppress Naming/PredicatePrefix via department"
+        );
+    }
+
+    #[test]
+    fn single_colon_separator_treated_as_department_disable() {
+        // `Layout:LineLength` with a single colon is also treated as a
+        // department-level disable by RuboCop, because `:` is not `\w`.
+        // The regex captures only `Layout`, suppressing all Layout/* cops.
+        let mut dr = disabled_ranges(
+            "# rubocop:disable Layout:LineLength\ntransport.tap do |double|\n  puts double\nend\n# rubocop:enable Layout:LineLength\ny = 2\n",
+        );
+        assert!(
+            dr.check_and_mark_used("Layout/SpaceAroundBlockParameters", 2),
+            "Layout:LineLength should suppress Layout/SpaceAroundBlockParameters via department"
+        );
+        assert!(
+            dr.check_and_mark_used("Layout/LineLength", 2),
+            "Layout:LineLength should suppress Layout/LineLength via department"
+        );
+        assert!(
+            !dr.is_disabled("Layout/SpaceAroundBlockParameters", 6),
+            "after enable, Layout cops should not be disabled"
         );
     }
 

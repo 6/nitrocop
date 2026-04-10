@@ -262,3 +262,62 @@ def test_generate_md_no_variant_column_without_data():
     md = gen_corpus_md.generate_md(data, {})
     assert "All variants %" not in md
     assert "Match %" in md
+
+
+def test_synthetic_row_in_summary():
+    """Synthetic results add an 'incl. synthetic' row to the summary table."""
+    data = {
+        "summary": {
+            "total_repos": 10, "repos_perfect": 5, "repos_error": 0,
+            "total_offenses_compared": 100, "matches": 95, "fp": 3, "fn": 2,
+            "registered_cops": 4, "perfect_cops": 2, "diverging_cops": 1,
+            "inactive_cops": 1, "overall_match_rate": 0.95,
+            "total_files_inspected": 500, "rubocop_files_dropped": 0,
+        },
+        "by_department": [{
+            "department": "Style", "cops": 4, "perfect_cops": 2,
+            "diverging_cops": 1, "inactive_cops": 1,
+            "matches": 95, "fp": 3, "fn": 2, "match_rate": 0.95,
+        }],
+        "by_cop": [
+            {"cop": "Style/Foo", "matches": 50, "fp": 0, "fn": 0,
+             "match_rate": 1.0, "exercised": True, "perfect_match": True,
+             "diverging": False},
+            {"cop": "Style/Bar", "matches": 45, "fp": 3, "fn": 2,
+             "match_rate": 0.9, "exercised": True, "perfect_match": False,
+             "diverging": True},
+            {"cop": "Style/Baz", "matches": 0, "fp": 0, "fn": 0,
+             "exercised": False, "perfect_match": True,
+             "diverging": False},
+            # No-data cop that synthetic marks as perfect
+            {"cop": "Style/NoData", "matches": 0, "fp": 0, "fn": 0,
+             "exercised": False, "perfect_match": False,
+             "diverging": False},
+        ],
+        "by_repo": [], "by_repo_cop": {},
+    }
+    synthetic = {"Style/NoData": {"cop": "Style/NoData", "perfect_match": True}}
+    md = gen_corpus_md.generate_md(data, {}, synthetic)
+    assert "| Cops with exact match | 2 |" in md
+    assert "| Cops with exact match (incl. synthetic) | 3 |" in md
+
+
+def test_no_synthetic_row_without_flag():
+    """Without synthetic data, no 'incl. synthetic' row appears."""
+    data = {
+        "summary": {
+            "total_repos": 1, "repos_perfect": 1, "repos_error": 0,
+            "total_offenses_compared": 10, "matches": 10, "fp": 0, "fn": 0,
+            "registered_cops": 1, "perfect_cops": 1, "diverging_cops": 0,
+            "inactive_cops": 0, "overall_match_rate": 1.0,
+            "total_files_inspected": 5, "rubocop_files_dropped": 0,
+        },
+        "by_department": [],
+        "by_cop": [
+            {"cop": "Style/Foo", "matches": 10, "fp": 0, "fn": 0,
+             "exercised": True, "perfect_match": True, "diverging": False},
+        ],
+        "by_repo": [], "by_repo_cop": {},
+    }
+    md = gen_corpus_md.generate_md(data, {})
+    assert "incl. synthetic" not in md

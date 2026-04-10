@@ -66,3 +66,9 @@ end
 def anon_block(&)
   yield
 end
+
+# Empty multiline parens: OK (RuboCop considers the args node multiline
+# when lparen..rparen spans lines, even with no actual parameters)
+def empty_multiline(
+)
+end

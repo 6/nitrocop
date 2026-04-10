@@ -80,15 +80,6 @@ $counter +=
 ^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
   check_flag
 
-# Multiline regex — RuboCop's safe_to_split? does not check :regexp,
-# so assignments containing multiline regexps are still flaggable.
-pattern = /
-^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
-  \A
-  (?<key>.+)
-  \z
-/x
-
 # Multiline %w array — RuboCop's safe_to_split? does not check arrays.
 names = %w[
 ^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
@@ -227,3 +218,110 @@ expect(foo).to be_a(Parlour::RbsGenerator::Method) & have_attributes(
     )
   ]),
 )
+
+# Assignment with method chain containing single-line block — not chained
+# after the block, so Layout/SingleLineBlockChain does NOT take precedence.
+# RuboCop flags these because block_node.parent is the assignment, not a send.
+parameters = yard_parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  .map { |x| process(x) }
+
+parameters = split_type_parameters(type_parameters)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  .map { |x| process(x) }
+
+# Assignment with hash containing lambda (single-line block on `lambda` call)
+options = {
+^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  formatter: lambda { |tags| tags.join(" ") }
+}.merge(options)
+
+# Call with single-line block in argument — block parent is the outer call,
+# not a chained send with dot, so Layout/SingleLineBlockChain doesn't apply.
+scope = by_file_type(
+^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  sources.map { |ext| lookup(ext) }
+)
+
+# Multi-write assignment with chain ending in single-line block
+failures, successes = repository
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  .search_tests(input.split)
+  .partition { |k, v| v.nil? }
+
+validates :campaign, uniqueness: { scope: :user,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  message: "The same user may not join the same campaign twice" }
+
+raise ArgumentError,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+      "can't inherit configuration from the rubocop gem"
+
+RUMOR_TYPES = {
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "RUMOR" => "this is rumor",
+  "NOT_RUMOR" => "this is true",
+}
+
+it 'fails to resolve a dependency with an explicit source even if it can be ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+   'resolved using the global sources' do
+end
+
+results.add_warning('summary', 'The summary should be a short ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'version of `description` (max 140 characters).')
+
+raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "for attribute: #{inspect}" unless acceptable
+
+raise "[Xcodeproj] unsupported key `#{key}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
+
+return if !checks.values.
+          ^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  find { |c| c.check? page, [Element::Form::DOM, Element::Cookie::DOM], true }
+
+# CJK characters: combined line is under 120 chars but over 120 bytes.
+# RuboCop measures character length, not byte length.
+DiceTable::Table.new(
+^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  "奇跡の触媒（エレメント）",
+  "1D6",
+  ["ワンド", "水晶玉", "カード", "ステッキ", "手鏡", "宝石"]
+)
+
+raise ArgumentError,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+      "error message"
+
+it 'fails to resolve a dependency with an explicit source even if it can be ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+   'resolved using the global sources' do
+end
+
+results.add_warning('summary', 'The summary should be a short ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'version of `description` (max 140 characters).')
+
+raise "[Xcodeproj] Type checking error: got `#{object.class}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "for attribute: #{inspect}" unless acceptable
+
+raise "[Xcodeproj] unsupported key `#{key}` " \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  "(accepted `#{classes_by_key.keys}`) for attribute `#{inspect}`"
+
+!current_course_user&.
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  email_unsubscribed
+
+), public: File.read(
+           ^ Layout/RedundantLineBreak: Redundant line break detected.
+  path
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)

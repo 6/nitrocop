@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::node_type::{CALL_NODE, FALSE_NODE, TRUE_NODE};
 use crate::cop::shared::node_type_groups;
 use crate::cop::shared::util::RSPEC_DEFAULT_INCLUDE;
@@ -5,6 +6,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Matches RuboCop's `RSpec/PredicateMatcher` for both styles.
+///
+/// The default `inflected` style only rewrites predicates in `expect(actual)`
+/// and skips safe-navigation calls and `respond_to?` with multiple arguments.
+/// The explicit-style branch must also stay scoped to `expect(actual)`: corpus
+/// false positives came from flagging `is_expected.to include ...` and
+/// `is_expected.to be_empty`, which RuboCop intentionally leaves alone because
+/// its explicit matcher check only matches `expect(...)` receivers.
 pub struct PredicateMatcher;
 
 /// Built-in matchers that should NOT be flagged in explicit style.
@@ -19,25 +28,6 @@ const BUILT_IN_MATCHERS: &[&str] = &[
     "be_within",
 ];
 
-/// Default style `inflected`: flags `expect(foo.bar?).to be_truthy` →
-/// prefer `expect(foo).to be_bar`.
-///
-/// Inflected FP fix: safe navigation calls (`&.visible?`) cannot be rewritten
-/// to predicate matchers because the nil-safe semantics would be lost.
-/// Fixed by checking `call_operator_loc()` for `&.` on the predicate call.
-///
-/// Explicit style: flags `expect(foo).to be_bar` → prefer `expect(foo).to bar?`.
-/// Built-in matchers (`be_truthy`, `be_falsey`, `be_falsy`, `have_attributes`,
-/// `have_received`, `be_between`, `be_within`) are excluded from the explicit
-/// style check because they are not actually predicate matchers — they are special
-/// RSpec matchers with different semantics. Also `include` and `respond_to` ARE
-/// flagged in explicit style (they don't start with `be_`/`have_` but are
-/// explicit predicate matchers per RuboCop's `predicate_matcher_name?`).
-///
-/// Explicit style FP fix: `include` with no arguments or multiple arguments cannot
-/// be rewritten to `include?` and should not be flagged. RuboCop's
-/// `replaceable_matcher?` returns false for these cases. Fixed by checking that
-/// `include` has exactly one argument before flagging.
 impl Cop for PredicateMatcher {
     fn name(&self) -> &'static str {
         "RSpec/PredicateMatcher"
@@ -84,6 +74,20 @@ impl Cop for PredicateMatcher {
         }
 
         if enforced_style == "explicit" {
+            let expect_call = match call.receiver().and_then(|receiver| receiver.as_call_node()) {
+                Some(c) if method_dispatch_predicates::is_command(&c, b"expect") => c,
+                _ => return,
+            };
+
+            let expect_args = match expect_call.arguments() {
+                Some(a) if a.arguments().iter().count() >= 1 => a,
+                _ => return,
+            };
+            let expect_arg_list: Vec<_> = expect_args.arguments().iter().collect();
+            if expect_arg_list.is_empty() {
+                return;
+            }
+
             // Explicit style: flag `expect(foo).to be_valid` → prefer explicit predicate
             let args = match call.arguments() {
                 Some(a) => a,
@@ -323,6 +327,26 @@ mod tests {
         let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("valid?"));
+    }
+
+    #[test]
+    fn explicit_style_does_not_flag_is_expected_shorthand() {
+        use crate::cop::CopConfig;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("explicit".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"it { is_expected.to include ['x', 1] }\nit { is_expected.not_to include foo }\nit { is_expected.to be_empty }\n";
+        let diags = crate::testutil::run_cop_full_with_config(&PredicateMatcher, source, config);
+        assert!(
+            diags.is_empty(),
+            "`is_expected` shorthand should not be flagged in explicit style"
+        );
     }
 
     #[test]

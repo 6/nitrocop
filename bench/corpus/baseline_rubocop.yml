@@ -177,6 +177,12 @@ Performance/SelectMap:
 # rubocop-rails (12 cops)
 Rails/ActionFilter:
   Enabled: true
+Rails/BulkChangeTable:
+  # Corpus reruns load this external baseline config from bench/corpus/ while
+  # scanning absolute repo paths under /tmp, so rubocop-rails' relative
+  # Include: db/**/*.rb would skip every migration file.
+  Include:
+    - "**/db/**/*.rb"
 Rails/DefaultScope:
   Enabled: true
 Rails/Env:
