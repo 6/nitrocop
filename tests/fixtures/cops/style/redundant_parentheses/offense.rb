@@ -305,3 +305,15 @@ assert_eq(false, (not true))
 
 (not(true)).should be_false
 ^ Style/RedundantParentheses: Don't use parentheses around a keyword.
+
+if value =~ (configuration[:format])
+            ^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+if Gem::Specification.any? { |s| (s.name == 'fastlane-plugin-trainer') && Gem::Requirement.default =~ (s.version) }
+                                                                                                      ^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+assert no_results_div.text =~ (Regexp.new(I18n.translate("bento_search.no_results")))
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+mail && Regexp.new(regexp) =~ (mail[field.to_sym])
+                              ^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.

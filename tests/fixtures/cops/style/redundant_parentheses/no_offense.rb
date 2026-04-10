@@ -303,3 +303,27 @@ while (pop_messages(queue_url, 10).length > 0)
 end
 # Single-line def body with assignment — not a multi-statement begin
 def start_handlers; (@start_handlers ||= {}); end
+# Double-negation on numeric — Prism collapses --5 to -@(5),
+# but RuboCop (Parser) sees (send (int -5) :-@) and doesn't flag
+(--5.5).should be_close(5.5, 0.01)
+(--5).should == 5
+(--2).should == 2
+# Rescue clause body — RuboCop's rescue? exempts parens inside resbody
+begin
+  work
+rescue StandardError
+  (foo.bar).to_s
+end
+begin
+  work
+rescue
+  (x && y)
+end
+# Bracket chaining — (expr)[key] is chained like (expr).method
+(n.next_element || n.parent)['id'] ||= n['name']
+# self[] receiver — RuboCop's square_brackets? doesn't include self
+class Foo
+  def bar(n)
+    (self[0, n]).to_s
+  end
+end
