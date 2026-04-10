@@ -29,8 +29,12 @@ use ruby_prism::{
 /// it treated all Prism parse errors as syntax-only skips even when RuboCop still had enough
 /// tokens to flag the comment. The `never` branch now scans the full leading comment section once,
 /// flags only the first matching magic comment, keeps reporting semantic `Invalid ...` errors like
-/// top-level `yield`, and suppresses the encoded-regexp parser gap where RuboCop's parser emits
-/// only `Lint/Syntax` for short `\\xNN` escapes under non-UTF-8 encodings.
+/// top-level `yield`, and suppresses the encoded-regexp parser gap only when Prism actually emits
+/// parser errors for short `\\xNN` escapes under non-UTF-8 encodings.
+///
+/// RuboCop's default target finder also skips mixed-case `*.Gemfile` suffixes like
+/// `json-1.x.Gemfile` during repo scans because `AllCops.Include` only has `**/*.gemfile`.
+/// nitrocop mirrors that quirk here for this cop's missing-comment styles.
 ///
 /// ActiveAdmin `.arb` templates have another RuboCop quirk: the vendor default config excludes
 /// them for this cop, but ANY explicit cop config entry drops that default exclusion. nitrocop
@@ -57,6 +61,10 @@ impl Cop for FrozenStringLiteralComment {
         let enforced_style = config.get_str("EnforcedStyle", "always");
 
         if should_skip_default_active_admin_template(source, config) {
+            return;
+        }
+
+        if has_non_default_case_gemfile_extension(source) {
             return;
         }
 
@@ -110,8 +118,16 @@ impl Cop for FrozenStringLiteralComment {
             idx += 1;
         }
 
+        if enforced_style == "always_true" {
+            let parse_result = crate::parse::parse_source(source.as_bytes());
+            if has_non_utf8_regexp_escape_parser_gap(&parse_result) {
+                return;
+            }
+        }
+
         if enforced_style == "never" {
-            if should_skip_never_style(source) {
+            let parse_result = crate::parse::parse_source(source.as_bytes());
+            if should_skip_never_style(&parse_result) {
                 return;
             }
 
@@ -357,7 +373,7 @@ fn normalize_encoding_name(value: &[u8]) -> Vec<u8> {
 }
 
 fn encoding_is_rubocop_safe_for_short_hex_regex_escapes(encoding: &[u8]) -> bool {
-    matches!(encoding, b"utf8" | b"ascii8bit" | b"binary")
+    matches!(encoding, b"utf8" | b"ascii8bit" | b"binary" | b"usascii")
 }
 
 fn regexp_contains_short_non_ascii_hex_escape(parse_result: &ruby_prism::ParseResult<'_>) -> bool {
@@ -446,10 +462,8 @@ fn has_invalid_retry_parse_error(source: &SourceFile) -> bool {
         .any(|err| err.message().starts_with("Invalid retry"))
 }
 
-fn should_skip_never_style(source: &SourceFile) -> bool {
-    let parse_result = crate::parse::parse_source(source.as_bytes());
-
-    if has_non_utf8_regexp_escape_parser_gap(&parse_result) {
+fn should_skip_never_style(parse_result: &ruby_prism::ParseResult<'_>) -> bool {
+    if has_non_utf8_regexp_escape_parser_gap(parse_result) {
         return true;
     }
 
@@ -461,7 +475,22 @@ fn should_skip_never_style(source: &SourceFile) -> bool {
     !error_messages.is_empty()
         && !error_messages
             .iter()
-            .all(|message| message.starts_with("Invalid "))
+            .all(|message| is_rubocop_valid_semantic_error(message))
+}
+
+fn is_rubocop_valid_semantic_error(message: &str) -> bool {
+    message.starts_with("Invalid break")
+        || message.starts_with("Invalid next")
+        || message.starts_with("Invalid redo")
+        || message == "Invalid yield"
+}
+
+fn has_non_default_case_gemfile_extension(source: &SourceFile) -> bool {
+    source
+        .path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gemfile") && ext != "gemfile")
 }
 
 fn should_skip_default_active_admin_template(source: &SourceFile, config: &CopConfig) -> bool {
@@ -888,6 +917,66 @@ mod tests {
         assert_eq!(
             diags[0].message,
             "Unnecessary frozen string literal comment."
+        );
+    }
+
+    #[test]
+    fn always_true_style_windows1252_regexp_no_offense() {
+        let source = SourceFile::from_bytes(
+            "test_windows_1252.rb",
+            b"# encoding: windows-1252\n# frozen_string_literal: false\n/^\\xdf$/\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_enforced_style("always_true"),
+            &mut diags,
+            None,
+        );
+        assert!(
+            diags.is_empty(),
+            "always_true should skip parser-gap files that RuboCop reports only as Lint/Syntax"
+        );
+    }
+
+    #[test]
+    fn never_style_us_ascii_short_hex_regex_still_offense() {
+        let source = SourceFile::from_bytes(
+            "test_m17n.rb",
+            b"# coding: US-ASCII\n# frozen_string_literal: false\nassert_regexp_fixed_ascii8bit(/\\xc2\\xa1/n)\n"
+                .to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_enforced_style("never"),
+            &mut diags,
+            None,
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 2);
+        assert_eq!(
+            diags[0].message,
+            "Unnecessary frozen string literal comment."
+        );
+    }
+
+    #[test]
+    fn always_true_style_mixed_case_gemfile_suffix_no_offense() {
+        let source = SourceFile::from_bytes(
+            "json-1.x.Gemfile",
+            b"source 'https://rubygems.org'\n\ngem 'json', '~> 2.0'\n".to_vec(),
+        );
+        let mut diags = Vec::new();
+        FrozenStringLiteralComment.check_lines(
+            &source,
+            &config_with_enforced_style("always_true"),
+            &mut diags,
+            None,
+        );
+        assert!(
+            diags.is_empty(),
+            "repo-scan parity should skip mixed-case .Gemfile suffixes"
         );
     }
 
