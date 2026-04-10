@@ -257,18 +257,6 @@ def parse_args(sw)
   end
 end
 
-# FN fix: unless/else — block in RHS of assignment in unless body, var also assigned in else
-def echo(major, minor)
-  unless minor
-    item = storage.items.detect do |item|
-                                    ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `item`.
-      item.name == major
-    end
-  else
-    item = list.find_item(minor)
-  end
-end
-
 # FN fix: if/else — block nested in method chain in else body, var in if body
 def track_constant(tp, caller_locations)
   if File.exist?(tp.path)
@@ -544,6 +532,40 @@ class SpecHelper
                    ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `http`.
       request = Net::HTTP::Post.new(url)
       http.request(request)
+    end
+  end
+end
+
+# FN fix: case/when — variable in single-stmt when body, block in different single-stmt when body
+# block_cond_parent_suppresses incorrectly propagates through single-stmt chains
+# (corpus: AuthorizeNet/sdk-ruby xml_response.rb:140)
+def handle_node_type(node_desc, xml, node_name)
+  case node_desc[node_name]
+  when Symbol
+    node = xml.at_css(node_name.to_s)
+  when EntityDescription
+    if node_desc[:multivalue].nil?
+      entity = build_entity(xml)
+    else
+      xml.css(node_name.to_s).each do |node|
+                                       ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `node`.
+        build_entity(node)
+      end
+    end
+  end
+end
+
+# FN fix: variable at method scope, block inside if branch
+# (corpus: Restream/redmine_elasticsearch parent_project.rb:76)
+def allowed_to_query(user, permission)
+  role = user.logged? ? non_member : anonymous
+  if role.allowed_to?(permission)
+    use(role)
+  end
+  if user.logged?
+    user.projects_by_role.each do |role, projects|
+                                   ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `role`.
+      use(role, projects)
     end
   end
 end
