@@ -346,8 +346,6 @@ jobs:
       # --- Shared environment setup (Rust, Ruby, mold, uv, corpus) ---
       - uses: ./.github/actions/setup-agent-env
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.repair.outputs.route != 'skip'
-        with:
-          rust_components: rustfmt, clippy
 
       - name: Build release binary for local cop-check diagnosis
         if: steps.pr.outputs.should_run == 'true' && steps.policy.outputs.should_repair == 'true' && steps.verify_meta.outputs.needs_local_cop_check == 'true'

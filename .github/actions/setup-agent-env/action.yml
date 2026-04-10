@@ -2,9 +2,6 @@ name: Setup Agent Environment
 description: Install Rust, Ruby, mold linker, and corpus bundle for agent workflows
 
 inputs:
-  rust_components:
-    description: Rust toolchain components to install (comma-separated)
-    default: rustfmt
   install_vendor_gems:
     description: Install RuboCop gems from vendor submodule tags (cop-fix only)
     default: 'false'
@@ -15,9 +12,9 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: jdx/mise-action@v4
       with:
-        components: ${{ inputs.rust_components }}
+        install_args: rust
 
     - uses: Swatinem/rust-cache@v2
 

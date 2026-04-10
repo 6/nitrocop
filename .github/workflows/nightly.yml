@@ -166,12 +166,11 @@ jobs:
           submodules: true
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: jdx/mise-action@v4
+        with:
+          install_args: rust hyperfine
       - uses: Swatinem/rust-cache@v2
       - uses: ruby/setup-ruby@v1
-
-      - name: Install hyperfine
-        run: cargo install hyperfine
 
       - name: Setup benchmark repo
         run: cargo run --release --bin bench_nitrocop -- setup
