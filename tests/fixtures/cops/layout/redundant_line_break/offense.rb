@@ -325,3 +325,23 @@ raise "[Xcodeproj] unsupported key `#{key}` " \
 Datadog::Tracing::Contrib::Sidekiq::Patcher
 ^ Layout/RedundantLineBreak: Redundant line break detected.
   .instance_variable_get(:@patch_only_once)
+
+!current_course_user&.
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  email_unsubscribed
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)
+
+o.col_type.nil? \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  foo
+
+expect(ForestLiana::DecorationHelper)
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .to receive(:decorate_for_search)
