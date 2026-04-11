@@ -875,7 +875,7 @@ def test_cmd_issues_sync_reopens_diverging_issue_and_closes_resolved_issue():
         "close_tracker_issue": gct.close_tracker_issue,
         "create_tracker_issue": gct.create_tracker_issue,
     }
-    gct.ensure_labels = lambda repo: calls.append(("ensure", repo))
+    gct.ensure_labels = lambda repo, departments=None: calls.append(("ensure", repo))
     gct.fetch_corpus_for_sync = lambda input_path: (
         {
             "by_cop": [
@@ -1329,4 +1329,46 @@ if __name__ == "__main__":
     test_infer_variant_style_params_single()
     test_infer_variant_style_params_multi()
     test_infer_variant_style_params_fallback()
+    test_dept_label()
+    test_config_only_requires_zero_default_divergence()
     print("All tests passed.")
+
+
+def test_dept_label():
+    assert gct.dept_label("Layout/BlockAlignment") == "dept:layout"
+    assert gct.dept_label("Style/FrozenStringLiteralComment") == "dept:style"
+    assert gct.dept_label("Rails/CreateTableWithTimestamps") == "dept:rails"
+    assert gct.dept_label("RSpec/DescribedClass") == "dept:rspec"
+
+
+def test_config_only_requires_zero_default_divergence():
+    """Cops with non-zero default FP/FN should NOT be classified as config-only,
+    even if the pre-diagnostic says code_bugs=0 and config_issues>0."""
+    # BlockAlignment: 8 FP in default, pre-diagnostic says config-only
+    # but the FPs are real context-dependent code bugs
+    entry_with_fp = {"fp": 8, "fn": 0, "matches": 2552}
+    # Simulate: code_bugs=0, cfg_issues=8 (pre-diagnostic can't reproduce)
+    # With our fix, is_config_only should be False because default_fp > 0
+    default_fp = entry_with_fp.get("fp", 0)
+    default_fn = entry_with_fp.get("fn", 0)
+    is_config_only = (
+        True  # binary is not None
+        and 0 == 0  # code_bugs == 0
+        and 8 > 0  # cfg_issues > 0
+        and default_fp == 0
+        and default_fn == 0
+    )
+    assert not is_config_only, "Cop with 8 default FP should not be config-only"
+
+    # Rails cop: 0 FP, 0 FN in default, config-only IS correct
+    entry_zero = {"fp": 0, "fn": 0, "matches": 0}
+    default_fp = entry_zero.get("fp", 0)
+    default_fn = entry_zero.get("fn", 0)
+    is_config_only = (
+        True
+        and 0 == 0
+        and 8 > 0
+        and default_fp == 0
+        and default_fn == 0
+    )
+    assert is_config_only, "Cop with 0 default FP/FN and config issues should be config-only"

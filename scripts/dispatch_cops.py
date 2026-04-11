@@ -254,6 +254,14 @@ LABEL_COLORS = {
     "difficulty:complex": "d73a4a",
     "difficulty:config-only": "c5def5",
 }
+DEPT_LABEL_COLOR = "e0e0e0"
+
+
+def dept_label(cop: str) -> str:
+    """Return the department label for a cop, e.g., 'dept:layout'."""
+    return f"dept:{cop.split('/')[0].lower()}"
+
+
 TITLE_RE = re.compile(r"^\[bot\] Fix (?P<cop>.+?)(?: \(retry\))?$")
 TRACKER_RE = re.compile(r"<!--\s*" + re.escape(COP_TRACKER_MARKER) + r":\s*(.*?)\s*-->")
 PR_ISSUE_RE = re.compile(r"<!--\s*" + re.escape(PR_ISSUE_MARKER) + r":\s*(.*?)\s*-->")
@@ -2523,10 +2531,18 @@ def run_gh(args: list[str], check: bool = True) -> str:
     return result.stdout.strip()
 
 
-def ensure_labels(repo: str) -> None:
+def ensure_labels(repo: str, departments: set[str] | None = None) -> None:
     for label, color in LABEL_COLORS.items():
         subprocess.run(
             ["gh", "label", "create", label, "--repo", repo, "--color", color],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    for dept in departments or []:
+        label = f"dept:{dept.lower()}"
+        subprocess.run(
+            ["gh", "label", "create", label, "--repo", repo, "--color", DEPT_LABEL_COLOR],
             capture_output=True,
             text=True,
             check=False,
@@ -3050,7 +3066,6 @@ def cmd_backend(args: argparse.Namespace) -> int:
 
 def cmd_issues_sync(args: argparse.Namespace) -> int:
     repo = args.repo
-    ensure_labels(repo)
     data, run_id, head_sha = fetch_corpus_for_sync(args.input)
     corpus_kind = "corpus" if not args.input else "custom"
     entries = build_entry_index(data)
@@ -3086,6 +3101,10 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     diverging_cops |= variant_only_cops
+
+    # Ensure labels exist (including department labels for all diverging cops)
+    departments = {cop.split("/")[0] for cop in diverging_cops}
+    ensure_labels(repo, departments)
 
     # Filter by department if requested
     dept_filter = args.department
@@ -3138,11 +3157,21 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         prior_prs = prs_by_cop.get(cop, [])
 
         code_bugs, cfg_issues = diagnosis.get(cop, (0, 0))
-        # Classify as config-only when pre-diagnostic finds 0 code bugs AND:
-        # - Zero matches (Include-gated cop, never fires), OR
-        # - All divergence is config/context issues (snippet + full-file
-        #   fallback couldn't reproduce any FP/FN with default config)
-        is_config_only = binary is not None and code_bugs == 0 and cfg_issues > 0
+        # Classify as config-only ONLY when:
+        # 1. Pre-diagnostic finds 0 code bugs AND config issues exist, AND
+        # 2. The cop has zero default FP/FN (divergence is Include-gated or
+        #    config-resolution only). Cops with non-zero default FP/FN have
+        #    real detection issues even if the pre-diagnostic can't reproduce
+        #    them in isolation (context-dependent bugs).
+        default_fp = entry.get("fp", 0)
+        default_fn = entry.get("fn", 0)
+        is_config_only = (
+            binary is not None
+            and code_bugs == 0
+            and cfg_issues > 0
+            and default_fp == 0
+            and default_fn == 0
+        )
         precomputed = (code_bugs, cfg_issues) if binary else None
 
         recommendation = select_backend_for_entry(
@@ -3159,7 +3188,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         open_pr = open_prs_by_cop.get(cop)
         existing_issue = issues_by_cop.get(cop)
         state_label = choose_issue_state(existing_issue, open_pr is not None, entry)
-        labels = [state_label, DIFFICULTY_LABELS[difficulty]]
+        labels = [state_label, DIFFICULTY_LABELS[difficulty], dept_label(cop)]
         title = make_issue_title(cop)
         body = render_issue_body(
             cop,
