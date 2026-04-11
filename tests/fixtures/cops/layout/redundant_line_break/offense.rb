@@ -345,3 +345,23 @@ o.col_type.nil? \
 expect(ForestLiana::DecorationHelper)
 ^ Layout/RedundantLineBreak: Redundant line break detected.
   .to receive(:decorate_for_search)
+
+expect(
+^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  Puppet::Resource::Catalog.indirection
+).to receive(:find) do |_, options|
+  options[:facts_format]
+end.and_return(catalog)
+
+expect_any_instance_of(Machinery::InspectTask).
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  to receive(:inspect_system) do |_instance,
+                                  _store,
+                                  _system,
+                                  _name,
+                                  _user,
+                                  _scopes,
+                                  filter,
+                                  _options|
+    filter
+  end.and_return(description)
