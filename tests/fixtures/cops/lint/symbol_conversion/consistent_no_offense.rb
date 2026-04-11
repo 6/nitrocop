@@ -23,6 +23,18 @@ alias foo bar
    super then true undef unless until when while
    yield]
 
+# FP fix: "undef" as first word on a line inside %i — the newline makes
+# is_undef_at_statement_start return true, falsely treating "unless" as
+# a undef argument.
+%i[
+  undef unless until
+]
+
+# FP fix: bare symbol values (not hash keys) should not be checked
+# in consistent mode. RuboCop's on_sym skips non-hash-key symbols.
+test_gvar(gvar: :$-0)
+test_gvar(gvar: :$-F)
+
 # Bare symbols already matching correction are not flagged
 :foo
 :~

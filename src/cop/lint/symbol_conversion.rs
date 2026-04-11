@@ -358,8 +358,8 @@ fn is_global_variable_symbol(value: &[u8]) -> bool {
         return true;
     }
 
-    // $-x flags (e.g., $-w, $-v, $-a)
-    if value.len() == 3 && value[1] == b'-' && value[2].is_ascii_alphabetic() {
+    // $-x flags (e.g., $-w, $-v, $-a, $-0, $-F)
+    if value.len() == 3 && value[1] == b'-' && value[2].is_ascii_alphanumeric() {
         return true;
     }
 
@@ -518,7 +518,32 @@ fn is_undef_at_statement_start(src: &[u8], undef_start: usize) -> bool {
     while p > 0 && matches!(src[p - 1], b' ' | b'\t') {
         p -= 1;
     }
-    p == 0 || matches!(src[p - 1], b'\n' | b'\r' | b';' | b'{')
+    if !(p == 0 || matches!(src[p - 1], b'\n' | b'\r' | b';' | b'{')) {
+        return false;
+    }
+
+    // Verify we're not inside a %i[...] or %I[...] array — the text "undef"
+    // as a %i element on a new line would pass the statement-start check above,
+    // but it's not a keyword. Scan backwards for an unmatched '['.
+    let mut depth: i32 = 0;
+    for i in (0..undef_start).rev() {
+        match src[i] {
+            b']' => depth += 1,
+            b'[' => {
+                depth -= 1;
+                if depth < 0 {
+                    // Found unmatched '['. Check for %i or %I prefix.
+                    if i >= 2 && (src[i - 1] == b'i' || src[i - 1] == b'I') && src[i - 2] == b'%' {
+                        return false;
+                    }
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    true
 }
 
 /// Check if a symbol node is inside a `undef` statement.
@@ -536,8 +561,8 @@ fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
 
     let mut pos = start;
 
-    // Skip whitespace
-    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+    // Skip whitespace (including newlines for multi-line undef continuations)
+    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
         pos -= 1;
     }
 
@@ -570,8 +595,8 @@ fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
             return false;
         }
 
-        // Skip whitespace
-        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+        // Skip whitespace (including newlines for multi-line undef)
+        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
             pos -= 1;
         }
 
