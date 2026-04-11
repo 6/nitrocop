@@ -13,6 +13,20 @@ use crate::parse::source::SourceFile;
 /// files as "Carriage return character missing." on every line, causing 108 false
 /// positives in the corpus.
 ///
+/// ## Non-UTF-8 files
+///
+/// Files with non-UTF-8 bytes (e.g., EUC-JP or Shift-JIS encoded content) cause
+/// fatal `Lint/Syntax` errors in RuboCop ("Invalid byte sequence in utf-8."),
+/// which prevents all other cops — including EndOfLine — from running. Prism
+/// handles these files via encoding magic comments and parses them successfully,
+/// so nitrocop explicitly skips the EndOfLine cop on non-UTF-8 files to match
+/// RuboCop's behavior.
+///
+/// One remaining edge case: `test_windows_1252.rb` in the jruby corpus is pure
+/// ASCII but declares `# encoding:windows-1252` and contains regex patterns
+/// (`\xdf`) that cause fatal Parser gem errors but not Prism errors. This file
+/// cannot be detected by a UTF-8 validity check alone.
+///
 /// @example EnforcedStyle: native (default)
 ///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
 ///   # enforced on Windows, and LF is enforced on other platforms.
@@ -55,6 +69,15 @@ impl Cop for EndOfLine {
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // Files with non-UTF-8 bytes cause fatal Lint/Syntax errors in RuboCop
+        // ("Invalid byte sequence in utf-8."), which prevents all other cops
+        // (including EndOfLine) from running. Prism handles these files via
+        // encoding magic comments, so nitrocop must explicitly skip them to
+        // avoid false positives.
+        if std::str::from_utf8(source.as_bytes()).is_err() {
+            return;
+        }
+
         let style = config.get_str("EnforcedStyle", "native");
         let _bytes = source.as_bytes();
 
@@ -278,5 +301,31 @@ mod tests {
         EndOfLine.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1, "crlf style should flag first LF-only line");
         assert_eq!(diags[0].message, "Carriage return character missing.");
+    }
+
+    #[test]
+    fn crlf_style_skips_non_utf8_files() {
+        // Files with non-UTF-8 bytes cause fatal Lint/Syntax errors in RuboCop,
+        // preventing EndOfLine from running. Prism handles these files via
+        // encoding magic comments, so nitrocop must explicitly skip them.
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        // Simulate a file with EUC-JP encoding comment and non-UTF-8 bytes
+        let mut content = b"# encoding: euc-jp\nx = 1\n".to_vec();
+        content.extend_from_slice(&[0xA3, 0xE1]); // non-UTF-8 EUC-JP bytes
+        content.push(b'\n');
+        let source = SourceFile::from_bytes("test.rb", content);
+        let mut diags = Vec::new();
+        EndOfLine.check_lines(&source, &config, &mut diags, None);
+        assert!(
+            diags.is_empty(),
+            "crlf style should skip files with non-UTF-8 bytes (RuboCop reports fatal Lint/Syntax instead)"
+        );
     }
 }
