@@ -284,6 +284,83 @@ def test_clone_repos_for_cop_no_variant_repos_without_flag():
         check_cop._clone_repos = original_clone
 
 
+def test_clone_repos_for_cop_includes_style_diverging_repos():
+    """When style_label is set, repos diverging for that variant are included."""
+    original_manifest = check_cop.MANIFEST_PATH
+    original_clone = check_cop._clone_repos
+    original_vb = check_cop.load_variant_baselines
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            manifest_path = tmp_path / "manifest.jsonl"
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            for repo_id in ["repo-default", "repo-style-diverge"]:
+                entry = {"id": repo_id, "repo_url": "https://example.com/r.git", "sha": "abc"}
+                with manifest_path.open("a") as f:
+                    f.write(json.dumps(entry) + "\n")
+            check_cop.MANIFEST_PATH = manifest_path
+            check_cop._manifest_cache = None
+
+            check_cop.load_variant_baselines = lambda cop, run_id: {
+                "empty_lines": {
+                    "fp": 0, "fn": 8, "matches": 100,
+                    "by_repo": {"repo-style-diverge": {"fp": 0, "fn": 8}},
+                },
+            }
+
+            calls = []
+            check_cop._clone_repos = lambda dest, manifest, repo_ids=None, parallel=3: calls.append(
+                {"ids": repo_ids}
+            ) or 0
+
+            check_cop.clone_repos_for_cop(
+                "Layout/EmptyLinesAroundClassBody",
+                {"cop_activity_repos": {"Layout/EmptyLinesAroundClassBody": ["repo-default"]},
+                 "by_repo_cop": {}},
+                style_label="empty_lines",
+                variant_run_id=123,
+            )
+
+            assert len(calls) == 1
+            assert calls[0]["ids"] == {"repo-default", "repo-style-diverge"}
+    finally:
+        check_cop.MANIFEST_PATH = original_manifest
+        check_cop._clone_repos = original_clone
+        check_cop.load_variant_baselines = original_vb
+        check_cop._manifest_cache = None
+
+
+def test_clone_repos_for_cop_style_label_without_run_id_is_noop():
+    """style_label without variant_run_id doesn't crash."""
+    original_manifest = check_cop.MANIFEST_PATH
+    original_clone = check_cop._clone_repos
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            check_cop.MANIFEST_PATH = tmp_path / "manifest.jsonl"
+            write_manifest(check_cop.MANIFEST_PATH)
+            check_cop._manifest_cache = None
+
+            calls = []
+            check_cop._clone_repos = lambda dest, manifest, repo_ids=None, parallel=3: calls.append(
+                {"ids": repo_ids}
+            ) or 0
+
+            check_cop.clone_repos_for_cop(
+                "Style/Foo",
+                {"cop_activity_repos": {"Style/Foo": ["demo-repo"]}, "by_repo_cop": {}},
+                style_label="tabs",
+                variant_run_id=None,
+            )
+
+            assert len(calls) == 1
+            assert calls[0]["ids"] == {"demo-repo"}
+    finally:
+        check_cop.MANIFEST_PATH = original_manifest
+        check_cop._clone_repos = original_clone
+        check_cop._manifest_cache = None
+
+
 def test_rerun_local_per_repo_always_uses_per_repo_mode():
     original_ensure_binary_fresh = check_cop.ensure_binary_fresh
     original_clear_file_cache = check_cop.clear_file_cache
