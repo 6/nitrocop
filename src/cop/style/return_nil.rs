@@ -17,6 +17,11 @@ use ruby_prism::Visit;
 ///   Fix: push block context before visiting receiver/arguments/body, keep `lambda`
 ///   as a scope boundary, and only treat regular dot calls with receivers as chained
 ///   sends.
+/// - Variant FN=2 for `EnforcedStyle=return_nil`: nested bare returns inside a
+///   return argument expression, e.g. `return redirect(...) && return`, were
+///   missed because `visit_return_node` diagnosed the outer node but never
+///   recursed into child nodes. RuboCop runs `on_return` for both nodes, so we
+///   must continue visiting return arguments after checking the current node.
 pub struct ReturnNil;
 
 impl Cop for ReturnNil {
@@ -99,42 +104,42 @@ impl<'pr> Visit<'pr> for ReturnNilVisitor<'_, '_> {
     fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'pr>) {
         // RuboCop suppresses the offense when `return` is inside an iterator block
         // to avoid double-reporting with Lint/NonLocalExitFromIterator.
-        if self.inside_iterator_block() {
-            return;
-        }
-
-        match self.enforced_style {
-            "return" => {
-                // Flag `return nil` — prefer `return`
-                if let Some(args) = node.arguments() {
-                    let arg_list: Vec<_> = args.arguments().iter().collect();
-                    if arg_list.len() == 1 && arg_list[0].as_nil_node().is_some() {
+        if !self.inside_iterator_block() {
+            match self.enforced_style {
+                "return" => {
+                    // Flag `return nil` — prefer `return`
+                    if let Some(args) = node.arguments() {
+                        let arg_list: Vec<_> = args.arguments().iter().collect();
+                        if arg_list.len() == 1 && arg_list[0].as_nil_node().is_some() {
+                            let loc = node.location();
+                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                            self.diagnostics.push(self.cop.diagnostic(
+                                self.source,
+                                line,
+                                column,
+                                "Use `return` instead of `return nil`.".to_string(),
+                            ));
+                        }
+                    }
+                }
+                "return_nil" => {
+                    // Flag bare `return` — prefer `return nil`
+                    if node.arguments().is_none() {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
                             line,
                             column,
-                            "Use `return` instead of `return nil`.".to_string(),
+                            "Use `return nil` instead of `return`.".to_string(),
                         ));
                     }
                 }
+                _ => {}
             }
-            "return_nil" => {
-                // Flag bare `return` — prefer `return nil`
-                if node.arguments().is_none() {
-                    let loc = node.location();
-                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use `return nil` instead of `return`.".to_string(),
-                    ));
-                }
-            }
-            _ => {}
         }
+
+        ruby_prism::visit_return_node(self, node);
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -231,5 +236,30 @@ impl<'pr> Visit<'pr> for ReturnNilVisitor<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::testutil::assert_cop_offenses_full_with_config;
+
     crate::cop_fixture_tests!(ReturnNil, "cops/style/return_nil");
+
+    fn return_nil_config() -> CopConfig {
+        let mut options = HashMap::new();
+        options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("return_nil".to_string()),
+        );
+        CopConfig {
+            options,
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_return_nil_fixture() {
+        assert_cop_offenses_full_with_config(
+            &ReturnNil,
+            include_bytes!("../../../tests/fixtures/cops/style/return_nil/offense.return_nil.rb"),
+            return_nil_config(),
+        );
+    }
 }
