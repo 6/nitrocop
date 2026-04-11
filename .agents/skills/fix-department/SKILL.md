@@ -25,7 +25,7 @@ Final stop condition:
 Per-cop `check_cop.py --rerun` results are intermediate count-based gates only.
 They are necessary, but they are NOT sufficient to end `/fix-department`.
 When the corpus oracle has concrete FP/FN examples for a cop, use
-`check_cop.py --rerun --clone` to verify before treating that cop as done locally.
+`check_cop.py --rerun` to verify before treating that cop as done locally.
 Run fix work from a dedicated git worktree by default.
 
 ## Persistence
@@ -109,17 +109,12 @@ treated as a standing task across the thread.
      ```
    - Do **not** treat `vendor/corpus/` as mandatory bootstrap. The smoke test does not
      need it, and cloud environments should not prefetch the full corpus checkout.
-   - Only hydrate corpus repos on demand when a workflow step actually needs local
-     source files (`investigate_cop.py --context` fallback, `reduce_mismatch.py`):
+   - To inspect corpus source files, fetch them directly from GitHub using repo info
+     from `bench/corpus/manifest.jsonl` (no cloning needed):
      ```bash
-     python3 scripts/corpus_repo_map.py --clone Department/CopName
+     gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
      ```
-     This clones only the repos relevant to that cop into `vendor/corpus/`.
-   - If working in a separate worktree and the main checkout already has targeted
-     `vendor/corpus` data, symlink it into the worktree and keep that wiring
-     untracked/local-only.
-   - Missing vendor **rubocop** submodules are setup failures. Missing `vendor/corpus`
-     is not a failure unless the current investigation step needs local corpus files.
+   - Missing vendor **rubocop** submodules are setup failures.
 
 ### Phase 1: Plan Batch
 
@@ -150,9 +145,10 @@ python3 scripts/investigate_cop.py Department/CopName --context --fn-only --limi
 ```
 
 `investigate_cop.py` prefers embedded snippets from `corpus-results.json`. If that
-is insufficient and you need full local source files, clone only the relevant repos:
+is insufficient, fetch full source files directly from GitHub using repo info
+from `bench/corpus/manifest.jsonl`:
 ```bash
-python3 scripts/corpus_repo_map.py --clone Department/CopName
+gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
 ```
 
 **Synthetic-only cops** (zero corpus activity): If `investigate_cop.py` shows no results, the cop
@@ -222,7 +218,7 @@ Read reduced repros from `/tmp/nitrocop-reduce/` and capture root-cause hypothes
      gh run view <run-id> --job <job-id> --log 2>&1 | grep -A 3 "FAIL:"
      ```
      This immediately names the regressed repo(s) — do NOT re-run
-     `check_cop.py --rerun --clone` locally to find a regression that CI
+     `check_cop.py --rerun` locally to find a regression that CI
      already identified.
    - If FP increases (even with passing tests), revert the code change.
    - Add a detailed investigation comment to the cop source:
@@ -365,11 +361,8 @@ Do not leave retained progress only in a worktree branch.
 - New worktree bootstrap (run before reducers/tests/check-cop):
   - Initialize submodules: `git submodule update --init --recursive`
   - Ensure `bench/corpus/vendor/bundle/` exists for the active Ruby version before any corpus-backed validation or smoke runs.
-  - Do not clone the full corpus by default. Create/populate `vendor/corpus/` only when a step needs local corpus source files, preferably via:
-    `python3 scripts/corpus_repo_map.py --clone Department/CopName`
-  - If the main checkout already has targeted `vendor/corpus` data, symlink it into the worktree:
-    `ln -s /absolute/path/to/nitrocop/vendor/corpus vendor/corpus`
-  - Keep corpus wiring untracked and local-only (do not commit worktree-specific symlinks).
+  - To inspect corpus source files, fetch them from GitHub using `bench/corpus/manifest.jsonl`:
+    `gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d`
 - Parallel-agent activity is common; expect unrelated local changes in the working tree.
 - Do not revert or include unrelated files in your commit; stage only files for the cop(s) you are fixing.
 - Treat unrelated modified files as off-limits: do not edit them unless the user explicitly asks.

@@ -165,7 +165,7 @@ BUNDLE_PATH=vendor/bundle bundle install
 ```
 
 - Do not run `cargo run --release --bin bench_nitrocop -- conform` by default during cop-fix loops. Use per-cop corpus gates unless the task explicitly asks for full conformance regeneration.
-- **Disk space:** The devcontainer can only hold ~50 corpus repos locally. Never run `bench/corpus/clone_repos.sh` (which syncs all ~5,500 repos). Instead, clone only the repos needed for a specific cop with `python3 scripts/corpus_repo_map.py --clone Department/CopName`, or use `check_cop.py --rerun --clone` which fetches only diverging repos.
+- **Corpus source files:** To inspect corpus files, fetch them directly from GitHub using repo info from `bench/corpus/manifest.jsonl` — no cloning needed. Example: `gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d`
 
 ## Core Rules
 

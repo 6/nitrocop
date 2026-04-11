@@ -25,7 +25,7 @@ Final stop condition:
 Per-cop `check_cop.py --rerun` results are intermediate count-based gates only.
 They are necessary, but they are NOT sufficient to end `/fix-department`.
 When the corpus oracle has concrete FP/FN examples for a cop, use
-`check_cop.py --rerun --clone` to verify before treating that cop as done locally.
+`check_cop.py --rerun` to verify before treating that cop as done locally.
 
 ## Persistence
 
@@ -132,13 +132,12 @@ On macOS or devcontainers, committing directly to main is acceptable.
      ```
    - Do **not** treat `vendor/corpus/` as mandatory bootstrap. The smoke test does not
      need it, and cloud environments should not prefetch the full corpus checkout.
-   - Only hydrate corpus repos on demand when a workflow step actually needs local
-     source files (`investigate_cop.py --context` fallback, `reduce_mismatch.py`):
+   - To inspect corpus source files, fetch them directly from GitHub using repo info
+     from `bench/corpus/manifest.jsonl` (no cloning needed):
      ```bash
-     python3 scripts/corpus_repo_map.py --clone Department/CopName
+     gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
      ```
-   - Missing vendor **rubocop** submodules are setup failures. Missing `vendor/corpus`
-     is not a failure unless the current investigation step needs local corpus files.
+   - Missing vendor **rubocop** submodules are setup failures.
    - **Build isolation (required when multiple agents share the repo):**
      Multiple `/fix-department` sessions may run in parallel on the same repo. Each
      session MUST use a unique target directory and set `NITROCOP_BIN` to avoid
@@ -187,9 +186,10 @@ python3 scripts/investigate_cop.py Department/CopName --context --fn-only --limi
 ```
 
 `investigate_cop.py` prefers embedded snippets from `corpus-results.json`. If that
-is insufficient and you need full local source files, clone only the relevant repos:
+is insufficient, fetch full source files directly from GitHub using repo info
+from `bench/corpus/manifest.jsonl`:
 ```bash
-python3 scripts/corpus_repo_map.py --clone Department/CopName
+gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
 ```
 
 **Synthetic-only cops** (zero corpus activity): If `investigate_cop.py` shows no results, the cop
@@ -279,10 +279,8 @@ if the prompt/examples require local corpus source context.
    extend the prior approach to avoid its documented failure mode.
 
 2. **Understand the FP/FN pattern** from the examples provided in your prompt.
-   If needed, read the actual source files from `vendor/corpus/<repo_id>/<path>` to see more context,
-   but only after cloning the targeted repos for this cop. Prefer:
-   `python3 scripts/corpus_repo_map.py --clone Department/CopName`
-   instead of fetching a full corpus checkout.
+   If needed, fetch source files from GitHub using repo info from `bench/corpus/manifest.jsonl`:
+   `gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d`
    **DO NOT run nitrocop or rubocop directly** — not on corpus repos, not on ad-hoc
    files in `/tmp/`, not anywhere outside the test fixtures. Running `nitrocop` on
    arbitrary paths fails ("No lockfile found") and wastes tokens. The ONLY ways to
@@ -408,7 +406,7 @@ if the prompt/examples require local corpus source context.
    gh run view <run-id> --job <job-id> --log 2>&1 | grep -A 3 "FAIL:"
    ```
    This immediately names the regressed repo(s) — do NOT re-run `check_cop.py
-   --rerun --clone` locally to find a regression that CI already identified.
+   --rerun` locally to find a regression that CI already identified.
 
    If a fix increases FP count (even if unit tests pass), revert
    the code change but **add a detailed investigation comment** to the cop source file
