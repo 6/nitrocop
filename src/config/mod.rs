@@ -146,6 +146,10 @@ pub struct CopFilterSet {
     /// For other configs (e.g., `baseline_rubocop.yml`): current working directory.
     /// Used to relativize absolute file paths before glob matching.
     base_dir: Option<PathBuf>,
+    /// Root of the scanned target repo/directory, if one was provided on the CLI.
+    /// For external configs, plugin cops like `Rails/*` still need `db/**/*.rb`
+    /// matched relative to the inspected repo root rather than the caller's CWD.
+    scan_root: Option<PathBuf>,
     /// Sub-directories containing their own `.rubocop.yml` files.
     /// Sorted deepest-first so `nearest_config_dir` finds the most specific match.
     /// RuboCop resolves Include/Exclude patterns relative to the nearest config
@@ -164,6 +168,12 @@ pub struct CopFilterSet {
 }
 
 impl CopFilterSet {
+    /// Set the scan root for Include/Exclude pattern resolution.
+    /// Called by the linter when a target directory is provided on the CLI.
+    pub fn set_scan_root(&mut self, root: PathBuf) {
+        self.scan_root = Some(root);
+    }
+
     fn matches_global_exclude_glob(&self, path: &Path) -> bool {
         self.global_exclude.is_match(path)
             && self
@@ -311,6 +321,15 @@ impl CopFilterSet {
             }
             path.strip_prefix(bd).ok()
         });
+        // Match against the explicit scan root when one was provided by the CLI.
+        // This fixes external baseline configs that lint an out-of-tree repo:
+        // plugin defaults like `db/**/*.rb` must still be relative to the repo
+        // being scanned, not just the config file's base_dir or the process CWD.
+        let rel_to_scan_root = self
+            .scan_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok());
+
         // Strip `./` prefix for matching: file discovery produces `./test/foo.rb`
         // but cop Exclude patterns use `test/**/*`. Without stripping, patterns
         // that don't start with `./` won't match.
@@ -322,6 +341,7 @@ impl CopFilterSet {
         let included = filter.is_included(path)
             || rel_path.is_some_and(|rel| filter.is_included(rel))
             || rel_to_base.is_some_and(|rel| filter.is_included(rel))
+            || rel_to_scan_root.is_some_and(|rel| filter.is_included(rel))
             || stripped.is_some_and(|s| filter.is_included(s));
         if !included {
             return false;
@@ -333,6 +353,7 @@ impl CopFilterSet {
         let excluded = filter.is_excluded(path)
             || rel_path.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
+            || rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel))
             || stripped.is_some_and(|s| filter.is_excluded(s));
         if excluded {
             return false;
@@ -366,11 +387,16 @@ impl CopFilterSet {
             .as_deref()
             .filter(|bd| self.config_dir.as_deref() != Some(*bd))
             .and_then(|bd| path.strip_prefix(bd).ok());
+        let rel_to_scan_root = self
+            .scan_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok());
         let stripped = path.strip_prefix("./").ok();
         filter.is_excluded(path)
             || rel_to_nearest.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_root.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
+            || rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel))
             || stripped.is_some_and(|s| filter.is_excluded(s))
     }
 
@@ -2810,6 +2836,7 @@ impl ResolvedConfig {
             filters,
             config_dir: self.config_dir.clone(),
             base_dir: self.base_dir.clone(),
+            scan_root: None, // Set by the caller via set_scan_root()
             sub_config_dirs,
             universal_cop_indices,
             pattern_cop_indices,
@@ -3544,6 +3571,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: config.config_dir().map(|p| p.to_path_buf()),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -3629,6 +3657,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: Some(overlay_dir.clone()),
             base_dir: Some(fake_repo.clone()),
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -3666,6 +3695,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: Some(PathBuf::from(".")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4696,6 +4726,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/mastodon")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4719,6 +4750,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/tmp/test")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4743,6 +4775,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/discourse")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4767,6 +4800,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/discourse")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4790,6 +4824,7 @@ mod tests {
             filters: vec![filter],
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4809,6 +4844,7 @@ mod tests {
             filters: vec![filter],
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4843,6 +4879,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: Some(PathBuf::from("/tmp/nitrocop_corpus_configs")),
             base_dir: Some(PathBuf::from("/fake/repo")),
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4900,6 +4937,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/tmp/nitrocop_corpus_configs")),
             base_dir: Some(PathBuf::from("/fake/repo")),
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: vec![0],
@@ -4935,6 +4973,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/project")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4957,6 +4996,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/project")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4984,6 +5024,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/mastodon")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: vec![PathBuf::from("bench/repos/mastodon/app/controllers")],
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -5010,6 +5051,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -5037,6 +5079,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),

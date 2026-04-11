@@ -435,7 +435,18 @@ pub fn run(args: Args) -> Result<i32> {
     let discovered = discover_files(&args.paths, &config)?;
 
     // Build cop filters once (reused for --list-target-files, file filtering, and linting).
-    let cop_filters = config.build_cop_filters(&registry, &tier_map, args.preview);
+    let mut cop_filters = config.build_cop_filters(&registry, &tier_map, args.preview);
+
+    // Set scan root so Include patterns like `db/**/*.rb` resolve relative to
+    // the target directory, not just the config file's dir or process CWD.
+    if let Some(target) = args.paths.first() {
+        let target_path = std::path::Path::new(target);
+        if target_path.is_dir() {
+            if let Ok(abs) = target_path.canonicalize() {
+                cop_filters.set_scan_root(abs);
+            }
+        }
+    }
 
     // Filter globally-excluded files so they are not counted in "N files inspected"
     // or given progress dots.  Explicit CLI files bypass AllCops.Exclude unless
