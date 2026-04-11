@@ -48,6 +48,15 @@ use super::trailing_comma;
 /// preserve the braced-hash `consistent_comma` carveout, fall back to
 /// `EnforcedStyle` when the multiline-specific key is absent, and implement the
 /// `diff_comma` newline predicate (including `\r\n`).
+///
+/// Investigation (2026-04-11, follow-up)
+///
+/// The earlier keyword-hash fix over-corrected `comma` style by always
+/// expanding Prism's `KeywordHashNode` into per-pair elements. RuboCop only
+/// does that when the braceless hash argument itself is multiline. A call like
+/// `create!(\n  id: 1, name: "x",\n)` therefore treats the keyword hash as one
+/// argument and accepts the trailing comma. Fix: only expand a keyword hash for
+/// `no_elements_on_same_line` when that hash node spans multiple lines.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -143,7 +152,7 @@ impl Cop for TrailingCommaInArguments {
         let call_is_multiline = close_line > call_start_line;
 
         // Expand KeywordHashNode to count individual keyword args.
-        let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+        let elem_locs = trailing_comma::effective_element_locations(source, arg_list.iter());
         let effective_args = elem_locs.len();
 
         let is_multiline = call_is_multiline
@@ -485,13 +494,15 @@ mod tests {
     }
 
     #[test]
-    fn comma_style_mixed_args_keyword_sharing_line_no_offense() {
-        // Positional arg + keyword args where keywords share a line
+    fn comma_style_mixed_args_keyword_sharing_line_offense() {
+        // A single-line keyword hash on its own line still counts as one
+        // argument, so a preceding positional arg does not exempt the call.
         let source = b"foo(\n  1,\n  a: 2, b: 3\n)\n";
         let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
-        assert!(
-            diags.is_empty(),
-            "comma style should not flag when keyword args share a line (mixed args)"
+        assert_eq!(
+            diags.len(),
+            1,
+            "comma style should require a trailing comma for mixed args when the keyword hash is a single argument"
         );
     }
 
