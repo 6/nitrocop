@@ -72,11 +72,10 @@ cargo test --lib -- cop::style::while_until_modifier
 cargo test --lib -- cop::style::
 ```
 
-When you touch Python under `scripts/`, `tests/python/`, or `bench/corpus/`, run Ruff **and** the Python test suite:
+When you touch Python under `scripts/`, `tests/python/`, or `bench/corpus/`, run Ruff on the whole repo (it's fast) **and** the Python test suite:
 
 ```bash
-uv run ruff check --fix path/to/changed.py
-uv run ruff check path/to/changed.py
+uv run ruff check .
 uv run pytest tests/python/ --tb=short
 ```
 

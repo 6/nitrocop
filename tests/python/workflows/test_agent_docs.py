@@ -20,7 +20,7 @@ def test_agents_and_claude_are_wired_correctly():
     assert "cargo check                 # fast compile check" in text
     assert "cargo run -- -A .           # lint + autocorrect (all cops, including unsafe)" in text
     assert "cargo run -- --format json . # emit JSON diagnostics" in text
-    assert "uv run ruff check --fix path/to/changed.py" in text
+    assert "uv run ruff check ." in text
     assert "## Corpus Quick Reference" in text
     assert "Do not use `git diff` to discover changed files" in text
     assert "file-drop noise" in text
