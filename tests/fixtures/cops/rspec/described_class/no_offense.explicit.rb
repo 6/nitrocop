@@ -13,3 +13,11 @@ RSpec.describe ActiveInteraction::Inputs do
     end
   end
 end
+
+# FP fix: described_class::CONSTANT — OnlyStaticConstants stops recursion
+# at const nodes, so described_class inside a constant path is not flagged
+RSpec.describe Arachni::Browser::ElementLocator do
+  context "and a #{described_class::ARACHNI_ID}" do
+    it { described_class::ARACHNI_ID }
+  end
+end
