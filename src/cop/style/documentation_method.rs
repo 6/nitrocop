@@ -126,6 +126,19 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 /// `BlockNode` body. RuboCop associates comments inside the block with the inner `def`,
 /// not the outer call argument. Fix: reset both `wrapped_comment_depth` and
 /// `inline_non_public_depth` at real block boundaries, just like class/module/def scopes.
+///
+/// **Investigation (2026-04-11):** Remaining FPs came from two comment-association quirks:
+/// 1. nitrocop stripped all leading `#` characters before checking annotation keywords and
+///    RuboCop directives. RuboCop's `AnnotationComment` and `DirectiveComment` only match a
+///    single leading `#`, so `## TODO ...`, `### TODO ...`, and `## rubocop:disable ...` still
+///    count as documentation and must not suppress this cop.
+/// 2. nitrocop only looked at full comment lines above a method. RuboCop also associates inline
+///    comments on body-opening keyword lines like `else # older versions`,
+///    `begin # relative path`, `rescue # fallback`, and `ensure # cleanup` with the first
+///    method in that body.
+///
+/// Fix: only classify single-`#` comments as annotations/directives, and treat inline comments
+/// on `begin`/`else`/`rescue`/`ensure` lines as method documentation.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -263,8 +276,20 @@ fn inline_non_public_call(call: &ruby_prism::CallNode<'_>, arg: &ruby_prism::Nod
         && arg.as_def_node().is_some()
 }
 
+fn single_hash_comment_text(comment: &str) -> Option<&str> {
+    let trimmed = comment.trim_start();
+    let rest = trimmed.strip_prefix('#')?;
+    if rest.starts_with('#') {
+        return None;
+    }
+
+    Some(rest.trim())
+}
+
 pub fn is_annotation_or_directive_case_insensitive(comment: &str) -> bool {
-    let text = comment.trim_start_matches('#').trim();
+    let Some(text) = single_hash_comment_text(comment) else {
+        return false;
+    };
 
     if text.starts_with("frozen_string_literal:")
         || text.starts_with("encoding:")
@@ -344,6 +369,21 @@ pub fn is_annotation_or_directive_case_insensitive(comment: &str) -> bool {
     false
 }
 
+fn inline_body_opener_comment(line: &[u8]) -> Option<&str> {
+    let trimmed = trim_bytes(line);
+    let hash_pos = trimmed.iter().position(|&b| b == b'#')?;
+    let code_before = trim_bytes(&trimmed[..hash_pos]);
+    let is_body_opener = matches!(code_before, b"begin" | b"else" | b"ensure")
+        || code_before == b"rescue"
+        || code_before.starts_with(b"rescue ");
+
+    if !is_body_opener {
+        return None;
+    }
+
+    std::str::from_utf8(&trimmed[hash_pos..]).ok()
+}
+
 fn if_is_postfix_modifier(node: &ruby_prism::IfNode<'_>) -> bool {
     node.end_keyword_loc().is_none()
         && node.if_keyword_loc().is_some_and(|keyword| {
@@ -404,6 +444,13 @@ fn has_method_documentation_comment(source: &SourceFile, keyword_offset: usize) 
         }
 
         if !trimmed.starts_with(b"#") {
+            if !found_doc_comment {
+                if let Some(comment_text) = inline_body_opener_comment(line) {
+                    if !is_annotation_or_directive_case_insensitive(comment_text) {
+                        found_doc_comment = true;
+                    }
+                }
+            }
             break;
         }
 

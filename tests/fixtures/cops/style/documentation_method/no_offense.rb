@@ -384,3 +384,35 @@ stub_const(
     end
   end
 )
+
+## TODO clean this up
+def double_hash_todo_method
+  42
+end
+
+### TODO clean this up
+def triple_hash_todo_method
+  42
+end
+
+# An inline comment on the enclosing branch opener counts for the first method in the branch.
+if condition
+else # older versions
+  def producer
+    42
+  end
+end
+
+# An inline comment on the enclosing begin line also counts for the first method in the body.
+begin # relative path
+  def files_relative_path
+    42
+  end
+end
+
+begin
+ensure # cleanup
+  def ensured_method
+    42
+  end
+end
