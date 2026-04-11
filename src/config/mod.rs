@@ -311,27 +311,10 @@ impl CopFilterSet {
             }
             path.strip_prefix(bd).ok()
         });
-
         // Strip `./` prefix for matching: file discovery produces `./test/foo.rb`
         // but cop Exclude patterns use `test/**/*`. Without stripping, patterns
         // that don't start with `./` won't match.
         let stripped = path.strip_prefix("./").ok();
-
-        // NOTE: No scan-root relativization for Include patterns.
-        //
-        // RuboCop resolves per-cop Include patterns against base_dir only
-        // (CWD for non-.rubocop configs, config dir for .rubocop configs).
-        // It does NOT have a scan-root fallback. Patterns that don't start
-        // with `**` (e.g., `db/**/*.rb`, `Rakefile`) only match when
-        // base_dir equals the repo root — which requires CWD to be the
-        // project directory for non-.rubocop configs.
-        //
-        // In normal usage (CWD = project root), all Include patterns match
-        // via rel_path (config_dir) or rel_to_base (CWD). Adding scan_roots
-        // would cause nitrocop to fire on files that RuboCop skips when both
-        // tools run from outside the repo (e.g., corpus oracle), creating
-        // false positives for Rake/* cops (`Rakefile`), Rails/Output
-        // (`db/**/*.rb`), and similar non-`**`-prefixed Include patterns.
 
         // Include: file must match on at least one path form.
         // This supports both absolute patterns (/tmp/test/db/**) and
@@ -383,7 +366,6 @@ impl CopFilterSet {
             .as_deref()
             .filter(|bd| self.config_dir.as_deref() != Some(*bd))
             .and_then(|bd| path.strip_prefix(bd).ok());
-
         let stripped = path.strip_prefix("./").ok();
         filter.is_excluded(path)
             || rel_to_nearest.is_some_and(|rel| filter.is_excluded(rel))
@@ -415,7 +397,6 @@ impl CopFilterSet {
             .as_deref()
             .filter(|bd| self.config_dir.as_deref() != Some(*bd))
             .and_then(|bd| path.strip_prefix(bd).ok());
-
         // Include check: if patterns exist, file must match at least one form
         let has_include = include_set.is_some() || include_re.is_some();
         if has_include {
@@ -2216,7 +2197,6 @@ impl ResolvedConfig {
                 _ => default_exclude.to_vec(),
             },
         };
-
         // 4. Include filter: path must match at least one
         if !effective_include.is_empty()
             && !effective_include.iter().any(|pat| glob_matches(pat, path))

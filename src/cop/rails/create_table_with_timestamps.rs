@@ -7,6 +7,7 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Flags `create_table` blocks without timestamp columns.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
@@ -48,18 +49,24 @@ impl<'pr> Visit<'pr> for TimestampFinder {
     }
 }
 
-/// Check if `create_table` has `id: false` option
+/// Check if `create_table` has `id: false` option.
+///
+/// Prism can represent the option hash as either `KeywordHashNode` (`id: false`)
+/// or `HashNode` (`{:id => false}`), so we need to handle both forms.
 fn has_id_false(call: &ruby_prism::CallNode<'_>) -> bool {
     let args = match call.arguments() {
         Some(a) => a,
         None => return false,
     };
     for arg in args.arguments().iter() {
-        let kw = match arg.as_keyword_hash_node() {
-            Some(k) => k,
-            None => continue,
+        let elements = if let Some(kw) = arg.as_keyword_hash_node() {
+            kw.elements()
+        } else if let Some(hash) = arg.as_hash_node() {
+            hash.elements()
+        } else {
+            continue;
         };
-        for elem in kw.elements().iter() {
+        for elem in elements.iter() {
             let assoc = match elem.as_assoc_node() {
                 Some(a) => a,
                 None => continue,
