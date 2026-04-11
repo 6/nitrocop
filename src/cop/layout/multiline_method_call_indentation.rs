@@ -340,12 +340,12 @@ impl ChainVisitor<'_> {
         // normal alignment logic.
         // Only for `aligned` style — `indented_relative_to_receiver` expects
         // indent relative to the receiver, not alignment with dots above.
-        if !is_trailing_dot && self.style == "aligned" {
-            if has_dot_at_col(self.source, rhs_line.saturating_sub(1), rhs_col)
-                && !is_dot_in_receiver_chain(self.source, &receiver, rhs_line - 1, rhs_col)
-            {
-                return Some(rhs_col);
-            }
+        if !is_trailing_dot
+            && self.style == "aligned"
+            && has_dot_at_col(self.source, rhs_line.saturating_sub(1), rhs_col)
+            && !is_dot_in_receiver_chain(self.source, receiver, rhs_line - 1, rhs_col)
+        {
+            return Some(rhs_col);
         }
 
         if !is_trailing_dot {
