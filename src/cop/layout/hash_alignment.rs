@@ -54,6 +54,17 @@ use ruby_prism::Visit;
 ///      Fixed by checking the Prism parent chain directly and only ignoring hashes
 ///      that are actually the last argument of a `CallNode`, `SuperNode`, or
 ///      `YieldNode`.
+///
+/// 5. **Variant shorthand + block-pass tail (2026-04-11):**
+///    - The corpus/local variant helpers drive this cop through an `EnforcedStyle`
+///      shorthand label like `separator, separator, always_ignore`, but the cop
+///      only read the split RuboCop keys. Fixed by treating `EnforcedStyle` as a
+///      fallback alias for `EnforcedColonStyle`, `EnforcedHashRocketStyle`, and
+///      `EnforcedLastArgumentHashStyle` when the split keys are absent.
+///    - RuboCop does not ignore an explicit hash before a block-pass tail
+///      (`foo({ a: 1 }, &block)`) under `ignore_explicit`, because the hash is
+///      no longer `send.last_argument`. Prism stores that tail on `call.block()`,
+///      so `is_last_argument_hash` now rejects `BlockArgumentNode` tails.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -81,6 +92,74 @@ const MSG_TABLE: &str =
 const MSG_KWSPLAT: &str =
     "Align keyword splats with the rest of the hash if it spans more than one line.";
 
+fn parse_align_style_token(style: &str) -> Option<AlignStyle> {
+    match style {
+        "key" => Some(AlignStyle::Key),
+        "separator" => Some(AlignStyle::Separator),
+        "table" => Some(AlignStyle::Table),
+        _ => None,
+    }
+}
+
+fn parse_last_argument_style_token(style: &str) -> Option<&'static str> {
+    match style {
+        "always_inspect" => Some("always_inspect"),
+        "always_ignore" => Some("always_ignore"),
+        "ignore_explicit" => Some("ignore_explicit"),
+        "ignore_implicit" => Some("ignore_implicit"),
+        _ => None,
+    }
+}
+
+#[derive(Default)]
+struct EnforcedStyleAlias {
+    colon_styles: Option<Vec<AlignStyle>>,
+    hash_rocket_styles: Option<Vec<AlignStyle>>,
+    last_arg_style: Option<&'static str>,
+}
+
+fn parse_enforced_style_alias(config: &CopConfig) -> Option<EnforcedStyleAlias> {
+    let raw = config.options.get("EnforcedStyle")?.as_str()?;
+    let parts: Vec<&str> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    match parts.as_slice() {
+        [style] => {
+            if let Some(last_arg_style) = parse_last_argument_style_token(style) {
+                return Some(EnforcedStyleAlias {
+                    last_arg_style: Some(last_arg_style),
+                    ..EnforcedStyleAlias::default()
+                });
+            }
+
+            let align_style = parse_align_style_token(style)?;
+            Some(EnforcedStyleAlias {
+                colon_styles: Some(vec![align_style]),
+                hash_rocket_styles: Some(vec![align_style]),
+                last_arg_style: None,
+            })
+        }
+        [colon_style, hash_rocket_style] => Some(EnforcedStyleAlias {
+            colon_styles: Some(vec![parse_align_style_token(colon_style)?]),
+            hash_rocket_styles: Some(vec![parse_align_style_token(hash_rocket_style)?]),
+            last_arg_style: None,
+        }),
+        [colon_style, hash_rocket_style, last_arg_style] => Some(EnforcedStyleAlias {
+            colon_styles: Some(vec![parse_align_style_token(colon_style)?]),
+            hash_rocket_styles: Some(vec![parse_align_style_token(hash_rocket_style)?]),
+            last_arg_style: Some(parse_last_argument_style_token(last_arg_style)?),
+        }),
+        _ => None,
+    }
+}
+
 fn parse_styles(config: &CopConfig, key: &str, default: &str) -> Vec<AlignStyle> {
     // Check if the value is a YAML sequence (array)
     if let Some(val) = config.options.get(key) {
@@ -88,11 +167,8 @@ fn parse_styles(config: &CopConfig, key: &str, default: &str) -> Vec<AlignStyle>
             let mut styles = Vec::new();
             for item in seq {
                 if let Some(s) = item.as_str() {
-                    match s {
-                        "key" => styles.push(AlignStyle::Key),
-                        "separator" => styles.push(AlignStyle::Separator),
-                        "table" => styles.push(AlignStyle::Table),
-                        _ => {}
+                    if let Some(style) = parse_align_style_token(s) {
+                        styles.push(style);
                     }
                 }
             }
@@ -102,14 +178,38 @@ fn parse_styles(config: &CopConfig, key: &str, default: &str) -> Vec<AlignStyle>
             }
         }
     }
-    // Fallback to string
-    let s = config.get_str(key, default);
-    match s {
-        "key" => vec![AlignStyle::Key],
-        "separator" => vec![AlignStyle::Separator],
-        "table" => vec![AlignStyle::Table],
-        _ => vec![AlignStyle::Key],
+
+    if let Some(alias) = parse_enforced_style_alias(config) {
+        let alias_styles = match key {
+            "EnforcedColonStyle" => alias.colon_styles,
+            "EnforcedHashRocketStyle" => alias.hash_rocket_styles,
+            _ => None,
+        };
+        if let Some(mut styles) = alias_styles {
+            styles.dedup();
+            return styles;
+        }
     }
+
+    // Fallback to string
+    parse_align_style_token(config.get_str(key, default))
+        .map(|style| vec![style])
+        .unwrap_or_else(|| vec![AlignStyle::Key])
+}
+
+fn last_argument_style(config: &CopConfig) -> &'static str {
+    if let Some(style) = config
+        .options
+        .get("EnforcedLastArgumentHashStyle")
+        .and_then(|value| value.as_str())
+        .and_then(parse_last_argument_style_token)
+    {
+        return style;
+    }
+
+    parse_enforced_style_alias(config)
+        .and_then(|alias| alias.last_arg_style)
+        .unwrap_or("always_inspect")
 }
 
 /// Info about a single hash pair extracted from the AST.
@@ -237,7 +337,12 @@ fn is_last_argument_hash(
         return false;
     };
 
-    let is_last_argument = |arguments: Option<ruby_prism::ArgumentsNode<'_>>| {
+    let is_last_argument = |arguments: Option<ruby_prism::ArgumentsNode<'_>>,
+                            has_block_argument: bool| {
+        if has_block_argument {
+            return false;
+        }
+
         arguments.is_some_and(|args| {
             args.arguments().iter().last().is_some_and(|last_arg| {
                 last_arg.location().start_offset() == node.location().start_offset()
@@ -247,13 +352,19 @@ fn is_last_argument_hash(
     };
 
     if let Some(call) = parent.as_call_node() {
-        return is_last_argument(call.arguments());
+        let has_block_argument = call
+            .block()
+            .is_some_and(|block| block.as_block_argument_node().is_some());
+        return is_last_argument(call.arguments(), has_block_argument);
     }
     if let Some(super_node) = parent.as_super_node() {
-        return is_last_argument(super_node.arguments());
+        let has_block_argument = super_node
+            .block()
+            .is_some_and(|block| block.as_block_argument_node().is_some());
+        return is_last_argument(super_node.arguments(), has_block_argument);
     }
     if let Some(yield_node) = parent.as_yield_node() {
-        return is_last_argument(yield_node.arguments());
+        return is_last_argument(yield_node.arguments(), false);
     }
 
     false
@@ -759,7 +870,7 @@ impl HashAlignment {
         let _allow_multiple = config.get_bool("AllowMultipleStyles", true);
         let rocket_styles = parse_styles(config, "EnforcedHashRocketStyle", "key");
         let colon_styles = parse_styles(config, "EnforcedColonStyle", "key");
-        let last_arg_style = config.get_str("EnforcedLastArgumentHashStyle", "always_inspect");
+        let last_arg_style = last_argument_style(config);
         let arg_alignment_style = config.get_str("ArgumentAlignmentStyle", "with_first_argument");
         let fixed_indentation = arg_alignment_style == "with_fixed_indentation";
 
@@ -1055,6 +1166,18 @@ mod tests {
         }
     }
 
+    fn enforced_style_alias_config(style: &'static str) -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn separator_always_ignore_offense_fixture() {
         crate::testutil::assert_cop_offenses_full_with_config(
@@ -1063,6 +1186,17 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_offense.rb"
             ),
             variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn separator_always_ignore_offense_fixture_via_enforced_style_alias() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_offense.rb"
+            ),
+            enforced_style_alias_config("separator, separator, always_ignore"),
         );
     }
 
@@ -1089,6 +1223,17 @@ mod tests {
     }
 
     #[test]
+    fn explicit_last_arg_no_offense_fixture_for_always_ignore_via_enforced_style_alias() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/explicit_last_arg_no_offense.rb"
+            ),
+            enforced_style_alias_config("separator, separator, always_ignore"),
+        );
+    }
+
+    #[test]
     fn explicit_last_arg_no_offense_fixture_for_ignore_explicit() {
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &HashAlignment,
@@ -1100,6 +1245,17 @@ mod tests {
     }
 
     #[test]
+    fn explicit_last_arg_no_offense_fixture_for_ignore_explicit_via_enforced_style_alias() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/explicit_last_arg_no_offense.rb"
+            ),
+            enforced_style_alias_config("ignore_explicit"),
+        );
+    }
+
+    #[test]
     fn table_ignore_implicit_flags_first_pair_fixture() {
         crate::testutil::assert_cop_offenses_full_with_config(
             &HashAlignment,
@@ -1107,6 +1263,17 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_first_pair_offense.rb"
             ),
             variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn table_ignore_implicit_flags_first_pair_fixture_via_enforced_style_alias() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_first_pair_offense.rb"
+            ),
+            enforced_style_alias_config("table, table, ignore_implicit"),
         );
     }
 
