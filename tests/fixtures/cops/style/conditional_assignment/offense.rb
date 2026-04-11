@@ -161,3 +161,33 @@ end
 # ternary with local variable assignment (FN case)
 opts[:response_timeout].nil? ? response_timeout = 0.9 : response_timeout = opts[:response_timeout].to_f
 ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+# Corpus FN: nested shovel assignment with Unicode content
+pagy.series.each do |item|
+  if item.to_s == pagy.page.to_s
+  ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+    html << link_to(item, url_for(page: item), class: "btn btn-sm btn-neutral min-w-[2.5rem] pointer-events-none")
+  elsif item.to_s == "gap"
+    html << link_to("…", url_for(page: item), class: "btn btn-sm btn-ghost min-w-[2.5rem] pointer-events-none btn-disabled")
+  else
+    html << link_to(item, url_for(page: item), class: "btn btn-sm btn-ghost min-w-[2.5rem]")
+  end
+end
+
+# Corpus FN: deeply nested setter assignment
+module MassiveRecord
+  module Adapters
+    module Thrift
+      class Scanner
+        def open
+          if created_at.empty?
+          ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+            self.opened_scanner = connection.scannerOpen(table_name, key, formatted_column_family_names, {})
+          else
+            self.opened_scanner = connection.scannerOpenTs(table_name, key, formatted_column_family_names, created_at, {})
+          end
+        end
+      end
+    end
+  end
+end
