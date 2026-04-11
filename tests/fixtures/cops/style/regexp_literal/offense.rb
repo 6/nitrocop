@@ -30,3 +30,8 @@ when %r{=}
 
 FULL_ENCODED_VALUE = %r{ # Identical to ENCODED_VALUE but captures the whole rather than components of
                      ^ Style/RegexpLiteral: Use `//` around regular expression.
+  foo
+}x
+
+abstract_texts = pdf.find_text %r/line of abstract/
+                               ^ Style/RegexpLiteral: Use `//` around regular expression.
