@@ -16,13 +16,17 @@ use crate::parse::source::SourceFile;
 /// `kw_expected` are accepted.
 ///
 /// Key fix (2026-04-04): CallNode (`+`, `-`, etc.) now delegates to
-/// `check_binary_node` with `accept_left_alignment=true`. This adds
-/// assignment/keyword context awareness (fixing FN where RuboCop requires
-/// alignment but old code accepted wrong indentation), while accepting
-/// same-column alignment as a fallback for operator calls. The fallback
-/// is needed because RuboCop's `argument_in_method_call` (which requires
-/// AST parent traversal) accepts alignment in method-arg and nested-if
-/// contexts that we cannot detect from Prism without parent pointers.
+/// `check_binary_node` with `accept_left_alignment=true`.
+///
+/// Key fix (2026-04-11): narrowed the `accept_left_alignment` fallback.
+/// Previously it accepted `right_col == left_col` unconditionally, which
+/// caused ~3k FN for standalone chained operators (e.g. `"a".cap +\n"b"`)
+/// where RuboCop requires indentation. Now same-column alignment is only
+/// accepted when there's evidence of method-call-argument context:
+/// (a) the first operand is offset from the line indent (genuine alignment),
+/// (b) the preceding line ends with a comma (no-parens method call), or
+/// (c) a preceding line at lower indent ends with an operator like `+`,
+/// `==`, `[`, etc., indicating the chain is an argument to a method call.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -230,6 +234,75 @@ fn line_ends_with_assignment_operator(line_bytes: &[u8]) -> bool {
     last_significant_index(line_bytes).is_some_and(|idx| is_assignment_operator(line_bytes, idx))
 }
 
+/// Check if the line immediately before `line` ends with a comma.
+/// This is a heuristic to detect method-call-argument context without parent
+/// pointers: `raise Exception,\n"a" +\n"b"` has a comma on the preceding line,
+/// indicating `"a" + "b"` is a continuation argument.  Approximates RuboCop's
+/// `argument_in_method_call` for no-parentheses method calls.
+fn has_preceding_comma_line(source: &SourceFile, line: usize) -> bool {
+    if line <= 1 {
+        return false;
+    }
+    let prev_line = source.lines().nth(line - 2).unwrap_or(b"");
+    last_significant_index(prev_line).is_some_and(|idx| prev_line[idx] == b',')
+}
+
+/// Scan backward from `left_line` looking for evidence that the current
+/// expression is in a method-call-argument context.  Checks up to 20
+/// preceding lines at *lower* indent for:
+///   1. A line ending with `+` (outer chain continuation),
+///   2. A line containing `}+` (block-close chained with `+`),
+///   3. A line ending with `==`, `!=`, `===`, or `<=>` (the operand chain
+///      is an argument to a comparison method call, e.g. `.should ==`), or
+///   4. A line ending with `[` (the chain is inside an array that is a
+///      method argument, e.g. `arr << ["a" + "b"]`), or
+///   5. A line ending with `<<` (the chain is an argument to the append
+///      method, e.g. `str <<\n  "a" +\n  "b"`).
+///
+/// This approximates RuboCop's `argument_in_method_call` without parent
+/// pointers.
+fn is_likely_in_method_arg_context(
+    source: &SourceFile,
+    left_line: usize,
+    left_indent: usize,
+) -> bool {
+    for offset in 1..=20 {
+        if left_line <= offset {
+            break;
+        }
+        let prev = source.lines().nth(left_line - 1 - offset).unwrap_or(b"");
+        // Stop at blank lines — they separate unrelated statements
+        if prev.is_empty() || prev.iter().all(|&b| b == b' ' || b == b'\t') {
+            break;
+        }
+        let prev_indent = indentation_of(prev);
+        if prev_indent >= left_indent {
+            continue;
+        }
+        if let Some(idx) = last_significant_index(prev) {
+            let end = &prev[..=idx];
+            // Line at lower indent ending with + or [
+            if prev[idx] == b'+' || prev[idx] == b'[' {
+                return true;
+            }
+            // Line ending with a comparison or append operator (method call in Ruby)
+            if end.ends_with(b"==")
+                || end.ends_with(b"!=")
+                || end.ends_with(b"===")
+                || end.ends_with(b"<=>")
+                || end.ends_with(b"<<")
+            {
+                return true;
+            }
+        }
+        // Block-close chained: }+ (e.g. `}+if owner`)
+        if prev.windows(2).any(|w| w[0] == b'}' && w[1] == b'+') {
+            return true;
+        }
+    }
+    false
+}
+
 fn modifier_keyword(before_expr: &[u8]) -> Option<&'static str> {
     if before_expr.windows(8).any(|w| w == b" unless ")
         || before_expr.windows(8).any(|w| w == b" unless(")
@@ -432,11 +505,18 @@ impl MultilineOperationIndentation {
             // (genuine alignment, not just same-indent-level chains).
             right_col == expected_indent || right_col == left_col
         } else if accept_left_alignment {
-            // For operator method calls (+, -, etc.) without AST parent info,
-            // we can't detect RuboCop's `argument_in_method_call` context
-            // (e.g. `raise Exception, "a" +\n"b"` or `+` inside if-as-operand).
-            // Accept same-column alignment as a safe fallback to avoid FP.
-            right_col == expected_indent || right_col == left_col
+            // For operator method calls (+, -, etc.), accept same-column alignment
+            // only when there's evidence of method-call-argument context. This
+            // approximates RuboCop's `argument_in_method_call` without parent pointers.
+            // - left_col > left_indent: the receiver is offset (e.g. inside a method
+            //   call on the same line), so alignment is genuine.
+            // - preceding comma: the expression is a continuation argument in a
+            //   no-parens method call (e.g. `raise Exception,\n"a" +\n"b"`).
+            right_col == expected_indent
+                || (right_col == left_col
+                    && (left_col > left_indent
+                        || has_preceding_comma_line(source, left_line)
+                        || is_likely_in_method_arg_context(source, left_line, left_indent)))
         } else {
             right_col == expected_indent
         };

@@ -37,3 +37,19 @@ result2 = "hello".capitalize +
   ^ Layout/MultilineOperationIndentation: Align the operands of an expression in an assignment spanning multiple lines.
   "foo"
   ^ Layout/MultilineOperationIndentation: Align the operands of an expression in an assignment spanning multiple lines.
+
+# FN: Chained + at same indent in method body (no assignment context)
+def lyrics
+  "hello".capitalize +
+  "world" +
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+  "foo"
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+end
+
+# FN: Standalone chained + at column 0
+"beer on the wall, ".capitalize +
+"beer.\n" +
+^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+"beer on the wall.\n"
+^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
