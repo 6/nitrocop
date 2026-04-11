@@ -569,3 +569,35 @@ def allowed_to_query(user, permission)
     end
   end
 end
+
+# FN fix: def inside conditional — the conditional branch context should not
+# leak through the def scope boundary. Block params inside the def that shadow
+# method params should still be flagged.
+unless Kernel.respond_to?(:require_relative)
+  def require_relative(path)
+    $:.each do |path|
+                ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `path`.
+      path += '/'
+    end
+  end
+end
+
+# Same pattern with if
+if RUBY_VERSION < '2.0'
+  def my_method(data)
+    data.map do |data|
+                 ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `data`.
+      data.to_s
+    end
+  end
+end
+
+# def self.foo inside conditional
+if defined?(Net::HTTP)
+  def self.simulate(http)
+    http.start do |http|
+                   ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `http`.
+      http.request
+    end
+  end
+end
