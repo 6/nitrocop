@@ -149,7 +149,7 @@ impl Cop for TrailingCommaInArguments {
         let is_multiline = call_is_multiline
             && !(has_closing_token
                 && effective_args == 1
-                && !begins_its_line(bytes, node_end_offset));
+                && !crate::cop::shared::util::begins_its_line(source, node_end_offset));
         let should_have_comma = match style {
             "comma" => {
                 is_multiline
@@ -217,24 +217,6 @@ fn is_only_horizontal_whitespace_and_comma(bytes: &[u8]) -> bool {
     false
 }
 
-fn begins_its_line(bytes: &[u8], offset: usize) -> bool {
-    if offset > bytes.len() {
-        return false;
-    }
-
-    let mut i = offset;
-    while i > 0 {
-        i -= 1;
-        match bytes[i] {
-            b'\n' | b'\r' => break,
-            b' ' | b'\t' => {}
-            _ => return false,
-        }
-    }
-
-    true
-}
-
 fn method_name_and_arguments_on_same_line(
     source: &SourceFile,
     call_node: &ruby_prism::CallNode<'_>,
@@ -248,6 +230,9 @@ fn method_name_and_arguments_on_same_line(
         return false;
     }
 
+    // Only explicit Hash `{...}` counts as "same line" — it has visible braces that
+    // visually anchor the closing. keyword_hash_node (implicit keyword args) does NOT
+    // get this exemption since there are no braces.
     if last_arg
         .as_hash_node()
         .is_some_and(|hash| hash.opening_loc().as_slice() == b"{")
