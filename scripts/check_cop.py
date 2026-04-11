@@ -51,6 +51,78 @@ BASELINE_CONFIG = PROJECT_ROOT / "bench" / "corpus" / "baseline_rubocop.yml"
 LOCAL_CACHE_DIR = PROJECT_ROOT / ".check-cop-cache"
 
 
+def _parse_example(ex) -> tuple[str, str, int, str, list[str] | None] | None:
+    """Parse a corpus FP/FN example into (repo_id, filepath, line, msg, src)."""
+    if isinstance(ex, dict):
+        loc, msg, src = ex.get("loc", ""), ex.get("msg", ""), ex.get("src")
+    else:
+        loc, msg, src = str(ex), "", None
+    if ": " not in loc:
+        return None
+    repo_id, rest = loc.split(": ", 1)
+    last_colon = rest.rfind(":")
+    if last_colon < 0:
+        return None
+    filepath = rest[:last_colon]
+    try:
+        line = int(rest[last_colon + 1:])
+    except ValueError:
+        return None
+    return repo_id, filepath, line, msg, src
+
+
+def show_examples(
+    cop_entry: dict,
+    *,
+    fp_only: bool = False,
+    fn_only: bool = False,
+    limit: int = 0,
+) -> None:
+    """Display FP/FN example locations from corpus oracle data."""
+    fp_examples = cop_entry.get("fp_examples", [])
+    fn_examples = cop_entry.get("fn_examples", [])
+
+    def _display(examples: list, label: str) -> None:
+        by_repo: dict[str, list] = {}
+        for ex in examples:
+            parsed = _parse_example(ex)
+            if parsed:
+                repo_id, filepath, line, msg, src = parsed
+                by_repo.setdefault(repo_id, []).append((filepath, line, msg, src))
+            else:
+                loc = ex.get("loc", str(ex)) if isinstance(ex, dict) else str(ex)
+                by_repo.setdefault("(unknown)", []).append((loc, 0, "", None))
+
+        print(f"{label} ({len(examples):,} total):")
+        shown = 0
+        for repo_id in sorted(by_repo, key=lambda r: -len(by_repo[r])):
+            locations = by_repo[repo_id]
+            print(f"\n  {repo_id} ({len(locations)}):")
+            for filepath, line, msg, src in sorted(locations, key=lambda x: (x[0], x[1])):
+                if limit and shown >= limit:
+                    remaining = len(examples) - shown
+                    print(f"\n  ... {remaining:,} more (use --limit 0 to see all)")
+                    return
+                msg_suffix = f"  [{msg}]" if msg else ""
+                print(f"    {filepath}:{line}{msg_suffix}")
+                if src:
+                    for ctx_line in src:
+                        print(f"      {ctx_line}")
+                shown += 1
+        print()
+
+    if not fn_only and fp_examples:
+        _display(fp_examples, "False positives")
+    if not fp_only and fn_examples:
+        _display(fn_examples, "False negatives")
+    if not fp_examples and not fn_examples:
+        fp_count = cop_entry.get("fp", 0)
+        fn_count = cop_entry.get("fn", 0)
+        if fp_count > 0 or fn_count > 0:
+            print("Note: corpus has counts but no example locations.")
+            print("Re-run the corpus oracle to get full example data.")
+
+
 def is_include_gated_cop(cop_name: str) -> bool:
     """Check if a cop has Include patterns that require base_dir resolution.
 
@@ -1104,6 +1176,16 @@ def main():
     parser.add_argument("--variant-batches-dir", type=str, default=None,
                         help="Directory containing variant_batch_*.yml configs. "
                              "If not specified, generates them into a temp directory.")
+    parser.add_argument("--examples", action="store_true",
+                        help="Show individual FP/FN example locations with source context "
+                             "(from corpus oracle data, no execution needed). "
+                             "Combine with --verbose for per-repo breakdown + examples.")
+    parser.add_argument("--fp-only", action="store_true",
+                        help="Show only false positive examples (with --examples)")
+    parser.add_argument("--fn-only", action="store_true",
+                        help="Show only false negative examples (with --examples)")
+    parser.add_argument("--limit", type=int, default=0,
+                        help="Limit number of examples shown with --examples (0 = all)")
     parser.add_argument("--force", action="store_true",
                         help="Override CI-only guard and run locally")
     args = parser.parse_args()
@@ -1232,6 +1314,12 @@ def main():
         sys.exit(1)
     has_activity_index = bool(data.get("cop_activity_repos"))
 
+    # Standalone --examples mode (no --verbose, no --rerun): just show examples and exit
+    if args.examples and not args.verbose and not args.rerun:
+        show_examples(cop_entry, fp_only=args.fp_only,
+                      fn_only=args.fn_only, limit=args.limit)
+        sys.exit(0)
+
     if args.verbose and not args.rerun:
         # Use baseline artifact data instead of re-running nitrocop.
         # This reflects the downloaded corpus-oracle run, not local unverified changes.
@@ -1264,6 +1352,10 @@ def main():
             if len(sorted_repos) > 30:
                 print(f"  ... and {len(sorted_repos) - 30} more")
             print()
+
+        if args.examples:
+            show_examples(cop_entry, fp_only=args.fp_only,
+                          fn_only=args.fn_only, limit=args.limit)
 
         # In artifact mode, nitrocop_total for that run is:
         # rubocop_matches + false_positives.
@@ -1410,7 +1502,7 @@ def main():
         if excess > 0 and file_drop_offenses >= excess:
             print(f"  WARNING: file-drop noise ({file_drop_offenses:,}) masks "
                   f"raw excess ({excess:,}). Real FPs may exist — use "
-                  f"verify_cop_locations.py for ground truth.")
+                  f"check_cop.py --rerun --clone for ground truth.")
     print()
 
     print("  Gate type: count-only / cop-level regression")
@@ -1657,7 +1749,7 @@ def main():
             if total_unchecked > total_checked:
                 print(f"    WARNING: {total_unchecked} examples could not be verified "
                       f"(repos not cloned with --sample). Use --sample with a higher "
-                      f"value or verify_cop_locations.py for ground truth.")
+                      f"value for ground truth.")
             print()
 
         print("PASS: no per-repo regressions vs baseline (default config)")

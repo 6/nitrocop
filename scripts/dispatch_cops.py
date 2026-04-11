@@ -725,9 +725,8 @@ def build_start_here_section(cop: str, corpus: dict) -> str:
         "Use the existing corpus data to focus on the most concentrated regressions first.",
         "",
         "Helpful local commands:",
-        f"- `python3 scripts/investigate_cop.py {cop} --repos-only`",
-        f"- `python3 scripts/investigate_cop.py {cop} --context`",
-        f"- `python3 scripts/verify_cop_locations.py {cop}`",
+        f"- `python3 scripts/check_cop.py {cop} --verbose`",
+        f"- `python3 scripts/check_cop.py {cop} --examples`",
         "",
     ]
 
@@ -1817,9 +1816,7 @@ config). Instead:
 3. Common causes: `Max` value not read from repo config, `Exclude` patterns not applied,
    `Enabled: false` in a department-level override not respected, inherited configs
    (e.g., `inherit_from`) not followed
-4. If you find a config-resolution fix, apply it and verify with `check_cop.py --rerun`
-5. Do NOT use `verify_cop_locations.py` unless the corpus repos are cloned locally —
-   it silently reports "fixed" when the repos are not on disk""")
+4. If you find a config-resolution fix, apply it and verify with `check_cop.py --rerun`""")
     elif diagnostics and has_config_issues and not has_code_bugs:
         parts.append("""
 ### IMPORTANT: This is a config/context issue, NOT a detection bug
@@ -2100,10 +2097,15 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
         if not has_examples:
             lines.append(
                 "No example source code is available from the variant oracle data. "
-                "Use `verify_cop_locations.py --style` to find specific diverging files:\n"
+                "Fetch diverging files directly from GitHub using repo info from "
+                "`bench/corpus/manifest.jsonl`:\n"
                 f"```bash\n"
-                f"python3 scripts/verify_cop_locations.py {cop} "
+                f"# Find variant-diverging repos:\n"
+                f"python3 scripts/check_cop.py {cop} --verbose "
                 f"--style EnforcedStyle=<value>\n"
+                f"# Then fetch a specific file at the pinned commit:\n"
+                f"gh api repos/OWNER/REPO/contents/PATH?ref=SHA "
+                f"--jq '.content' | base64 -d\n"
                 f"```\n"
             )
         return lines

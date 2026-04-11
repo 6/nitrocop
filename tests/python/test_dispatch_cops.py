@@ -386,7 +386,7 @@ def test_build_start_here_section_uses_repo_hotspots_and_examples():
     }
     section = gct.build_start_here_section("Style/MixinUsage", corpus)
     assert "## Start Here" in section
-    assert "python3 scripts/investigate_cop.py Style/MixinUsage --repos-only" in section
+    assert "python3 scripts/check_cop.py Style/MixinUsage --verbose" in section
     assert "`travis-ci__dpl__8c6eabc` (3 FP) — example `lib/foo.rb:10`" in section
     assert "`puppetlabs__puppet__e227c27` (4 FN) — example `manifests/init.rb:30`" in section
     assert "Representative FP examples:" in section
@@ -1155,14 +1155,14 @@ def test_generate_task_variant_only_includes_guardrail_note(tmp_path):
 
 
 def test_generate_task_variant_only_no_examples_shows_fallback(tmp_path):
-    """When variant data has no examples, prompt suggests verify_cop_locations."""
+    """When variant data has no examples, prompt suggests check_cop.py --rerun."""
     saved = _setup_generate_task_env(tmp_path, variant_data=[
         {"style_label": "comma", "matches": 300, "fp": 5, "fn": 3,
          "fp_examples": [], "fn_examples": []},
     ])
     try:
         task = gct.generate_task("Style/FooBar")
-        assert "verify_cop_locations.py" in task
+        assert "check_cop.py" in task
         assert "No example source code is available" in task
     finally:
         _teardown_generate_task_env(saved)

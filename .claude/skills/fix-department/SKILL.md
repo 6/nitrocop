@@ -25,8 +25,7 @@ Final stop condition:
 Per-cop `check_cop.py --rerun` results are intermediate count-based gates only.
 They are necessary, but they are NOT sufficient to end `/fix-department`.
 When the corpus oracle has concrete FP/FN examples for a cop, use
-`verify_cop_locations.py` as the location-level check before treating that cop
-as done locally.
+`check_cop.py --rerun` to verify before treating that cop as done locally.
 
 ## Persistence
 
@@ -133,14 +132,12 @@ On macOS or devcontainers, committing directly to main is acceptable.
      ```
    - Do **not** treat `vendor/corpus/` as mandatory bootstrap. The smoke test does not
      need it, and cloud environments should not prefetch the full corpus checkout.
-   - Only hydrate corpus repos on demand when a workflow step actually needs local
-     source files (`investigate_cop.py --context` fallback, `reduce_mismatch.py`,
-     `verify_cop_locations.py`):
+   - To inspect corpus source files, fetch them directly from GitHub using repo info
+     from `bench/corpus/manifest.jsonl` (no cloning needed):
      ```bash
-     python3 scripts/corpus_repo_map.py --clone Department/CopName
+     gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
      ```
-   - Missing vendor **rubocop** submodules are setup failures. Missing `vendor/corpus`
-     is not a failure unless the current investigation step needs local corpus files.
+   - Missing vendor **rubocop** submodules are setup failures.
    - **Build isolation (required when multiple agents share the repo):**
      Multiple `/fix-department` sessions may run in parallel on the same repo. Each
      session MUST use a unique target directory and set `NITROCOP_BIN` to avoid
@@ -151,7 +148,7 @@ On macOS or devcontainers, committing directly to main is acceptable.
      cp "${CARGO_TARGET_DIR}/release/nitrocop" "/tmp/nitrocop-${target_name}"
      export NITROCOP_BIN="/tmp/nitrocop-${target_name}"
      ```
-     All Python scripts (`check_cop.py`, `verify_cop_locations.py`, `corpus_smoke_test.py`,
+     All Python scripts (`check_cop.py`, `corpus_smoke_test.py`,
      `reduce_mismatch.py`) honor `NITROCOP_BIN` to find the binary. Copying to `/tmp/`
      prevents other agents' builds from overwriting it. Rebuild and re-copy after code
      changes (Phase 4 verification).
@@ -184,17 +181,18 @@ which repos are diverging.
 
 For each selected cop, investigate the FP/FN pattern:
 ```bash
-python3 scripts/investigate_cop.py Department/CopName --context --fp-only --limit 10
-python3 scripts/investigate_cop.py Department/CopName --context --fn-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fp-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fn-only --limit 10
 ```
 
-`investigate_cop.py` prefers embedded snippets from `corpus-results.json`. If that
-is insufficient and you need full local source files, clone only the relevant repos:
+`check_cop.py` prefers embedded snippets from `corpus-results.json`. If that
+is insufficient, fetch full source files directly from GitHub using repo info
+from `bench/corpus/manifest.jsonl`:
 ```bash
-python3 scripts/corpus_repo_map.py --clone Department/CopName
+gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
 ```
 
-**Synthetic-only cops** (zero corpus activity): If `investigate_cop.py` shows no results, the cop
+**Synthetic-only cops** (zero corpus activity): If `check_cop.py` shows no results, the cop
 only has data in the synthetic corpus. Investigate using:
 ```bash
 # Read synthetic results for the cop
@@ -217,7 +215,7 @@ to `/tmp/nitrocop-reduce/` — read them and include them in the teammate prompt
 
 Summarize: cop name, FP/FN counts, minimal repro(s), root cause hypothesis.
 
-**When no example locations are available** (investigate_cop.py shows counts but no
+**When no example locations are available** (check_cop.py shows counts but no
 file paths, and no corpus repos cloned): still dispatch teammates, but tell them
 upfront that examples are unavailable. For low-divergence cops (FP+FN ≤ 2), the
 FP/FN may be a corpus artifact — tell teammates to compare nitrocop vs vendor
@@ -281,10 +279,8 @@ if the prompt/examples require local corpus source context.
    extend the prior approach to avoid its documented failure mode.
 
 2. **Understand the FP/FN pattern** from the examples provided in your prompt.
-   If needed, read the actual source files from `vendor/corpus/<repo_id>/<path>` to see more context,
-   but only after cloning the targeted repos for this cop. Prefer:
-   `python3 scripts/corpus_repo_map.py --clone Department/CopName`
-   instead of fetching a full corpus checkout.
+   If needed, fetch source files from GitHub using repo info from `bench/corpus/manifest.jsonl`:
+   `gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d`
    **DO NOT run nitrocop or rubocop directly** — not on corpus repos, not on ad-hoc
    files in `/tmp/`, not anywhere outside the test fixtures. Running `nitrocop` on
    arbitrary paths fails ("No lockfile found") and wastes tokens. The ONLY ways to
@@ -294,13 +290,11 @@ if the prompt/examples require local corpus source context.
    - **Corpus validation**: `check_cop.py --rerun` for aggregate count regression on
      cops you modified; `check_cop.py --verbose` for untouched cops when the latest
      corpus oracle run is current.
-   - **Location validation**: `python3 scripts/verify_cop_locations.py Department/CopName`
-     for modified cops when the corpus oracle includes concrete FP/FN examples.
    - **Synthetic corpus**: `python3 bench/synthetic/run_synthetic.py --verbose` for
      synthetic-only cops.
    Never create test Ruby files outside the fixture directories.
 
-   **Bail-out rule:** If no example locations are available (investigate_cop.py shows
+   **Bail-out rule:** If no example locations are available (check_cop.py shows
    counts only, no file paths), no corpus repos are cloned locally, and the minimal
    repro examples in the prompt are insufficient to identify a concrete bug: stop
    investigating after analyzing the cop source + vendor RuboCop source. Compare the
@@ -396,8 +390,7 @@ if the prompt/examples require local corpus source context.
    ```
    **Corpus validation is the intermediate acceptance gate** for corpus-backed
    cops — unit tests passing is necessary but NOT sufficient. The goal is
-   `PASS: aggregate offense count matches RuboCop for this cop`, plus
-   `verify_cop_locations.py` when concrete oracle locations exist. `PASS: no
+   `PASS: aggregate offense count matches RuboCop for this cop`. `PASS: no
    new excess vs CI nitrocop baseline` alone is not enough — the cop may still
    have remaining mismatches. For synthetic-only cops, re-run the synthetic
    benchmark and inspect that cop's entry in
@@ -413,7 +406,7 @@ if the prompt/examples require local corpus source context.
    gh run view <run-id> --job <job-id> --log 2>&1 | grep -A 3 "FAIL:"
    ```
    This immediately names the regressed repo(s) — do NOT re-run `check_cop.py
-   --rerun --clone` locally to find a regression that CI already identified.
+   --rerun` locally to find a regression that CI already identified.
 
    If a fix increases FP count (even if unit tests pass), revert
    the code change but **add a detailed investigation comment** to the cop source file
@@ -456,7 +449,7 @@ if the prompt/examples require local corpus source context.
 8. After a CI corpus-report refresh, inspect the target row in `README.md` and
    `docs/corpus.md`:
    - If the row is still below 100%, go back to Phase 1 even if the modified
-     cops passed `check_cop.py --rerun` and `verify_cop_locations.py`.
+     cops passed `check_cop.py --rerun`.
    - If the row is 100% locally but Linux CI/corpus oracle is not yet green or
      disagrees, treat that as a parity bug and keep investigating. Do not
      declare the department/gem complete yet.

@@ -922,7 +922,23 @@ def _close_pr_no_changes(
             "--remove-label", "state:pr-open",
             "--add-label", "state:backlog",
         ])
-    _run_ok(["gh", "pr", "close", pr_url, "--comment", "Agent produced no changes.", "--delete-branch"])
+    # Post agent findings to the PR so they're visible without checking the
+    # linked issue or run log.
+    pr_findings = _read_agent_findings()
+    if pr_findings:
+        pr_body = (
+            "Agent produced no changes.\n\n"
+            "<details>\n"
+            "<summary>Agent findings (what was tried)</summary>\n\n"
+            f"```\n{pr_findings}\n```\n"
+            "</details>\n"
+        )
+        pr_comment_file = Path(str(_env_path("CLAIM_BODY_FILE")) + ".pr")
+        write_and_read(pr_comment_file, pr_body)
+        _run_ok(["gh", "pr", "comment", pr_url, "--body-file", str(pr_comment_file)])
+        _run_ok(["gh", "pr", "close", pr_url, "--delete-branch"])
+    else:
+        _run_ok(["gh", "pr", "close", pr_url, "--comment", "Agent produced no changes.", "--delete-branch"])
 
 
 def _close_pr_rejected(

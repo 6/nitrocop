@@ -15,15 +15,15 @@
 set -euo pipefail
 
 # Safety: block on devcontainers and macOS where disk space is limited.
-# Use scripts/corpus_repo_map.py --clone <Cop> for targeted clones instead.
+# Use check_cop.py --rerun --clone --sample N for targeted corpus checks instead.
 if [[ "$(uname -s)" == "Darwin" ]]; then
     echo "ERROR: clone_repos.sh is not intended for macOS (limited disk)." >&2
-    echo "Use: python3 scripts/corpus_repo_map.py --clone Department/CopName" >&2
+    echo "Use: python3 scripts/check_cop.py Department/CopName --rerun --clone --sample 15" >&2
     exit 1
 fi
 if [[ "${USER:-}" == "vscode" ]] && [[ -f /.dockerenv ]]; then
     echo "ERROR: clone_repos.sh is not intended for devcontainers (limited disk)." >&2
-    echo "Use: python3 scripts/corpus_repo_map.py --clone Department/CopName" >&2
+    echo "Use: python3 scripts/check_cop.py Department/CopName --rerun --clone --sample 15" >&2
     exit 1
 fi
 

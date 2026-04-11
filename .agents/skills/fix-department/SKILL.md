@@ -25,8 +25,7 @@ Final stop condition:
 Per-cop `check_cop.py --rerun` results are intermediate count-based gates only.
 They are necessary, but they are NOT sufficient to end `/fix-department`.
 When the corpus oracle has concrete FP/FN examples for a cop, use
-`verify_cop_locations.py` as the location-level check before treating that cop
-as done locally.
+`check_cop.py --rerun` to verify before treating that cop as done locally.
 Run fix work from a dedicated git worktree by default.
 
 ## Persistence
@@ -110,18 +109,12 @@ treated as a standing task across the thread.
      ```
    - Do **not** treat `vendor/corpus/` as mandatory bootstrap. The smoke test does not
      need it, and cloud environments should not prefetch the full corpus checkout.
-   - Only hydrate corpus repos on demand when a workflow step actually needs local
-     source files (`investigate_cop.py --context` fallback, `reduce_mismatch.py`,
-     `verify_cop_locations.py`):
+   - To inspect corpus source files, fetch them directly from GitHub using repo info
+     from `bench/corpus/manifest.jsonl` (no cloning needed):
      ```bash
-     python3 scripts/corpus_repo_map.py --clone Department/CopName
+     gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
      ```
-     This clones only the repos relevant to that cop into `vendor/corpus/`.
-   - If working in a separate worktree and the main checkout already has targeted
-     `vendor/corpus` data, symlink it into the worktree and keep that wiring
-     untracked/local-only.
-   - Missing vendor **rubocop** submodules are setup failures. Missing `vendor/corpus`
-     is not a failure unless the current investigation step needs local corpus files.
+   - Missing vendor **rubocop** submodules are setup failures.
 
 ### Phase 1: Plan Batch
 
@@ -147,17 +140,18 @@ which repos are diverging.
 
 Investigate each selected cop:
 ```bash
-python3 scripts/investigate_cop.py Department/CopName --context --fp-only --limit 10
-python3 scripts/investigate_cop.py Department/CopName --context --fn-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fp-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fn-only --limit 10
 ```
 
-`investigate_cop.py` prefers embedded snippets from `corpus-results.json`. If that
-is insufficient and you need full local source files, clone only the relevant repos:
+`check_cop.py` prefers embedded snippets from `corpus-results.json`. If that
+is insufficient, fetch full source files directly from GitHub using repo info
+from `bench/corpus/manifest.jsonl`:
 ```bash
-python3 scripts/corpus_repo_map.py --clone Department/CopName
+gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
 ```
 
-**Synthetic-only cops** (zero corpus activity): If `investigate_cop.py` shows no results, the cop
+**Synthetic-only cops** (zero corpus activity): If `check_cop.py` shows no results, the cop
 only has data in the synthetic corpus. Investigate using:
 ```bash
 # Read synthetic results for the cop
@@ -224,7 +218,7 @@ Read reduced repros from `/tmp/nitrocop-reduce/` and capture root-cause hypothes
      gh run view <run-id> --job <job-id> --log 2>&1 | grep -A 3 "FAIL:"
      ```
      This immediately names the regressed repo(s) — do NOT re-run
-     `check_cop.py --rerun --clone` locally to find a regression that CI
+     `check_cop.py --rerun` locally to find a regression that CI
      already identified.
    - If FP increases (even with passing tests), revert the code change.
    - Add a detailed investigation comment to the cop source:
@@ -307,7 +301,7 @@ do not write those files. Never patch that generated content directly.
 After a CI corpus-report refresh, inspect the target row in `README.md` and
 `docs/corpus.md`:
 - If the row is still below 100%, loop back to Phase 1 even if the modified cops
-  passed `check_cop.py --rerun` and `verify_cop_locations.py`.
+  passed `check_cop.py --rerun`.
 - If the row is 100% locally but Linux CI/corpus oracle is not yet green or
   disagrees, treat that as a parity bug and keep investigating. Do not declare
   the department/gem complete yet.
@@ -367,11 +361,8 @@ Do not leave retained progress only in a worktree branch.
 - New worktree bootstrap (run before reducers/tests/check-cop):
   - Initialize submodules: `git submodule update --init --recursive`
   - Ensure `bench/corpus/vendor/bundle/` exists for the active Ruby version before any corpus-backed validation or smoke runs.
-  - Do not clone the full corpus by default. Create/populate `vendor/corpus/` only when a step needs local corpus source files, preferably via:
-    `python3 scripts/corpus_repo_map.py --clone Department/CopName`
-  - If the main checkout already has targeted `vendor/corpus` data, symlink it into the worktree:
-    `ln -s /absolute/path/to/nitrocop/vendor/corpus vendor/corpus`
-  - Keep corpus wiring untracked and local-only (do not commit worktree-specific symlinks).
+  - To inspect corpus source files, fetch them from GitHub using `bench/corpus/manifest.jsonl`:
+    `gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d`
 - Parallel-agent activity is common; expect unrelated local changes in the working tree.
 - Do not revert or include unrelated files in your commit; stage only files for the cop(s) you are fixing.
 - Treat unrelated modified files as off-limits: do not edit them unless the user explicitly asks.
@@ -385,8 +376,6 @@ Do not leave retained progress only in a worktree branch.
     `cargo test --lib -- <cop_name_snake>`.
   - **Corpus validation**: `check_cop.py --rerun` for aggregate count regression on
     modified cops; `check_cop.py --verbose` (artifact mode) for untouched cops.
-  - **Location validation**: `python3 scripts/verify_cop_locations.py Department/CopName`
-    for modified cops when the corpus oracle includes concrete FP/FN examples.
   - **Synthetic corpus**: `python3 bench/synthetic/run_synthetic.py --verbose` for synthetic-only cops.
   Never create test Ruby files outside the fixture directories.
 - `docs/corpus.md` is autogenerated, and the conformance/corpus section in
@@ -395,9 +384,7 @@ Do not leave retained progress only in a worktree branch.
 - `cargo run --release --bin bench_nitrocop -- conform` updates
   `bench/conform.json` and `bench/results.md`; it does not regenerate
   the generated conformance section in `README.md` or `docs/corpus.md`.
-- `check_cop.py` is a count-only cop-level gate, not the completion gate.
-  When the corpus oracle has concrete FP/FN examples, also run
-  `verify_cop_locations.py` before treating a cop as done locally. Never declare
+- `check_cop.py` is a count-only cop-level gate, not the completion gate. Never declare
   `/fix-department` done while generated `README.md` / `docs/corpus.md` still
   show the target below 100%, or while Linux CI parity is still unconfirmed.
 - Use local corpus files under `vendor/corpus/` when available, but fetch them selectively rather than assuming a full local corpus checkout.

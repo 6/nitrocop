@@ -17,16 +17,6 @@ HELPERS = [
         "python3 scripts/dispatch_cops.py changed --base origin/main --head HEAD",
     ),
     (
-        "scripts/investigate_cop.py",
-        "inspect FP/FN examples from corpus oracle data",
-        "python3 scripts/investigate_cop.py Department/CopName --context",
-    ),
-    (
-        "scripts/verify_cop_locations.py",
-        "verify exact known oracle FP/FN locations (supports --style for variants)",
-        "python3 scripts/verify_cop_locations.py Department/CopName",
-    ),
-    (
         "scripts/corpus_smoke_test.py",
         "smoke-test a few pinned repos",
         "python3 scripts/corpus_smoke_test.py --binary target/release/nitrocop",

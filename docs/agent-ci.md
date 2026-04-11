@@ -36,11 +36,11 @@ These rules apply when `GITHUB_ACTIONS` is set and the workflow is driving the a
 Agent runs have a hard timeout. Plan your work to finish well within it — a partial fix that passes tests is better than an unfinished fix that times out with no commit.
 
 - **Do not rebuild binaries you already have.** The workflow pre-builds a release binary and pre-runs `check_cop.py` before the agent starts. The diagnosis packet already contains the corpus regression data — do not re-derive it from scratch.
-- **Do not build `origin/main` from source.** Use the pre-computed diagnosis packet or `investigate_cop.py` with the corpus artifact for baseline data.
+- **Do not build `origin/main` from source.** Use the pre-computed diagnosis packet or `check_cop.py` with the corpus artifact for baseline data.
 - **Do not run full corpus reruns as verification.** `check_cop.py --rerun --clone` against the full diverging-repo set takes 20+ minutes. Use targeted spot-checks on specific repos/files instead. The workflow runs the full gate after you exit.
 - **Minimize cargo release builds.** Use `cargo test --lib` (debug, incremental) for fast iteration. Budget for at most one release build after your code fix.
 - **Verify with RuboCop on specific patterns first.** Before writing code, confirm what RuboCop does on the exact pattern from the corpus example. Use `bundle exec rubocop --only Department/CopName /tmp/test.rb` (from `bench/corpus/`). This prevents fixing a "regression" that isn't actually a mismatch.
-- **Use `investigate_cop.py --context` to understand the pattern.** The context shows the enclosing code structure around each FP/FN, which usually reveals the exact condition you need to add.
+- **Use `check_cop.py --examples` to understand the pattern.** The examples show each FP/FN location with source context, revealing the exact condition you need to add.
 - **Don't run `check_cop.py --rerun --clone` more than once.** It takes 5-10 minutes. Use `cargo test --lib` and targeted `cargo run` on test files for iteration. Save the one corpus check for final validation.
 
 ## Helper Script Conventions
@@ -50,7 +50,7 @@ Agent runs have a hard timeout. Plan your work to finish well within it — a pa
 - Shared importable helpers live in `scripts/shared/`.
 - Use the stable top-level CLI paths shown in the prompt, for example:
   - `python3 scripts/check_cop.py Department/CopName --verbose --rerun --clone`
-  - `python3 scripts/investigate_cop.py Department/CopName --context`
+  - `python3 scripts/check_cop.py Department/CopName --examples`
   - `python3 scripts/dispatch_cops.py changed --base origin/main --head HEAD`
 
 ## Variant Style Testing
@@ -60,7 +60,6 @@ Many cops have configurable `EnforcedStyle` parameters. The CI gate tests all su
 - The task prompt's **Style Variant Divergence** section lists which variants diverge and by how much.
 - Add fixture tests for non-default styles using the `# nitrocop-config: EnforcedStyle: value` directive.
 - Spot-check a specific variant locally: `python3 scripts/check_cop.py Cop --rerun --clone --sample 5 --style EnforcedStyle=value`
-- Verify per-line variant locations: `python3 scripts/verify_cop_locations.py Cop --style EnforcedStyle=value`
 - The full CI gate runs `--check-variants` automatically, which tests all variant styles.
 - When the variant check fails, it shows which repos diverge with FP/FN locations (e.g., `repo_a(FP:file.rb:7) repo_b(FN:file.rb:33)`). Use these to inspect the exact file.
 - **Do not assume a default-config fix works for all variants.** Always check the variant section in the task prompt and test each diverging style.

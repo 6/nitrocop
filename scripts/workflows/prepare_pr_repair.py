@@ -599,7 +599,7 @@ def build_prompt(
         ])
         if corpus_path:
             lines.append(
-                f"python3 scripts/investigate_cop.py Department/CopName --input {corpus_path} --context"
+                f"python3 scripts/check_cop.py Department/CopName --input {corpus_path} --examples"
             )
             lines.append(
                 f"python3 scripts/check_cop.py Department/CopName --input {corpus_path} --verbose --rerun --clone"
