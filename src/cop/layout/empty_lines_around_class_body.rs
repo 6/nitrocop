@@ -4,6 +4,7 @@ use crate::cop::shared::util;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Location, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Mirrors RuboCop's `EmptyLinesAroundBody` mixin for classes and `class << self`.
 ///
@@ -15,6 +16,10 @@ use crate::parse::source::SourceFile;
 /// - matches `empty_lines_special`'s deferred scan exactly: skip comment lines
 ///   when searching upward, but only a literally empty line satisfies the
 ///   separator, so whitespace-only lines still offend
+/// - skips files RuboCop never reaches because its parser fatally rejects
+///   them, including non-UTF-8 sources that only declare `vim: fileencoding=`
+///   and non-UTF-8-declared regex literals that contain unmatched high-bit
+///   `\xNN` escape runs
 pub struct EmptyLinesAroundClassBody;
 
 impl Cop for EmptyLinesAroundClassBody {
@@ -39,6 +44,10 @@ impl Cop for EmptyLinesAroundClassBody {
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        if rubocop_treats_file_as_fatal_syntax_error(source, _parse_result) {
+            return;
+        }
+
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
         let (kw_offset, end_offset, body) = if let Some(class_node) = node.as_class_node() {
             // For multiline class declarations (class Foo <\n  Bar), use the
@@ -410,6 +419,191 @@ fn is_comment_line(line: &[u8]) -> bool {
         index += 1;
     }
     line.get(index) == Some(&b'#')
+}
+
+fn rubocop_treats_file_as_fatal_syntax_error(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> bool {
+    let bytes = source.as_bytes();
+
+    if std::str::from_utf8(bytes).is_err() && rubocop_declared_source_encoding(bytes).is_none() {
+        return true;
+    }
+
+    source_declares_non_utf8_encoding(bytes)
+        && file_contains_rubocop_fatal_high_bit_regex_escape(bytes, parse_result)
+}
+
+fn source_declares_non_utf8_encoding(bytes: &[u8]) -> bool {
+    rubocop_declared_source_encoding(bytes)
+        .is_some_and(|encoding| !matches!(encoding.as_str(), "utf-8" | "utf8"))
+}
+
+fn rubocop_declared_source_encoding(bytes: &[u8]) -> Option<String> {
+    let mut max_lines = 2;
+    for (index, line) in bytes.split(|&b| b == b'\n').take(3).enumerate() {
+        if index == 0 && line.starts_with(b"#!") {
+            max_lines = 3;
+            continue;
+        }
+        if index >= max_lines {
+            break;
+        }
+        if let Some(encoding) = parse_rubocop_source_encoding_comment(line) {
+            return Some(encoding);
+        }
+    }
+    None
+}
+
+fn parse_rubocop_source_encoding_comment(line: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(line);
+    let trimmed = line.trim_start_matches([' ', '\t', '\u{feff}']);
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let content = lower.strip_prefix('#')?.trim_start();
+
+    if let Some(emacs) = extract_emacs_magic_comment(content) {
+        for token in emacs.split(';') {
+            if let Some(encoding) = extract_encoding_value(token.trim()) {
+                return Some(encoding.to_string());
+            }
+        }
+        return None;
+    }
+
+    extract_encoding_value(content).map(str::to_string)
+}
+
+fn extract_emacs_magic_comment(content: &str) -> Option<&str> {
+    let start = content.find("-*-")?;
+    let rest = content.get(start + 3..)?;
+    let end = rest.rfind("-*-")?;
+    (end > 0).then_some(rest[..end].trim())
+}
+
+fn extract_encoding_value(content: &str) -> Option<&str> {
+    for key in ["encoding", "coding"] {
+        if let Some(rest) = content.strip_prefix(key) {
+            let rest = rest.trim_start();
+            let value = rest.strip_prefix(':')?.trim_start();
+            return take_encoding_token(value);
+        }
+    }
+    None
+}
+
+fn take_encoding_token(value: &str) -> Option<&str> {
+    let end = value
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (!ch.is_ascii_alphanumeric() && ch != '-' && ch != '_').then_some(idx)
+        })
+        .unwrap_or(value.len());
+    (end > 0).then_some(&value[..end])
+}
+
+fn file_contains_rubocop_fatal_high_bit_regex_escape(
+    bytes: &[u8],
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> bool {
+    let mut finder = HighBitRegexEscapeFinder {
+        bytes,
+        fatal: false,
+    };
+    finder.visit(&parse_result.node());
+    finder.fatal
+}
+
+struct HighBitRegexEscapeFinder<'a> {
+    bytes: &'a [u8],
+    fatal: bool,
+}
+
+impl ruby_prism::Visit<'_> for HighBitRegexEscapeFinder<'_> {
+    fn visit_regular_expression_node(&mut self, node: &ruby_prism::RegularExpressionNode<'_>) {
+        if self.fatal {
+            return;
+        }
+
+        let content =
+            &self.bytes[node.content_loc().start_offset()..node.content_loc().end_offset()];
+        if regex_has_fatal_high_bit_hex_escape(content) {
+            self.fatal = true;
+            return;
+        }
+
+        ruby_prism::visit_regular_expression_node(self, node);
+    }
+}
+
+fn regex_has_fatal_high_bit_hex_escape(content: &[u8]) -> bool {
+    let mut index = 0;
+    while index + 3 < content.len() {
+        let Some(run_len) = high_bit_hex_escape_run_length(content, index) else {
+            index += 1;
+            continue;
+        };
+
+        if run_len % 2 == 1 {
+            return true;
+        }
+        index += run_len * 4;
+    }
+
+    false
+}
+
+fn high_bit_hex_escape_run_length(content: &[u8], start: usize) -> Option<usize> {
+    let mut count = 0;
+    let mut index = start;
+
+    while index + 3 < content.len() {
+        if content[index] != b'\\'
+            || backslash_is_escaped(content, index)
+            || !matches!(content[index + 1], b'x' | b'X')
+        {
+            break;
+        }
+
+        let Some(high) = hex_nibble(content[index + 2]) else {
+            break;
+        };
+        let Some(low) = hex_nibble(content[index + 3]) else {
+            break;
+        };
+        if ((high << 4) | low) < 0x80 {
+            break;
+        }
+
+        count += 1;
+        index += 4;
+    }
+
+    (count > 0).then_some(count)
+}
+
+fn backslash_is_escaped(content: &[u8], index: usize) -> bool {
+    let mut backslashes = 0;
+    let mut cursor = index;
+    while cursor > 0 && content[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Check if the body is a "namespace" for `empty_lines_except_namespace` purposes.
@@ -863,6 +1057,60 @@ mod tests {
             diags.is_empty(),
             "empty_lines_special namespace should use no_empty_lines (no offenses), got: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn empty_lines_except_namespace_ignores_non_utf8_vim_encoding_files_rubocop_skips() {
+        let src = b"# vim: set fileencoding=euc-jp\nclass Foo\n  def bar\n    /(\xA3\xE1)(a)\\1\\2/i\n  end\nend\n";
+        let diags = run_cop_full_with_config(
+            &EmptyLinesAroundClassBody,
+            src,
+            style_config("empty_lines_except_namespace"),
+        );
+        assert!(
+            diags.is_empty(),
+            "vim fileencoding comments are ignored by RuboCop's parser, so this cop should skip the file: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn empty_lines_special_ignores_non_utf8_regex_escape_files_rubocop_skips() {
+        let src = b"# encoding:windows-1252\nclass Foo\n  def bar\n    /(\\xdf)/\n  end\nend\n";
+        let diags = run_cop_full_with_config(
+            &EmptyLinesAroundClassBody,
+            src,
+            style_config("empty_lines_special"),
+        );
+        assert!(
+            diags.is_empty(),
+            "high-bit regex escapes in non-UTF-8-declared files are fatal in RuboCop, so this cop should skip the file: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn empty_lines_except_namespace_still_flags_safe_non_utf8_declared_regex_files() {
+        let src = b"# encoding:euc-jp\nclass Foo\n  def bar\n    /\\xA2\\xA2/\n  end\nend\n";
+        let diags = run_cop_full_with_config(
+            &EmptyLinesAroundClassBody,
+            src,
+            style_config("empty_lines_except_namespace"),
+        );
+        assert_eq!(
+            diags.len(),
+            2,
+            "safe non-UTF-8 regex escapes should still be checked, got: {:?}",
+            diags
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("beginning")),
+            "should still report missing beginning blank line"
+        );
+        assert!(
+            diags.iter().any(|d| d.message.contains("end")),
+            "should still report missing ending blank line"
         );
     }
 }
