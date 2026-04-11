@@ -136,3 +136,29 @@ Hash[list.map { |k, v|
 Hash[info.map { |k, v|
   [k, v]
 }.compact]
+
+# Semantic: do-end in a keyword-hash value remains allowed
+render json: {
+  ingredients_with_errors: items.map do |ingredient|
+    ingredient.id
+  end
+}
+
+# Semantic: do-end in a modifier-condition context remains allowed
+loop do
+  next if sinks.find do |sink|
+    sink
+  end
+end
+
+# Semantic: braces in a super argument remain functional
+super(configuration_hash.transform_keys { transform_key(_1) })
+
+# AlwaysBraces: nested blocks in ignored lambda arguments stay suppressed
+register_placeholder :path, ->(resource) do
+  {
+    raw_value: resource.relative_path_basename_without_prefix.tap do |path|
+      path
+    end,
+  }
+end

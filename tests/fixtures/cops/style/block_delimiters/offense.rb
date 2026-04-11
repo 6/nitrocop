@@ -44,3 +44,13 @@ expect {
   subject.log("a")
   subject.debug("b")
 }.to output("a\nb\n").to_stdout
+
+# Explicit begin/rescue still treats the block as procedural
+begin
+  Timeout.timeout(20) {
+                      ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for multi-line blocks.
+    sleep 0.1 while !server.ready?
+  }
+rescue Exception => e
+  raised = true
+end

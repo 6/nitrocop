@@ -28,11 +28,22 @@ use std::collections::HashSet;
 ///
 /// ## Fix (2026-04-06): recursive hash/array traversal in rv marking
 ///
-/// `mark_rv_used_on_call` and `mark_rv_of_scope_on_node` now recursively traverse
-/// hash and array nodes to mark nested calls. Previously, a block inside a hash value
-/// argument (e.g., `foo(a: items.map { ... })`) had its inner calls not marked as
-/// having return values used, causing false positives in semantic style where functional
-/// blocks with braces were incorrectly flagged as procedural.
+/// `mark_rv_of_scope_on_node` now recursively traverses hash and array nodes so
+/// blocks nested inside pair values or array elements retain their functional-brace
+/// contexts. Later semantic fixes narrowed `mark_rv_used_on_call` back to direct
+/// call/parens contexts to match RuboCop's parent-based `return_value_used?`.
+///
+/// ## Fix (2026-04-11): semantic parent-context parity and ignored lambda hashes
+///
+/// Matched three remaining variant edge cases from the corpus:
+///
+/// - conditional predicates and hash values are `return_value_of_scope?`, not
+///   `return_value_used?`, so semantic style allows `do...end` there;
+/// - parenthesized chained receivers like `(items.map do ... end).compact` and
+///   calls nested inside `super(...)` arguments still count as rv-used;
+/// - explicit `begin/rescue` pre-rescue bodies are not scope-return positions,
+///   and ignored lambda bodies must recurse into hash/array literals to suppress
+///   nested blocks under `always_braces`.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -83,6 +94,7 @@ impl Cop for BlockDelimiters {
             functional_methods,
             allow_braces_on_procedural_one_liners: allow_braces_on_procedural,
             is_program_body: true,
+            begin_statements_without_scope_return: HashSet::new(),
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -118,6 +130,10 @@ struct BlockDelimitersVisitor<'a> {
     /// child gets rv_of_scope. We replicate this by only marking the
     /// last child of the program body when there are multiple statements.
     is_program_body: bool,
+    /// Statements nodes that belong to an explicit `begin` with `rescue`/`ensure`.
+    /// RuboCop treats the surrounding Begin/Rescue node as the parent, so the
+    /// pre-rescue body is not automatically in return-value-of-scope position.
+    begin_statements_without_scope_return: HashSet<usize>,
 }
 
 impl<'a> BlockDelimitersVisitor<'a> {
@@ -395,15 +411,8 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         // If this call's receiver is a CallNode with a block, that block is chained
         // and the receiver call's return value is used.
         if let Some(receiver) = node.receiver() {
-            if let Some(recv_call) = receiver.as_call_node() {
-                self.rv_used_calls.insert(call_node_key(&recv_call));
-                if let Some(block) = recv_call.block() {
-                    if let Some(block_node) = block.as_block_node() {
-                        self.chained_blocks
-                            .insert(block_node.opening_loc().start_offset());
-                    }
-                }
-            }
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+            mark_receiver_chained_blocks(&receiver, &mut self.chained_blocks);
             // SuperNode as receiver of a chain
             if let Some(super_node) = receiver.as_super_node() {
                 self.rv_used_calls
@@ -448,6 +457,11 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
     }
 
     fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'_>) {
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                mark_rv_used_on_call(&arg, &mut self.rv_used_calls);
+            }
+        }
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
                 let offset = block_node.opening_loc().start_offset();
@@ -487,24 +501,39 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 
     // --- Context tracking for semantic & braces_for_chaining styles ---
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'_>) {
+        if let Some(statements) = node.statements() {
+            if node.rescue_clause().is_some() || node.ensure_clause().is_some() {
+                self.begin_statements_without_scope_return
+                    .insert(statements.location().start_offset());
+            }
+        }
+        ruby_prism::visit_begin_node(self, node);
+    }
+
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'_>) {
         // Mark the last statement's call as rv_of_scope (return value of scope).
         // This matches RuboCop's `parent.children.last == node` check.
         let body: Vec<_> = node.body().iter().collect();
-        if self.is_program_body {
-            // Program body: only mark if multiple statements (matches Parser's
-            // begin wrapper — single-statement files have no begin, so block.parent
-            // is nil and rv_of_scope is false)
-            self.is_program_body = false;
-            if body.len() > 1 {
+        let skip_scope_return = self
+            .begin_statements_without_scope_return
+            .contains(&node.location().start_offset());
+        if !skip_scope_return {
+            if self.is_program_body {
+                // Program body: only mark if multiple statements (matches Parser's
+                // begin wrapper — single-statement files have no begin, so block.parent
+                // is nil and rv_of_scope is false)
+                self.is_program_body = false;
+                if body.len() > 1 {
+                    if let Some(last) = body.last() {
+                        mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
+                    }
+                }
+            } else {
+                // Non-program body (def, block, class, etc.): always mark last child
                 if let Some(last) = body.last() {
                     mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
                 }
-            }
-        } else {
-            // Non-program body (def, block, class, etc.): always mark last child
-            if let Some(last) = body.last() {
-                mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
             }
         }
         ruby_prism::visit_statements_node(self, node);
@@ -718,23 +747,22 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 
     // Conditional and logical contexts mark contents as rv_of_scope
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'_>) {
-        // Block inside if/unless predicate: rv_used (it's used as a condition)
-        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        mark_rv_of_scope_on_node(&node.predicate(), &mut self.rv_of_scope_calls);
         ruby_prism::visit_if_node(self, node);
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'_>) {
-        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        mark_rv_of_scope_on_node(&node.predicate(), &mut self.rv_of_scope_calls);
         ruby_prism::visit_unless_node(self, node);
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'_>) {
-        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        mark_rv_of_scope_on_node(&node.predicate(), &mut self.rv_of_scope_calls);
         ruby_prism::visit_while_node(self, node);
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'_>) {
-        mark_rv_used_on_call(&node.predicate(), &mut self.rv_used_calls);
+        mark_rv_of_scope_on_node(&node.predicate(), &mut self.rv_of_scope_calls);
         ruby_prism::visit_until_node(self, node);
     }
 
@@ -752,23 +780,49 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
     }
 
     fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'_>) {
-        // Elements of array literals have their return values used
+        // Elements of array literals are in `return_value_of_scope?` position.
         for element in node.elements().iter() {
             mark_rv_of_scope_on_node(&element, &mut self.rv_of_scope_calls);
         }
         ruby_prism::visit_array_node(self, node);
     }
 
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'_>) {
+        for element in node.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_of_scope_on_node(&assoc.value(), &mut self.rv_of_scope_calls);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_of_scope_on_node(&value, &mut self.rv_of_scope_calls);
+                }
+            }
+        }
+        ruby_prism::visit_hash_node(self, node);
+    }
+
+    fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'_>) {
+        for element in node.elements().iter() {
+            if let Some(assoc) = element.as_assoc_node() {
+                mark_rv_of_scope_on_node(&assoc.value(), &mut self.rv_of_scope_calls);
+            } else if let Some(splat) = element.as_assoc_splat_node() {
+                if let Some(value) = splat.value() {
+                    mark_rv_of_scope_on_node(&value, &mut self.rv_of_scope_calls);
+                }
+            }
+        }
+        ruby_prism::visit_keyword_hash_node(self, node);
+    }
+
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'_>) {
         if let Some(predicate) = node.predicate() {
-            mark_rv_used_on_call(&predicate, &mut self.rv_used_calls);
+            mark_rv_of_scope_on_node(&predicate, &mut self.rv_of_scope_calls);
         }
         ruby_prism::visit_case_node(self, node);
     }
 
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'_>) {
         if let Some(predicate) = node.predicate() {
-            mark_rv_used_on_call(&predicate, &mut self.rv_used_calls);
+            mark_rv_of_scope_on_node(&predicate, &mut self.rv_of_scope_calls);
         }
         ruby_prism::visit_case_match_node(self, node);
     }
@@ -807,6 +861,24 @@ fn call_node_key(call: &ruby_prism::CallNode<'_>) -> usize {
         .map_or_else(|| call.location().start_offset(), |loc| loc.start_offset())
 }
 
+fn mark_receiver_chained_blocks(node: &ruby_prism::Node<'_>, chained_blocks: &mut HashSet<usize>) {
+    if let Some(call) = node.as_call_node() {
+        if let Some(block) = call.block() {
+            if let Some(block_node) = block.as_block_node() {
+                chained_blocks.insert(block_node.opening_loc().start_offset());
+            }
+        }
+    } else if let Some(parens) = node.as_parentheses_node() {
+        if let Some(body) = parens.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                if let Some(last) = stmts.body().iter().last() {
+                    mark_receiver_chained_blocks(&last, chained_blocks);
+                }
+            }
+        }
+    }
+}
+
 fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize>) {
     if let Some(call) = node.as_call_node() {
         rv_used.insert(call_node_key(&call));
@@ -820,33 +892,6 @@ fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize
             if let Some(stmts) = body.as_statements_node() {
                 for stmt in stmts.body().iter() {
                     mark_rv_used_on_call(&stmt, rv_used);
-                }
-            }
-        }
-    } else if let Some(hash) = node.as_hash_node() {
-        // Recursively mark calls in hash values: `{ k: map { ... } }` → rv_used
-        for element in hash.elements().iter() {
-            if let Some(assoc) = element.as_assoc_node() {
-                mark_rv_used_on_call(&assoc.value(), rv_used);
-            } else if let Some(splat) = element.as_assoc_splat_node() {
-                if let Some(value) = splat.value() {
-                    mark_rv_used_on_call(&value, rv_used);
-                }
-            }
-        }
-    } else if let Some(arr) = node.as_array_node() {
-        // Recursively mark calls in array elements
-        for element in arr.elements().iter() {
-            mark_rv_used_on_call(&element, rv_used);
-        }
-    } else if let Some(kwh) = node.as_keyword_hash_node() {
-        // Recursively mark calls in keyword hash values
-        for element in kwh.elements().iter() {
-            if let Some(assoc) = element.as_assoc_node() {
-                mark_rv_used_on_call(&assoc.value(), rv_used);
-            } else if let Some(splat) = element.as_assoc_splat_node() {
-                if let Some(value) = splat.value() {
-                    mark_rv_used_on_call(&value, rv_used);
                 }
             }
         }
@@ -1045,6 +1090,76 @@ fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut H
     if let Some(stmts) = node.as_statements_node() {
         for stmt in stmts.body().iter() {
             collect_ignored_blocks_from_body(&stmt, ignored);
+        }
+        return;
+    }
+
+    if let Some(hash) = node.as_hash_node() {
+        for element in hash.elements().iter() {
+            collect_ignored_blocks_from_body(&element, ignored);
+        }
+        return;
+    }
+
+    if let Some(kwh) = node.as_keyword_hash_node() {
+        for element in kwh.elements().iter() {
+            collect_ignored_blocks_from_body(&element, ignored);
+        }
+        return;
+    }
+
+    if let Some(assoc) = node.as_assoc_node() {
+        collect_ignored_blocks_from_body(&assoc.value(), ignored);
+        return;
+    }
+
+    if let Some(splat) = node.as_assoc_splat_node() {
+        if let Some(value) = splat.value() {
+            collect_ignored_blocks_from_body(&value, ignored);
+        }
+        return;
+    }
+
+    if let Some(arr) = node.as_array_node() {
+        for element in arr.elements().iter() {
+            collect_ignored_blocks_from_body(&element, ignored);
+        }
+        return;
+    }
+
+    if let Some(parens) = node.as_parentheses_node() {
+        if let Some(body) = parens.body() {
+            collect_ignored_blocks_from_body(&body, ignored);
+        }
+        return;
+    }
+
+    if let Some(begin) = node.as_begin_node() {
+        if let Some(stmts) = begin.statements() {
+            for stmt in stmts.body().iter() {
+                collect_ignored_blocks_from_body(&stmt, ignored);
+            }
+        }
+        if let Some(rescue_clause) = begin.rescue_clause() {
+            collect_ignored_blocks_from_body(&rescue_clause.as_node(), ignored);
+        }
+        if let Some(else_clause) = begin.else_clause() {
+            collect_ignored_blocks_from_body(&else_clause.as_node(), ignored);
+        }
+        if let Some(ensure_clause) = begin.ensure_clause() {
+            collect_ignored_blocks_from_body(&ensure_clause.as_node(), ignored);
+        }
+        return;
+    }
+
+    if let Some(rescue_node) = node.as_rescue_node() {
+        if let Some(stmts) = rescue_node.statements() {
+            for stmt in stmts.body().iter() {
+                collect_ignored_blocks_from_body(&stmt, ignored);
+            }
+        }
+        if let Some(subsequent) = rescue_node.subsequent() {
+            collect_ignored_blocks_from_body(&subsequent.as_node(), ignored);
         }
         return;
     }
@@ -1754,6 +1869,39 @@ mod tests {
             diags.is_empty(),
             "braces in compound assignment should be functional: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn semantic_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &BlockDelimiters,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/block_delimiters/semantic_offense.rb"
+            ),
+            config_with_style("semantic"),
+        );
+    }
+
+    #[test]
+    fn semantic_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &BlockDelimiters,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/block_delimiters/semantic_no_offense.rb"
+            ),
+            config_with_style("semantic"),
+        );
+    }
+
+    #[test]
+    fn always_braces_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &BlockDelimiters,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/block_delimiters/always_braces_no_offense.rb"
+            ),
+            config_with_style("always_braces"),
         );
     }
 }
