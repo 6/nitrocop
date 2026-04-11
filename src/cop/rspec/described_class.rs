@@ -88,6 +88,16 @@ use ruby_prism::Visit;
 /// and `described_class.class_exec do ... end` were incorrectly flagged even though
 /// RuboCop stops recursion at the enclosing block. Fixed by applying the same
 /// `in_scope_change` guard to explicit-style `described_class` sends.
+///
+/// ## Variant investigation (EnforcedStyle: explicit, 1646 FP, 2026-04-11)
+///
+/// **`described_class::CONSTANT` paths flagged the inner `described_class` call.**
+/// RuboCop's `allowed?` check (`node.const_type? && only_static_constants?`) stops
+/// recursion at const nodes regardless of enforced style. Our `visit_constant_path_node`
+/// only applied the `only_static_constants` guard inside the `described_class` style
+/// branch, so in explicit style it recursed into `described_class::FOO` and flagged
+/// the inner `described_class` send. Fixed by moving the `only_static_constants`
+/// recursion guard outside the style-specific block.
 pub struct DescribedClass;
 
 impl Cop for DescribedClass {
@@ -594,14 +604,15 @@ impl<'pr> Visit<'pr> for DescribedClassVisitor<'_> {
                 // Don't recurse — the constant path matched as a whole
                 return;
             }
+        }
 
-            // OnlyStaticConstants: true — don't recurse into children of constant paths.
-            // This prevents flagging `MyClass` in `MyClass::FOO` or `MyClass::Subclass`.
-            // OnlyStaticConstants: false — recurse to check the parent part
-            // (e.g., flag `MyClass` in `MyClass::FOO`).
-            if self.only_static_constants {
-                return;
-            }
+        // OnlyStaticConstants: true — don't recurse into children of constant paths.
+        // In described_class style, prevents flagging `MyClass` in `MyClass::FOO`.
+        // In explicit style, prevents flagging `described_class` in `described_class::FOO`.
+        // Matches RuboCop's `allowed?` check which stops recursion at const nodes
+        // regardless of enforced style.
+        if self.only_static_constants {
+            return;
         }
 
         ruby_prism::visit_constant_path_node(self, node);
