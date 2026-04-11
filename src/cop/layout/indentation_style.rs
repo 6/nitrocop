@@ -73,6 +73,31 @@ use ruby_prism::Visit;
 ///    range_end` check fails.
 ///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
 ///    switched `heredoc_range_end()` to use it.
+///
+/// ## Corpus investigation (2026-04-11, tabs variant: FP=19, FN=10)
+///
+/// Three narrow gaps remained after the earlier tabs-variant fixes:
+///
+/// 1. **Nested heredoc delimiters inside interpolation**: RuboCop skips inner
+///    `RUBY`/`MD`/`EOI` closing delimiters when they appear inside `#{...}` of an
+///    enclosing heredoc, but still flags the enclosing heredoc's own closing
+///    delimiter. Prism exposes only the token offsets, so this cop now skips
+///    lines whose first non-whitespace byte lives inside
+///    `CodeMap::is_heredoc_interpolation()`, and detects closing delimiters from
+///    the first non-whitespace byte so space-indented outer `<<~` terminators are
+///    still checked.
+///
+/// 2. **Dynamic symbol literals**: RuboCop's `string_literal_ranges` ignores
+///    `:sym`/`:dsym`, so multiline quoted symbols are checked like normal code.
+///    nitrocop was still skipping them via `CodeMap`'s general string ranges.
+///    Fix: track symbol ranges separately and let this cop opt out of skipping
+///    them, the same way it already does for regexes and xstrings.
+///
+/// 3. **Doc-comment directive examples**: RuboCop suppresses the specific line
+///    `#   # rubocop:disable all` in docs/examples, but does not treat it as a
+///    block disable. nitrocop's shared directive parser discarded that nested
+///    form entirely, so this cop still reported it under `EnforcedStyle: tabs`.
+///    Fix: parse nested comment directives as line-local disables.
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {
@@ -108,13 +133,31 @@ impl Cop for IndentationStyle {
                 .iter()
                 .take_while(|&&b| b == b' ' || b == b'\t')
                 .count();
-            let is_heredoc_closing = is_heredoc_closing_delimiter(line, code_map, line_start);
+            let content_offset = line_start + indent_end;
+            let first_non_whitespace_in_heredoc_interpolation =
+                indent_end < line.len() && code_map.is_heredoc_interpolation(content_offset);
+            let is_heredoc_closing =
+                is_heredoc_closing_delimiter(line, code_map, line_start, content_offset);
+            let is_nested_heredoc_closing = is_heredoc_closing
+                && indent_end < line.len()
+                && code_map.heredoc_depth(content_offset) > 1;
+            let is_checkable_heredoc_closing = is_heredoc_closing && !is_nested_heredoc_closing;
             let in_interpolated_string = indent_end > 0
                 && range_contained_in_any(
                     &interpolated_string_ranges,
                     line_start,
                     line_start + indent_end,
                 );
+            let first_non_whitespace_in_regex =
+                indent_end < line.len() && code_map.is_regex(content_offset);
+            let first_non_whitespace_in_symbol =
+                indent_end < line.len() && code_map.is_symbol(content_offset);
+            let first_non_whitespace_in_xstring =
+                indent_end < line.len() && code_map.is_xstring(content_offset);
+
+            if first_non_whitespace_in_heredoc_interpolation {
+                continue;
+            }
 
             // Skip lines whose indentation starts in a string/heredoc region.
             // RuboCop checks indentation in comments (including =begin/=end blocks)
@@ -126,10 +169,16 @@ impl Cop for IndentationStyle {
             // string_literal_ranges only covers :str/:dstr nodes, not :regexp.
             // Exception 3: xstring (backtick) literals are NOT skipped. RuboCop's
             // string_literal_ranges only covers :str/:dstr, not :xstr.
+            // Exception 4: symbol literals are NOT skipped. RuboCop's
+            // string_literal_ranges only covers :str/:dstr, not :sym/:dsym.
             if (!code_map.is_not_string(line_start) || in_interpolated_string)
                 && !code_map.is_regex(line_start)
+                && !first_non_whitespace_in_regex
+                && !code_map.is_symbol(line_start)
+                && !first_non_whitespace_in_symbol
                 && !code_map.is_xstring(line_start)
-                && !is_heredoc_closing
+                && !first_non_whitespace_in_xstring
+                && !is_checkable_heredoc_closing
             {
                 continue;
             }
@@ -140,10 +189,11 @@ impl Cop for IndentationStyle {
             // byte is inside a str/dstr heredoc body (not regex or xstring).
             if indent_end > 0
                 && indent_end < line.len()
-                && !is_heredoc_closing
-                && code_map.is_heredoc(line_start + indent_end)
-                && !code_map.is_regex(line_start + indent_end)
-                && !code_map.is_xstring(line_start + indent_end)
+                && !is_checkable_heredoc_closing
+                && code_map.is_heredoc(content_offset)
+                && !code_map.is_regex(content_offset)
+                && !code_map.is_symbol(content_offset)
+                && !code_map.is_xstring(content_offset)
             {
                 continue;
             }
@@ -160,8 +210,12 @@ impl Cop for IndentationStyle {
                     // the CodeMap.
                     if code_map.is_not_string(tab_offset)
                         || code_map.is_regex(tab_offset)
+                        || first_non_whitespace_in_regex
+                        || code_map.is_symbol(tab_offset)
+                        || first_non_whitespace_in_symbol
                         || code_map.is_xstring(tab_offset)
-                        || is_heredoc_closing
+                        || first_non_whitespace_in_xstring
+                        || is_checkable_heredoc_closing
                     {
                         let mut diag = self.diagnostic(
                             source,
@@ -198,8 +252,12 @@ impl Cop for IndentationStyle {
                     let space_offset = line_start + space_col;
                     if code_map.is_not_string(space_offset)
                         || code_map.is_regex(space_offset)
+                        || first_non_whitespace_in_regex
+                        || code_map.is_symbol(space_offset)
+                        || first_non_whitespace_in_symbol
                         || code_map.is_xstring(space_offset)
-                        || is_heredoc_closing
+                        || first_non_whitespace_in_xstring
+                        || is_checkable_heredoc_closing
                     {
                         let mut diag = self.diagnostic(
                             source,
@@ -273,11 +331,23 @@ fn range_contained_in_any(ranges: &[(usize, usize)], start: usize, end: usize) -
 ///
 /// In Parser gem, the closing delimiter is a `:tSTRING_END` token and is NOT
 /// included in `string_literal_ranges`, so RuboCop checks its indentation.
-fn is_heredoc_closing_delimiter(line: &[u8], code_map: &CodeMap, line_start: usize) -> bool {
-    // Must be inside a heredoc range
-    let range_end = match code_map.heredoc_range_end(line_start) {
-        Some(end) => end,
-        None => return false,
+fn is_heredoc_closing_delimiter(
+    line: &[u8],
+    code_map: &CodeMap,
+    line_start: usize,
+    content_offset: usize,
+) -> bool {
+    // For `<<~` heredocs, Prism may place the range start at the first
+    // non-whitespace byte of the line rather than the visual line start.
+    let range_end = code_map.heredoc_range_end(line_start).or_else(|| {
+        if content_offset < line_start + line.len() {
+            code_map.heredoc_range_end(content_offset)
+        } else {
+            None
+        }
+    });
+    let Some(range_end) = range_end else {
+        return false;
     };
 
     // The closing delimiter line is the last line in the heredoc range.

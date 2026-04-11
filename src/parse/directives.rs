@@ -253,7 +253,7 @@ impl DisabledRanges {
             let (line, col) = source.offset_to_line_col(loc.start_offset());
 
             // Determine if inline: check if there's non-whitespace before the comment
-            let is_inline = if line >= 1 && line <= lines.len() {
+            let mut is_inline = if line >= 1 && line <= lines.len() {
                 let line_bytes = lines[line - 1];
                 let before_comment = &line_bytes[..col.min(line_bytes.len())];
                 before_comment.iter().any(|b| !b.is_ascii_whitespace())
@@ -261,17 +261,17 @@ impl DisabledRanges {
                 false
             };
 
-            // Reject YARD doc nested comments like `#   # rubocop:disable all`
-            // where Prism reports the entire line as one comment token.
-            // The text before the directive match is only `#` + whitespace.
-            // Only reject on standalone comment lines — inline comments with
-            // double-# (e.g., `rescue Exception # # rubocop:disable Cop`) are
-            // legitimate directives.
+            // RuboCop treats nested comment examples like
+            // `#   # rubocop:disable all` as line-local disables for that same
+            // comment line, not as block directives for following lines.
+            // Prism exposes the whole line as one comment token, so detect that
+            // shape from the prefix before the directive match and downgrade it
+            // to inline semantics.
             let match_start = caps.get(0).unwrap().start();
             if match_start > 0 && !is_inline {
                 let prefix = &comment_str[..match_start];
                 if prefix.bytes().all(|b| b == b'#' || b == b' ' || b == b'\t') {
-                    continue;
+                    is_inline = true;
                 }
             }
 
@@ -1218,13 +1218,18 @@ mod tests {
     }
 
     #[test]
-    fn yard_nested_comment_not_parsed_as_directive() {
-        // YARD doc examples: `#   # rubocop:disable all` should NOT be a real directive
+    fn yard_nested_comment_treated_as_inline_directive() {
+        // YARD doc examples suppress their own line, but do not create a block
+        // disable for following lines.
         let src = "# @example\n#   # rubocop:disable Layout/LineLength\n#   long_line = true\n#   # rubocop:enable Layout/LineLength\nx = 1\n";
         let dr = disabled_ranges(src);
         assert!(
-            !dr.is_disabled("Layout/LineLength", 5),
-            "YARD nested comment should not create a real disable range"
+            dr.is_disabled("Layout/LineLength", 2),
+            "YARD nested comment should suppress its own line"
+        );
+        assert!(
+            !dr.is_disabled("Layout/LineLength", 3),
+            "YARD nested comment should not create a block disable range"
         );
     }
 

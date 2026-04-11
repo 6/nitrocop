@@ -17,6 +17,10 @@ pub struct CodeMap {
     /// Sorted, non-overlapping (start, end) byte ranges of regex literal content.
     /// Used by cops that need to skip content inside regex literals specifically.
     regex_ranges: Vec<(usize, usize)>,
+    /// Sorted, non-overlapping (start, end) byte ranges of symbol literal content.
+    /// RuboCop's `Layout/IndentationStyle` excludes `:sym`/`:dsym` from
+    /// `string_literal_ranges`, so that cop needs to detect them separately.
+    symbol_ranges: Vec<(usize, usize)>,
     /// Sorted, non-overlapping (start, end) byte ranges of xstring (backtick)
     /// literal content. Used by cops like Layout/IndentationStyle that need to
     /// NOT skip xstring content (RuboCop's string_literal_ranges excludes xstr).
@@ -45,6 +49,7 @@ impl CodeMap {
         let mut string_ranges = Vec::new();
         let mut heredoc_ranges = Vec::new();
         let mut regex_ranges = Vec::new();
+        let mut symbol_ranges = Vec::new();
         let mut xstring_ranges = Vec::new();
         let mut heredoc_interpolation_ranges = Vec::new();
 
@@ -53,6 +58,7 @@ impl CodeMap {
             ranges: &mut string_ranges,
             heredoc_ranges: &mut heredoc_ranges,
             regex_ranges: &mut regex_ranges,
+            symbol_ranges: &mut symbol_ranges,
             xstring_ranges: &mut xstring_ranges,
             heredoc_interpolation_ranges: &mut heredoc_interpolation_ranges,
         };
@@ -103,6 +109,10 @@ impl CodeMap {
         regex_ranges.sort_unstable();
         let regex_ranges = merge_ranges(regex_ranges);
 
+        // Sort and merge symbol ranges
+        symbol_ranges.sort_unstable();
+        let symbol_ranges = merge_ranges(symbol_ranges);
+
         // Sort and merge xstring ranges
         xstring_ranges.sort_unstable();
         let xstring_ranges = merge_ranges(xstring_ranges);
@@ -120,6 +130,7 @@ impl CodeMap {
             ranges,
             string_ranges,
             heredoc_ranges,
+            symbol_ranges,
             xstring_ranges,
             raw_heredoc_ranges,
             regex_ranges,
@@ -151,6 +162,11 @@ impl CodeMap {
         Self::in_ranges(&self.regex_ranges, offset)
     }
 
+    /// Returns true if the given byte offset is inside a symbol literal.
+    pub fn is_symbol(&self, offset: usize) -> bool {
+        Self::in_ranges(&self.symbol_ranges, offset)
+    }
+
     /// Returns true if the given byte offset is inside an xstring (backtick)
     /// literal. RuboCop's `string_literal_ranges` excludes `:xstr` nodes, so
     /// cops that mirror RuboCop's skip logic need this to avoid false negatives.
@@ -162,20 +178,27 @@ impl CodeMap {
     /// if the offset is not inside a heredoc range.
     /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
     /// heredocs, where adjacent ranges would otherwise merge and lose internal
-    /// boundaries.
+    /// boundaries. Nested heredocs overlap in this raw list, so we cannot use a
+    /// binary search here; instead, choose the innermost containing range.
     pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
         self.raw_heredoc_ranges
-            .binary_search_by(|&(start, end)| {
-                if offset < start {
-                    std::cmp::Ordering::Greater
-                } else if offset >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .map(|idx| self.raw_heredoc_ranges[idx].1)
+            .iter()
+            .filter(|&&(start, end)| offset >= start && offset < end)
+            .min_by_key(|&&(start, end)| end - start)
+            .map(|&(_start, end)| end)
+    }
+
+    /// Count how many raw heredoc ranges contain `offset`.
+    ///
+    /// Nested heredocs can overlap in the raw range list even though merged
+    /// heredoc ranges flatten that structure away. Layout/IndentationStyle uses
+    /// this to distinguish an inner closing delimiter nested inside an enclosing
+    /// heredoc from the outermost closing delimiter, which RuboCop still checks.
+    pub fn heredoc_depth(&self, offset: usize) -> usize {
+        self.raw_heredoc_ranges
+            .iter()
+            .filter(|&&(start, end)| offset >= start && offset < end)
+            .count()
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation
@@ -212,6 +235,7 @@ struct NonCodeCollector<'a> {
     ranges: &'a mut Vec<(usize, usize)>,
     heredoc_ranges: &'a mut Vec<(usize, usize)>,
     regex_ranges: &'a mut Vec<(usize, usize)>,
+    symbol_ranges: &'a mut Vec<(usize, usize)>,
     xstring_ranges: &'a mut Vec<(usize, usize)>,
     heredoc_interpolation_ranges: &'a mut Vec<(usize, usize)>,
 }
@@ -329,6 +353,8 @@ impl NonCodeCollector<'_> {
             ruby_prism::Node::SymbolNode { .. } => {
                 let loc = node.location();
                 self.ranges.push((loc.start_offset(), loc.end_offset()));
+                self.symbol_ranges
+                    .push((loc.start_offset(), loc.end_offset()));
             }
             // For interpolated regex/xstring/symbol, mark only non-interpolated parts
             ruby_prism::Node::InterpolatedRegularExpressionNode { .. } => {
@@ -373,15 +399,21 @@ impl NonCodeCollector<'_> {
                 let isn = node.as_interpolated_symbol_node().unwrap();
                 if let Some(open) = isn.opening_loc() {
                     self.ranges.push((open.start_offset(), open.end_offset()));
+                    self.symbol_ranges
+                        .push((open.start_offset(), open.end_offset()));
                 }
                 for part in isn.parts().iter() {
                     if part.as_embedded_statements_node().is_none() {
                         let ploc = part.location();
                         self.ranges.push((ploc.start_offset(), ploc.end_offset()));
+                        self.symbol_ranges
+                            .push((ploc.start_offset(), ploc.end_offset()));
                     }
                 }
                 if let Some(close) = isn.closing_loc() {
                     self.ranges.push((close.start_offset(), close.end_offset()));
+                    self.symbol_ranges
+                        .push((close.start_offset(), close.end_offset()));
                 }
             }
             _ => {}

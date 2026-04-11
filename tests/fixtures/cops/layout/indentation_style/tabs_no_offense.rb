@@ -19,3 +19,10 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Nested heredoc closing delimiters inside heredoc interpolation should not be flagged
+x = <<~OUTER
+  #{foo(<<~INNER)}
+    body
+  INNER
+OUTER
