@@ -146,6 +146,10 @@ pub struct CopFilterSet {
     /// For other configs (e.g., `baseline_rubocop.yml`): current working directory.
     /// Used to relativize absolute file paths before glob matching.
     base_dir: Option<PathBuf>,
+    /// Root of the scanned target repo/directory, if one was provided on the CLI.
+    /// For external configs, plugin cops like `Rails/*` still need `db/**/*.rb`
+    /// matched relative to the inspected repo root rather than the caller's CWD.
+    scan_root: Option<PathBuf>,
     /// Sub-directories containing their own `.rubocop.yml` files.
     /// Sorted deepest-first so `nearest_config_dir` finds the most specific match.
     /// RuboCop resolves Include/Exclude patterns relative to the nearest config
@@ -311,27 +315,20 @@ impl CopFilterSet {
             }
             path.strip_prefix(bd).ok()
         });
+        let rel_to_scan_root = self
+            .scan_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok());
 
         // Strip `./` prefix for matching: file discovery produces `./test/foo.rb`
         // but cop Exclude patterns use `test/**/*`. Without stripping, patterns
         // that don't start with `./` won't match.
         let stripped = path.strip_prefix("./").ok();
 
-        // NOTE: No scan-root relativization for Include patterns.
-        //
-        // RuboCop resolves per-cop Include patterns against base_dir only
-        // (CWD for non-.rubocop configs, config dir for .rubocop configs).
-        // It does NOT have a scan-root fallback. Patterns that don't start
-        // with `**` (e.g., `db/**/*.rb`, `Rakefile`) only match when
-        // base_dir equals the repo root — which requires CWD to be the
-        // project directory for non-.rubocop configs.
-        //
-        // In normal usage (CWD = project root), all Include patterns match
-        // via rel_path (config_dir) or rel_to_base (CWD). Adding scan_roots
-        // would cause nitrocop to fire on files that RuboCop skips when both
-        // tools run from outside the repo (e.g., corpus oracle), creating
-        // false positives for Rake/* cops (`Rakefile`), Rails/Output
-        // (`db/**/*.rb`), and similar non-`**`-prefixed Include patterns.
+        // Match against the explicit scan root when one was provided by the CLI.
+        // This fixes external baseline configs that lint an out-of-tree repo:
+        // plugin defaults like `db/**/*.rb` must still be relative to the repo
+        // being scanned, not just the config file's base_dir or the process CWD.
 
         // Include: file must match on at least one path form.
         // This supports both absolute patterns (/tmp/test/db/**) and
@@ -339,6 +336,7 @@ impl CopFilterSet {
         let included = filter.is_included(path)
             || rel_path.is_some_and(|rel| filter.is_included(rel))
             || rel_to_base.is_some_and(|rel| filter.is_included(rel))
+            || rel_to_scan_root.is_some_and(|rel| filter.is_included(rel))
             || stripped.is_some_and(|s| filter.is_included(s));
         if !included {
             return false;
@@ -350,6 +348,7 @@ impl CopFilterSet {
         let excluded = filter.is_excluded(path)
             || rel_path.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
+            || rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel))
             || stripped.is_some_and(|s| filter.is_excluded(s));
         if excluded {
             return false;
@@ -383,12 +382,17 @@ impl CopFilterSet {
             .as_deref()
             .filter(|bd| self.config_dir.as_deref() != Some(*bd))
             .and_then(|bd| path.strip_prefix(bd).ok());
+        let rel_to_scan_root = self
+            .scan_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok());
 
         let stripped = path.strip_prefix("./").ok();
         filter.is_excluded(path)
             || rel_to_nearest.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_root.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
+            || rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel))
             || stripped.is_some_and(|s| filter.is_excluded(s))
     }
 
@@ -415,6 +419,10 @@ impl CopFilterSet {
             .as_deref()
             .filter(|bd| self.config_dir.as_deref() != Some(*bd))
             .and_then(|bd| path.strip_prefix(bd).ok());
+        let rel_to_scan_root = self
+            .scan_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok());
 
         // Include check: if patterns exist, file must match at least one form
         let has_include = include_set.is_some() || include_re.is_some();
@@ -424,11 +432,13 @@ impl CopFilterSet {
                 inc.is_match(path)
                     || rel_path.is_some_and(|rel| inc.is_match(rel))
                     || rel_to_base.is_some_and(|rel| inc.is_match(rel))
+                    || rel_to_scan_root.is_some_and(|rel| inc.is_match(rel))
             });
             let re_match = include_re.as_ref().is_some_and(|re| {
                 re.is_match(path_str.as_ref())
                     || rel_path.is_some_and(|rel| re.is_match(&rel.to_string_lossy()))
                     || rel_to_base.is_some_and(|rel| re.is_match(&rel.to_string_lossy()))
+                    || rel_to_scan_root.is_some_and(|rel| re.is_match(&rel.to_string_lossy()))
             });
             if !glob_match && !re_match {
                 return false;
@@ -439,7 +449,8 @@ impl CopFilterSet {
         if let Some(ref exc) = exclude_set {
             let excluded = exc.is_match(path)
                 || rel_path.is_some_and(|rel| exc.is_match(rel))
-                || rel_to_base.is_some_and(|rel| exc.is_match(rel));
+                || rel_to_base.is_some_and(|rel| exc.is_match(rel))
+                || rel_to_scan_root.is_some_and(|rel| exc.is_match(rel));
             if excluded {
                 return false;
             }
@@ -448,7 +459,8 @@ impl CopFilterSet {
             let path_str = path.to_string_lossy();
             let excluded = re.is_match(path_str.as_ref())
                 || rel_path.is_some_and(|rel| re.is_match(&rel.to_string_lossy()))
-                || rel_to_base.is_some_and(|rel| re.is_match(&rel.to_string_lossy()));
+                || rel_to_base.is_some_and(|rel| re.is_match(&rel.to_string_lossy()))
+                || rel_to_scan_root.is_some_and(|rel| re.is_match(&rel.to_string_lossy()));
             if excluded {
                 return false;
             }
@@ -660,6 +672,9 @@ pub struct ResolvedConfig {
     /// (e.g., `baseline_rubocop.yml`), this is the current working directory.
     /// This distinction matters because non-dotfile configs use cwd-relative patterns.
     base_dir: Option<PathBuf>,
+    /// Root of the scanned target repo/directory, if one was provided by the CLI.
+    /// Used as an extra relativization base for per-cop Include/Exclude matching.
+    scan_root: Option<PathBuf>,
     /// AllCops.MigratedSchemaVersion from rubocop-rails.
     /// When set, files whose basename contains a 14-digit "timestamp" <= this value
     /// have ALL offenses suppressed (rubocop-rails' MigrationFileSkippable).
@@ -689,6 +704,7 @@ impl ResolvedConfig {
             railties_in_lockfile: false,
             rack_version: None,
             base_dir: None,
+            scan_root: None,
             migrated_schema_version: None,
         }
     }
@@ -704,6 +720,12 @@ impl ResolvedConfig {
                 }
             }
         }
+    }
+
+    /// Remember the scanned repo/directory so per-cop Include/Exclude patterns
+    /// can also be matched relative to that root.
+    pub fn set_scan_root(&mut self, target_dir: Option<&Path>) {
+        self.scan_root = normalize_scan_root(target_dir);
     }
 }
 
@@ -794,6 +816,16 @@ fn walk_up_for(start_dir: &Path, filename: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+fn normalize_scan_root(target_dir: Option<&Path>) -> Option<PathBuf> {
+    let target = target_dir?;
+    let root = if target.is_file() {
+        target.parent().unwrap_or(target)
+    } else {
+        target
+    };
+    Some(root.canonicalize().unwrap_or_else(|_| root.to_path_buf()))
 }
 
 /// Walk up from `start_dir` to find `.rubocop.yml`, falling back to
@@ -979,7 +1011,9 @@ pub fn load_config(
             if p.exists() {
                 Some(p.to_path_buf())
             } else {
-                return Ok(ResolvedConfig::empty());
+                let mut config = ResolvedConfig::empty();
+                config.set_scan_root(target_dir);
+                return Ok(config);
             }
         }
         None => start_dir.as_ref().and_then(|dir| find_config(dir)),
@@ -1004,6 +1038,7 @@ pub fn load_config(
                 config_dir: Some(config_dir.clone()),
                 dir_overrides: load_dir_overrides(&config_dir),
                 base_dir: Some(base_dir),
+                scan_root: normalize_scan_root(target_dir),
                 global_excludes: defaults.global_excludes,
                 ..ResolvedConfig::empty()
             });
@@ -1205,6 +1240,7 @@ pub fn load_config(
         railties_in_lockfile,
         rack_version,
         base_dir: Some(base_dir),
+        scan_root: normalize_scan_root(target_dir),
         migrated_schema_version: base.migrated_schema_version,
     })
 }
@@ -2216,16 +2252,25 @@ impl ResolvedConfig {
                 _ => default_exclude.to_vec(),
             },
         };
+        let rel_to_scan_root = self
+            .scan_root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok());
 
         // 4. Include filter: path must match at least one
         if !effective_include.is_empty()
             && !effective_include.iter().any(|pat| glob_matches(pat, path))
+            && !rel_to_scan_root
+                .is_some_and(|rel| effective_include.iter().any(|pat| glob_matches(pat, rel)))
         {
             return false;
         }
 
         // 5. Exclude filter: path must NOT match any
-        if effective_exclude.iter().any(|pat| glob_matches(pat, path)) {
+        if effective_exclude.iter().any(|pat| glob_matches(pat, path))
+            || rel_to_scan_root
+                .is_some_and(|rel| effective_exclude.iter().any(|pat| glob_matches(pat, rel)))
+        {
             return false;
         }
 
@@ -2830,6 +2875,7 @@ impl ResolvedConfig {
             filters,
             config_dir: self.config_dir.clone(),
             base_dir: self.base_dir.clone(),
+            scan_root: self.scan_root.clone(),
             sub_config_dirs,
             universal_cop_indices,
             pattern_cop_indices,
@@ -3564,6 +3610,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: config.config_dir().map(|p| p.to_path_buf()),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -3649,6 +3696,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: Some(overlay_dir.clone()),
             base_dir: Some(fake_repo.clone()),
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -3686,6 +3734,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: Some(PathBuf::from(".")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4716,6 +4765,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/mastodon")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4739,6 +4789,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/tmp/test")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4763,6 +4814,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/discourse")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4787,6 +4839,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/discourse")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4810,6 +4863,7 @@ mod tests {
             filters: vec![filter],
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4829,6 +4883,7 @@ mod tests {
             filters: vec![filter],
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4863,6 +4918,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: Some(PathBuf::from("/tmp/nitrocop_corpus_configs")),
             base_dir: Some(PathBuf::from("/fake/repo")),
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4920,6 +4976,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/tmp/nitrocop_corpus_configs")),
             base_dir: Some(PathBuf::from("/fake/repo")),
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: vec![0],
@@ -4955,6 +5012,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/project")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -4977,6 +5035,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("/project")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -5004,6 +5063,7 @@ mod tests {
             filters: vec![filter],
             config_dir: Some(PathBuf::from("bench/repos/mastodon")),
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: vec![PathBuf::from("bench/repos/mastodon/app/controllers")],
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -5030,6 +5090,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -5057,6 +5118,7 @@ mod tests {
             filters: Vec::new(),
             config_dir: None,
             base_dir: None,
+            scan_root: None,
             sub_config_dirs: Vec::new(),
             universal_cop_indices: Vec::new(),
             pattern_cop_indices: Vec::new(),
@@ -5705,6 +5767,45 @@ mod tests {
         assert!(
             !filters.is_cop_match(idx, Path::new("/fake/repo/db/seeds.rb")),
             "db/seeds.rb should not match when base_dir != repo root"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn include_matches_repo_root_when_target_dir_is_provided() {
+        let dir = std::env::temp_dir().join("nitrocop_test_scan_root_include");
+        let _ = fs::remove_dir_all(&dir);
+        let repo_dir = dir.join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+
+        let path = write_yaml(
+            &dir,
+            "baseline.yml",
+            "Style/FrozenStringLiteralComment:\n  Include:\n    - 'spec/**/*.rb'\n    - 'Rakefile'\n    - 'db/**/*.rb'\n",
+        );
+        let config = load_config(Some(&path), Some(&repo_dir), None).unwrap();
+        let registry = crate::cop::registry::CopRegistry::default_registry();
+        let tier_map = crate::cop::tiers::TierMap::load();
+
+        let filters = config.build_cop_filters(&registry, &tier_map, true);
+        let idx = registry
+            .cops()
+            .iter()
+            .position(|c| c.name() == "Style/FrozenStringLiteralComment")
+            .unwrap();
+
+        assert!(
+            filters.is_cop_match(idx, &repo_dir.join("spec/foo.rb")),
+            "spec/foo.rb should match relative to the scanned repo root"
+        );
+        assert!(
+            filters.is_cop_match(idx, &repo_dir.join("Rakefile")),
+            "Rakefile should match relative to the scanned repo root"
+        );
+        assert!(
+            filters.is_cop_match(idx, &repo_dir.join("db/seeds.rb")),
+            "db/seeds.rb should match relative to the scanned repo root"
         );
 
         fs::remove_dir_all(&dir).ok();

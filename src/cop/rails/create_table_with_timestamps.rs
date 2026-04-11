@@ -7,6 +7,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Flags `create_table` blocks without timestamp columns.
+///
+/// The large corpus FN bucket here was not a Prism/detection bug. The missing
+/// offenses came from external configs resolving rubocop-rails' `Include:
+/// db/**/*.rb` against the caller's CWD instead of the scanned repo root, so
+/// this cop never ran on migrations and schema files in corpus repos.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
@@ -55,11 +61,14 @@ fn has_id_false(call: &ruby_prism::CallNode<'_>) -> bool {
         None => return false,
     };
     for arg in args.arguments().iter() {
-        let kw = match arg.as_keyword_hash_node() {
-            Some(k) => k,
-            None => continue,
+        let elements = if let Some(kw) = arg.as_keyword_hash_node() {
+            kw.elements()
+        } else if let Some(hash) = arg.as_hash_node() {
+            hash.elements()
+        } else {
+            continue;
         };
-        for elem in kw.elements().iter() {
+        for elem in elements.iter() {
             let assoc = match elem.as_assoc_node() {
                 Some(a) => a,
                 None => continue,
