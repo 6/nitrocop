@@ -29,6 +29,18 @@ use super::trailing_comma;
 /// heredoc was nested inside a hash literal, `has_heredoc` was false, causing the
 /// scanner to read through heredoc body content and miss the trailing comma.
 /// Fix: add `HashNode` handling to `is_heredoc_argument`.
+///
+/// Investigation (2026-04-11)
+///
+/// Variant drift came from two gaps:
+/// - `diff_comma` fell through to the default `no_comma` branch, so nitrocop
+///   rejected commas that immediately preceded a newline and missed required
+///   commas in that layout.
+/// - The local variant harness overrides this family via `EnforcedStyle`,
+///   while the cop only read `EnforcedStyleForMultiline`.
+///
+/// Fix: fall back to `EnforcedStyle` when the multiline-specific key is absent,
+/// and implement RuboCop's `diff_comma` newline predicate (including `\r\n`).
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -104,7 +116,10 @@ impl Cop for TrailingCommaInArguments {
             false
         };
 
-        let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
 
         // Determine if the call is multiline and whether a trailing comma should be present
         let close_line = source.offset_to_line_col(closing_start).0;
@@ -183,6 +198,37 @@ impl Cop for TrailingCommaInArguments {
                     );
                 }
             }
+            "diff_comma" => {
+                let last_precedes_newline =
+                    is_multiline && last_item_precedes_newline(bytes, last_end, closing_start);
+                if has_comma && !last_precedes_newline {
+                    if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
+                        bytes,
+                        last_end,
+                        closing_start,
+                        has_heredoc,
+                    ) {
+                        let (line, column) = source.offset_to_line_col(abs_offset);
+                        diagnostics.push(self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Avoid comma after the last parameter of a method call, unless that item immediately precedes a newline.".to_string(),
+                        ));
+                    }
+                } else if !has_comma && last_precedes_newline {
+                    let (line, column) = source.offset_to_line_col(last_end);
+                    diagnostics.push(
+                        self.diagnostic(
+                            source,
+                            line,
+                            column,
+                            "Put a comma after the last parameter of a multiline method call."
+                                .to_string(),
+                        ),
+                    );
+                }
+            }
             _ => {
                 if has_comma && last_end < closing_start {
                     if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
@@ -218,6 +264,32 @@ fn is_only_horizontal_whitespace_and_comma(bytes: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: usize) -> bool {
+    if last_end >= closing_start || closing_start > bytes.len() {
+        return false;
+    }
+
+    let region = &bytes[last_end..closing_start];
+    let mut i = 0;
+
+    if matches!(region.get(i), Some(b',')) {
+        i += 1;
+    }
+
+    while matches!(region.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+
+    if matches!(region.get(i), Some(b'#')) {
+        while !matches!(region.get(i), None | Some(b'\n' | b'\r')) {
+            i += 1;
+        }
+    }
+
+    matches!(region.get(i), Some(b'\n'))
+        || (matches!(region.get(i), Some(b'\r')) && matches!(region.get(i + 1), Some(b'\n')))
 }
 
 #[cfg(test)]
@@ -380,6 +452,39 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.comma.rb"
             ),
             comma_config(),
+        );
+    }
+
+    fn alias_style_config(style: &str) -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_diff_comma_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
         );
     }
 }
