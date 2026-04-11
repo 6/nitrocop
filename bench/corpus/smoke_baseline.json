@@ -24,17 +24,17 @@
     "rc_files": 121
   },
   "rubocop__rubocop-rspec__51dab28": {
-    "fn": 254,
-    "fp": 2,
-    "matches": 4393,
+    "fn": 251,
+    "fp": 0,
+    "matches": 4396,
     "nc_files": 288,
-    "rate": 94.5,
+    "rate": 94.6,
     "rc_files": 288
   },
   "ruby-formatter__rufo__a90e654": {
-    "fn": 33,
-    "fp": 5,
-    "matches": 10871,
+    "fn": 32,
+    "fp": 4,
+    "matches": 10872,
     "nc_files": 158,
     "rate": 99.7,
     "rc_files": 158
