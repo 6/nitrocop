@@ -121,7 +121,7 @@ def test_corpus_oracle_workflow_uses_dynamic_pr_renderer():
     assert "scripts/workflows/render_corpus_oracle_pr.py" in content
     assert "actions/create-github-app-token@v3" in content
     assert "id: app-token" in content
-    assert "app-id: ${{ secrets.GH_APP_ID }}" in content
+    assert "client-id: ${{ secrets.GH_APP_ID }}" in content
     assert "private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}" in content
     assert "GH_TOKEN: ${{ steps.app-token.outputs.token }}" in content
     assert "GH_TOKEN: ${{ github.token }}" not in content
