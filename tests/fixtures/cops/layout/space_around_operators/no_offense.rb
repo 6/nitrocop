@@ -109,6 +109,13 @@ h ^= 0xff
 i |= 0x01
 j &= 0xff
 
+# Standalone ||= / &&= with extra leading space are accepted
+@config  ||= File.open(config_path) { |yf| YAML::load(yf) }
+
+self.state  ||= nil
+
+feature_flag  &&= true
+
 # Match operators with proper spacing
 x =~ /abc/
 y !~ /abc/
