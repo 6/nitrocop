@@ -556,3 +556,26 @@ def inline_rescue_assign
   raise "Invalid #{err}" if err
   [red_low, yellow_low, yellow_high, red_high]
 end
+
+# FP fix: assignment in implicit-rescue method body, variable read in rescue handler.
+# If `extract_code` raises, the rescue handler reads `code` (via `code:` shorthand)
+# with the value from the first assignment. Not useless.
+def get_embedded_sql_answer(text)
+  code = text[/^SQLQuery: (.*)/, 1]
+  code = extract_code(text)
+  Boxcars.debug code, :yellow
+  output = clean_up_output(code)
+  Result.new(status: :ok, answer: output, code: code)
+rescue StandardError => e
+  Result.new(status: :error, answer: nil, explanation: e.message, code: code)
+end
+
+# FP fix: assignment before ensure block, variable read in ensure.
+# If `start(...)` raises, the ensure block reads `obj` with the initial value.
+def call_target(target_num)
+  obj = {}
+  obj = start(target_num: target_num)
+  process(obj)
+ensure
+  cleanup(obj)
+end
