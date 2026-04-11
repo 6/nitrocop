@@ -445,7 +445,7 @@ def test_sync_issue_labels_removes_then_readds_labels():
     assert remove_args == [
         "gh", "issue", "edit", "591",
         "--repo", "6/nitrocop",
-        "--remove-label", "state:backlog,state:pr-open,state:blocked,difficulty:simple,difficulty:medium,difficulty:complex,difficulty:config-only",
+        "--remove-label", "state:backlog,state:pr-open,state:blocked,difficulty:simple,difficulty:medium,difficulty:complex,difficulty:config-only,difficulty:synth-only",
     ]
     assert remove_kwargs["check"] is False
 

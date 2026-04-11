@@ -243,6 +243,7 @@ DIFFICULTY_LABELS = {
     "medium": "difficulty:medium",
     "complex": "difficulty:complex",
     "config-only": "difficulty:config-only",
+    "synth-only": "difficulty:synth-only",
 }
 LABEL_COLORS = {
     TRACKER_LABEL: "1d76db",
@@ -253,6 +254,7 @@ LABEL_COLORS = {
     "difficulty:medium": "fbca04",
     "difficulty:complex": "d73a4a",
     "difficulty:config-only": "c5def5",
+    "difficulty:synth-only": "d4c5f9",
 }
 DEPT_LABEL_COLOR = "e0e0e0"
 
@@ -3102,6 +3104,34 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
         )
     diverging_cops |= variant_only_cops
 
+    # Expand with synthetic-only divergence: cops with zero corpus data but
+    # FP/FN in the synthetic benchmark. These need tracker issues too.
+    synthetic_path = PROJECT_ROOT / "bench" / "synthetic" / "synthetic-results.json"
+    synthetic_only_cops: set[str] = set()
+    if synthetic_path.exists():
+        try:
+            sdata = json.loads(synthetic_path.read_text())
+            for sc in sdata.get("by_cop", []):
+                cn = sc.get("cop", "")
+                if cn and cn not in diverging_cops:
+                    sfp = sc.get("fp", 0)
+                    sfn = sc.get("fn", 0)
+                    if sfp > 0 or sfn > 0:
+                        # Only include if the cop has zero corpus data
+                        corpus_entry = entries.get(cn)
+                        if not corpus_entry or total_for_entry(corpus_entry) == 0:
+                            corpus_matches = corpus_entry.get("matches", 0) if corpus_entry else 0
+                            if corpus_matches == 0:
+                                synthetic_only_cops.add(cn)
+        except (json.JSONDecodeError, OSError):
+            pass
+    if synthetic_only_cops:
+        print(
+            f"  {len(synthetic_only_cops)} cops diverge only in synthetic benchmark",
+            file=sys.stderr,
+        )
+    diverging_cops |= synthetic_only_cops
+
     # Ensure labels exist (including department labels for all diverging cops)
     departments = {cop.split("/")[0] for cop in diverging_cops}
     ensure_labels(repo, departments)
@@ -3153,7 +3183,7 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
 
     for cop in sorted(diverging_cops):
         dept = cop.split("/")[0]
-        entry = entries[cop]
+        entry = entries.get(cop, {"cop": cop, "fp": 0, "fn": 0, "matches": 0})
         prior_prs = prs_by_cop.get(cop, [])
 
         code_bugs, cfg_issues = diagnosis.get(cop, (0, 0))
@@ -3182,9 +3212,14 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
             prior_prs=prior_prs,
             precomputed_diagnosis=precomputed,
         )
-        difficulty = "config-only" if is_config_only else classify_issue_difficulty(entry, recommendation)
-        if is_config_only:
+        is_synth_only = cop in synthetic_only_cops
+        if is_synth_only:
+            difficulty = "synth-only"
+        elif is_config_only:
+            difficulty = "config-only"
             config_only += 1
+        else:
+            difficulty = classify_issue_difficulty(entry, recommendation)
         open_pr = open_prs_by_cop.get(cop)
         existing_issue = issues_by_cop.get(cop)
         state_label = choose_issue_state(existing_issue, open_pr is not None, entry)

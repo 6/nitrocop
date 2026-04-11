@@ -110,6 +110,26 @@ def main() -> int:
         print(f"Skipping {len(closed_issue_cops)} cops with closed issues: {', '.join(sorted(closed_issue_cops))}")
         skip_cops |= closed_issue_cops
 
+    # ── Skip synth-only cops (no corpus data to validate against) ─────
+    synth_only_cops: set[str] = set()
+    r = subprocess.run(
+        ["gh", "issue", "list", "--state", "open",
+         "--label", "type:cop-issue,difficulty:synth-only",
+         "--search", f"{department}/ in:title",
+         "--limit", "200",
+         "--json", "title"],
+        capture_output=True, text=True,
+    )
+    if r.returncode == 0:
+        for item in json.loads(r.stdout):
+            title = item.get("title", "")
+            if "[cop] " in title:
+                cop = title.split("[cop] ", 1)[1].strip()
+                synth_only_cops.add(cop)
+    if synth_only_cops:
+        print(f"Skipping {len(synth_only_cops)} synth-only cops: {', '.join(sorted(synth_only_cops))}")
+        skip_cops |= synth_only_cops
+
     # ── Look up tracker issue numbers ────────────────────────────────
     cop_issues = get_cop_issue_numbers(department)
     if cop_issues:
