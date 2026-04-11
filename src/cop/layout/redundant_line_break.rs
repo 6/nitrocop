@@ -206,6 +206,17 @@ use crate::parse::source::SourceFile;
 ///   line with the very next line. That produced false positives for long DSL-style
 ///   argument lists that still obviously continued after the first continuation line.
 ///
+/// ## Fixes applied (2026-04-11)
+/// - **Non-convertible block chain suppression**: outer sends such as
+///   `expect(...).to receive(:find) do ... end.and_return(...)` were still
+///   marking their full Prism byte range as "checked", which suppressed the
+///   inner send that actually owns the non-convertible block. RuboCop stops its
+///   `on_send` walk-up at that block boundary, so the multiline `expect(` /
+///   `expect_any_instance_of(...).` send is the real offense target. Nitrocop
+///   now lets call nodes that own a non-convertible block bypass outer
+///   `checked_chain_ranges` suppression so those RSpec chains are checked at the
+///   same boundary RuboCop uses.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -906,7 +917,8 @@ impl<'pr> Visit<'pr> for RedundantLineBreakVisitor<'_, 'pr> {
             end_offset
         };
 
-        let skip_for_checked_chain = self.part_of_checked_chain(start_offset, end_offset);
+        let skip_for_checked_chain =
+            !has_non_convertible_block && self.part_of_checked_chain(start_offset, end_offset);
         let unary_bang_wrapper = node.name().as_slice() == b"!"
             && node.arguments().is_none()
             && node.block().is_none()
