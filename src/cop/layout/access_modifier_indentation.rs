@@ -46,6 +46,19 @@ use ruby_prism::Visit;
 /// Fixed by adding a `MacroScopeChecker` visitor that walks the AST from the root
 /// to the block node, tracking `in_def` state. Blocks not in macro scope are now
 /// skipped. Class constructor blocks reset `in_def` like class/module/sclass.
+///
+/// ### Round 5 (2026-04-11): Constant assignment (casgn) breaks macro scope
+/// Root cause of 80 FPs with `EnforcedStyle: outdent`: constant assignments
+/// (`FOO = SomeBuilder.new do...end`) break the `in_macro_scope?` chain in
+/// RuboCop. In parser's AST, `casgn` is not a transparent wrapper (not one of
+/// kwbegin/begin/any_block/if-body), so access modifiers inside a block wrapped
+/// in a constant assignment are not in macro scope — unless the call is a
+/// `class_constructor?` (Class.new/Module.new/Struct.new/Data.define), which
+/// resets scope. Corpus pattern: `cyberark/conjur` uses `CommandClass.new(...)`
+/// (not a class constructor) extensively with constant assignment. Fixed by
+/// adding `visit_constant_write_node` and `visit_constant_path_write_node` to
+/// `MacroScopeChecker`, which set `in_def = true` (breaking macro scope) when
+/// entering constant assignments.
 pub struct AccessModifierIndentation;
 
 // Uses access_modifier_predicates::is_bare_access_modifier() instead of local constant.
@@ -169,6 +182,31 @@ impl<'pr> Visit<'pr> for MacroScopeChecker {
         let prev = self.in_def;
         self.in_def = false;
         ruby_prism::visit_singleton_class_node(self, node);
+        self.in_def = prev;
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        // Constant assignment (casgn) breaks the macro scope chain in RuboCop's
+        // in_macro_scope?. A block inside `FOO = SomeBuilder.new do...end` is NOT
+        // in macro scope unless the call is a class_constructor? (Class.new, etc.),
+        // which resets scope in visit_call_node.
+        let prev = self.in_def;
+        self.in_def = true;
+        ruby_prism::visit_constant_write_node(self, node);
+        self.in_def = prev;
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+        // Foo::BAR = ... also breaks macro scope, same as plain constant assignment.
+        let prev = self.in_def;
+        self.in_def = true;
+        ruby_prism::visit_constant_path_write_node(self, node);
         self.in_def = prev;
     }
 
@@ -477,6 +515,73 @@ mod tests {
             diags.len(),
             1,
             "Module.new block is a class constructor (macro scope), should flag: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_no_offense_fixture() {
+        // Non-class-constructor block inside constant assignment (casgn) is not
+        // in macro scope — RuboCop's bare_access_modifier? returns false.
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/access_modifier_indentation/no_offense.outdent.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: outdent\n")
+            .expect("fixture should start with outdent config directive");
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &AccessModifierIndentation,
+            source.as_bytes(),
+            config,
+        );
+    }
+
+    #[test]
+    fn outdent_skips_non_class_constructor_block_in_casgn() {
+        // CommandClass.new is NOT a class_constructor (not Class/Module/Struct/Data).
+        // The constant assignment (casgn) breaks the macro scope chain,
+        // so `private` is not a bare access modifier and should not be checked.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"module Foo\n  Bar = SomeBuilder.new do\n    def call; end\n    private\n    def secret; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert!(
+            diags.is_empty(),
+            "non-class-constructor block in casgn is not in macro scope: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn outdent_still_checks_class_constructor_block_in_casgn() {
+        // Class.new IS a class_constructor — it resets macro scope even inside casgn.
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("outdent".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source =
+            b"module Foo\n  Bar = Class.new do\n    private\n    def secret; end\n  end\nend\n";
+        let diags = run_cop_full_with_config(&AccessModifierIndentation, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Class.new block in casgn is a class constructor (macro scope), should flag: {:?}",
             diags
         );
     }
