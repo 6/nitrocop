@@ -1,3 +1,5 @@
+# nitrocop-filename: db/migrate/001_create_table_with_timestamps.rb
+
 create_table :users do |t|
   t.string :name
   t.string :email

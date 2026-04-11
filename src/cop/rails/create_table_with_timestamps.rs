@@ -7,6 +7,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Checks `create_table` calls that omit timestamps.
+///
+/// Corpus investigation (2026-04-11): the reported FNs are config-layer, not
+/// AST-layer. Full-context fixture cases from the corpus are already detected
+/// in isolation, but oracle-mode runs nitrocop from outside the target repo and
+/// `rubocop-rails` injects `Rails/CreateTableWithTimestamps: Include:
+/// db/**/*.rb` from plugin config. That repo-relative include is resolved in
+/// `src/config`, before this cop runs, so the remaining corpus gap needs
+/// config-path handling rather than changes to the matcher here.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
