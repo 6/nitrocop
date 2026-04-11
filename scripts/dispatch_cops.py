@@ -1714,33 +1714,50 @@ def generate_task(
         focus_detail = "both directions"
     # Build variant-aware step 1 and step 7
     variant_only = default_perfect and bool(diverging_variants)
+    # Build per-variant --style commands for all diverging variants.
+    # Never use --check-variants with --sample — the sample may not include
+    # variant-diverging repos, producing misleading FP/FN numbers.
+    def _variant_style_cmds() -> str:
+        cmds = []
+        for v in sorted(diverging_variants, key=lambda x: x["fp"] + x["fn"], reverse=True):
+            params = _infer_variant_style_params(v)
+            if len(params) == 1:
+                cmds.append(
+                    f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
+                    f"--style {params[0][0]}={params[0][1]}"
+                )
+            # Multi-param cops: skip (CI --check-variants handles these)
+        return "\n".join(cmds)
+
     if variant_only:
-        # Primary variant style for commands (highest divergence)
-        primary_variant = max(diverging_variants, key=lambda v: v["fp"] + v["fn"])
-        # Detect the config key(s) (e.g., "EnforcedStyle") from variant data
-        style_params = _infer_variant_style_params(primary_variant)
-        if len(style_params) == 1:
-            style_flag = f"--style {style_params[0][0]}={style_params[0][1]}"
-        else:
-            # Multi-param cops can't use --style (only takes one PARAM=VALUE).
-            # Tell the agent to use --check-variants instead.
-            style_flag = "--check-variants"
         step1_text = (
             "1. Read the **Variant FP/FN Examples** section below — it contains actual "
             "Ruby code from the corpus that diverges under the non-default style"
         )
-        step7_text = (
-            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
-            f"   ```bash\n"
-            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
-            f"{style_flag}\n"
-            f"   ```\n"
-            f"   Also validate the default config is not regressed:\n"
-            f"   ```bash\n"
-            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
-            f"   ```\n"
-            f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
-        )
+        variant_cmds = _variant_style_cmds()
+        if variant_cmds:
+            step7_text = (
+                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                f"   ```bash\n"
+                f"{variant_cmds}\n"
+                f"   ```\n"
+                f"   Also validate the default config is not regressed:\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                f"   ```\n"
+                f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+            )
+        else:
+            # Multi-param cop where --style can't express the config.
+            # Just validate default; CI --check-variants handles variants.
+            step7_text = (
+                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                f"   ```\n"
+                f"   CI will validate all variant styles via `--check-variants` after you push.\n"
+                f"   If default reports FP or FN regression, your fix is too broad — narrow it down."
+            )
     else:
         if diagnostics:
             step1_text = "1. Read the **Pre-diagnostic Results** section below first"
@@ -1750,20 +1767,28 @@ def generate_task(
             step1_text = "1. Read the sections below for context"
         if diverging_variants:
             # Mixed cop: has default FP/FN AND variant divergence.
-            # Must validate both default and variants to avoid pushing a fix
-            # that passes default but breaks a variant style.
-            step7_text = (
-                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
-                f"   ```bash\n"
-                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
-                f"   ```\n"
-                f"   **Also validate variant styles** (this cop has non-default style divergence):\n"
-                f"   ```bash\n"
-                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
-                f"--check-variants\n"
-                f"   ```\n"
-                f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
-            )
+            variant_cmds = _variant_style_cmds()
+            if variant_cmds:
+                step7_text = (
+                    f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                    f"   ```bash\n"
+                    f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                    f"   ```\n"
+                    f"   **Also validate variant styles** (this cop has non-default style divergence):\n"
+                    f"   ```bash\n"
+                    f"{variant_cmds}\n"
+                    f"   ```\n"
+                    f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+                )
+            else:
+                step7_text = (
+                    f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                    f"   ```bash\n"
+                    f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                    f"   ```\n"
+                    f"   CI will validate all variant styles via `--check-variants` after you push.\n"
+                    f"   If this reports FP or FN regression, your fix is too broad — narrow it down."
+                )
         else:
             step7_text = (
                 f"7. **Validate against corpus** (REQUIRED before finishing):\n"
@@ -1797,7 +1822,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
    - FN fix: add the missed pattern to `tests/fixtures/cops/{dept_snake}/{snake}/offense.rb` with `^` annotation
    - FP fix: add the false-positive pattern to `tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`
 4. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
-5. Fix `src/cop/{dept_snake}/{snake}.rs`
+5. Fix the code (usually `src/cop/{dept_snake}/{snake}.rs`, but `src/config/` or `src/linter.rs` for config issues)
 6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
 {step7_text}
 8. Add a `///` doc comment on the cop struct documenting what you found and fixed
@@ -1824,6 +1849,7 @@ config). The FPs only appear when running against target repos with custom `.rub
 This means nitrocop is reading the repo's config differently than RuboCop does.
 
 **The detection logic is correct — the bug is in config resolution.**
+**Do NOT just document findings and give up — fix the config resolution.**
 
 Do NOT add `no_offense.rb` fixtures for these patterns (they ARE offenses under default
 config). Instead:
@@ -1832,26 +1858,37 @@ config). Instead:
 2. Investigate `src/config/` for how this cop's config is loaded and applied
 3. Common causes: `Max` value not read from repo config, `Exclude` patterns not applied,
    `Enabled: false` in a department-level override not respected, inherited configs
-   (e.g., `inherit_from`) not followed
-4. If you find a config-resolution fix, apply it and verify with `check_cop.py --rerun`""")
+   (e.g., `inherit_from`) not followed, Include patterns not resolving relative to repo root
+4. Fix the config resolution bug in `src/config/` or `src/linter.rs` and verify with
+   `check_cop.py --rerun`""")
     elif diagnostics and has_config_issues and not has_code_bugs:
-        parts.append("""
+        parts.append(f"""
 ### IMPORTANT: This is a config/context issue, NOT a detection bug
 Pre-diagnostic shows nitrocop already detects all FP/FN patterns correctly in isolation.
 The corpus mismatches are caused by configuration differences in target repos.
 
 **Do NOT loop trying to fix detection logic — the detection code is correct.**
+**Do NOT just document findings and give up — fix the config resolution.**
 
-Instead:
-1. Investigate why the cop doesn't fire (FN) or fires incorrectly (FP) in the target
-   repo's config context. Common causes:
-   - Include/Exclude patterns in the cop's config not matching the file path
-   - The cop being disabled by the target repo's `.rubocop.yml`
-   - `# rubocop:disable` comments in the source file
-   - File path patterns (e.g., spec files excluded by default)
-2. Look at `src/config/` for how config affects this cop
-3. If you can fix the config resolution, do so. Otherwise document your findings as a
-   `///` comment on the cop struct and leave your changes as-is.""")
+The bug is in how nitrocop loads/applies config for this cop. Common causes and where to fix:
+
+1. **Include/Exclude patterns not resolving relative to repo root** — plugin cops (e.g.,
+   `rubocop-rails`) inject `Include: db/**/*.rb` which must resolve relative to the
+   scanned repo, not the working directory. Look at `src/config/` for how `Include`
+   patterns are resolved and matched against file paths.
+2. **Cop disabled by department-level override** — the repo's `.rubocop.yml` may disable
+   the cop or its department. Look at config inheritance in `src/config/`.
+3. **`# rubocop:disable` comments** not being respected — look at `src/linter.rs`.
+4. **Config values (Max, EnforcedStyle) not read from repo config** — look at how
+   `cop_config_for_file` resolves per-cop options.
+
+Workflow:
+1. Use `python3 scripts/check_cop.py {cop} --rerun --clone --sample 5` to confirm the
+   FP/FN reproduces against real repos
+2. Read `src/config/` to understand how config is loaded for this cop
+3. Fix the config resolution bug — you have full access to `src/config/`, `src/linter.rs`,
+   and any other `src/` files
+4. Verify with `check_cop.py --rerun` that FP/FN is reduced""")
 
     elif diagnostics and has_config_issues and has_code_bugs:
         parts.append("""
@@ -1868,9 +1905,8 @@ If you add a test case and it passes without code changes, the corpus mismatch i
 caused by config/context differences, not a detection bug.
 **Do NOT loop** trying to make the test fail. Instead:
 1. Investigate config resolution (Include/Exclude, cop enablement, disable comments)
-2. The fix is likely in `src/config/` or the cop's config handling, not detection logic
-3. If you cannot determine the root cause within 5 minutes, document your findings as
-   a `///` comment on the cop struct and leave your changes as-is
+2. The fix is likely in `src/config/` or the cop's config handling, not detection logic — you have full access to edit these files
+3. Verify with `check_cop.py --rerun --clone --sample 5` that your config fix reduces the FP/FN
 
 ### Do NOT make doc-only changes when CODE BUGs were reported
 If the pre-diagnostic classified examples as **CODE BUG** but you cannot reproduce them
@@ -1909,10 +1945,10 @@ node type, operator class, or naming pattern, it's probably too broad. Prefer ad
 condition that matches the SPECIFIC differentiating context.
 
 ### Rules
-- Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
+- Primary files: `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
+- If the bug is in config resolution (Include/Exclude patterns, cop filtering), you may also edit `src/config/`, `src/linter.rs`, and other files under `src/` and `tests/`
 - Run `cargo test --lib -- cop::{dept_snake}::{snake}` to verify your fix (do NOT run the full test suite)
 - Run `python3 scripts/check_cop.py {cop} --rerun --clone --sample 15` before finishing to catch regressions
-- Do NOT touch unrelated files
 - Do NOT use `git stash`
 - Do NOT push — you do not have push permission; the workflow handles pushing after you exit
 

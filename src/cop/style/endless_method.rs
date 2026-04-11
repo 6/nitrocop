@@ -79,10 +79,24 @@ use crate::parse::source::SourceFile;
 ///    Fix: compute argument length directly from the parameter source location
 ///    without adding a leading space.
 ///
-/// Remaining FP (33): files with parser-gem-incompatible encoding (e.g., jruby's
-/// `# coding: US-ASCII` test files with `[\x0-\xff]` regex) fail to parse in the
-/// parser gem, so RuboCop skips them entirely. Prism parses them fine, so nitrocop
-/// flags methods. This is a systemic Prism-vs-parser divergence not fixable per-cop.
+///
+/// ## Variant-style fixes (2026-04-11)
+///
+/// 8. **`body_uses_heredoc` / parser `:str` vs `:dstr` mapping**: Prism uses
+///    `StringNode` for more heredoc cases than the parser gem. RuboCop's
+///    descendant check only walks `:str`, so it skips plain one-line heredocs
+///    like `puts <<~HEREDOC ...`, but still flags empty heredoc calls
+///    (`execute <<-SQL`) and heredocs embedded in interpolated strings
+///    (`"#{<<-"begin;"}..."`) because those are `:dstr` in the parser gem.
+///    Fix: only treat descendant Prism `StringNode` heredocs as RuboCop `:str`
+///    when the unescaped content contains exactly one newline.
+///
+/// 9. **Invalid UTF-8 without Ruby magic encoding**: `require_single_line` can
+///    flag regular methods in files that Prism parses from raw bytes, but
+///    RuboCop's parser gem rejects when the file contains non-UTF-8 bytes and
+///    no Ruby `coding:` / `encoding:` magic comment. Fix: skip this cop for
+///    such files, while still checking non-UTF-8 sources that advertise a Ruby
+///    source encoding.
 pub struct EndlessMethod;
 
 impl EndlessMethod {
@@ -121,28 +135,31 @@ impl EndlessMethod {
             return true;
         }
 
-        // Second check: walk descendants for plain StringNode heredocs only.
+        // Second check: walk descendants for parser-gem `:str` heredocs only.
         // Matches RuboCop's `body.each_descendant(:str).any?(&:heredoc?)`
-        // Note: RuboCop only checks :str, NOT :dstr, so interpolated heredocs
-        // nested inside other expressions are intentionally not detected.
-        struct PlainStringHeredocVisitor {
+        // Note: RuboCop only checks :str, NOT :dstr. In Prism, descendant
+        // heredocs come through as StringNode more often, so we must narrow to
+        // the subset that parser gem exposes as `:str`: plain one-line heredocs
+        // with exactly one trailing newline in the content.
+        struct ParserStrHeredocVisitor {
             found: bool,
         }
 
-        impl<'pr> Visit<'pr> for PlainStringHeredocVisitor {
+        impl<'pr> Visit<'pr> for ParserStrHeredocVisitor {
             fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
                 if !self.found
                     && node
                         .opening_loc()
                         .is_some_and(|loc| loc.as_slice().starts_with(b"<<"))
                 {
-                    // In the parser gem, a heredoc with multi-line content (2+
-                    // newlines) becomes :dstr, not :str. RuboCop's
-                    // `each_descendant(:str)` won't find :dstr nodes, so only
-                    // single-line content heredocs (≤1 newline) are detected.
+                    // In the parser gem, descendant heredocs are `:str` only
+                    // when the content is a single logical line ("hello\n").
+                    // Empty heredocs ("") and multi-line heredocs ("a\nb\n")
+                    // become `:dstr`, so RuboCop's `each_descendant(:str)`
+                    // won't see them.
                     let content = node.unescaped();
                     let newline_count = content.iter().filter(|&&b| b == b'\n').count();
-                    if newline_count <= 1 {
+                    if newline_count == 1 {
                         self.found = true;
                     }
                 }
@@ -152,7 +169,7 @@ impl EndlessMethod {
             }
         }
 
-        let mut visitor = PlainStringHeredocVisitor { found: false };
+        let mut visitor = ParserStrHeredocVisitor { found: false };
         visitor.visit(&body);
         visitor.found
     }
@@ -329,6 +346,34 @@ impl EndlessMethod {
         let offset = Self::modifier_offset(source, def_node);
         offset + Self::endless_replacement_length(source, def_node) > max_line_length
     }
+
+    fn skip_for_invalid_utf8_without_magic_encoding(source: &SourceFile) -> bool {
+        if std::str::from_utf8(source.as_bytes()).is_ok() {
+            return false;
+        }
+        !Self::has_magic_encoding_comment(source.as_bytes())
+    }
+
+    fn has_magic_encoding_comment(source: &[u8]) -> bool {
+        for line in source.split(|&b| b == b'\n').take(2) {
+            let lower = String::from_utf8_lossy(line)
+                .trim_start()
+                .to_ascii_lowercase();
+            if lower.starts_with("# encoding:")
+                || lower.starts_with("# encoding=")
+                || lower.starts_with("# coding:")
+                || lower.starts_with("# coding=")
+            {
+                return true;
+            }
+            if lower.starts_with("# -*-")
+                && (lower.contains("encoding") || lower.contains("coding"))
+            {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Cop for EndlessMethod {
@@ -356,6 +401,10 @@ impl Cop for EndlessMethod {
             .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)))
             .unwrap_or(2.7);
         if ruby_version < 3.0 {
+            return;
+        }
+
+        if Self::skip_for_invalid_utf8_without_magic_encoding(source) {
             return;
         }
 
@@ -631,6 +680,35 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Heredoc bodies should be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_single_line_skips_invalid_utf8_without_magic_encoding() {
+        let source = b"# vim: set fileencoding=euc-jp\n\ndef test_charboundary\n  assert_nil(/\\xA2\\xA2/ =~ \"\xA1\xA2\xA2\xA3\")\nend\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_single_line"),
+        );
+        assert!(
+            diags.is_empty(),
+            "Invalid UTF-8 source without Ruby magic encoding should be skipped, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn require_single_line_still_checks_invalid_utf8_with_magic_encoding_comment() {
+        let source = b"# encoding: iso-8859-1\n\ndef my_method\n  x\nend\n# \xF1\n";
+        let diags = run_cop_full_with_config(
+            &EndlessMethod,
+            source,
+            ruby30_style_config("require_single_line"),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "Use endless method definitions for single line methods."
         );
     }
 

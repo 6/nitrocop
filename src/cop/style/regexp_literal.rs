@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -28,13 +26,15 @@ use ruby_prism::Visit;
 /// extending the existing call-context exemption to direct call parents while
 /// still rejecting standalone `%r/#{foo} bar/`.
 ///
-/// Mixed-style fix (2026-04): RuboCop's `mixed` style still requires `%r` for
-/// single-line slash literals when the regexp body contains a disallowed `/`,
-/// so `/\/$/` must be flagged even though it is not multiline. `%r` literals in
-/// call contexts are also allowed when `Style/MethodCallWithArgsParentheses`
-/// uses `omit_parentheses`; the cop now honors an injected
-/// `MethodCallWithArgsParenthesesEnforcedStyle` override and falls back to the
-/// file's discovered RuboCop config to mirror that cross-cop allowance.
+/// Mixed-style/config fix (2026-04): RuboCop's `mixed` style still requires
+/// `%r` for single-line slash literals when the regexp body contains a
+/// disallowed `/`, so `/\/$/` must be flagged even though it is not multiline.
+/// The `MethodCallWithArgsParentheses` cross-cop allowance must come from the
+/// resolved config driving the current run; reloading `.rubocop.yml` from
+/// `source.path` created a second config context and suppressed real corpus
+/// offenses such as asciidoctor-pdf's bare `%r/.../` call arguments. Keep
+/// honoring an explicit `MethodCallWithArgsParenthesesEnforcedStyle` override,
+/// but do not rediscover config from disk inside the cop.
 pub struct RegexpLiteral;
 
 impl Cop for RegexpLiteral {
@@ -260,27 +260,10 @@ impl<'pr> RegexpLiteralVisitor<'_, 'pr> {
             .get("MethodCallWithArgsParenthesesEnforcedStyle")
             .and_then(|value| value.as_str())
             .map(|style| style == "omit_parentheses")
-            .unwrap_or_else(|| self.discover_method_call_with_args_parentheses_omit());
+            .unwrap_or(false);
 
         self.method_call_with_args_parentheses_omit = Some(omit);
         omit
-    }
-
-    fn discover_method_call_with_args_parentheses_omit(&self) -> bool {
-        let path = Path::new(&self.source.path);
-        if !path.exists() {
-            return false;
-        }
-
-        crate::config::load_config(None, Some(path), None)
-            .ok()
-            .map(|resolved| {
-                resolved
-                    .cop_config_for_file("Style/MethodCallWithArgsParentheses", path)
-                    .get_str("EnforcedStyle", "require_parentheses")
-                    == "omit_parentheses"
-            })
-            .unwrap_or(false)
     }
 
     fn add_offense(&mut self, start_offset: usize, message: &str) {
@@ -310,8 +293,11 @@ impl<'pr> Visit<'pr> for RegexpLiteralVisitor<'_, 'pr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
     use crate::testutil::{
-        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config, run_cop_full,
+        assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
+        run_cop_full, run_cop_full_internal,
     };
 
     crate::cop_fixture_tests!(RegexpLiteral, "cops/style/regexp_literal");
@@ -375,6 +361,45 @@ mod tests {
         let source = b"assert_equal(':', %r:\\::.source, bug5484)\n";
         let diags =
             crate::testutil::run_cop_full_with_config(&RegexpLiteral, source, mixed_config());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].message, "Use `//` around regular expression.");
+    }
+
+    #[test]
+    fn injected_omit_parentheses_override_allows_percent_r_call_argument() {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "MethodCallWithArgsParenthesesEnforcedStyle".to_string(),
+            serde_yml::Value::String("omit_parentheses".into()),
+        );
+
+        let source = b"abstract_texts = pdf.find_text %r/line of abstract/\n";
+        let diags = crate::testutil::run_cop_full_with_config(&RegexpLiteral, source, config);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn does_not_rediscover_omit_parentheses_from_disk() {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let file_path = tempdir.path().join("test.rb");
+        fs::write(
+            tempdir.path().join(".rubocop.yml"),
+            "Style/MethodCallWithArgsParentheses:\n  Enabled: true\n  EnforcedStyle: omit_parentheses\n",
+        )
+        .expect("write config");
+        fs::write(
+            &file_path,
+            "abstract_texts = pdf.find_text %r/line of abstract/\n",
+        )
+        .expect("write source");
+
+        let diags = run_cop_full_internal(
+            &RegexpLiteral,
+            b"abstract_texts = pdf.find_text %r/line of abstract/\n",
+            CopConfig::default(),
+            file_path.to_str().expect("utf-8 path"),
+        );
+
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].message, "Use `//` around regular expression.");
     }

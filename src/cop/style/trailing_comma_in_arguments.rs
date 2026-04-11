@@ -29,6 +29,25 @@ use super::trailing_comma;
 /// heredoc was nested inside a hash literal, `has_heredoc` was false, causing the
 /// scanner to read through heredoc body content and miss the trailing comma.
 /// Fix: add `HashNode` handling to `is_heredoc_argument`.
+///
+/// Investigation (2026-04-11)
+///
+/// Variant drift came from four gaps:
+/// - `comma` / `consistent_comma` only added missing-comma diagnostics and
+///   never mirrored RuboCop's matching avoid-comma path for unsupported commas.
+/// - `consistent_comma` approximated RuboCop's
+///   `method_name_and_arguments_on_same_line?` predicate and missed the
+///   explicit-braced-hash exception.
+/// - `diff_comma` fell through to the default `no_comma` branch, so nitrocop
+///   rejected commas that immediately preceded a newline and missed required
+///   commas in that layout.
+/// - The local fixture harness overrides this family via `EnforcedStyle`,
+///   while the cop only read `EnforcedStyleForMultiline`.
+///
+/// Fix: mirror RuboCop's shared `should_have_comma?` / `check_comma` flow,
+/// preserve the braced-hash `consistent_comma` carveout, fall back to
+/// `EnforcedStyle` when the multiline-specific key is absent, and implement the
+/// `diff_comma` newline predicate (including `\r\n`).
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -54,8 +73,16 @@ impl Cop for TrailingCommaInArguments {
             None => return,
         };
 
-        let closing_loc = match call_node.closing_loc() {
-            Some(loc) => loc,
+        let has_closing_token = call_node.closing_loc().is_some();
+        let (closing_start, node_end_offset) = match call_node.closing_loc() {
+            Some(loc) => {
+                let start = loc.start_offset();
+                (start, start)
+            }
+            None if call_node.name().as_slice() == b"[]" => {
+                let end = call_node.location().end_offset();
+                (end, end.saturating_sub(1))
+            }
             None => return,
         };
 
@@ -71,7 +98,6 @@ impl Cop for TrailingCommaInArguments {
         };
 
         let last_end = last_arg.location().end_offset();
-        let closing_start = closing_loc.start_offset();
         let bytes = source.as_bytes();
         let has_heredoc = arg_list
             .iter()
@@ -86,7 +112,7 @@ impl Cop for TrailingCommaInArguments {
         }
 
         // Check for a trailing comma between the last argument and closing paren.
-        if closing_start > bytes.len() {
+        if closing_start > bytes.len() || node_end_offset > bytes.len() {
             return;
         }
 
@@ -104,10 +130,13 @@ impl Cop for TrailingCommaInArguments {
             false
         };
 
-        let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
 
         // Determine if the call is multiline and whether a trailing comma should be present
-        let close_line = source.offset_to_line_col(closing_start).0;
+        let close_line = source.offset_to_line_col(node_end_offset).0;
         let call_start_line = source
             .offset_to_line_col(call_node.location().start_offset())
             .0;
@@ -117,90 +146,58 @@ impl Cop for TrailingCommaInArguments {
         let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
         let effective_args = elem_locs.len();
 
-        if effective_args == 1 {
-            let last_arg_end_line = source.offset_to_line_col(last_end).0;
-            if close_line == last_arg_end_line {
-                // Single arg with closing bracket on same line — not considered multiline
-                // for trailing comma purposes (but unwanted commas still detected below)
-                if has_comma && last_end < closing_start {
-                    if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
-                        bytes,
-                        last_end,
-                        closing_start,
-                        has_heredoc,
-                    ) {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Avoid comma after the last parameter of a method call.".to_string(),
-                        ));
-                    }
-                }
-                return;
+        let is_multiline = call_is_multiline
+            && !(has_closing_token
+                && effective_args == 1
+                && !crate::cop::shared::util::begins_its_line(source, node_end_offset));
+        let should_have_comma = match style {
+            "comma" => {
+                is_multiline
+                    && trailing_comma::no_elements_on_same_line(source, &elem_locs, node_end_offset)
             }
-        }
-
-        let is_multiline = match style {
             "consistent_comma" => {
-                // For consistent_comma: multiline means the call spans multiple lines
-                // AND the method name is NOT on the same line as the last argument's last line.
-                if !call_is_multiline {
-                    false
-                } else {
-                    let method_line = call_node
-                        .message_loc()
-                        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
-                        .unwrap_or(call_start_line);
-                    let last_arg_end_line = source.offset_to_line_col(last_end).0;
-                    method_line != last_arg_end_line
-                }
+                is_multiline
+                    && !method_name_and_arguments_on_same_line(
+                        source,
+                        &call_node,
+                        &last_arg,
+                        call_start_line,
+                        close_line,
+                        last_end,
+                    )
             }
-            _ => {
-                let last_line = source.offset_to_line_col(last_end).0;
-                close_line > last_line
+            "diff_comma" => {
+                is_multiline && last_item_precedes_newline(bytes, last_end, closing_start)
             }
+            _ => false,
         };
 
-        match style {
-            "comma" | "consistent_comma" => {
-                let all_on_own_line = if style == "comma" {
-                    trailing_comma::no_elements_on_same_line(source, &elem_locs, closing_start)
-                } else {
-                    true
-                };
-                if is_multiline && !has_comma && all_on_own_line {
-                    let (line, column) = source.offset_to_line_col(last_end);
-                    diagnostics.push(
-                        self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Put a comma after the last parameter of a multiline method call."
-                                .to_string(),
-                        ),
-                    );
-                }
+        if has_comma && !should_have_comma && last_end < closing_start {
+            if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
+                bytes,
+                last_end,
+                closing_start,
+                has_heredoc,
+            ) {
+                let (line, column) = source.offset_to_line_col(abs_offset);
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Avoid comma after the last parameter of a method call{}.",
+                        extra_avoid_comma_info(style)
+                    ),
+                ));
             }
-            _ => {
-                if has_comma && last_end < closing_start {
-                    if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
-                        bytes,
-                        last_end,
-                        closing_start,
-                        has_heredoc,
-                    ) {
-                        let (line, column) = source.offset_to_line_col(abs_offset);
-                        diagnostics.push(self.diagnostic(
-                            source,
-                            line,
-                            column,
-                            "Avoid comma after the last parameter of a method call.".to_string(),
-                        ));
-                    }
-                }
-            }
+        } else if !has_comma && should_have_comma {
+            let (line, column) = source.offset_to_line_col(last_end);
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Put a comma after the last parameter of a multiline method call.".to_string(),
+            ));
         }
     }
 }
@@ -218,6 +215,71 @@ fn is_only_horizontal_whitespace_and_comma(bytes: &[u8]) -> bool {
         }
     }
     false
+}
+
+fn method_name_and_arguments_on_same_line(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'_>,
+    last_arg: &ruby_prism::Node<'_>,
+    call_start_line: usize,
+    close_line: usize,
+    last_end: usize,
+) -> bool {
+    let last_arg_end_line = source.offset_to_line_col(last_end).0;
+    if close_line != last_arg_end_line {
+        return false;
+    }
+
+    // Only explicit Hash `{...}` counts as "same line" — it has visible braces that
+    // visually anchor the closing. keyword_hash_node (implicit keyword args) does NOT
+    // get this exemption since there are no braces.
+    if last_arg
+        .as_hash_node()
+        .is_some_and(|hash| hash.opening_loc().as_slice() == b"{")
+    {
+        return true;
+    }
+
+    let method_line = call_node
+        .message_loc()
+        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
+        .unwrap_or(call_start_line);
+    method_line == last_arg_end_line
+}
+
+fn extra_avoid_comma_info(style: &str) -> &'static str {
+    match style {
+        "comma" => ", unless each item is on its own line",
+        "consistent_comma" => ", unless items are split onto multiple lines",
+        "diff_comma" => ", unless that item immediately precedes a newline",
+        _ => "",
+    }
+}
+
+fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: usize) -> bool {
+    if last_end >= closing_start || closing_start > bytes.len() {
+        return false;
+    }
+
+    let region = &bytes[last_end..closing_start];
+    let mut i = 0;
+
+    if matches!(region.get(i), Some(b',')) {
+        i += 1;
+    }
+
+    while matches!(region.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+
+    if matches!(region.get(i), Some(b'#')) {
+        while !matches!(region.get(i), None | Some(b'\n' | b'\r')) {
+            i += 1;
+        }
+    }
+
+    matches!(region.get(i), Some(b'\n'))
+        || (matches!(region.get(i), Some(b'\r')) && matches!(region.get(i + 1), Some(b'\n')))
 }
 
 #[cfg(test)]
@@ -290,6 +352,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn consistent_comma_single_line_trailing_comma_offense() {
+        let source = b"foo(1, 2,)\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, consistent_comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "single-line trailing comma should be rejected"
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains("unless items are split onto multiple lines")
+        );
+    }
+
+    #[test]
+    fn consistent_comma_braced_hash_after_argument_no_offense() {
+        let source = b"foo(\n  arg, {\n    a: 1,\n    b: 2\n  })\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, consistent_comma_config());
+        assert!(
+            diags.is_empty(),
+            "consistent_comma should exempt a multiline braced hash when the call ends on the same line"
+        );
+    }
+
+    #[test]
+    fn consistent_comma_bracket_method_without_closing_token_offense() {
+        let source = b"Hash.[] \\\n  foo\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, consistent_comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "consistent_comma should handle [] method calls without a closing token"
+        );
+    }
+
     fn comma_config() -> CopConfig {
         use std::collections::HashMap;
         CopConfig {
@@ -322,6 +424,38 @@ mod tests {
             diags.len(),
             1,
             "comma style should flag when each arg is on its own line"
+        );
+    }
+
+    #[test]
+    fn comma_style_single_line_trailing_comma_offense() {
+        let source = b"foo(1, 2,)\n";
+        let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "single-line trailing comma should be rejected"
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains("unless each item is on its own line")
+        );
+    }
+
+    #[test]
+    fn comma_style_multiline_shared_line_trailing_comma_offense() {
+        let source = b"foo(\n  a, b,\n  c,\n)\n";
+        let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "comma style should reject trailing commas when items share a line"
+        );
+        assert!(
+            diags[0]
+                .message
+                .contains("unless each item is on its own line")
         );
     }
 
@@ -380,6 +514,39 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.comma.rb"
             ),
             comma_config(),
+        );
+    }
+
+    fn alias_style_config(style: &str) -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn offense_diff_comma_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
         );
     }
 }

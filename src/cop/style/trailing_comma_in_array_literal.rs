@@ -30,7 +30,42 @@ use super::trailing_comma;
 /// `end_offset()` and the outer `]`. The `any_heredoc` check must recurse into
 /// sub-arrays to detect these nested heredocs, otherwise heredoc content gets
 /// scanned for commas producing false positives. Seen in zeitwerk, rufo, thredded.
+///
+/// ## Variant divergence (2026-04)
+/// The remaining `diff_comma` corpus drift came from two array-only issues:
+/// the variant harness can arrive through the generic `EnforcedStyle` key, and
+/// Windows line endings use `\r\n` instead of `\n`. That meant the `diff_comma`
+/// branch sometimes fell back to `no_comma`, and even when the style was set
+/// explicitly it treated `,\r\n]` as an illegal trailing comma while missing
+/// required commas before `\r\n]`.
+///
+/// Fix: fall back to `EnforcedStyle` when `EnforcedStyleForMultiline` is
+/// absent, and accept either `\n` or `\r\n` as the newline immediately after
+/// the last item. This matches RuboCop on the timetrap, solargraph, and betty
+/// corpus examples without broadening the rule for `...,]` on the same line.
 pub struct TrailingCommaInArrayLiteral;
+
+fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: usize) -> bool {
+    let region = &bytes[last_end..closing_start];
+    let mut i = 0;
+
+    if i < region.len() && region[i] == b',' {
+        i += 1;
+    }
+
+    while i < region.len() && matches!(region[i], b' ' | b'\t') {
+        i += 1;
+    }
+
+    if i < region.len() && region[i] == b'#' {
+        while i < region.len() && !matches!(region[i], b'\n' | b'\r') {
+            i += 1;
+        }
+    }
+
+    matches!(region.get(i), Some(b'\n'))
+        || (matches!(region.get(i), Some(b'\r')) && matches!(region.get(i + 1), Some(b'\n')))
+}
 
 impl Cop for TrailingCommaInArrayLiteral {
     fn name(&self) -> &'static str {
@@ -81,7 +116,10 @@ impl Cop for TrailingCommaInArrayLiteral {
         let has_comma =
             trailing_comma::detect_trailing_comma(bytes, last_end, closing_start, has_heredoc);
 
-        let style = config.get_str("EnforcedStyleForMultiline", "no_comma");
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
 
         // Check if array is multiline: the opening `[` and closing `]` are on different lines.
         let open_line = if let Some(opening) = array_node.opening_loc() {
@@ -155,8 +193,8 @@ impl Cop for TrailingCommaInArrayLiteral {
                 }
             }
             "diff_comma" => {
-                let last_precedes_newline = is_multiline
-                    && trailing_comma::last_item_precedes_newline(bytes, last_end, closing_start);
+                let last_precedes_newline =
+                    is_multiline && last_item_precedes_newline(bytes, last_end, closing_start);
                 if has_comma && !last_precedes_newline {
                     if let Some(abs_offset) = find_comma_offset() {
                         let (line, column) = source.offset_to_line_col(abs_offset);
@@ -208,16 +246,24 @@ mod tests {
         "cops/style/trailing_comma_in_array_literal"
     );
 
-    fn comma_config() -> CopConfig {
+    fn multiline_config(style: &str) -> CopConfig {
         let mut options = HashMap::new();
         options.insert(
             "EnforcedStyleForMultiline".to_string(),
-            serde_yml::Value::String("comma".to_string()),
+            serde_yml::Value::String(style.to_string()),
         );
         CopConfig {
             options,
             ..CopConfig::default()
         }
+    }
+
+    fn comma_config() -> CopConfig {
+        multiline_config("comma")
+    }
+
+    fn diff_comma_config() -> CopConfig {
+        multiline_config("diff_comma")
     }
 
     #[test]
@@ -256,11 +302,11 @@ mod tests {
         );
     }
 
-    fn diff_comma_config() -> CopConfig {
+    fn alias_style_config(style: &str) -> CopConfig {
         let mut options = HashMap::new();
         options.insert(
-            "EnforcedStyleForMultiline".to_string(),
-            serde_yml::Value::String("diff_comma".to_string()),
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String(style.to_string()),
         );
         CopConfig {
             options,
@@ -351,6 +397,85 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/no_offense.comma.rb"
             ),
             comma_config(),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma_fixture() {
+        assert_cop_offenses_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/offense.diff_comma.rb"
+            ),
+            diff_comma_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_fixture() {
+        assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/no_offense.diff_comma.rb"
+            ),
+            diff_comma_config(),
+        );
+    }
+
+    #[test]
+    fn offense_diff_comma_fixture_via_enforced_style_alias() {
+        assert_cop_offenses_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_diff_comma_fixture_via_enforced_style_alias() {
+        assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_array_literal/no_offense.diff_comma.rb"
+            ),
+            alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn diff_comma_accepts_crlf_trailing_comma_before_newline() {
+        let source = b"multiple_functions = [\r\n  :scanVariable   => [],\r\n  :scanQuotelike  => [],\r\n  :scanCodeblock  => [],\r\n]\r\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            source,
+            diff_comma_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "CRLF diff_comma array should accept trailing comma before newline"
+        );
+    }
+
+    #[test]
+    fn diff_comma_flags_missing_comma_before_crlf_newline() {
+        let source = b"files = {\r\n  examples: [\r\n    \"- betty copy folder my_songs/ to backup/\",\r\n    \"- betty move folder my_songs/ to backup/\",\r\n    \"- betty delete file junk.txt\",\r\n    \"- betty remove file junk.txt\",\r\n    \"- betty delete folder logs/\",\r\n    \"- betty remove folder logs/\",\r\n    \"- betty cleanup folder logs/\",\r\n    \"- betty force cleanup folder logs/\"\r\n  ]\r\n}\r\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &TrailingCommaInArrayLiteral,
+            source,
+            diff_comma_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "CRLF diff_comma array should require the trailing comma"
+        );
+        assert_eq!(diags[0].location.line, 10);
+        assert_eq!(diags[0].location.column, 40);
+        assert_eq!(
+            diags[0].message,
+            "Put a comma after the last item of a multiline array."
         );
     }
 }
