@@ -1714,33 +1714,50 @@ def generate_task(
         focus_detail = "both directions"
     # Build variant-aware step 1 and step 7
     variant_only = default_perfect and bool(diverging_variants)
+    # Build per-variant --style commands for all diverging variants.
+    # Never use --check-variants with --sample — the sample may not include
+    # variant-diverging repos, producing misleading FP/FN numbers.
+    def _variant_style_cmds() -> str:
+        cmds = []
+        for v in sorted(diverging_variants, key=lambda x: x["fp"] + x["fn"], reverse=True):
+            params = _infer_variant_style_params(v)
+            if len(params) == 1:
+                cmds.append(
+                    f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
+                    f"--style {params[0][0]}={params[0][1]}"
+                )
+            # Multi-param cops: skip (CI --check-variants handles these)
+        return "\n".join(cmds)
+
     if variant_only:
-        # Primary variant style for commands (highest divergence)
-        primary_variant = max(diverging_variants, key=lambda v: v["fp"] + v["fn"])
-        # Detect the config key(s) (e.g., "EnforcedStyle") from variant data
-        style_params = _infer_variant_style_params(primary_variant)
-        if len(style_params) == 1:
-            style_flag = f"--style {style_params[0][0]}={style_params[0][1]}"
-        else:
-            # Multi-param cops can't use --style (only takes one PARAM=VALUE).
-            # Tell the agent to use --check-variants instead.
-            style_flag = "--check-variants"
         step1_text = (
             "1. Read the **Variant FP/FN Examples** section below — it contains actual "
             "Ruby code from the corpus that diverges under the non-default style"
         )
-        step7_text = (
-            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
-            f"   ```bash\n"
-            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
-            f"{style_flag}\n"
-            f"   ```\n"
-            f"   Also validate the default config is not regressed:\n"
-            f"   ```bash\n"
-            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
-            f"   ```\n"
-            f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
-        )
+        variant_cmds = _variant_style_cmds()
+        if variant_cmds:
+            step7_text = (
+                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                f"   ```bash\n"
+                f"{variant_cmds}\n"
+                f"   ```\n"
+                f"   Also validate the default config is not regressed:\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                f"   ```\n"
+                f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+            )
+        else:
+            # Multi-param cop where --style can't express the config.
+            # Just validate default; CI --check-variants handles variants.
+            step7_text = (
+                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                f"   ```\n"
+                f"   CI will validate all variant styles via `--check-variants` after you push.\n"
+                f"   If default reports FP or FN regression, your fix is too broad — narrow it down."
+            )
     else:
         if diagnostics:
             step1_text = "1. Read the **Pre-diagnostic Results** section below first"
@@ -1750,20 +1767,28 @@ def generate_task(
             step1_text = "1. Read the sections below for context"
         if diverging_variants:
             # Mixed cop: has default FP/FN AND variant divergence.
-            # Must validate both default and variants to avoid pushing a fix
-            # that passes default but breaks a variant style.
-            step7_text = (
-                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
-                f"   ```bash\n"
-                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
-                f"   ```\n"
-                f"   **Also validate variant styles** (this cop has non-default style divergence):\n"
-                f"   ```bash\n"
-                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
-                f"--check-variants\n"
-                f"   ```\n"
-                f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
-            )
+            variant_cmds = _variant_style_cmds()
+            if variant_cmds:
+                step7_text = (
+                    f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                    f"   ```bash\n"
+                    f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                    f"   ```\n"
+                    f"   **Also validate variant styles** (this cop has non-default style divergence):\n"
+                    f"   ```bash\n"
+                    f"{variant_cmds}\n"
+                    f"   ```\n"
+                    f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+                )
+            else:
+                step7_text = (
+                    f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                    f"   ```bash\n"
+                    f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                    f"   ```\n"
+                    f"   CI will validate all variant styles via `--check-variants` after you push.\n"
+                    f"   If this reports FP or FN regression, your fix is too broad — narrow it down."
+                )
         else:
             step7_text = (
                 f"7. **Validate against corpus** (REQUIRED before finishing):\n"
