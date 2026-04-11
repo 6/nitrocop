@@ -146,3 +146,10 @@ A = b
 authorize scope.includes(:user)
                .where(name: 'Bob')
                .order(:name)
+
+# Continuation dot aligned with ancestor dot on line directly above
+# (RuboCop's get_dot_right_above walks ancestors, not just receiver chain)
+expect { subject.run! }
+  .to emit_notification("run").with_payload(x)
+  .and emit_notification("count").with_payload(y).with_value(0)
+  .and emit_notification("future").with_payload(z).with_value(0)

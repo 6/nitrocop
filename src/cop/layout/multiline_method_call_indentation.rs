@@ -122,6 +122,31 @@ use crate::parse::source::SourceFile;
 ///
 /// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
 /// -1,092 FP resolved, -329 FN resolved.
+///
+/// ## Corpus fix (2026-04-11)
+///
+/// Baseline: 38,410 matches, 3,184 FP, 2,231 FN.
+///
+/// Added text-based `get_dot_right_above` check. RuboCop walks AST
+/// ancestors to find a dot on the line directly above at the same
+/// column. Since nitrocop doesn't track parent pointers, we scan the
+/// text of the previous line instead, but only accept the match when
+/// the dot is NOT in the current call's receiver chain (to avoid
+/// suppressing legitimate receiver-chain alignment checks).
+///
+/// Root cause: in Prism's AST, calls inside non-parenthesized arguments
+/// have a receiver chain that diverges from the visual nesting. E.g.,
+/// `.and` in `expect { }.to(...).and(...)` chains on `.with_payload`
+/// (an inner call), not on `.to`. RuboCop's ancestor traversal finds
+/// `.to`'s dot directly above; our receiver-chain-only approach missed it.
+///
+/// This fixes the most common FP pattern: RSpec matcher chains with
+/// `.to ... .and ...` where continuation dots are properly aligned with
+/// each other but flagged because the receiver chain leads to an inline
+/// dot at a different column.
+///
+/// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
+/// -1,324 FP resolved, -190 FN resolved.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -302,6 +327,22 @@ impl ChainVisitor<'_> {
                 find_current_node_block_continuation(self.source, call_node, receiver)
             {
                 return Some(col);
+            }
+        }
+
+        // RuboCop's `get_dot_right_above`: check if any ancestor (not just
+        // the receiver chain) has a dot on the line directly above at the
+        // same column. This handles cases where the receiver chain goes
+        // through a different AST branch (e.g., `.and` chaining on
+        // `.with_payload` in RSpec matcher chains while `.to` has a dot
+        // directly above). We only accept this when the dot above is NOT
+        // in the receiver chain — receiver chain dots are handled by the
+        // normal alignment logic.
+        if !is_trailing_dot {
+            if has_dot_at_col(self.source, rhs_line.saturating_sub(1), rhs_col)
+                && !is_dot_in_receiver_chain(self.source, &receiver, rhs_line - 1, rhs_col)
+            {
+                return Some(rhs_col);
             }
         }
 
@@ -570,6 +611,53 @@ fn find_current_node_block_continuation(
     }
 
     None
+}
+
+/// Check if a given line has a `.` or `&.` at a specific column.
+/// Used for text-based approximation of RuboCop's `get_dot_right_above`.
+fn has_dot_at_col(source: &SourceFile, line: usize, col: usize) -> bool {
+    if line < 1 {
+        return false;
+    }
+    let line_bytes = match source.lines().nth(line - 1) {
+        Some(b) => b,
+        None => return false,
+    };
+    if col >= line_bytes.len() {
+        return false;
+    }
+    let ch = line_bytes[col];
+    if ch == b'.' {
+        return true;
+    }
+    if ch == b'&' && col + 1 < line_bytes.len() && line_bytes[col + 1] == b'.' {
+        return true;
+    }
+    false
+}
+
+/// Check if a dot at (target_line, target_col) belongs to any call node
+/// in the receiver chain of the given node. This is used to distinguish
+/// ancestor dots (from enclosing expressions) from receiver chain dots
+/// (from the current expression's own chain).
+fn is_dot_in_receiver_chain(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    target_line: usize,
+    target_col: usize,
+) -> bool {
+    if let Some(call) = node.as_call_node() {
+        if let Some(dot_loc) = call.call_operator_loc() {
+            let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+            if dot_line == target_line && dot_col == target_col {
+                return true;
+            }
+        }
+        if let Some(recv) = call.receiver() {
+            return is_dot_in_receiver_chain(source, &recv, target_line, target_col);
+        }
+    }
+    false
 }
 
 /// Find alignment based on the first dot in the chain (RuboCop's
