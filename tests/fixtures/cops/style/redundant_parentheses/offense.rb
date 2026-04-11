@@ -342,3 +342,18 @@ rescue Exception => e
   raise ASSERTION_CLASS, e.message, (e.backtrace.reject { |line| File.expand_path(line).match?(/#{path}/) })
                                     ^ Style/RedundantParentheses: Don't use parentheses around a method call.
 end
+
+(--5.5).should be_close(5.5, TOLERANCE)
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--5).should == 5
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--2).should == 2
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(((ruby_rails_versions_hash[ruby_version] || {})['rails']) || '').split(',')
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+!!((@btc_txbuilder_provider_consumed_unspent_outputs ||= {})[btc_txbuilder_outpoint_id(output)])
+^ Style/RedundantParentheses: Don't use parentheses around a method call.
