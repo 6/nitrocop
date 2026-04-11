@@ -1155,14 +1155,14 @@ def test_generate_task_variant_only_includes_guardrail_note(tmp_path):
 
 
 def test_generate_task_variant_only_no_examples_shows_fallback(tmp_path):
-    """When variant data has no examples, prompt suggests verify_cop_locations."""
+    """When variant data has no examples, prompt suggests check_cop.py --rerun."""
     saved = _setup_generate_task_env(tmp_path, variant_data=[
         {"style_label": "comma", "matches": 300, "fp": 5, "fn": 3,
          "fp_examples": [], "fn_examples": []},
     ])
     try:
         task = gct.generate_task("Style/FooBar")
-        assert "verify_cop_locations.py" in task
+        assert "check_cop.py" in task
         assert "No example source code is available" in task
     finally:
         _teardown_generate_task_env(saved)

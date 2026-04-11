@@ -8,11 +8,10 @@ Use the cached corpus tools before rerunning expensive checks:
 python3 scripts/investigate_cop.py Department/CopName
 python3 scripts/investigate_cop.py Department/CopName --repos-only
 python3 scripts/investigate_cop.py Department/CopName --context
-python3 scripts/investigate_repo.py rails
 python3 scripts/reduce_mismatch.py Department/CopName repo_id path/to/file.rb:line
 ```
 
-`investigate_cop.py` and `investigate_repo.py` download the latest corpus artifact automatically. Do not manually download artifacts first.
+`investigate_cop.py` downloads the latest corpus artifact automatically. Do not manually download artifacts first.
 
 ## Regression Checks
 
@@ -23,13 +22,11 @@ python3 scripts/check_cop.py Department/CopName
 python3 scripts/check_cop.py Department/CopName --verbose
 python3 scripts/check_cop.py Department/CopName --verbose --rerun
 python3 scripts/check_cop.py Department/CopName --verbose --rerun --all-repos  # full scan, local only
-python3 scripts/verify_cop_locations.py Department/CopName
 ```
 
 Important:
 
 - `check_cop.py` is count-based. It does not prove exact location matches.
-- `verify_cop_locations.py` checks the known oracle FP/FN locations.
 - “file-drop noise” is not an excuse for real FN gaps. Investigate the actual missed examples.
 
 ## Corpus Bundle Notes

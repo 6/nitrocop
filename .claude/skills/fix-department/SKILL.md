@@ -25,8 +25,7 @@ Final stop condition:
 Per-cop `check_cop.py --rerun` results are intermediate count-based gates only.
 They are necessary, but they are NOT sufficient to end `/fix-department`.
 When the corpus oracle has concrete FP/FN examples for a cop, use
-`verify_cop_locations.py` as the location-level check before treating that cop
-as done locally.
+`check_cop.py --rerun --clone` to verify before treating that cop as done locally.
 
 ## Persistence
 
@@ -134,8 +133,7 @@ On macOS or devcontainers, committing directly to main is acceptable.
    - Do **not** treat `vendor/corpus/` as mandatory bootstrap. The smoke test does not
      need it, and cloud environments should not prefetch the full corpus checkout.
    - Only hydrate corpus repos on demand when a workflow step actually needs local
-     source files (`investigate_cop.py --context` fallback, `reduce_mismatch.py`,
-     `verify_cop_locations.py`):
+     source files (`investigate_cop.py --context` fallback, `reduce_mismatch.py`):
      ```bash
      python3 scripts/corpus_repo_map.py --clone Department/CopName
      ```
@@ -151,7 +149,7 @@ On macOS or devcontainers, committing directly to main is acceptable.
      cp "${CARGO_TARGET_DIR}/release/nitrocop" "/tmp/nitrocop-${target_name}"
      export NITROCOP_BIN="/tmp/nitrocop-${target_name}"
      ```
-     All Python scripts (`check_cop.py`, `verify_cop_locations.py`, `corpus_smoke_test.py`,
+     All Python scripts (`check_cop.py`, `corpus_smoke_test.py`,
      `reduce_mismatch.py`) honor `NITROCOP_BIN` to find the binary. Copying to `/tmp/`
      prevents other agents' builds from overwriting it. Rebuild and re-copy after code
      changes (Phase 4 verification).
@@ -294,8 +292,6 @@ if the prompt/examples require local corpus source context.
    - **Corpus validation**: `check_cop.py --rerun` for aggregate count regression on
      cops you modified; `check_cop.py --verbose` for untouched cops when the latest
      corpus oracle run is current.
-   - **Location validation**: `python3 scripts/verify_cop_locations.py Department/CopName`
-     for modified cops when the corpus oracle includes concrete FP/FN examples.
    - **Synthetic corpus**: `python3 bench/synthetic/run_synthetic.py --verbose` for
      synthetic-only cops.
    Never create test Ruby files outside the fixture directories.
@@ -396,8 +392,7 @@ if the prompt/examples require local corpus source context.
    ```
    **Corpus validation is the intermediate acceptance gate** for corpus-backed
    cops — unit tests passing is necessary but NOT sufficient. The goal is
-   `PASS: aggregate offense count matches RuboCop for this cop`, plus
-   `verify_cop_locations.py` when concrete oracle locations exist. `PASS: no
+   `PASS: aggregate offense count matches RuboCop for this cop`. `PASS: no
    new excess vs CI nitrocop baseline` alone is not enough — the cop may still
    have remaining mismatches. For synthetic-only cops, re-run the synthetic
    benchmark and inspect that cop's entry in
@@ -456,7 +451,7 @@ if the prompt/examples require local corpus source context.
 8. After a CI corpus-report refresh, inspect the target row in `README.md` and
    `docs/corpus.md`:
    - If the row is still below 100%, go back to Phase 1 even if the modified
-     cops passed `check_cop.py --rerun` and `verify_cop_locations.py`.
+     cops passed `check_cop.py --rerun`.
    - If the row is 100% locally but Linux CI/corpus oracle is not yet green or
      disagrees, treat that as a parity bug and keep investigating. Do not
      declare the department/gem complete yet.

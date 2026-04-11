@@ -137,6 +137,12 @@ jobs:
             CODE_BUGS=1
             echo "Variant-only divergence detected — treating as dispatchable"
           fi
+          # Config/context issues (e.g. config resolution, Include patterns) are
+          # still real bugs worth investigating — don't skip the agent.
+          if [ "$CODE_BUGS" -eq 0 ] && [ "$CONFIG_ISSUES" -gt 0 ]; then
+            CODE_BUGS=1
+            echo "Config/context issues detected ($CONFIG_ISSUES) — treating as dispatchable"
+          fi
           echo "code_bugs=$CODE_BUGS" >> "$GITHUB_OUTPUT"
           echo "Code bugs: $CODE_BUGS, Config issues: $CONFIG_ISSUES"
 

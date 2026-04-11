@@ -1410,7 +1410,7 @@ def main():
         if excess > 0 and file_drop_offenses >= excess:
             print(f"  WARNING: file-drop noise ({file_drop_offenses:,}) masks "
                   f"raw excess ({excess:,}). Real FPs may exist — use "
-                  f"verify_cop_locations.py for ground truth.")
+                  f"check_cop.py --rerun --clone for ground truth.")
     print()
 
     print("  Gate type: count-only / cop-level regression")
@@ -1657,7 +1657,7 @@ def main():
             if total_unchecked > total_checked:
                 print(f"    WARNING: {total_unchecked} examples could not be verified "
                       f"(repos not cloned with --sample). Use --sample with a higher "
-                      f"value or verify_cop_locations.py for ground truth.")
+                      f"value for ground truth.")
             print()
 
         print("PASS: no per-repo regressions vs baseline (default config)")

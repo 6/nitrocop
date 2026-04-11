@@ -2,8 +2,8 @@
 """Run nitrocop on a corpus repo with oracle-identical environment.
 
 Single source of truth for how nitrocop is invoked on corpus repos.
-Used by check_cop.py, corpus-oracle.yml, verify_cop_locations.py,
-corpus_smoke_test.py, and reduce_mismatch.py.
+Used by check_cop.py, corpus-oracle.yml, corpus_smoke_test.py,
+and reduce_mismatch.py.
 
 CLI usage:
     python3 bench/corpus/run_nitrocop.py <repo_dir> [options]

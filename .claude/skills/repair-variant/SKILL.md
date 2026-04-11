@@ -205,7 +205,7 @@ EOF
 - **Don't run corpus tooling to find issues.** When examples are available from
   `docs/corpus.md` or CI, that IS the diagnosis. Fetching the source at those
   lines and reading the cop/RuboCop source is all you need. `check_cop.py --style`
-  and `verify_cop_locations.py --style` exist but only help verify a fix after the
-  fact — CI already does that when you push. Don't burn time running them locally.
+  exists but only helps verify a fix after the
+  fact — CI already does that when you push. Don't burn time running it locally.
 - **All variants must pass.** The CI gate (`--check-variants`) runs ALL variant styles
   automatically. Fixing one variant must not break another or the default config.

@@ -565,6 +565,14 @@ def test_close_pr_no_changes_includes_findings(tmp_path):
     assert "Lint/RedundantCopDisableDirective" in body
     # Should NOT have the bare "did not produce" message when findings exist
     assert "did not produce any branch changes" not in body
+    # PR should also get findings posted via gh pr comment
+    pr_comment_cmds = [c for c in calls if "pr" in c and "comment" in c]
+    assert pr_comment_cmds, "Expected gh pr comment call for findings"
+    pr_body_file = Path(str(claim_body) + ".pr")
+    assert pr_body_file.exists()
+    pr_body = pr_body_file.read_text()
+    assert "Agent findings" in pr_body
+    assert "post-processing" in pr_body
 
 
 def test_close_pr_no_changes_bare_message_without_findings(tmp_path):
