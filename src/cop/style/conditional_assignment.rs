@@ -74,6 +74,15 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// (starting column) to the first line's length, double-counting indentation.
 /// RuboCop's `longest_line` computes each branch line's length independently
 /// of the node's column position. Dropped `node_col` to match.
+///
+/// FN reduction (2026-04-11): RuboCop strips the branch assignment using
+/// `/\s*#{Regexp.escape(lhs).gsub('\ ', '\s*')}/`, which removes the branch's
+/// indentation along with the assignment. nitrocop was only removing the raw
+/// lhs substring and keeping the leading spaces, so long branch lines like
+/// `html << ...` and `details = "..."` were incorrectly suppressed by the
+/// line-length guard. RuboCop also measures `String#length` in characters,
+/// not UTF-8 bytes, so multibyte literals like `…` must not inflate the
+/// corrected line length.
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -1246,25 +1255,25 @@ fn exceeds_line_limit(
         Ok(s) => s,
         Err(_) => return false,
     };
-    let lhs_trimmed = lhs_text.trim_end();
+    let assignment_regex = match build_assignment_regex(lhs_text) {
+        Some(regex) => regex,
+        None => return false,
+    };
     let mut max_remaining = 0;
     for line in src.lines() {
-        // Remove first occurrence of the LHS anywhere in the line, matching
-        // RuboCop's `line.sub(assignment_regex, '')`. For if/else branches
-        // the LHS is at the start; for ternaries it appears mid-line.
-        let remaining = if let Some(pos) = line.find(lhs_trimmed) {
-            let before = &line[..pos];
-            let after = &line[pos + lhs_trimmed.len()..];
-            let after_trimmed = after.trim_start();
-            before.len() + after_trimmed.len()
-        } else {
-            line.len()
-        };
+        // Remove the first match of RuboCop's assignment regex:
+        // `/\s*#{Regexp.escape(lhs).gsub('\ ', '\s*')}/`.
+        let remaining = assignment_regex.replace(line, "").chars().count();
         if remaining > max_remaining {
             max_remaining = remaining;
         }
     }
-    lhs_text.len() + max_remaining > max_line_length
+    lhs_text.chars().count() + max_remaining > max_line_length
+}
+
+fn build_assignment_regex(lhs_text: &str) -> Option<regex::Regex> {
+    let escaped = regex::escape(lhs_text).replace("\\ ", "\\s*");
+    regex::Regex::new(&format!("\\s*{escaped}")).ok()
 }
 
 #[cfg(test)]

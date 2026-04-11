@@ -161,3 +161,69 @@ end
 # ternary with local variable assignment (FN case)
 opts[:response_timeout].nil? ? response_timeout = 0.9 : response_timeout = opts[:response_timeout].to_f
 ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+# Corpus FN: long `<<` branches inside if/elsif/else
+if item.to_s == pagy.page.to_s
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  html << link_to(item, url_for(page: item), class: "btn btn-sm btn-neutral min-w-[2.5rem] pointer-events-none")
+elsif item.to_s == "gap"
+  html << link_to("…", url_for(page: item), class: "btn btn-sm btn-ghost min-w-[2.5rem] pointer-events-none btn-disabled")
+else
+  html << link_to(item, url_for(page: item), class: "btn btn-sm btn-ghost min-w-[2.5rem]")
+end
+
+# Corpus FN: long setter calls in both branches
+if created_at.empty?
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  self.opened_scanner = connection.scannerOpen(table_name, key, formatted_column_family_names, {})
+else
+  self.opened_scanner = connection.scannerOpenTs(table_name, key, formatted_column_family_names, created_at, {})
+end
+
+# Corpus FN: nested conditional inside else branch
+if @article.persistent?
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  notifications[:error] = t(:error_persistent, :scope => [:published_publication, @article.class, :destroy, :flashes])
+else
+  notifications[:error] = t(:error, :scope => [:published_publication, @article.class, :destroy, :flashes])
+end
+
+# Corpus FN: long local variable assignment in both branches
+if $colors_enabled
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  command = Readline.readline( "#{colorize('*Evil-WinRM*', 'red')}#{colorize(' PS ', 'yellow')}#{pwd}> ", true)
+else
+  command = Readline.readline("*Evil-WinRM* PS #{pwd}> ", true)
+end
+
+# Corpus FN: long local variable assignment inside block branch
+if @options[:interline_align]
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  result = @interline_align.call line_number, @results[line_number].map { |result| result.gsub "\n", '\n' }
+else
+  result = @results[line_number].map { |result| result.gsub "\n", '\n' }.join(', ')
+end
+
+# Corpus FN: long local variable assignment with string interpolation
+if(event.respond_to?(:message))
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  details = "An error occurred in #{self.class.task_type_name}. Error: #{event.try(:message)}\n\n#{event.try(:backtrace)}"
+else
+  details = event.to_s
+end
+
+# Corpus FN: provider variant of long local variable assignment
+if(event.respond_to?(:message))
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  details = "An error occurred in #{self.class.provider_name}. Error #{event.to_s}"
+else
+  details = "An error occurred in #{self.class.provider_name}. Error: #{event.try(:message)}\n\n#{event.try(:backtrace)}"
+end
+
+# Corpus FN: long `+=` branches inside nested else
+if state[:status] == :success
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+  message += '! Great job, if the other parts of your build have completed successfully, you may check in your code!'
+else
+  message += '. Please fix or approve them.'
+end
