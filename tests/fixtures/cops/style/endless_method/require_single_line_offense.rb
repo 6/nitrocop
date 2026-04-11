@@ -46,3 +46,22 @@ def apply_vector_operator operator, vector, other
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/EndlessMethod: Use endless method definitions for single line methods.
   BoolArray.new(vector.zip(other).map { |d, o| !!d.send(operator, o) })
 end
+
+# Empty heredoc argument: parser gem treats this descendant as :dstr, not :str,
+# so RuboCop's use_heredoc? does NOT skip it.
+def empty_heredoc_call
+^^^^^^^^^^^^^^^^^^^^^^ Style/EndlessMethod: Use endless method definitions for single line methods.
+  execute <<-SQL
+  SQL
+end
+
+# Interpolated string with heredoc parts: the descendant heredocs are :dstr in
+# the parser gem, so RuboCop still requires an endless method.
+def interpolated_heredoc_string
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/EndlessMethod: Use endless method definitions for single line methods.
+  assert_separately([], "#{<<-'BEGIN'}\n#{<<-'END'}")
+  BEGIN
+    puts :a
+    puts :b
+  END
+end
