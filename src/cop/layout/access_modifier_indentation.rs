@@ -59,6 +59,19 @@ use ruby_prism::Visit;
 /// adding `visit_constant_write_node` and `visit_constant_path_write_node` to
 /// `MacroScopeChecker`, which set `in_def = true` (breaking macro scope) when
 /// entering constant assignments.
+///
+/// ### Round 6 (2026-04-11): Other non-transparent parents also break macro scope
+/// Root cause of the remaining 5 FPs with `EnforcedStyle: outdent`: the first
+/// macro-scope checker only tracked `def` and constant assignment wrappers. The
+/// remaining corpus examples sat inside other parents that RuboCop does NOT
+/// treat as transparent for `in_macro_scope?`, notably local assignments
+/// (`app = Sinatra.new do ... end`) and rescuing `begin` bodies. That let
+/// nested arbitrary blocks inherit macro scope when RuboCop would stop at the
+/// assignment or `begin .. rescue` wrapper. Fixed by replacing the boolean
+/// `in_def` tracker with a small macro-scope stack that mirrors RuboCop's
+/// transparent wrappers vs non-transparent parents for the cases seen here,
+/// while still letting `Class.new`/`Module.new`/`Struct.new`/`Data.define`
+/// reset scope like real class/module bodies.
 pub struct AccessModifierIndentation;
 
 // Uses access_modifier_predicates::is_bare_access_modifier() instead of local constant.
@@ -83,7 +96,7 @@ fn body_statements(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
 struct MacroScopeChecker {
     target_start: usize,
     target_end: usize,
-    in_def: bool,
+    macro_scope_stack: Vec<access_modifier_predicates::MacroScope>,
     result: Option<bool>,
 }
 
@@ -92,9 +105,40 @@ impl MacroScopeChecker {
         Self {
             target_start,
             target_end,
-            in_def: false,
+            macro_scope_stack: vec![],
             result: None,
         }
+    }
+
+    fn current_macro_scope(&self) -> bool {
+        access_modifier_predicates::in_macro_scope(&self.macro_scope_stack)
+    }
+
+    fn push_class_like_scope(&mut self) {
+        access_modifier_predicates::push_class_like_scope(&mut self.macro_scope_stack);
+    }
+
+    fn push_non_macro_scope(&mut self) {
+        access_modifier_predicates::push_def_scope(&mut self.macro_scope_stack);
+    }
+
+    fn push_wrapper_scope(&mut self) {
+        access_modifier_predicates::push_wrapper_scope(&mut self.macro_scope_stack);
+    }
+
+    fn pop_scope(&mut self) {
+        access_modifier_predicates::pop_scope(&mut self.macro_scope_stack);
+    }
+
+    fn is_target_block(&self, node: &ruby_prism::BlockNode<'_>) -> bool {
+        let loc = node.location();
+        loc.start_offset() == self.target_start && loc.end_offset() == self.target_end
+    }
+
+    fn visit_in_non_macro_scope<T>(&mut self, child: &T, visit: impl FnOnce(&mut Self, &T)) {
+        self.push_non_macro_scope();
+        visit(self, child);
+        self.pop_scope();
     }
 }
 
@@ -127,21 +171,68 @@ fn is_class_constructor_call(node: &ruby_prism::CallNode<'_>) -> bool {
     false
 }
 
+macro_rules! visit_node_as_non_macro_scope {
+    ($method:ident, $node_ty:ty, $visit_fn:ident) => {
+        fn $method(&mut self, node: &$node_ty) {
+            if self.result.is_some() {
+                return;
+            }
+            self.push_non_macro_scope();
+            ruby_prism::$visit_fn(self, node);
+            self.pop_scope();
+        }
+    };
+}
+
 impl<'pr> Visit<'pr> for MacroScopeChecker {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        // Class.new/Module.new/Struct.new/Data.define blocks act as class-like
-        // scopes (class_constructor? in RuboCop's in_macro_scope?), resetting
-        // the macro scope just like class/module/sclass nodes.
-        if is_class_constructor_call(node) {
-            let prev = self.in_def;
-            self.in_def = false;
-            ruby_prism::visit_call_node(self, node);
-            self.in_def = prev;
-        } else {
-            ruby_prism::visit_call_node(self, node);
+
+        if let Some(receiver) = node.receiver() {
+            self.visit_in_non_macro_scope(&receiver, |this, receiver| this.visit(receiver));
+            if self.result.is_some() {
+                return;
+            }
+        }
+
+        if let Some(arguments) = node.arguments() {
+            self.visit_in_non_macro_scope(&arguments, |this, arguments| {
+                this.visit_arguments_node(arguments)
+            });
+            if self.result.is_some() {
+                return;
+            }
+        }
+
+        if let Some(block_node) = node.block().and_then(|block| block.as_block_node()) {
+            let block_is_class_like = is_class_constructor_call(node);
+
+            if self.is_target_block(&block_node) {
+                self.result = Some(block_is_class_like || self.current_macro_scope());
+                return;
+            }
+
+            if block_is_class_like {
+                self.push_class_like_scope();
+            } else if self.current_macro_scope() {
+                self.push_wrapper_scope();
+            } else {
+                self.push_non_macro_scope();
+            }
+            ruby_prism::visit_block_node(self, &block_node);
+            self.pop_scope();
+            return;
+        }
+
+        if let Some(block_argument) = node
+            .block()
+            .and_then(|block| block.as_block_argument_node())
+        {
+            self.visit_in_non_macro_scope(&block_argument, |this, block_argument| {
+                this.visit_block_argument_node(block_argument)
+            });
         }
     }
 
@@ -149,80 +240,283 @@ impl<'pr> Visit<'pr> for MacroScopeChecker {
         if self.result.is_some() {
             return;
         }
-        let prev = self.in_def;
-        self.in_def = true;
+        self.push_non_macro_scope();
         ruby_prism::visit_def_node(self, node);
-        self.in_def = prev;
+        self.pop_scope();
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        let prev = self.in_def;
-        self.in_def = false;
+        self.push_class_like_scope();
         ruby_prism::visit_class_node(self, node);
-        self.in_def = prev;
+        self.pop_scope();
     }
 
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        let prev = self.in_def;
-        self.in_def = false;
+        self.push_class_like_scope();
         ruby_prism::visit_module_node(self, node);
-        self.in_def = prev;
+        self.pop_scope();
     }
 
     fn visit_singleton_class_node(&mut self, node: &ruby_prism::SingletonClassNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        let prev = self.in_def;
-        self.in_def = false;
+        self.push_class_like_scope();
         ruby_prism::visit_singleton_class_node(self, node);
-        self.in_def = prev;
+        self.pop_scope();
     }
 
-    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        // Constant assignment (casgn) breaks the macro scope chain in RuboCop's
-        // in_macro_scope?. A block inside `FOO = SomeBuilder.new do...end` is NOT
-        // in macro scope unless the call is a class_constructor? (Class.new, etc.),
-        // which resets scope in visit_call_node.
-        let prev = self.in_def;
-        self.in_def = true;
-        ruby_prism::visit_constant_write_node(self, node);
-        self.in_def = prev;
+        if node.rescue_clause().is_some() || node.ensure_clause().is_some() {
+            self.push_non_macro_scope();
+            ruby_prism::visit_begin_node(self, node);
+            self.pop_scope();
+            return;
+        }
+
+        ruby_prism::visit_begin_node(self, node);
     }
 
-    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        // Foo::BAR = ... also breaks macro scope, same as plain constant assignment.
-        let prev = self.in_def;
-        self.in_def = true;
-        ruby_prism::visit_constant_path_write_node(self, node);
-        self.in_def = prev;
+        self.push_non_macro_scope();
+        ruby_prism::visit_lambda_node(self, node);
+        self.pop_scope();
     }
 
-    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+    fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         if self.result.is_some() {
             return;
         }
-        let loc = node.location();
-        let start = loc.start_offset();
-        let end = loc.end_offset();
-        if start == self.target_start && end == self.target_end {
-            self.result = Some(!self.in_def);
+
+        self.visit_in_non_macro_scope(&node.predicate(), |this, predicate| this.visit(predicate));
+        if self.result.is_some() {
             return;
         }
-        ruby_prism::visit_block_node(self, node);
+
+        if let Some(statements) = node.statements() {
+            self.visit_statements_node(&statements);
+            if self.result.is_some() {
+                return;
+            }
+        }
+
+        if let Some(subsequent) = node.subsequent() {
+            self.visit(&subsequent);
+        }
     }
+
+    fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+        if self.result.is_some() {
+            return;
+        }
+
+        self.visit_in_non_macro_scope(&node.predicate(), |this, predicate| this.visit(predicate));
+        if self.result.is_some() {
+            return;
+        }
+
+        if let Some(statements) = node.statements() {
+            self.visit_statements_node(&statements);
+            if self.result.is_some() {
+                return;
+            }
+        }
+
+        if let Some(else_clause) = node.else_clause() {
+            self.visit_else_node(&else_clause);
+        }
+    }
+
+    visit_node_as_non_macro_scope!(visit_and_node, ruby_prism::AndNode<'pr>, visit_and_node);
+    visit_node_as_non_macro_scope!(visit_or_node, ruby_prism::OrNode<'pr>, visit_or_node);
+    visit_node_as_non_macro_scope!(
+        visit_rescue_node,
+        ruby_prism::RescueNode<'pr>,
+        visit_rescue_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_ensure_node,
+        ruby_prism::EnsureNode<'pr>,
+        visit_ensure_node
+    );
+    visit_node_as_non_macro_scope!(visit_case_node, ruby_prism::CaseNode<'pr>, visit_case_node);
+    visit_node_as_non_macro_scope!(
+        visit_case_match_node,
+        ruby_prism::CaseMatchNode<'pr>,
+        visit_case_match_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_call_and_write_node,
+        ruby_prism::CallAndWriteNode<'pr>,
+        visit_call_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_call_operator_write_node,
+        ruby_prism::CallOperatorWriteNode<'pr>,
+        visit_call_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_call_or_write_node,
+        ruby_prism::CallOrWriteNode<'pr>,
+        visit_call_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_class_variable_and_write_node,
+        ruby_prism::ClassVariableAndWriteNode<'pr>,
+        visit_class_variable_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_class_variable_operator_write_node,
+        ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+        visit_class_variable_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_class_variable_or_write_node,
+        ruby_prism::ClassVariableOrWriteNode<'pr>,
+        visit_class_variable_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_class_variable_write_node,
+        ruby_prism::ClassVariableWriteNode<'pr>,
+        visit_class_variable_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_and_write_node,
+        ruby_prism::ConstantAndWriteNode<'pr>,
+        visit_constant_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_operator_write_node,
+        ruby_prism::ConstantOperatorWriteNode<'pr>,
+        visit_constant_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_or_write_node,
+        ruby_prism::ConstantOrWriteNode<'pr>,
+        visit_constant_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_path_and_write_node,
+        ruby_prism::ConstantPathAndWriteNode<'pr>,
+        visit_constant_path_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_path_operator_write_node,
+        ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+        visit_constant_path_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_path_or_write_node,
+        ruby_prism::ConstantPathOrWriteNode<'pr>,
+        visit_constant_path_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_path_write_node,
+        ruby_prism::ConstantPathWriteNode<'pr>,
+        visit_constant_path_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_constant_write_node,
+        ruby_prism::ConstantWriteNode<'pr>,
+        visit_constant_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_global_variable_and_write_node,
+        ruby_prism::GlobalVariableAndWriteNode<'pr>,
+        visit_global_variable_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_global_variable_operator_write_node,
+        ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+        visit_global_variable_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_global_variable_or_write_node,
+        ruby_prism::GlobalVariableOrWriteNode<'pr>,
+        visit_global_variable_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_global_variable_write_node,
+        ruby_prism::GlobalVariableWriteNode<'pr>,
+        visit_global_variable_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_index_and_write_node,
+        ruby_prism::IndexAndWriteNode<'pr>,
+        visit_index_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_index_operator_write_node,
+        ruby_prism::IndexOperatorWriteNode<'pr>,
+        visit_index_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_index_or_write_node,
+        ruby_prism::IndexOrWriteNode<'pr>,
+        visit_index_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_instance_variable_and_write_node,
+        ruby_prism::InstanceVariableAndWriteNode<'pr>,
+        visit_instance_variable_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_instance_variable_operator_write_node,
+        ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+        visit_instance_variable_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_instance_variable_or_write_node,
+        ruby_prism::InstanceVariableOrWriteNode<'pr>,
+        visit_instance_variable_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_instance_variable_write_node,
+        ruby_prism::InstanceVariableWriteNode<'pr>,
+        visit_instance_variable_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_local_variable_and_write_node,
+        ruby_prism::LocalVariableAndWriteNode<'pr>,
+        visit_local_variable_and_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_local_variable_operator_write_node,
+        ruby_prism::LocalVariableOperatorWriteNode<'pr>,
+        visit_local_variable_operator_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_local_variable_or_write_node,
+        ruby_prism::LocalVariableOrWriteNode<'pr>,
+        visit_local_variable_or_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_local_variable_write_node,
+        ruby_prism::LocalVariableWriteNode<'pr>,
+        visit_local_variable_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_match_write_node,
+        ruby_prism::MatchWriteNode<'pr>,
+        visit_match_write_node
+    );
+    visit_node_as_non_macro_scope!(
+        visit_multi_write_node,
+        ruby_prism::MultiWriteNode<'pr>,
+        visit_multi_write_node
+    );
 }
 
 fn is_block_in_macro_scope(
