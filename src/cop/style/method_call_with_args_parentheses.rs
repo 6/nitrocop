@@ -211,6 +211,30 @@ use crate::parse::source::SourceFile;
 ///    exempt. RuboCop only keeps parentheses when the call is in a
 ///    conditional-style parent or is not the last expression. Added explicit
 ///    non-last-expression tracking and narrowed the exemption to those cases.
+///
+/// ## Variant fix (2026-04-11)
+///
+/// The remaining live `omit_parentheses` mismatches came from Prism parent
+/// tracking around receiver context:
+///
+/// 1. RuboCop's `node.descendants` checks receiver subtrees too, so calls like
+///    `(ignored_organisations || []).join(", ")`, `[*only].include?(k)`, and
+///    `Class.new {}.new.extend(InterfaceModule)` keep their parentheses
+///    because the ambiguity lives in the receiver. nitrocop only scanned
+///    argument subtrees and flagged these as false positives.
+///
+/// 2. Inner calls passed to `super(...)` such as
+///    `super(errors.local_attribute(attribute))` are allowed by RuboCop's
+///    `call_as_argument_or_chain?`, which treats `super` like `send` and
+///    `yield`. Prism did not push any parent context for `SuperNode`
+///    arguments, so nitrocop flagged these as false positives.
+///
+/// 3. Calls inside a block that is itself the receiver of another call, such
+///    as `child_errors.map { ... }.freeze`, inherited the outer receiver-call
+///    parent. That made the block body's last expression look like a chained
+///    call argument and suppressed real offenses. Only direct receiver calls
+///    should inherit `ParentKind::Call`; wrapper receivers like blocks should
+///    break that context.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -289,6 +313,7 @@ enum ParentKind {
     TernaryPredicate,
     LogicalOp,
     Call,
+    CallReceiver,
     OptArg,
     KwOptArg,
     ClassSingleLine,
@@ -436,6 +461,9 @@ impl ParenVisitor<'_> {
         node: &ruby_prism::StatementsNode<'pr>,
         parent_kind: ParentKind,
     ) {
+        let prev_non_last = self.non_last_expression_depth;
+        self.non_last_expression_depth = 0;
+
         let body = node.body();
         let single_statement = body.len() == 1;
         let can_inherit_direct_parent = single_statement
@@ -449,7 +477,6 @@ impl ParenVisitor<'_> {
             if is_not_last {
                 self.non_last_expression_depth += 1;
             }
-
             if can_inherit_direct_parent {
                 self.parent_stack.push(parent_kind);
             }
@@ -457,11 +484,12 @@ impl ParenVisitor<'_> {
             if can_inherit_direct_parent {
                 self.parent_stack.pop();
             }
-
             if is_not_last {
                 self.non_last_expression_depth -= 1;
             }
         }
+
+        self.non_last_expression_depth = prev_non_last;
     }
 
     /// Derive child scope for wrapper nodes (begin, block, if branches).
@@ -757,7 +785,10 @@ impl ParenVisitor<'_> {
     }
 
     fn call_as_argument_or_chain(&self) -> bool {
-        matches!(self.immediate_parent(), Some(ParentKind::Call))
+        matches!(
+            self.immediate_parent(),
+            Some(ParentKind::Call | ParentKind::CallReceiver)
+        )
     }
 
     fn call_has_block_pass(&self, call: &ruby_prism::CallNode<'_>) -> bool {
@@ -824,6 +855,12 @@ impl ParenVisitor<'_> {
 
     /// Check for forwarded args, ambiguous literals, logical operators, and blocks in descendants
     fn has_ambiguous_content_in_descendants(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        if let Some(recv) = call.receiver() {
+            if is_ambiguous_descendant(&recv, self.source) {
+                return true;
+            }
+        }
+
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
                 if is_ambiguous_descendant(&arg, self.source) {
@@ -1260,6 +1297,9 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
 
 impl<'pr> Visit<'pr> for ParenVisitor<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
+        let prev_non_last = self.non_last_expression_depth;
+        self.non_last_expression_depth = 0;
+
         let body = node.body();
         for (index, stmt) in body.iter().enumerate() {
             let is_not_last = index + 1 < body.len();
@@ -1271,6 +1311,8 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                 self.non_last_expression_depth -= 1;
             }
         }
+
+        self.non_last_expression_depth = prev_non_last;
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -1290,9 +1332,14 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // Visit children — push Call as parent for receiver, args, and block arg
         // because in RuboCop, all these children have the call as parent node
         if let Some(recv) = node.receiver() {
-            self.parent_stack.push(child_parent);
+            let direct_receiver_call = recv.as_call_node().is_some();
+            if direct_receiver_call {
+                self.parent_stack.push(ParentKind::CallReceiver);
+            }
             self.visit(&recv);
-            self.parent_stack.pop();
+            if direct_receiver_call {
+                self.parent_stack.pop();
+            }
         }
         if let Some(args) = node.arguments() {
             for arg in args.arguments().iter() {
@@ -1315,12 +1362,20 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     // ordinary call-attached blocks only keep macro scope when
                     // the whole block expression is itself in macro scope.
                     let child_scope = self.call_block_child_scope();
+                    let inherited_receiver_chain =
+                        self.immediate_parent() == Some(ParentKind::CallReceiver);
                     self.push_macro_scope(child_scope);
+                    if inherited_receiver_chain {
+                        self.parent_stack.push(ParentKind::Grouped);
+                    }
                     if let Some(params) = block_node.parameters() {
                         self.visit(&params);
                     }
                     if let Some(body) = block_node.body() {
                         self.visit(&body);
+                    }
+                    if inherited_receiver_chain {
+                        self.parent_stack.pop();
                     }
                     self.pop_scope();
                 }
@@ -1389,6 +1444,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.in_endless_def = true;
         }
 
+        let saved_parent_stack = std::mem::take(&mut self.parent_stack);
         self.push_macro_scope(MacroScope::NotMacroScope);
         // Visit parameters
         if let Some(params) = node.parameters() {
@@ -1398,6 +1454,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.visit(&body);
         }
         self.pop_scope();
+        self.parent_stack = saved_parent_stack;
         self.in_endless_def = prev_endless;
     }
 
@@ -1446,6 +1503,20 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                 self.visit(&arg);
             }
             self.parent_stack.pop();
+        }
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        if let Some(args) = node.arguments() {
+            self.parent_stack.push(ParentKind::Call);
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+            self.parent_stack.pop();
+        }
+
+        if let Some(block) = node.block() {
+            self.visit(&block);
         }
     }
 
