@@ -17,11 +17,12 @@ use ruby_prism::Visit;
 ///   Fix: push block context before visiting receiver/arguments/body, keep `lambda`
 ///   as a scope boundary, and only treat regular dot calls with receivers as chained
 ///   sends.
-/// - Variant FN=2 for `EnforcedStyle=return_nil`: nested bare returns inside a
-///   return argument expression, e.g. `return redirect(...) && return`, were
-///   missed because `visit_return_node` diagnosed the outer node but never
-///   recursed into child nodes. RuboCop runs `on_return` for both nodes, so we
-///   must continue visiting return arguments after checking the current node.
+/// - Variant FN=2 for `EnforcedStyle=return_nil`: openSUSE controller code like
+///   `redirect_back_or_to(admin_conference_booths_path(...)) && return` and
+///   `return redirect_back_or_to(...) && return` was missed because
+///   `visit_return_node` diagnosed the outer node but never recursed into child
+///   nodes. RuboCop runs `on_return` for both nodes, so we must continue
+///   visiting return arguments after checking the current node.
 pub struct ReturnNil;
 
 impl Cop for ReturnNil {
