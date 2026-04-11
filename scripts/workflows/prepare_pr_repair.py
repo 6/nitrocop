@@ -710,18 +710,24 @@ def main() -> None:
         "headRefName": args.head_branch,
     }
 
-    # When the repair was triggered by a variant style regression, the verify
-    # script must also check variant styles.  Without this, a repair agent can
-    # pass local verification by only fixing the default style while the broken
-    # variant remains unverified — then the full CI cop-check-gate fails again.
-    if vc:
-        classification["verification_commands"] = [
-            cmd.replace(
-                'scripts/check_cop.py "$cop" --verbose --rerun --clone',
-                'scripts/check_cop.py "$cop" --verbose --rerun --clone --check-variants',
-            )
-            for cmd in classification["verification_commands"]
-        ]
+    # When the repair was triggered by a variant style regression, add
+    # per-variant --style checks to the verification commands.  Don't use
+    # --check-variants with --sample — it compares against a full-corpus
+    # baseline but only samples a subset, producing misleading FP/FN numbers.
+    if vc and cop:
+        from dispatch_cops import _infer_variant_style_params, load_variant_data_for_cop
+        variants = load_variant_data_for_cop(cop)
+        diverging = [v for v in variants if v["fp"] + v["fn"] > 0]
+        style_cmds = []
+        for v in diverging:
+            params = _infer_variant_style_params(v)
+            if len(params) == 1:
+                style_cmds.append(
+                    f'python3 scripts/check_cop.py "$cop" --verbose --rerun --clone '
+                    f'--style {params[0][0]}={params[0][1]}'
+                )
+        if style_cmds:
+            classification["verification_commands"].extend(style_cmds)
 
     prompt = build_prompt(
         run=run,
