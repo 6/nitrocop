@@ -136,6 +136,7 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 ///    comments on body-opening keyword lines like `else # older versions`,
 ///    `begin # relative path`, `rescue # fallback`, and `ensure # cleanup` with the first
 ///    method in that body.
+///
 /// Fix: only classify single-`#` comments as annotations/directives, and treat inline comments
 /// on `begin`/`else`/`rescue`/`ensure` lines as method documentation.
 pub struct DocumentationMethod;
