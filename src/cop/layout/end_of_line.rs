@@ -4,6 +4,17 @@ use crate::parse::source::SourceFile;
 
 /// Checks for Windows-style line endings in the source code.
 ///
+/// ## Corpus investigation (2026-04-11)
+///
+/// Under `EnforcedStyle: crlf`, RuboCop's JSON output drops
+/// `Layout/EndOfLine` offenses for files Prism rejects with syntax or
+/// encoding errors (for example top-level `retry` or invalid UTF-8 bytes).
+/// nitrocop's line-based check still reported "Carriage return character
+/// missing." before parse context was available, causing 4 variant false
+/// positives in the corpus. Fixed by suppressing this cop's `crlf`
+/// diagnostics and autocorrections during `check_source` when Prism reports
+/// parse errors.
+///
 /// ## Variant behavior
 ///
 /// For `EnforcedStyle: crlf`, RuboCop's `unimportant_missing_cr?` skips reporting
@@ -157,6 +168,28 @@ impl Cop for EndOfLine {
             }
         }
     }
+
+    fn check_source(
+        &self,
+        _source: &SourceFile,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+        mut corrections: Option<&mut Vec<crate::correction::Correction>>,
+    ) {
+        if config.get_str("EnforcedStyle", "native") != "crlf" {
+            return;
+        }
+        if parse_result.errors().next().is_none() {
+            return;
+        }
+
+        diagnostics.retain(|diag| diag.cop_name != self.name());
+        if let Some(ref mut corr) = corrections {
+            corr.retain(|corr| corr.cop_name != self.name());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -278,5 +311,47 @@ mod tests {
         EndOfLine.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1, "crlf style should flag first LF-only line");
         assert_eq!(diags[0].message, "Carriage return character missing.");
+    }
+
+    #[test]
+    fn crlf_style_skips_retry_syntax_error_in_full_pipeline() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diags = crate::testutil::run_cop_full_with_config(&EndOfLine, b"retry\n", config);
+        assert!(
+            diags.is_empty(),
+            "crlf style should skip syntax-error files, got {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn crlf_style_skips_invalid_utf8_syntax_error_in_full_pipeline() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EndOfLine,
+            b"# coding: UTF-8\n\xFF\n",
+            config,
+        );
+        assert!(
+            diags.is_empty(),
+            "crlf style should skip invalid-byte syntax errors, got {:?}",
+            diags
+        );
     }
 }
