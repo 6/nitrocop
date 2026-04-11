@@ -19,12 +19,14 @@ use crate::parse::source::SourceFile;
 /// ### Variant: `EnforcedStyle: never`
 ///
 /// RuboCop only inspects the leading comment block for `never`, then reports the FIRST valid
-/// `frozen_string_literal` magic comment it finds there. nitrocop previously diverged in three
+/// `frozen_string_literal` magic comment it finds there. nitrocop previously diverged in five
 /// ways: it flagged every matching leading comment, it missed Emacs-style combined
-/// `encoding`/`frozen_string_literal` comments because the encoding fast-path returned early, and
-/// it still reported files where RuboCop emitted only `Lint/Syntax`. The `never` branch now scans
-/// the full leading comment section once, flags only the first matching magic comment, and skips
-/// parse-error files for that style.
+/// `encoding`/`frozen_string_literal` comments because the encoding fast-path returned early,
+/// it skipped semantic-only Prism errors such as bare `yield` in builder templates, and it still
+/// reported non-UTF-8 encoded regex-escape files where RuboCop emitted only `Lint/Syntax`.
+/// The `never` branch now scans the full leading comment section once, flags only the first
+/// matching magic comment, skips only STRUCTURAL parse errors for that style, and mirrors
+/// RuboCop's parser bailout for grouped high-byte `\xHH` regex escapes that are invalid UTF-8.
 ///
 /// ActiveAdmin `.arb` templates have another RuboCop quirk: the vendor default config excludes
 /// them for this cop, but ANY explicit cop config entry drops that default exclusion. nitrocop
@@ -105,8 +107,11 @@ impl Cop for FrozenStringLiteralComment {
         }
 
         if enforced_style == "never" {
-            // RuboCop suppresses this cop when parsing fails and only `Lint/Syntax` is emitted.
-            if has_parse_errors(source) {
+            // RuboCop suppresses this cop when the file has structural syntax errors, but it still
+            // runs on semantic-only parser errors (for example bare `yield` in builder templates).
+            if has_structural_parse_errors(source)
+                || rubocop_skips_non_utf8_regex_escape_file(source)
+            {
                 return;
             }
 
@@ -333,11 +338,19 @@ fn has_invalid_retry_parse_error(source: &SourceFile) -> bool {
         .any(|err| err.message().starts_with("Invalid retry"))
 }
 
-fn has_parse_errors(source: &SourceFile) -> bool {
+fn is_semantic_parse_error(message: &str) -> bool {
+    message.starts_with("Invalid break")
+        || message.starts_with("Invalid next")
+        || message.starts_with("Invalid redo")
+        || message.starts_with("Invalid retry")
+        || message == "Invalid yield"
+        || message.starts_with("Invalid return in class/module body")
+}
+
+fn has_structural_parse_errors(source: &SourceFile) -> bool {
     crate::parse::parse_source(source.as_bytes())
         .errors()
-        .next()
-        .is_some()
+        .any(|err| !is_semantic_parse_error(err.message()))
 }
 
 fn should_skip_default_active_admin_template(source: &SourceFile, config: &CopConfig) -> bool {
@@ -428,6 +441,188 @@ fn has_leading_encoding_comment(lines: &[&[u8]]) -> bool {
     }
 
     idx < lines.len() && is_encoding_comment(lines[idx])
+}
+
+fn has_non_utf8_encoding_comment(lines: &[&[u8]]) -> bool {
+    let mut idx = 0;
+
+    if idx < lines.len() && starts_with_shebang(lines[idx]) {
+        idx += 1;
+    }
+
+    while idx < lines.len() && is_blank_line(lines[idx]) {
+        idx += 1;
+    }
+
+    let Some(line) = lines.get(idx) else {
+        return false;
+    };
+    if !is_encoding_comment(line) {
+        return false;
+    }
+
+    let lower = normalized_ascii_string(line).to_ascii_lowercase();
+    let Some(keyword_idx) = lower.find("encoding").or_else(|| lower.find("coding")) else {
+        return false;
+    };
+    let after_keyword = &lower[keyword_idx..];
+    let value = after_keyword
+        .split_once([':', '='])
+        .map(|(_, rhs)| rhs.trim_start())
+        .unwrap_or("");
+    let enc_name: String = value
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect();
+
+    if enc_name.is_empty() {
+        return false;
+    }
+
+    !(enc_name == "utf"
+        || enc_name == "utf8"
+        || enc_name.starts_with("utf-8")
+        || enc_name.starts_with("utf_8")
+        || enc_name == "binary"
+        || enc_name.starts_with("ascii-8bit")
+        || enc_name.starts_with("ascii_8bit")
+        || enc_name == "us-ascii"
+        || enc_name == "ascii")
+}
+
+fn rubocop_skips_non_utf8_regex_escape_file(source: &SourceFile) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    has_non_utf8_encoding_comment(&lines)
+        && lines
+            .iter()
+            .copied()
+            .any(line_contains_high_hex_escape_in_regex_literal)
+}
+
+fn line_contains_high_hex_escape_in_regex_literal(line: &[u8]) -> bool {
+    let mut start = 0;
+
+    while start < line.len() {
+        let Some(open_idx) = line[start..].iter().position(|&byte| byte == b'/') else {
+            return false;
+        };
+        let slash_idx = start + open_idx;
+        if !looks_like_regex_open(line, slash_idx) {
+            start = slash_idx + 1;
+            continue;
+        }
+
+        let body_start = slash_idx + 1;
+        let mut idx = body_start;
+        let mut escaped = false;
+
+        while idx < line.len() {
+            let byte = line[idx];
+
+            if escaped {
+                escaped = false;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'\\' {
+                escaped = true;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'/' {
+                if contains_non_utf8_hex_escape(&line[body_start..idx]) {
+                    return true;
+                }
+                start = idx + 1;
+                break;
+            }
+
+            idx += 1;
+        }
+
+        if idx >= line.len() {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn looks_like_regex_open(line: &[u8], slash_idx: usize) -> bool {
+    let prev = line[..slash_idx]
+        .iter()
+        .rfind(|&&byte| !byte.is_ascii_whitespace())
+        .copied();
+
+    !matches!(
+        prev,
+        Some(
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b')'
+            | b']'
+            | b'}'
+            | b'"'
+            | b'\''
+            | b'/',
+        )
+    )
+}
+
+fn contains_non_utf8_hex_escape(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < body.len() {
+        if body[i] == b'\\' && body[i + 1] == b'x' {
+            let (d1, d2) = (body[i + 2], body[i + 3]);
+            if d1.is_ascii_hexdigit() && d2.is_ascii_hexdigit() {
+                let byte = hex_pair_to_byte(d1, d2);
+                if byte >= 0x80 {
+                    let mut bytes = vec![byte];
+                    let mut j = i + 4;
+                    while j + 3 < body.len()
+                        && body[j] == b'\\'
+                        && body[j + 1] == b'x'
+                        && body[j + 2].is_ascii_hexdigit()
+                        && body[j + 3].is_ascii_hexdigit()
+                    {
+                        let next = hex_pair_to_byte(body[j + 2], body[j + 3]);
+                        if next >= 0x80 {
+                            bytes.push(next);
+                            j += 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    if std::str::from_utf8(&bytes).is_err() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn hex_pair_to_byte(h1: u8, h2: u8) -> u8 {
+    hex_digit_val(h1) * 16 + hex_digit_val(h2)
+}
+
+fn hex_digit_val(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    }
 }
 
 /// Match `frozen_string_literal:` or `frozen-string-literal:` case-insensitively,
@@ -714,11 +909,33 @@ mod tests {
     }
 
     #[test]
+    fn never_style_builder_template_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/offense/never_builder_template.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
     fn never_style_syntax_error_no_offense_fixture() {
         crate::testutil::assert_cop_no_offenses_full_with_config(
             &FrozenStringLiteralComment,
             include_bytes!(
                 "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_syntax_error_no_offense.rb"
+            ),
+            config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn never_style_windows_1252_regex_syntax_error_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_windows_1252_regex_syntax_error_no_offense.rb"
             ),
             config_with_enforced_style("never"),
         );
