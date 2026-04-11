@@ -439,12 +439,20 @@ pub fn run(args: Args) -> Result<i32> {
 
     // Set scan root so Include patterns like `db/**/*.rb` resolve relative to
     // the target directory, not just the config file's dir or process CWD.
+    // Use absolute() (no symlink resolution) instead of canonicalize() —
+    // discovered file paths use the original CLI path, not the resolved one
+    // (e.g., /tmp/repo vs /private/tmp/repo on macOS).
     if let Some(target) = args.paths.first() {
         let target_path = std::path::Path::new(target);
         if target_path.is_dir() {
-            if let Ok(abs) = target_path.canonicalize() {
-                cop_filters.set_scan_root(abs);
-            }
+            let abs = if target_path.is_absolute() {
+                target_path.to_path_buf()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(target_path))
+                    .unwrap_or_else(|_| target_path.to_path_buf())
+            };
+            cop_filters.set_scan_root(abs);
         }
     }
 
