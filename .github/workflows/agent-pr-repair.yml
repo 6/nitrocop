@@ -204,7 +204,7 @@ jobs:
           ref: ${{ steps.pr.outputs.head_branch }}
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v7
         if: steps.pr.outputs.should_run == 'true'
 
       - name: Initialize runtime layout

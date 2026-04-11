@@ -64,7 +64,7 @@ jobs:
       - name: No vendor include macros
         run: bash scripts/workflows/check_no_vendor_include_macros.sh
 
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v7
 
       - name: Python lint
         run: uv run ruff check scripts tests/python bench/corpus
