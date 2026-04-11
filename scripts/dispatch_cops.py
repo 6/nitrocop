@@ -727,7 +727,7 @@ def build_start_here_section(cop: str, corpus: dict) -> str:
         "Helpful local commands:",
         f"- `python3 scripts/investigate_cop.py {cop} --repos-only`",
         f"- `python3 scripts/investigate_cop.py {cop} --context`",
-        f"- `python3 scripts/check_cop.py {cop} --rerun --clone --sample 15`",
+        f"- `python3 scripts/check_cop.py {cop} --verbose`",
         "",
     ]
 
