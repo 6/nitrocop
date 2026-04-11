@@ -292,6 +292,25 @@ def classify_run(run: dict, fix_backend: str = "") -> dict:
         steps = ", ".join(job.get("failed_step_names", [])) or job.get("name", "unknown")
         reasons.append(f"{job.get('name', 'unknown')}: {steps}")
 
+    # Skip auto-repair when the only hard failure is corpus-smoke-test and
+    # cop-check passed. Smoke failures from global config fixes (e.g.,
+    # scan_root Include pattern resolution) are expected — the smoke baseline
+    # needs manual updating, not an agent reverting the fix.
+    if route == "hard" and hard_jobs:
+        cop_check_failed = any(
+            "Check cops against corpus baseline" in step
+            for job in hard_jobs
+            for step in job.get("failed_step_names", [])
+        )
+        smoke_only_hard = hard_jobs and all(
+            job.get("name", "").startswith("corpus-smoke")
+            for job in hard_jobs
+        ) and not easy_jobs
+        if not cop_check_failed and smoke_only_hard:
+            route = "skip"
+            backend = ""
+            reasons.append("Smoke-only failure with cop-check passing — baseline may need updating")
+
     return {
         "route": route,
         "backend": backend,
