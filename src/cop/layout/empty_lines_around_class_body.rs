@@ -15,6 +15,12 @@ use crate::parse::source::SourceFile;
 /// - matches `empty_lines_special`'s deferred scan exactly: skip comment lines
 ///   when searching upward, but only a literally empty line satisfies the
 ///   separator, so whitespace-only lines still offend
+/// - skips files with non-UTF-8 encoding magic comments (e.g., `# encoding: euc-jp`,
+///   `# vim: set fileencoding=shift_jis`, `# encoding: windows-1252`). RuboCop's
+///   parser gem fails with "Invalid byte sequence in utf-8" or syntax errors on such
+///   files and runs no cops, producing 0 offenses. Prism parses them successfully,
+///   so without this skip we'd produce false positives for every offense.
+///   Corpus: jruby test/mri/ruby/enc/test_euc_jp.rb, test_shift_jis.rb, test_windows_1252.rb.
 pub struct EmptyLinesAroundClassBody;
 
 impl Cop for EmptyLinesAroundClassBody {
@@ -39,6 +45,14 @@ impl Cop for EmptyLinesAroundClassBody {
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        // RuboCop's parser gem fails on files with non-UTF-8 encoding
+        // declarations (e.g., euc-jp, shift_jis, windows-1252), reporting
+        // "Invalid byte sequence in utf-8" or regex syntax errors and running
+        // no cops. Skip these files to match RuboCop's 0-offense behavior.
+        if has_non_utf8_encoding_comment(source.as_bytes()) {
+            return;
+        }
+
         let style = config.get_str("EnforcedStyle", "no_empty_lines");
         let (kw_offset, end_offset, body) = if let Some(class_node) = node.as_class_node() {
             // For multiline class declarations (class Foo <\n  Bar), use the
@@ -598,7 +612,76 @@ fn is_bare_access_modifier(node: &ruby_prism::Node<'_>) -> bool {
     }
 }
 
-/// Check if a node is a def, class, or module node.
+/// Check if a file has a non-UTF-8 encoding magic comment (e.g.,
+/// `# encoding: windows-1252`, `# vim: set fileencoding=euc-jp`).
+/// RuboCop's parser gem fails on such files, producing 0 offenses.
+fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
+    // Scan up to 3 lines (shebang + possible encoding comment)
+    let mut start = 0;
+    for _ in 0..3 {
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| start + p)
+            .unwrap_or(bytes.len());
+        let line = &bytes[start..end];
+        let trimmed: Vec<u8> = line.iter().copied().filter(|b| *b != b'\r').collect();
+        if trimmed.starts_with(b"#") {
+            let lower: Vec<u8> = trimmed.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(pos) = find_encoding_keyword(&lower) {
+                let after = &lower[pos..];
+                let value_start = after
+                    .iter()
+                    .position(|&b| b == b':' || b == b'=')
+                    .map(|p| p + 1)
+                    .unwrap_or(after.len());
+                let value = &after[value_start..];
+                let value_trimmed: Vec<u8> =
+                    value.iter().copied().skip_while(|b| *b == b' ').collect();
+                let enc_end = value_trimmed
+                    .iter()
+                    .position(|b| !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_')
+                    .unwrap_or(value_trimmed.len());
+                let enc_name = &value_trimmed[..enc_end];
+                // UTF-8 variants are fine
+                if enc_name == b"utf"
+                    || enc_name == b"utf8"
+                    || enc_name.starts_with(b"utf-8")
+                    || enc_name.starts_with(b"utf_8")
+                {
+                    return false;
+                }
+                // binary / ASCII-8BIT are fine
+                if enc_name == b"binary"
+                    || enc_name.starts_with(b"ascii-8bit")
+                    || enc_name.starts_with(b"ascii_8bit")
+                {
+                    return false;
+                }
+                // US-ASCII is fine — strict subset of UTF-8
+                if enc_name == b"us-ascii" || enc_name == b"ascii" {
+                    return false;
+                }
+                if !enc_name.is_empty() {
+                    return true;
+                }
+            }
+        }
+        start = end + 1;
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn find_encoding_keyword(haystack: &[u8]) -> Option<usize> {
+    haystack
+        .windows(8)
+        .position(|w| w == b"encoding")
+        .or_else(|| haystack.windows(6).position(|w| w == b"coding"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,6 +945,71 @@ mod tests {
         assert!(
             diags.is_empty(),
             "empty_lines_special namespace should use no_empty_lines (no offenses), got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn non_utf8_encoding_skipped_empty_lines_except_namespace() {
+        // Files with non-UTF-8 encoding comments cause RuboCop's parser to fail
+        // ("Invalid byte sequence in utf-8"), so no cops run. We must skip too.
+        let config = style_config("empty_lines_except_namespace");
+        let src = b"# encoding: euc-jp\nclass Foo\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            diags.is_empty(),
+            "non-UTF-8 encoding files should be skipped, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn non_utf8_encoding_skipped_empty_lines_special() {
+        let config = style_config("empty_lines_special");
+        let src = b"# encoding: windows-1252\nclass Foo\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            diags.is_empty(),
+            "non-UTF-8 encoding files should be skipped, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn non_utf8_encoding_vim_modeline_skipped() {
+        // vim modelines like "# vim: set fileencoding=shift_jis" also indicate
+        // non-UTF-8 encoding and should be skipped.
+        let config = style_config("empty_lines_except_namespace");
+        let src = b"# vim: set fileencoding=shift_jis\nclass Foo\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            diags.is_empty(),
+            "vim modeline non-UTF-8 encoding files should be skipped, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn utf8_encoding_not_skipped() {
+        // Files with UTF-8 encoding comments should still be checked normally.
+        let config = style_config("empty_lines_except_namespace");
+        let src = b"# encoding: utf-8\nclass Foo\n  def bar; end\nend\n";
+        let diags = run_cop_full_with_config(&EmptyLinesAroundClassBody, src, config);
+        assert!(
+            !diags.is_empty(),
+            "UTF-8 encoding files should still be checked"
+        );
+    }
+
+    #[test]
+    fn non_utf8_encoding_default_style_still_works() {
+        // Default style (no_empty_lines) should also skip non-UTF-8 files,
+        // but since they have no extra blank lines, the result is the same.
+        let src = b"# encoding: euc-jp\nclass Foo\n\n  def bar; end\n\nend\n";
+        let diags = run_cop_full(&EmptyLinesAroundClassBody, src);
+        assert!(
+            diags.is_empty(),
+            "non-UTF-8 encoding files should be skipped even with default style, got: {:?}",
             diags
         );
     }
