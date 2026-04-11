@@ -1849,6 +1849,7 @@ config). The FPs only appear when running against target repos with custom `.rub
 This means nitrocop is reading the repo's config differently than RuboCop does.
 
 **The detection logic is correct — the bug is in config resolution.**
+**Do NOT just document findings and give up — fix the config resolution.**
 
 Do NOT add `no_offense.rb` fixtures for these patterns (they ARE offenses under default
 config). Instead:
@@ -1857,26 +1858,37 @@ config). Instead:
 2. Investigate `src/config/` for how this cop's config is loaded and applied
 3. Common causes: `Max` value not read from repo config, `Exclude` patterns not applied,
    `Enabled: false` in a department-level override not respected, inherited configs
-   (e.g., `inherit_from`) not followed
-4. If you find a config-resolution fix, apply it and verify with `check_cop.py --rerun`""")
+   (e.g., `inherit_from`) not followed, Include patterns not resolving relative to repo root
+4. Fix the config resolution bug in `src/config/` or `src/linter.rs` and verify with
+   `check_cop.py --rerun`""")
     elif diagnostics and has_config_issues and not has_code_bugs:
-        parts.append("""
+        parts.append(f"""
 ### IMPORTANT: This is a config/context issue, NOT a detection bug
 Pre-diagnostic shows nitrocop already detects all FP/FN patterns correctly in isolation.
 The corpus mismatches are caused by configuration differences in target repos.
 
 **Do NOT loop trying to fix detection logic — the detection code is correct.**
+**Do NOT just document findings and give up — fix the config resolution.**
 
-Instead:
-1. Investigate why the cop doesn't fire (FN) or fires incorrectly (FP) in the target
-   repo's config context. Common causes:
-   - Include/Exclude patterns in the cop's config not matching the file path
-   - The cop being disabled by the target repo's `.rubocop.yml`
-   - `# rubocop:disable` comments in the source file
-   - File path patterns (e.g., spec files excluded by default)
-2. Look at `src/config/` for how config affects this cop
-3. If you can fix the config resolution, do so. Otherwise document your findings as a
-   `///` comment on the cop struct and leave your changes as-is.""")
+The bug is in how nitrocop loads/applies config for this cop. Common causes and where to fix:
+
+1. **Include/Exclude patterns not resolving relative to repo root** — plugin cops (e.g.,
+   `rubocop-rails`) inject `Include: db/**/*.rb` which must resolve relative to the
+   scanned repo, not the working directory. Look at `src/config/` for how `Include`
+   patterns are resolved and matched against file paths.
+2. **Cop disabled by department-level override** — the repo's `.rubocop.yml` may disable
+   the cop or its department. Look at config inheritance in `src/config/`.
+3. **`# rubocop:disable` comments** not being respected — look at `src/linter.rs`.
+4. **Config values (Max, EnforcedStyle) not read from repo config** — look at how
+   `cop_config_for_file` resolves per-cop options.
+
+Workflow:
+1. Use `python3 scripts/check_cop.py {cop} --rerun --clone --sample 5` to confirm the
+   FP/FN reproduces against real repos
+2. Read `src/config/` to understand how config is loaded for this cop
+3. Fix the config resolution bug — you have full access to `src/config/`, `src/linter.rs`,
+   and any other `src/` files
+4. Verify with `check_cop.py --rerun` that FP/FN is reduced""")
 
     elif diagnostics and has_config_issues and has_code_bugs:
         parts.append("""
