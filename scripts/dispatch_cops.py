@@ -3106,9 +3106,13 @@ def cmd_issues_sync(args: argparse.Namespace) -> int:
 
     # Expand with synthetic-only divergence: cops with zero corpus data but
     # FP/FN in the synthetic benchmark. These need tracker issues too.
-    synthetic_path = PROJECT_ROOT / "bench" / "synthetic" / "synthetic-results.json"
+    # Try the corpus artifact cache first (CI), fall back to local file.
+    from shared.corpus_artifacts import get_synthetic_results_path
+    synthetic_path = get_synthetic_results_path(int(run_id)) if run_id else None
+    if not synthetic_path:
+        synthetic_path = PROJECT_ROOT / "bench" / "synthetic" / "synthetic-results.json"
     synthetic_only_cops: set[str] = set()
-    if synthetic_path.exists():
+    if synthetic_path and synthetic_path.exists():
         try:
             sdata = json.loads(synthetic_path.read_text())
             for sc in sdata.get("by_cop", []):
