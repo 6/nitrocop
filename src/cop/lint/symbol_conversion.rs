@@ -561,8 +561,8 @@ fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
 
     let mut pos = start;
 
-    // Skip whitespace
-    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+    // Skip whitespace (including newlines for multi-line undef continuations)
+    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
         pos -= 1;
     }
 
@@ -595,8 +595,8 @@ fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
             return false;
         }
 
-        // Skip whitespace
-        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t') {
+        // Skip whitespace (including newlines for multi-line undef)
+        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
             pos -= 1;
         }
 

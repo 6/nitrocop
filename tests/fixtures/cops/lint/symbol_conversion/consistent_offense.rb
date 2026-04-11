@@ -28,6 +28,17 @@ FeatureHelper.instance_eval { undef test_method }
 method :~@
        ^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:~` instead.
 
+# FN fix: multiline undef — continuation-line arguments should also be flagged
+undef program, version_number, version_date,
+      ^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:program` instead.
+               ^^^^^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:version_number` instead.
+                               ^^^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:version_date` instead.
+  message, converged?, reference, db
+  ^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:message` instead.
+           ^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:converged?` instead.
+                       ^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:reference` instead.
+                                  ^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:db` instead.
+
 # FN fix: hash pattern in case/in should be processed like regular hash
 # ruby-formatter/rufo pattern
 case x
