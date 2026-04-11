@@ -1013,12 +1013,20 @@ impl<'pr> Visit<'pr> for ContextCollector {
             }
         }
 
+        // Clear conditional branch context: def creates a hard scope boundary
+        // for local variables. Conditional context from enclosing if/unless/case
+        // should not leak into the def body, or blocks inside the def would
+        // incorrectly suppress shadowing via block_cond_parent_suppresses.
+        let saved_cond_stack = std::mem::take(&mut self.conditional_branch_stack);
+        let saved_inherited = self.inherited_cond_branch.take();
         if let Some(parameters) = node.parameters() {
             self.visit_parameters_node(&parameters);
         }
         if let Some(body) = node.body() {
             self.visit(&body);
         }
+        self.conditional_branch_stack = saved_cond_stack;
+        self.inherited_cond_branch = saved_inherited;
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
