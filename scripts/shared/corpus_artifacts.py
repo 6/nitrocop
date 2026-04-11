@@ -313,7 +313,7 @@ def _try_corpus_md() -> tuple[Path, int, str] | None:
 
     This is a last-resort fallback when no GitHub token is available.
     It provides summary and by_cop data (enough for gem_progress.py, triage.py)
-    but NOT per-file detail (investigate_cop.py, check_cop.py need the full JSON).
+    but NOT per-file detail (check_cop.py needs the full JSON).
     """
     project_root = _find_project_root()
     corpus_md = project_root / "docs" / "corpus.md"

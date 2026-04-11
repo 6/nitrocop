@@ -725,9 +725,8 @@ def build_start_here_section(cop: str, corpus: dict) -> str:
         "Use the existing corpus data to focus on the most concentrated regressions first.",
         "",
         "Helpful local commands:",
-        f"- `python3 scripts/investigate_cop.py {cop} --repos-only`",
-        f"- `python3 scripts/investigate_cop.py {cop} --context`",
         f"- `python3 scripts/check_cop.py {cop} --verbose`",
+        f"- `python3 scripts/check_cop.py {cop} --examples`",
         "",
     ]
 

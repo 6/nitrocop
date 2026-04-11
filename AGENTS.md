@@ -129,7 +129,7 @@ The canonical reference for RuboCop's AST node predicates is vendored at `vendor
 
 ## Corpus Quick Reference
 
-`investigate_cop.py` and `check_cop.py` are **CI-only** (guarded by `CI` env var). Do not run them locally. Pass `--force` to override in exceptional cases.
+`check_cop.py` is **CI-only** (guarded by `CI` env var). Do not run it locally. Pass `--force` to override in exceptional cases.
 
 For local cop investigation, use these sources instead:
 
@@ -145,15 +145,15 @@ python3 scripts/reduce_mismatch.py Department/CopName repo_id path/to/file.rb:li
 The CI-only scripts (for reference in CI workflows and skills):
 
 ```bash
-python3 scripts/investigate_cop.py Department/CopName           # FP/FN details from corpus oracle
-python3 scripts/investigate_cop.py Department/CopName --context  # with source snippets
-python3 scripts/check_cop.py Department/CopName                  # aggregate count check
-python3 scripts/check_cop.py Department/CopName --verbose --rerun  # re-execute with per-repo breakdown
+python3 scripts/check_cop.py Department/CopName                     # aggregate count check
+python3 scripts/check_cop.py Department/CopName --verbose           # per-repo breakdown
+python3 scripts/check_cop.py Department/CopName --examples          # FP/FN locations with source context
+python3 scripts/check_cop.py Department/CopName --verbose --rerun   # re-execute with per-repo breakdown
 ```
 
 Important:
 
-- `investigate_cop.py` auto-downloads the latest corpus artifacts. Do not manually download them first.
+- `check_cop.py` auto-downloads the latest corpus artifacts. Do not manually download them first.
 - `check_cop.py` supports `--style` for variant checks (e.g., `--style EnforcedStyle=never`).
 - When reproducing a corpus FP/FN locally, always test from the **PR branch** (with the agent's changes), not main. Testing from main shows pre-change behavior and will not reproduce the issue.
 - “file-drop noise” is not an excuse for FN gaps. Investigate the actual missed examples.

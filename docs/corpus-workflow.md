@@ -5,13 +5,12 @@
 Use the cached corpus tools before rerunning expensive checks:
 
 ```bash
-python3 scripts/investigate_cop.py Department/CopName
-python3 scripts/investigate_cop.py Department/CopName --repos-only
-python3 scripts/investigate_cop.py Department/CopName --context
+python3 scripts/check_cop.py Department/CopName --verbose           # per-repo breakdown
+python3 scripts/check_cop.py Department/CopName --examples          # FP/FN locations with source context
 python3 scripts/reduce_mismatch.py Department/CopName repo_id path/to/file.rb:line
 ```
 
-`investigate_cop.py` downloads the latest corpus artifact automatically. Do not manually download artifacts first.
+`check_cop.py` downloads the latest corpus artifact automatically. Do not manually download artifacts first.
 
 ## Regression Checks
 
@@ -66,16 +65,10 @@ python3 scripts/check_cop.py Department/CopName \
 
 ### Exhaustive local check
 
-Check ALL supported styles for a cop locally:
+Check a specific variant style:
 
 ```bash
-python3 scripts/check_cop_styles.py Department/CopName --sample 50
-```
-
-Check all configurable cops in a department:
-
-```bash
-python3 scripts/check_cop_styles.py --department Layout --sample 30
+python3 scripts/check_cop.py Department/CopName --rerun --style EnforcedStyle=value
 ```
 
 ### Variant batch configs (CI)

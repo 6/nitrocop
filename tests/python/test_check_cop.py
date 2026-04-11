@@ -1335,3 +1335,66 @@ def test_summary_detail_empty_when_no_regressions():
     """No detail when there are no regressing repos."""
     detail = _build_summary_detail([], [], [], [])
     assert detail == ""
+
+
+# ── _parse_example / show_examples ────────────────────────────────────
+
+
+def test_parse_example_dict_format():
+    ex = {"loc": "my_repo__abc123: lib/foo.rb:42", "msg": "Use snake_case", "src": ["  x = 1"]}
+    result = check_cop._parse_example(ex)
+    assert result == ("my_repo__abc123", "lib/foo.rb", 42, "Use snake_case", ["  x = 1"])
+
+
+def test_parse_example_string_format():
+    result = check_cop._parse_example("repo_id: path/file.rb:10")
+    assert result == ("repo_id", "path/file.rb", 10, "", None)
+
+
+def test_parse_example_invalid_returns_none():
+    assert check_cop._parse_example("no-colon-space") is None
+    assert check_cop._parse_example({"loc": "repo: nolinenum"}) is None
+
+
+def test_show_examples_prints_grouped_output(capsys):
+    cop_entry = {
+        "fp": 2, "fn": 1,
+        "fp_examples": [
+            {"loc": "repo_a: app/x.rb:5", "msg": "bad style", "src": ["  x = 1"]},
+            {"loc": "repo_a: app/y.rb:10", "msg": "bad style"},
+        ],
+        "fn_examples": [
+            {"loc": "repo_b: lib/z.rb:20", "msg": "missed"},
+        ],
+    }
+    check_cop.show_examples(cop_entry)
+    out = capsys.readouterr().out
+    assert "False positives (2 total):" in out
+    assert "repo_a (2):" in out
+    assert "app/x.rb:5" in out
+    assert "x = 1" in out
+    assert "False negatives (1 total):" in out
+    assert "repo_b (1):" in out
+
+
+def test_show_examples_fp_only(capsys):
+    cop_entry = {
+        "fp_examples": [{"loc": "r: a.rb:1", "msg": ""}],
+        "fn_examples": [{"loc": "r: b.rb:2", "msg": ""}],
+    }
+    check_cop.show_examples(cop_entry, fp_only=True)
+    out = capsys.readouterr().out
+    assert "False positives" in out
+    assert "False negatives" not in out
+
+
+def test_show_examples_limit(capsys):
+    cop_entry = {
+        "fp_examples": [
+            {"loc": f"r: f{i}.rb:{i}", "msg": ""} for i in range(10)
+        ],
+        "fn_examples": [],
+    }
+    check_cop.show_examples(cop_entry, limit=3)
+    out = capsys.readouterr().out
+    assert "7 more" in out

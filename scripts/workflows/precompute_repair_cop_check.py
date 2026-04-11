@@ -153,7 +153,7 @@ def render_oracle_context(
 
     lines = [
         "Oracle context from CI corpus artifact:",
-        f"- Repos and exact examples: `python3 scripts/investigate_cop.py {cop} --input {standard_corpus} --fn-only --context --limit 10`",
+        f"- Repos and exact examples: `python3 scripts/check_cop.py {cop} --input {standard_corpus} --examples --fn-only --limit 10`",
     ]
 
     repo_breakdown = oracle_repo_breakdown.get(cop, {})
@@ -286,7 +286,7 @@ def render_start_here(
     ]
     if standard_corpus is not None:
         lines.append(
-            f"- Baseline corpus context: `python3 scripts/investigate_cop.py {cop} --input {standard_corpus} --repos-only`"
+            f"- Baseline corpus context: `python3 scripts/check_cop.py {cop} --input {standard_corpus} --verbose`"
         )
     if batch_mode and top_repos:
         lines.extend(

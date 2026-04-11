@@ -140,18 +140,18 @@ which repos are diverging.
 
 Investigate each selected cop:
 ```bash
-python3 scripts/investigate_cop.py Department/CopName --context --fp-only --limit 10
-python3 scripts/investigate_cop.py Department/CopName --context --fn-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fp-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fn-only --limit 10
 ```
 
-`investigate_cop.py` prefers embedded snippets from `corpus-results.json`. If that
+`check_cop.py` prefers embedded snippets from `corpus-results.json`. If that
 is insufficient, fetch full source files directly from GitHub using repo info
 from `bench/corpus/manifest.jsonl`:
 ```bash
 gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
 ```
 
-**Synthetic-only cops** (zero corpus activity): If `investigate_cop.py` shows no results, the cop
+**Synthetic-only cops** (zero corpus activity): If `check_cop.py` shows no results, the cop
 only has data in the synthetic corpus. Investigate using:
 ```bash
 # Read synthetic results for the cop

@@ -430,10 +430,6 @@ class TestCallerScriptImports(unittest.TestCase):
         source = (SCRIPTS_DIR / "check_cop.py").read_text()
         self.assertIn("from shared.corpus_artifacts import", source)
 
-    def test_investigate_cop_import(self):
-        source = (SCRIPTS_DIR / "investigate_cop.py").read_text()
-        self.assertIn("from shared.corpus_artifacts import", source)
-
     def test_triage_import(self):
         source = (
             ROOT / ".claude" / "skills" / "triage" / "scripts" / "triage.py"

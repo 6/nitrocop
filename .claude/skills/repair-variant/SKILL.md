@@ -70,9 +70,9 @@ Do NOT clone repos. Use `gh api` to fetch specific files.
 
 **For CI count-only failures** (repo ID + FP/FN delta, no file paths):
 
-Use `investigate_cop.py --context` to find the specific FP/FN locations:
+Use `check_cop.py --examples` to find the specific FP/FN locations:
 ```bash
-python3 scripts/investigate_cop.py Department/CopName --context 2>&1 | grep -A5 '<repo_id>'
+python3 scripts/check_cop.py Department/CopName --examples 2>&1 | grep -A5 '<repo_id>'
 ```
 
 **For each location, record:**

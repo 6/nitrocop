@@ -386,7 +386,7 @@ def test_build_start_here_section_uses_repo_hotspots_and_examples():
     }
     section = gct.build_start_here_section("Style/MixinUsage", corpus)
     assert "## Start Here" in section
-    assert "python3 scripts/investigate_cop.py Style/MixinUsage --repos-only" in section
+    assert "python3 scripts/check_cop.py Style/MixinUsage --verbose" in section
     assert "`travis-ci__dpl__8c6eabc` (3 FP) — example `lib/foo.rb:10`" in section
     assert "`puppetlabs__puppet__e227c27` (4 FN) — example `manifests/init.rb:30`" in section
     assert "Representative FP examples:" in section

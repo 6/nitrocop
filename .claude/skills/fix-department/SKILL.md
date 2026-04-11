@@ -181,18 +181,18 @@ which repos are diverging.
 
 For each selected cop, investigate the FP/FN pattern:
 ```bash
-python3 scripts/investigate_cop.py Department/CopName --context --fp-only --limit 10
-python3 scripts/investigate_cop.py Department/CopName --context --fn-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fp-only --limit 10
+python3 scripts/check_cop.py Department/CopName --examples --fn-only --limit 10
 ```
 
-`investigate_cop.py` prefers embedded snippets from `corpus-results.json`. If that
+`check_cop.py` prefers embedded snippets from `corpus-results.json`. If that
 is insufficient, fetch full source files directly from GitHub using repo info
 from `bench/corpus/manifest.jsonl`:
 ```bash
 gh api repos/OWNER/REPO/contents/PATH?ref=SHA --jq '.content' | base64 -d
 ```
 
-**Synthetic-only cops** (zero corpus activity): If `investigate_cop.py` shows no results, the cop
+**Synthetic-only cops** (zero corpus activity): If `check_cop.py` shows no results, the cop
 only has data in the synthetic corpus. Investigate using:
 ```bash
 # Read synthetic results for the cop
@@ -215,7 +215,7 @@ to `/tmp/nitrocop-reduce/` — read them and include them in the teammate prompt
 
 Summarize: cop name, FP/FN counts, minimal repro(s), root cause hypothesis.
 
-**When no example locations are available** (investigate_cop.py shows counts but no
+**When no example locations are available** (check_cop.py shows counts but no
 file paths, and no corpus repos cloned): still dispatch teammates, but tell them
 upfront that examples are unavailable. For low-divergence cops (FP+FN ≤ 2), the
 FP/FN may be a corpus artifact — tell teammates to compare nitrocop vs vendor
@@ -294,7 +294,7 @@ if the prompt/examples require local corpus source context.
      synthetic-only cops.
    Never create test Ruby files outside the fixture directories.
 
-   **Bail-out rule:** If no example locations are available (investigate_cop.py shows
+   **Bail-out rule:** If no example locations are available (check_cop.py shows
    counts only, no file paths), no corpus repos are cloned locally, and the minimal
    repro examples in the prompt are insufficient to identify a concrete bug: stop
    investigating after analyzing the cop source + vendor RuboCop source. Compare the
