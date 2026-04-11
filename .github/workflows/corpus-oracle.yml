@@ -40,7 +40,7 @@ jobs:
         run: cargo build --release
 
       - name: Upload binary
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: nitrocop-binary
           path: target/release/nitrocop
@@ -427,7 +427,7 @@ jobs:
       # 10GB cache limit. The consolidated cache alone is sufficient.
 
       - name: Upload results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-results-${{ matrix.batch_id }}
           path: |
@@ -438,7 +438,7 @@ jobs:
 
       - name: Retry upload on failure
         if: failure() && steps.run-batch.conclusion == 'success'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-results-${{ matrix.batch_id }}
           path: |
@@ -488,7 +488,7 @@ jobs:
           python3 bench/synthetic/run_synthetic.py --verbose
 
       - name: Upload synthetic results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: synthetic-results
           path: bench/synthetic/synthetic-results.json
@@ -769,7 +769,7 @@ jobs:
           python3 scripts/cop_coverage.py --input corpus-results.json $SYNTH_ARG > docs/cop_coverage.md
 
       - name: Upload report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-report
           path: |
@@ -905,7 +905,7 @@ jobs:
             --shard ${{ matrix.shard }}/4
 
       - name: Upload shard result
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: diagnosis-shard-${{ matrix.shard }}
           path: diagnosis-shard-${{ matrix.shard }}.json
@@ -941,7 +941,7 @@ jobs:
             --shards 'shards/diagnosis-shard-*.json'
 
       - name: Re-upload report with diagnosis
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: corpus-report
           path: |

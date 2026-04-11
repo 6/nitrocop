@@ -34,7 +34,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build release binary
         run: cargo build --release
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           name: nitrocop-linux
           path: target/release/nitrocop
@@ -64,7 +64,7 @@ jobs:
       - name: No vendor include macros
         run: bash scripts/workflows/check_no_vendor_include_macros.sh
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v8
 
       - name: Python lint
         run: uv run ruff check scripts tests/python bench/corpus
@@ -164,7 +164,7 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: nitrocop-linux
           path: target/release
@@ -219,7 +219,7 @@ jobs:
 
       - name: Upload cop-check summary
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cop-check-summary-${{ matrix.shard }}
           path: /tmp/cop-check-summary/
@@ -304,7 +304,7 @@ jobs:
         with:
           submodules: true
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: nitrocop-linux
           path: target/release
@@ -336,7 +336,7 @@ jobs:
           submodules: true
           ref: ${{ inputs.ref || '' }}
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v8
         with:
           name: nitrocop-linux
           path: target/release
