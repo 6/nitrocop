@@ -1822,7 +1822,7 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
    - FN fix: add the missed pattern to `tests/fixtures/cops/{dept_snake}/{snake}/offense.rb` with `^` annotation
    - FP fix: add the false-positive pattern to `tests/fixtures/cops/{dept_snake}/{snake}/no_offense.rb`
 4. Verify test fails: `cargo test --lib -- cop::{dept_snake}::{snake}`
-5. Fix `src/cop/{dept_snake}/{snake}.rs`
+5. Fix the code (usually `src/cop/{dept_snake}/{snake}.rs`, but `src/config/` or `src/linter.rs` for config issues)
 6. Verify test passes: `cargo test --lib -- cop::{dept_snake}::{snake}`
 {step7_text}
 8. Add a `///` doc comment on the cop struct documenting what you found and fixed
@@ -1905,9 +1905,8 @@ If you add a test case and it passes without code changes, the corpus mismatch i
 caused by config/context differences, not a detection bug.
 **Do NOT loop** trying to make the test fail. Instead:
 1. Investigate config resolution (Include/Exclude, cop enablement, disable comments)
-2. The fix is likely in `src/config/` or the cop's config handling, not detection logic
-3. If you cannot determine the root cause within 5 minutes, document your findings as
-   a `///` comment on the cop struct and leave your changes as-is
+2. The fix is likely in `src/config/` or the cop's config handling, not detection logic — you have full access to edit these files
+3. Verify with `check_cop.py --rerun --clone --sample 5` that your config fix reduces the FP/FN
 
 ### Do NOT make doc-only changes when CODE BUGs were reported
 If the pre-diagnostic classified examples as **CODE BUG** but you cannot reproduce them
@@ -1946,10 +1945,10 @@ node type, operator class, or naming pattern, it's probably too broad. Prefer ad
 condition that matches the SPECIFIC differentiating context.
 
 ### Rules
-- Only modify `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
+- Primary files: `src/cop/{dept_snake}/{snake}.rs` and `tests/fixtures/cops/{dept_snake}/{snake}/`
+- If the bug is in config resolution (Include/Exclude patterns, cop filtering), you may also edit `src/config/`, `src/linter.rs`, and other files under `src/` and `tests/`
 - Run `cargo test --lib -- cop::{dept_snake}::{snake}` to verify your fix (do NOT run the full test suite)
 - Run `python3 scripts/check_cop.py {cop} --rerun --clone --sample 15` before finishing to catch regressions
-- Do NOT touch unrelated files
 - Do NOT use `git stash`
 - Do NOT push — you do not have push permission; the workflow handles pushing after you exit
 

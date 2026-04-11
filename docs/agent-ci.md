@@ -14,7 +14,7 @@ These rules apply when `GITHUB_ACTIONS` is set and the workflow is driving the a
 ## Scope Rules
 
 - Stay within the file scope implied by the workflow route.
-- `agent-cop-fix` is limited to cop implementation and corpus-fixture files.
+- `agent-cop-fix` can edit any file under `src/` and `tests/` — this includes `src/config/`, `src/linter.rs`, and `src/parse/` when the fix requires changes beyond the cop file itself (e.g., config resolution bugs).
 - `agent-pr-repair` is limited by the failing route:
   - Rust/test repairs: Rust sources, tests, and bench files.
   - Python/workflow repairs: `scripts/`, `tests/python/`, workflow YAML, and Python metadata.
