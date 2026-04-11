@@ -2098,10 +2098,15 @@ forgot `--preview`. Do NOT rewrite the cop architecture to work around this.
         if not has_examples:
             lines.append(
                 "No example source code is available from the variant oracle data. "
-                "Use `check_cop.py --rerun --style` to find specific diverging repos:\n"
+                "Fetch diverging files directly from GitHub using repo info from "
+                "`bench/corpus/manifest.jsonl`:\n"
                 f"```bash\n"
-                f"python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
+                f"# Find variant-diverging repos:\n"
+                f"python3 scripts/check_cop.py {cop} --verbose "
                 f"--style EnforcedStyle=<value>\n"
+                f"# Then fetch a specific file at the pinned commit:\n"
+                f"gh api repos/OWNER/REPO/contents/PATH?ref=SHA "
+                f"--jq '.content' | base64 -d\n"
                 f"```\n"
             )
         return lines
