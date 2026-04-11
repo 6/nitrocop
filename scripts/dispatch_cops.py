@@ -1748,13 +1748,30 @@ def generate_task(
             step1_text = "1. Read the **Corpus FP/FN Examples** section below first"
         else:
             step1_text = "1. Read the sections below for context"
-        step7_text = (
-            f"7. **Validate against corpus** (REQUIRED before finishing):\n"
-            f"   ```bash\n"
-            f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
-            f"   ```\n"
-            f"   If this reports FP or FN regression, your fix is too broad — narrow it down."
-        )
+        if diverging_variants:
+            # Mixed cop: has default FP/FN AND variant divergence.
+            # Must validate both default and variants to avoid pushing a fix
+            # that passes default but breaks a variant style.
+            step7_text = (
+                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                f"   ```\n"
+                f"   **Also validate variant styles** (this cop has non-default style divergence):\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 "
+                f"--check-variants\n"
+                f"   ```\n"
+                f"   If either reports FP or FN regression, your fix is too broad — narrow it down."
+            )
+        else:
+            step7_text = (
+                f"7. **Validate against corpus** (REQUIRED before finishing):\n"
+                f"   ```bash\n"
+                f"   python3 scripts/check_cop.py {cop} --rerun --clone --sample 15\n"
+                f"   ```\n"
+                f"   If this reports FP or FN regression, your fix is too broad — narrow it down."
+            )
 
     parts.append(f"""## Instructions
 
