@@ -8,11 +8,6 @@ use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
 /// Flags `create_table` blocks without timestamp columns.
-///
-/// The large corpus FN bucket here was not a Prism/detection bug. The missing
-/// offenses came from external configs resolving rubocop-rails' `Include:
-/// db/**/*.rb` against the caller's CWD instead of the scanned repo root, so
-/// this cop never ran on migrations and schema files in corpus repos.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
@@ -54,7 +49,10 @@ impl<'pr> Visit<'pr> for TimestampFinder {
     }
 }
 
-/// Check if `create_table` has `id: false` option
+/// Check if `create_table` has `id: false` option.
+///
+/// Prism can represent the option hash as either `KeywordHashNode` (`id: false`)
+/// or `HashNode` (`{:id => false}`), so we need to handle both forms.
 fn has_id_false(call: &ruby_prism::CallNode<'_>) -> bool {
     let args = match call.arguments() {
         Some(a) => a,
