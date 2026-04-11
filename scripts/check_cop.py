@@ -492,6 +492,7 @@ def clone_repos_for_cop(
     include_gated: bool = False,
     check_variants: bool = False,
     variant_run_id: int | None = None,
+    style_label: str | None = None,
 ) -> Path:
     """Clone repos needed for a cop into a temp dir matching the oracle's structure.
 
@@ -499,6 +500,8 @@ def clone_repos_for_cop(
     When *check_variants* is True, also includes repos that diverge only
     in variant styles (up to 10 extra), so variant CI is not trivially 0/0
     for cops with no default-style divergence.
+    When *style_label* is set (from --style), includes repos that diverge
+    for that specific variant style so the sample is representative.
     Returns the temp dir path. Repos are at <tmpdir>/repos/REPO_ID/.
     """
     import tempfile
@@ -522,6 +525,33 @@ def clone_repos_for_cop(
         variant_extra &= set(manifest.keys())
         if variant_extra:
             needed = needed | variant_extra
+
+    # When --style is used, include repos that diverge for that specific
+    # variant style.  Without this, --sample picks repos based on default-
+    # config divergence which may be completely unrelated to the variant.
+    if style_label and variant_run_id is not None:
+        baselines = load_variant_baselines(cop_name, variant_run_id)
+        style_data = baselines.get(style_label, {})
+        style_repos = {
+            repo_id for repo_id, rd in style_data.get("by_repo", {}).items()
+            if rd.get("fp", 0) + rd.get("fn", 0) > 0
+        }
+        style_repos &= set(manifest.keys())
+        style_repos -= needed  # don't duplicate
+        if style_repos:
+            # Add up to 10 variant-diverging repos for this style
+            ranked = sorted(
+                style_repos,
+                key=lambda r: (
+                    style_data["by_repo"][r].get("fp", 0)
+                    + style_data["by_repo"][r].get("fn", 0)
+                ),
+                reverse=True,
+            )
+            extra = set(ranked[:10])
+            print(f"  --style {style_label}: adding {len(extra)} variant-diverging repos",
+                  file=sys.stderr)
+            needed = needed | extra
 
     # When sharding, only clone this shard's repos
     if shard_index is not None and total_shards is not None and needed:
@@ -1281,6 +1311,10 @@ def main():
     if args.rerun:
         if args.clone:
             # Clone into temp dir with oracle-identical path structure
+            # Extract style label from --style for variant-aware sampling
+            _style_label = None
+            if args.style and "=" in args.style:
+                _style_label = args.style.split("=", 1)[1]
             tmpdir = clone_repos_for_cop(
                 args.cop, data,
                 shard_index=args.shard_index, total_shards=args.total_shards,
@@ -1288,6 +1322,7 @@ def main():
                 include_gated=include_gated and zero_baseline,
                 check_variants=args.check_variants,
                 variant_run_id=corpus_run_id,
+                style_label=_style_label,
             )
             _CLONE_DIR = tmpdir / "repos"
         else:

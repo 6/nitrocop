@@ -1200,8 +1200,8 @@ def test_generate_task_nonvariant_step7_no_style_flag(tmp_path):
         _teardown_generate_task_env(saved)
 
 
-def test_generate_task_mixed_cop_step7_includes_check_variants(tmp_path):
-    """Mixed cops (default FP/FN + variant divergence) must validate variants too."""
+def test_generate_task_mixed_cop_step7_includes_per_variant_style(tmp_path):
+    """Mixed cops (default FP/FN + variant divergence) must validate each variant with --style."""
     saved = _setup_generate_task_env(
         tmp_path,
         corpus_overrides={"fp": 5, "fn": 3,
@@ -1215,7 +1215,9 @@ def test_generate_task_mixed_cop_step7_includes_check_variants(tmp_path):
     try:
         task = gct.generate_task("Style/FooBar")
         workflow_section = task.split("### Workflow")[1].split("### Fixture")[0]
-        assert "--check-variants" in workflow_section
+        # Should use per-variant --style, NOT --check-variants
+        assert "--check-variants" not in workflow_section
+        assert "--style EnforcedStyle=tabs" in workflow_section
         # Should also have the default validation
         assert "check_cop.py Style/FooBar --rerun --clone --sample 15\n" in workflow_section
     finally:
