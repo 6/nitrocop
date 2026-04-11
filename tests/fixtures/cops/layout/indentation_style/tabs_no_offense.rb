@@ -19,3 +19,15 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Nested heredoc closing delimiters (inner) should NOT be flagged
+# They are inside the outer heredoc body — RuboCop skips them
+method_name = class_eval <<~OUTER, __FILE__, __LINE__ + 1
+  def run(data)
+    #{if true
+      <<~INNER
+        code_here
+      INNER
+    end}
+  end
+OUTER

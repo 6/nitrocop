@@ -158,24 +158,38 @@ impl CodeMap {
         Self::in_ranges(&self.xstring_ranges, offset)
     }
 
-    /// Returns the end offset of the heredoc range containing `offset`, or None
-    /// if the offset is not inside a heredoc range.
+    /// Returns the end offset of the INNERMOST heredoc range containing `offset`,
+    /// or None if the offset is not inside any heredoc range.
     /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
     /// heredocs, where adjacent ranges would otherwise merge and lose internal
     /// boundaries.
+    ///
+    /// Uses linear scan because raw_heredoc_ranges can overlap (nested heredocs).
+    /// Binary search fails on overlapping ranges: when an inner range at a higher
+    /// index is "less than" the target, binary search skips the outer range at a
+    /// lower index that actually contains the target.
     pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
+        let mut best_end: Option<usize> = None;
+        for &(start, end) in &self.raw_heredoc_ranges {
+            if offset >= start && offset < end {
+                // Pick the range with the smallest end (innermost containing range)
+                best_end = Some(match best_end {
+                    Some(prev) if prev < end => prev,
+                    _ => end,
+                });
+            }
+        }
+        best_end
+    }
+
+    /// Returns true if the given byte offset is contained in more than one
+    /// raw heredoc range, i.e., it's inside a nested heredoc structure.
+    pub fn is_in_nested_heredoc(&self, offset: usize) -> bool {
         self.raw_heredoc_ranges
-            .binary_search_by(|&(start, end)| {
-                if offset < start {
-                    std::cmp::Ordering::Greater
-                } else if offset >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .map(|idx| self.raw_heredoc_ranges[idx].1)
+            .iter()
+            .filter(|&&(start, end)| offset >= start && offset < end)
+            .count()
+            > 1
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation

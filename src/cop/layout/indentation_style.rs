@@ -73,6 +73,31 @@ use ruby_prism::Visit;
 ///    range_end` check fails.
 ///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
 ///    switched `heredoc_range_end()` to use it.
+///
+/// ## Corpus investigation (2026-04-11, tabs variant: FP=19, FN=10)
+///
+/// Two root causes, both involving nested heredocs (heredocs inside `#{}`
+/// interpolation within an outer heredoc):
+///
+/// 1. **FP on inner heredoc closing delimiters**: Inner heredoc closing
+///    delimiters (e.g., `RUBY` inside `#{<<~RUBY...RUBY}` within an outer
+///    `<<~RUBY`) were identified as closing delimiters via
+///    `is_heredoc_closing_delimiter()`, causing them to bypass the string-skip
+///    logic and get flagged. But RuboCop's `string_literal_ranges` covers the
+///    outer heredoc body, so these inner delimiters are inside a string literal
+///    and should be skipped.
+///    Fix: added `is_effective_closing` that is true only when
+///    `is_heredoc_closing` AND the position is NOT inside another (outer)
+///    heredoc range. Uses `CodeMap::is_in_nested_heredoc()`.
+///
+/// 2. **FN on outer heredoc closing delimiters**: `heredoc_range_end()` used
+///    binary search on `raw_heredoc_ranges`, but nested heredoc ranges overlap
+///    (the outer range contains the inner). When binary search checked the inner
+///    range first and found the target past it, it searched RIGHT and missed the
+///    outer range at a lower index. This caused `heredoc_range_end()` to return
+///    `None` for offsets between the inner range end and the outer range end.
+///    Fix: replaced binary search with linear scan that finds the innermost
+///    containing range (smallest `end` among containing ranges).
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {
@@ -109,6 +134,13 @@ impl Cop for IndentationStyle {
                 .take_while(|&&b| b == b' ' || b == b'\t')
                 .count();
             let is_heredoc_closing = is_heredoc_closing_delimiter(line, code_map, line_start);
+            // A heredoc closing delimiter that is ALSO inside another (outer)
+            // heredoc body should be treated as heredoc content, not as a real
+            // closing delimiter. RuboCop's string_literal_ranges covers the outer
+            // heredoc body, so inner closing delimiters are skipped. Only the
+            // outermost closing delimiter should bypass the string-skip logic.
+            let is_effective_closing =
+                is_heredoc_closing && !code_map.is_in_nested_heredoc(line_start);
             let in_interpolated_string = indent_end > 0
                 && range_contained_in_any(
                     &interpolated_string_ranges,
@@ -129,7 +161,7 @@ impl Cop for IndentationStyle {
             if (!code_map.is_not_string(line_start) || in_interpolated_string)
                 && !code_map.is_regex(line_start)
                 && !code_map.is_xstring(line_start)
-                && !is_heredoc_closing
+                && !is_effective_closing
             {
                 continue;
             }
@@ -140,7 +172,7 @@ impl Cop for IndentationStyle {
             // byte is inside a str/dstr heredoc body (not regex or xstring).
             if indent_end > 0
                 && indent_end < line.len()
-                && !is_heredoc_closing
+                && !is_effective_closing
                 && code_map.is_heredoc(line_start + indent_end)
                 && !code_map.is_regex(line_start + indent_end)
                 && !code_map.is_xstring(line_start + indent_end)
@@ -161,7 +193,7 @@ impl Cop for IndentationStyle {
                     if code_map.is_not_string(tab_offset)
                         || code_map.is_regex(tab_offset)
                         || code_map.is_xstring(tab_offset)
-                        || is_heredoc_closing
+                        || is_effective_closing
                     {
                         let mut diag = self.diagnostic(
                             source,
@@ -199,7 +231,7 @@ impl Cop for IndentationStyle {
                     if code_map.is_not_string(space_offset)
                         || code_map.is_regex(space_offset)
                         || code_map.is_xstring(space_offset)
-                        || is_heredoc_closing
+                        || is_effective_closing
                     {
                         let mut diag = self.diagnostic(
                             source,
