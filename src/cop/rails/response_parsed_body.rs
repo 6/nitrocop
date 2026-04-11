@@ -6,6 +6,10 @@ use crate::parse::source::SourceFile;
 
 /// Rails/ResponseParsedBody
 ///
+/// Detection note: the matcher already handles the corpus-shaped nested RSpec
+/// form `expect(JSON.parse(response.body)).to eq({ ... })`; the fixture locks
+/// in that multiline/nested case so it does not regress.
+///
 /// FN fix: RuboCop's ResponseParsedBody cop does NOT use `requires_gem
 /// 'railties'` — it only checks `minimum_target_rails_version 5.0` via the
 /// `TargetRailsVersion` config setting. We use `target_rails_version()`
@@ -13,11 +17,15 @@ use crate::parse::source::SourceFile;
 /// requires `railties` in `Gemfile.lock`, which the corpus lockfile does
 /// not have (it only bundles linter gems, not Rails itself).
 ///
-/// Corpus note: this cop is Include-gated (`spec/controllers/**/*.rb`,
-/// `spec/requests/**/*.rb`, etc.). These patterns come from the
-/// rubocop-rails gem config and resolve relative to base_dir (CWD for
-/// non-dotfile configs). Corpus runs must use `--repo-cwd` so that CWD
-/// equals the repo root and the Include patterns match.
+/// Corpus note: the remaining large FN bucket is a config/runtime artifact,
+/// not a matcher bug. This cop is Include-gated (`spec/controllers/**/*.rb`,
+/// `spec/requests/**/*.rb`, `test/controllers/**/*.rb`,
+/// `test/integration/**/*.rb`), and those patterns resolve relative to
+/// `base_dir` (CWD for non-dotfile configs). Reproduced on
+/// `Arie/serveme@7f28d1b`: running from `/tmp` reports 0 offenses, while
+/// running with CWD at the repo root reports the expected 42 offenses.
+/// Keep the narrow default includes; widening or removing them would trade
+/// these corpus FNs for real false positives outside controller/request tests.
 pub struct ResponseParsedBody;
 
 impl Cop for ResponseParsedBody {
