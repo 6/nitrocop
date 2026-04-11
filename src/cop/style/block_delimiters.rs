@@ -44,6 +44,15 @@ use std::collections::HashSet;
 /// - explicit `begin/rescue` pre-rescue bodies are not scope-return positions,
 ///   and ignored lambda bodies must recurse into hash/array literals to suppress
 ///   nested blocks under `always_braces`.
+///
+/// ## Fix (2026-04-11): return/splat wrappers and paren-only chaining split
+///
+/// `semantic` follows RuboCop's asymmetric parent rules:
+///
+/// - `return`, `break`, `next`, and `*expr` wrappers contribute
+///   `return_value_of_scope?`, which allows braces but does not require them;
+/// - parenthesized receivers only make a block rv-used, not `chained?`, so
+///   `braces_for_chaining` must still allow `do...end` for `(foo do ... end).bar`.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -868,14 +877,6 @@ fn mark_receiver_chained_blocks(node: &ruby_prism::Node<'_>, chained_blocks: &mu
                 chained_blocks.insert(block_node.opening_loc().start_offset());
             }
         }
-    } else if let Some(parens) = node.as_parentheses_node() {
-        if let Some(body) = parens.body() {
-            if let Some(stmts) = body.as_statements_node() {
-                if let Some(last) = stmts.body().iter().last() {
-                    mark_receiver_chained_blocks(&last, chained_blocks);
-                }
-            }
-        }
     }
 }
 
@@ -886,13 +887,19 @@ fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize
         rv_used.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_used.insert(fwd_super.location().start_offset());
+    } else if let Some(splat) = node.as_splat_node() {
+        if let Some(expr) = splat.expression() {
+            mark_rv_used_on_call(&expr, rv_used);
+        }
     } else if let Some(parens) = node.as_parentheses_node() {
         // Propagate through parentheses: `(map do ... end)` → rv_used
         if let Some(body) = parens.body() {
             if let Some(stmts) = body.as_statements_node() {
-                for stmt in stmts.body().iter() {
-                    mark_rv_used_on_call(&stmt, rv_used);
+                if let Some(last) = stmts.body().iter().last() {
+                    mark_rv_used_on_call(&last, rv_used);
                 }
+            } else {
+                mark_rv_used_on_call(&body, rv_used);
             }
         }
     }
@@ -906,6 +913,38 @@ fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashS
         rv_of_scope.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_of_scope.insert(fwd_super.location().start_offset());
+    } else if let Some(ret) = node.as_return_node() {
+        if let Some(args) = ret.arguments() {
+            if let Some(last) = args.arguments().iter().last() {
+                mark_rv_of_scope_on_node(&last, rv_of_scope);
+            }
+        }
+    } else if let Some(brk) = node.as_break_node() {
+        if let Some(args) = brk.arguments() {
+            if let Some(last) = args.arguments().iter().last() {
+                mark_rv_of_scope_on_node(&last, rv_of_scope);
+            }
+        }
+    } else if let Some(next_node) = node.as_next_node() {
+        if let Some(args) = next_node.arguments() {
+            if let Some(last) = args.arguments().iter().last() {
+                mark_rv_of_scope_on_node(&last, rv_of_scope);
+            }
+        }
+    } else if let Some(parens) = node.as_parentheses_node() {
+        if let Some(body) = parens.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                if let Some(last) = stmts.body().iter().last() {
+                    mark_rv_of_scope_on_node(&last, rv_of_scope);
+                }
+            } else {
+                mark_rv_of_scope_on_node(&body, rv_of_scope);
+            }
+        }
+    } else if let Some(splat) = node.as_splat_node() {
+        if let Some(expr) = splat.expression() {
+            mark_rv_of_scope_on_node(&expr, rv_of_scope);
+        }
     } else if let Some(hash) = node.as_hash_node() {
         // Recursively mark calls in hash values
         for element in hash.elements().iter() {
@@ -1658,6 +1697,16 @@ mod tests {
         assert!(diags.is_empty(), "got: {:?}", diags);
     }
 
+    #[test]
+    fn braces_for_chaining_no_offense_parenthesized_receiver_do_end() {
+        // Parens make this rv-used for semantic style, but it is not `chained?`
+        // for braces_for_chaining in RuboCop.
+        let source = b"(content_tag :button do\n  icon\nend) + other\n";
+        let config = config_with_style("braces_for_chaining");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
     // =========== semantic tests ===========
 
     #[test]
@@ -1870,6 +1919,39 @@ mod tests {
             "braces in compound assignment should be functional: {:?}",
             diags
         );
+    }
+
+    #[test]
+    fn semantic_offense_do_end_in_parenthesized_receiver_chain() {
+        let source = b"result = (items.map do |item|\n  item\nend).compact\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(diags[0].message.contains("functional blocks"));
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_with_explicit_return() {
+        let source = b"def files(items)\n  return items.map { |item| item.path }\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_splatted_call_arg() {
+        let source = b"callback(*names.map { |name| name.upcase })\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn semantic_no_offense_braces_in_splatted_array() {
+        let source = b"[*filtered.map { |item| item.id }].to_json\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
     }
 
     #[test]
