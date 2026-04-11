@@ -276,6 +276,19 @@ use crate::parse::source::SourceFile;
 ///   `raise ASSERTION_CLASS, e.message, (e.backtrace.reject { ... })` inside multi-statement
 ///   `rescue` clauses. The exemption now stays limited to parens that are the first
 ///   non-whitespace token of the rescue-body statement.
+///
+/// ## Investigation findings (2026-04-11)
+///
+/// ### FP root causes fixed:
+/// - **Double-negation on assigned locals:** `json result: (!!r)` and
+///   `status: (!!success) ? 200 : 422` were flagged because Prism keeps nested `!` as nested
+///   `CallNode`s, while RuboCop eventually reaches the assigned local-variable base and treats the
+///   parens as plausible. The unary unwrapping now keeps descending through nested `!` before
+///   deciding whether the base is still call-like.
+/// - **Negated command-call predicate with an explicit receiver:** `(!selected.include? item)` was
+///   treated like `(!x.m arg)`, but RuboCop only reports the implicit-receiver form. When the
+///   unparenthesized predicate call is rooted at an explicit receiver (`selected`, `self`, `@obj`,
+///   etc.), the parens stay accepted.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -1517,6 +1530,12 @@ fn check_unary<'a>(
         if let Some(recv) = call.receiver() {
             if let Some(inner_call) = recv.as_call_node() {
                 if inner_call.arguments().is_some() && inner_call.opening_loc().is_none() {
+                    // RuboCop accepts `(!selected.include? item)` when the command-style
+                    // predicate call is rooted at an explicit receiver instead of an implicit
+                    // bare method call.
+                    if call_chain_rooted_at_explicit_receiver(&inner_call) {
+                        return None;
+                    }
                     // (!x arg) — has unparenthesized call with args inside
                     // Only flag as unary if it's standalone (no parent or parent is Other)
                     if let Some(p) = parent {
@@ -1573,8 +1592,9 @@ fn check_unary<'a>(
         // (RuboCop: `node = node.children.first while suspect_unary?(node)`)
         let mut current = recv;
         while let Some(inner_call) = current.as_call_node() {
-            // suspect_unary? is send_type? && unary_operation? && !prefix_not?
-            if is_unary_operation(&inner_call) && inner_call.name().as_slice() != b"!" {
+            // Prism stores nested `!` as unary calls too; keep descending so `!!local_var`
+            // reaches the variable base like RuboCop's Parser AST does.
+            if is_unary_operation(&inner_call) {
                 if let Some(r) = inner_call.receiver() {
                     current = r;
                     continue;
@@ -1611,6 +1631,24 @@ fn is_unary_operation(call: &ruby_prism::CallNode<'_>) -> bool {
     }
     // Must have a receiver and no arguments (unary prefix)
     call.receiver().is_some() && call.arguments().is_none() && call.opening_loc().is_none()
+}
+
+fn call_chain_rooted_at_explicit_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
+    let Some(mut current) = call.receiver() else {
+        return false;
+    };
+
+    while let Some(inner_call) = current.as_call_node() {
+        let Some(recv) = inner_call.receiver() else {
+            return false;
+        };
+        current = recv;
+    }
+
+    current.as_super_node().is_none()
+        && current.as_forwarding_super_node().is_none()
+        && current.as_yield_node().is_none()
+        && current.as_defined_node().is_none()
 }
 
 fn is_not_keyword_call(call: &ruby_prism::CallNode<'_>) -> bool {

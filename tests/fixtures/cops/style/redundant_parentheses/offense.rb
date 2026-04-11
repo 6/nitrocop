@@ -62,8 +62,10 @@ x =~ (%r{/\.{0,2}$})
 (super)
 ^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a keyword.
 
-(super())
-^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a keyword.
+def invoke_super
+  (super())
+  ^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a keyword.
+end
 
 (super(1, 2))
 ^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a keyword.
@@ -94,9 +96,6 @@ return (42)
 
 (!x arg)
 ^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a unary operation.
-
-(!x.m arg)
-^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a unary operation.
 
 x.y((a..b))
     ^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.

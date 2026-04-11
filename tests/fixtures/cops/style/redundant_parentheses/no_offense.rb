@@ -327,3 +327,17 @@ class Foo
     (self[0, n]).to_s
   end
 end
+# Double-negation on assigned locals inside keyword-hash values is accepted
+logging(:manage, :open, args) {
+  r = engine.open(target, fields, auto_field)
+  json result: (!!r)
+}
+def backwards_compatible_json(json_obj)
+  success = json_obj[:success]
+  render json: json_obj, status: (!!success) ? 200 : 422
+end
+# Negated command-call predicate rooted at a local variable is accepted
+selected_participants = []
+participants = [Struct.new(:id).new(1)]
+rand_num = 0
+if_condition_2 = (!selected_participants.include? participants[rand_num].id)
