@@ -314,6 +314,7 @@ pub fn run(args: Args) -> Result<i32> {
         // Without this, --force-default-config creates an empty config with
         // no require_departments, causing all plugin cops to be skipped.
         cfg.register_departments_from_only(&args.only);
+        cfg.set_scan_root(target_dir);
         cfg
     } else if use_cache {
         // Try to find config dir for lockfile lookup

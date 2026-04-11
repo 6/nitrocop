@@ -9,9 +9,10 @@ use crate::parse::source::SourceFile;
 
 /// Flags `create_table` blocks without timestamp columns.
 ///
-/// Join tables declared with `id: false` are exempt, including the legacy
-/// hash-literal form `create_table :x, {:id => false}` that Prism parses as a
-/// plain `HashNode` rather than a `KeywordHashNode`.
+/// The large corpus FN bucket here was not a Prism/detection bug. The missing
+/// offenses came from external configs resolving rubocop-rails' `Include:
+/// db/**/*.rb` against the caller's CWD instead of the scanned repo root, so
+/// this cop never ran on migrations and schema files in corpus repos.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
