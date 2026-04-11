@@ -170,6 +170,19 @@ use crate::parse::source::SourceFile;
 /// crash file in ~5,500 corpus repos. A correct fix would use Prism's AST
 /// to detect `RegularExpressionNode` with `\u` escapes in US-ASCII files,
 /// rather than raw-byte heuristics which are fragile around `/` ambiguity.
+///
+/// ## Variant fix (2026-04-11) — non_integer 3 FN in windows-1251 file
+///
+/// 3 FN in jruby `test/mri/ruby/enc/test_windows_1251.rb` (lines 7, 9, 10):
+/// `test_windows_1251` (method), `c1`, `c2` (variables). The file declares
+/// `# encoding:windows-1251` but contains only ASCII bytes. The previous
+/// `has_non_utf8_encoding_comment` check blanket-skipped ALL files with
+/// non-UTF-8 encoding declarations, but Translation::Parser only crashes
+/// when actual non-ASCII bytes (>= 0x80) are present. ASCII-only files
+/// are parsed fine regardless of declared encoding.
+/// Fix: renamed to `has_non_utf8_encoding_with_non_ascii_bytes` and added
+/// a check for bytes >= 0x80. Files with non-UTF-8 declarations but only
+/// ASCII content are now processed normally.
 pub struct VariableNumber;
 
 const DEFAULT_ALLOWED: &[&str] = &[
@@ -184,14 +197,12 @@ const DEFAULT_ALLOWED: &[&str] = &[
     "x86_64",
 ];
 
-/// Check if a file has a non-UTF-8 encoding magic comment (e.g.,
-/// `# encoding: windows-1252`, `# coding: US-ASCII`). When such a comment
-/// is present, RuboCop's `Prism::Translation::Parser` may crash or produce
-/// fatal syntax errors that prevent Naming cops from running, resulting in
-/// 0 offenses. Nitrocop's native Prism parser handles these files fine, so
-/// without this check we'd produce false positives for every offense in
-/// such files.
-fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
+/// Check if a file has a non-UTF-8 encoding magic comment AND contains
+/// non-ASCII bytes. Both conditions must be true for Translation::Parser
+/// to crash. Files declaring a non-UTF-8 encoding but containing only
+/// ASCII bytes (all bytes < 0x80) are parsed fine because ASCII is a
+/// valid subset of every encoding.
+fn has_non_utf8_encoding_with_non_ascii_bytes(bytes: &[u8]) -> bool {
     // Scan up to 3 lines (shebang + possible encoding comment)
     let mut start = 0;
     for _ in 0..3 {
@@ -250,10 +261,12 @@ fn has_non_utf8_encoding_comment(bytes: &[u8]) -> bool {
                 if enc_name == b"us-ascii" || enc_name == b"ascii" {
                     return false;
                 }
-                // Other non-UTF-8 encodings (us-ascii, windows-1252,
-                // iso-8859-1, etc.) cause Translation::Parser crashes → skip
+                // Other non-UTF-8 encodings (windows-1252, iso-8859-1,
+                // etc.) cause Translation::Parser crashes, but ONLY if the
+                // file contains actual non-ASCII bytes. ASCII-only files are
+                // parsed fine regardless of declared encoding.
                 if !enc_name.is_empty() {
-                    return true;
+                    return bytes.iter().any(|&b| b >= 0x80);
                 }
             }
         }
@@ -312,7 +325,7 @@ impl Cop for VariableNumber {
         // Skip files with non-UTF-8 encoding magic comments. RuboCop's
         // Translation::Parser crashes or produces fatal syntax errors on
         // these files, so no Naming cops run → 0 offenses.
-        if has_non_utf8_encoding_comment(source.as_bytes()) {
+        if has_non_utf8_encoding_with_non_ascii_bytes(source.as_bytes()) {
             return;
         }
 
@@ -506,7 +519,7 @@ impl Cop for VariableNumber {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Skip files with non-UTF-8 encoding magic comments (see check_node).
-        if has_non_utf8_encoding_comment(source.as_bytes()) {
+        if has_non_utf8_encoding_with_non_ascii_bytes(source.as_bytes()) {
             return;
         }
 
@@ -1150,12 +1163,28 @@ mod tests {
     }
 
     #[test]
-    fn non_utf8_encoding_file_skipped() {
-        // Files with non-UTF-8 encoding comments should be skipped entirely.
-        // RuboCop's Translation::Parser crashes on these, resulting in 0 offenses.
+    fn non_utf8_encoding_file_with_non_ascii_bytes_skipped() {
+        // Files with non-UTF-8 encoding comments AND non-ASCII bytes should
+        // be skipped. RuboCop's Translation::Parser crashes on these.
+        let diags = crate::testutil::run_cop_full(
+            &VariableNumber,
+            b"# encoding:windows-1252\nfoo_1 = 1\n\x80\n",
+        );
+        assert_eq!(
+            diags.len(),
+            0,
+            "expected windows-1252 file with non-ASCII bytes to be skipped"
+        );
+
+        // But ASCII-only files with non-UTF-8 encoding comments should NOT
+        // be skipped — Translation::Parser handles them fine.
         let diags =
             crate::testutil::run_cop_full(&VariableNumber, b"# encoding:windows-1252\nfoo_1 = 1\n");
-        assert_eq!(diags.len(), 0, "expected windows-1252 file to be skipped");
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected ASCII-only windows-1252 file to NOT be skipped"
+        );
 
         // UTF-8 encoding should NOT be skipped
         let diags =
@@ -1186,50 +1215,87 @@ mod tests {
         assert_eq!(diags.len(), 1, "expected us-ascii file to NOT be skipped");
     }
 
-    // --- has_non_utf8_encoding_comment unit tests ---
+    #[test]
+    fn non_integer_variant_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &VariableNumber,
+            include_bytes!(
+                "../../../tests/fixtures/cops/naming/variable_number/non_integer_offense.rb"
+            ),
+            non_integer_config(),
+        );
+    }
+
+    #[test]
+    fn non_integer_variant_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &VariableNumber,
+            include_bytes!(
+                "../../../tests/fixtures/cops/naming/variable_number/non_integer_no_offense.rb"
+            ),
+            non_integer_config(),
+        );
+    }
+
+    // --- has_non_utf8_encoding_with_non_ascii_bytes unit tests ---
 
     #[test]
     fn encoding_us_ascii_not_skipped() {
         // US-ASCII is a subset of UTF-8 — RuboCop handles it fine
-        assert!(!has_non_utf8_encoding_comment(b"# coding: US-ASCII\nfoo\n"));
-        assert!(!has_non_utf8_encoding_comment(
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
+            b"# coding: US-ASCII\nfoo\n"
+        ));
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"# -*- coding: us-ascii -*-\nfoo\n"
         ));
     }
 
     #[test]
-    fn encoding_detect_windows_1252() {
-        assert!(has_non_utf8_encoding_comment(
+    fn encoding_detect_windows_1252_with_non_ascii() {
+        // windows-1252 with non-ASCII bytes → skip
+        assert!(has_non_utf8_encoding_with_non_ascii_bytes(
+            b"# encoding:windows-1252\nfoo\n\x80\n"
+        ));
+        // windows-1252 with only ASCII bytes → don't skip
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"# encoding:windows-1252\nfoo\n"
         ));
     }
 
     #[test]
     fn encoding_detect_after_shebang() {
-        // Non-UTF-8 encoding after shebang should still be detected
-        assert!(has_non_utf8_encoding_comment(
+        // Non-UTF-8 encoding after shebang with non-ASCII bytes → skip
+        assert!(has_non_utf8_encoding_with_non_ascii_bytes(
+            b"#!/usr/bin/env ruby\n# coding: ISO-8859-1\nfoo\n\xff\n"
+        ));
+        // Non-UTF-8 encoding after shebang with only ASCII → don't skip
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"#!/usr/bin/env ruby\n# coding: ISO-8859-1\nfoo\n"
         ));
         // US-ASCII after shebang should NOT be detected (it's UTF-8 compatible)
-        assert!(!has_non_utf8_encoding_comment(
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"#!/usr/bin/env ruby\n# coding: US-ASCII\nfoo\n"
         ));
     }
 
     #[test]
     fn encoding_utf8_not_skipped() {
-        assert!(!has_non_utf8_encoding_comment(b"# encoding: utf-8\nfoo\n"));
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
+            b"# encoding: utf-8\nfoo\n"
+        ));
     }
 
     #[test]
     fn encoding_no_comment_not_skipped() {
-        assert!(!has_non_utf8_encoding_comment(b"foo_1 = 1\nbar_2 = 2\n"));
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
+            b"foo_1 = 1\nbar_2 = 2\n"
+        ));
     }
 
     #[test]
     fn encoding_frozen_string_not_skipped() {
         // frozen_string_literal comment should NOT trigger encoding detection
-        assert!(!has_non_utf8_encoding_comment(
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"# frozen_string_literal: true\nfoo\n"
         ));
     }
@@ -1237,14 +1303,22 @@ mod tests {
     #[test]
     fn encoding_binary_not_skipped() {
         // binary / ASCII-8BIT encodings are handled fine by RuboCop
-        assert!(!has_non_utf8_encoding_comment(
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"# -*- coding: binary -*-\nfoo\n"
         ));
-        assert!(!has_non_utf8_encoding_comment(
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"# encoding: ASCII-8BIT\nfoo\n"
         ));
-        assert!(!has_non_utf8_encoding_comment(
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
             b"# -*- encoding : ascii-8bit -*-\nfoo\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_windows_1251_ascii_only_not_skipped() {
+        // windows-1251 with only ASCII bytes — Translation::Parser handles fine
+        assert!(!has_non_utf8_encoding_with_non_ascii_bytes(
+            b"# encoding:windows-1251\ndef test_windows_1251; end\n"
         ));
     }
 }
