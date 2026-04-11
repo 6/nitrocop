@@ -25,8 +25,10 @@ use crate::parse::source::SourceFile;
 /// it skipped semantic-only Prism errors such as bare `yield` in builder templates, and it still
 /// reported non-UTF-8 encoded regex-escape files where RuboCop emitted only `Lint/Syntax`.
 /// The `never` branch now scans the full leading comment section once, flags only the first
-/// matching magic comment, skips only STRUCTURAL parse errors for that style, and mirrors
-/// RuboCop's parser bailout for grouped high-byte `\xHH` regex escapes that are invalid UTF-8.
+/// matching magic comment, and skips only STRUCTURAL parse errors for that style. The cop also
+/// mirrors two RuboCop file-targeting quirks found in corpus regressions: parser bailouts on
+/// grouped high-byte `\xHH` regex escapes that are invalid UTF-8, and case-sensitive `*.gemfile`
+/// matching that ignores mixed-case names like `json-1.x.Gemfile`.
 ///
 /// ActiveAdmin `.arb` templates have another RuboCop quirk: the vendor default config excludes
 /// them for this cop, but ANY explicit cop config entry drops that default exclusion. nitrocop
@@ -56,6 +58,10 @@ impl Cop for FrozenStringLiteralComment {
             return;
         }
 
+        if rubocop_skips_case_variant_ruby_extension_path(source, config) {
+            return;
+        }
+
         let lines: Vec<&[u8]> = source.lines().collect();
         let has_null_bytes = source.as_bytes().contains(&0x00);
 
@@ -71,6 +77,13 @@ impl Cop for FrozenStringLiteralComment {
             && std::str::from_utf8(source.as_bytes()).is_err()
             && !has_leading_encoding_comment(&lines)
         {
+            return;
+        }
+
+        // RuboCop emits only `Lint/Syntax` for grouped high-byte `\xHH` regex escapes that are
+        // invalid UTF-8 under a non-UTF-8 encoding comment, so this cop must bail out for every
+        // style, not just `EnforcedStyle: never`.
+        if rubocop_skips_non_utf8_regex_escape_file(source) {
             return;
         }
 
@@ -109,9 +122,7 @@ impl Cop for FrozenStringLiteralComment {
         if enforced_style == "never" {
             // RuboCop suppresses this cop when the file has structural syntax errors, but it still
             // runs on semantic-only parser errors (for example bare `yield` in builder templates).
-            if has_structural_parse_errors(source)
-                || rubocop_skips_non_utf8_regex_escape_file(source)
-            {
+            if has_structural_parse_errors(source) {
                 return;
             }
 
@@ -441,6 +452,60 @@ fn has_leading_encoding_comment(lines: &[&[u8]]) -> bool {
     }
 
     idx < lines.len() && is_encoding_comment(lines[idx])
+}
+
+const RUBOCOP_CASE_SENSITIVE_RUBY_EXTENSIONS: &[&str] = &[
+    "rb",
+    "arb",
+    "axlsx",
+    "builder",
+    "fcgi",
+    "gemfile",
+    "gemspec",
+    "god",
+    "jb",
+    "jbuilder",
+    "mspec",
+    "opal",
+    "pluginspec",
+    "podspec",
+    "rabl",
+    "rake",
+    "rbuild",
+    "rbw",
+    "rbx",
+    "ru",
+    "ruby",
+    "schema",
+    "spec",
+    "thor",
+    "watchr",
+];
+
+fn rubocop_skips_case_variant_ruby_extension_path(source: &SourceFile, config: &CopConfig) -> bool {
+    // Respect explicit cop-level Include overrides; this guard only corrects the default
+    // AllCops.Include behavior that RuboCop applies case-sensitively on Linux.
+    if !config.include.is_empty() {
+        return false;
+    }
+
+    let Some(name) = source.path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+
+    if let Some(ext) = source.path.extension().and_then(|e| e.to_str()) {
+        let lower = ext.to_ascii_lowercase();
+        return ext != lower && RUBOCOP_CASE_SENSITIVE_RUBY_EXTENSIONS.contains(&lower.as_str());
+    }
+
+    if let Some(after_dot) = name.strip_prefix('.') {
+        let lower = after_dot.to_ascii_lowercase();
+        return after_dot != lower
+            && !after_dot.contains('.')
+            && RUBOCOP_CASE_SENSITIVE_RUBY_EXTENSIONS.contains(&lower.as_str());
+    }
+
+    false
 }
 
 fn has_non_utf8_encoding_comment(lines: &[&[u8]]) -> bool {
@@ -938,6 +1003,26 @@ mod tests {
                 "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_windows_1252_regex_syntax_error_no_offense.rb"
             ),
             config_with_enforced_style("never"),
+        );
+    }
+
+    #[test]
+    fn always_true_windows_1252_regex_syntax_error_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/frozen_string_literal_comment/never_windows_1252_regex_syntax_error_no_offense.rb"
+            ),
+            config_with_enforced_style("always_true"),
+        );
+    }
+
+    #[test]
+    fn always_true_skips_mixed_case_gemfile_extension() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &FrozenStringLiteralComment,
+            b"# nitrocop-filename: json-1.x.Gemfile\nsource 'https://rubygems.org'\n",
+            config_with_enforced_style("always_true"),
         );
     }
 
