@@ -11,12 +11,6 @@ use crate::parse::source::SourceFile;
 /// Tasks without descriptions don't appear in `rake -T` output and lack
 /// documentation. The `:default` task is exempt.
 ///
-/// RuboCop's corpus invocation runs with an external baseline config against
-/// repo directories, which lints `*.rake` files but does not inspect
-/// extensionless `Rakefile` paths. Nitrocop previously flagged those
-/// `Rakefile` tasks and created corpus-only false positives, so this cop
-/// skips files whose basename is exactly `Rakefile`.
-///
 /// RuboCop only checks task siblings where a `desc` could actually be inserted.
 /// Single-statement bodies under `def`, `class`, `module`, and `if`/`unless`
 /// parents stay attached to those parent nodes, so tasks there are exempt. Once
@@ -64,14 +58,6 @@ impl Cop for Desc {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        if source
-            .path
-            .file_name()
-            .is_some_and(|name| name == "Rakefile")
-        {
-            return;
-        }
-
         let mut visitor = DescVisitor {
             cop: self,
             source,
@@ -271,7 +257,7 @@ mod tests {
     crate::cop_fixture_tests!(Desc, "cops/rake/desc");
 
     #[test]
-    fn ignores_root_rakefile_paths() {
+    fn flags_root_rakefile_paths() {
         let source = b"task :foo\n";
         let diagnostics = crate::testutil::run_cop_full_internal(
             &Desc,
@@ -280,11 +266,11 @@ mod tests {
             "/tmp/repo/Rakefile",
         );
 
-        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     }
 
     #[test]
-    fn ignores_nested_rakefile_paths() {
+    fn flags_nested_rakefile_paths() {
         let source = b"task :foo\n";
         let diagnostics = crate::testutil::run_cop_full_internal(
             &Desc,
@@ -293,11 +279,11 @@ mod tests {
             "/tmp/repo/lib/glimmer/Rakefile",
         );
 
-        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     }
 
     #[test]
-    fn still_flags_rake_task_files() {
+    fn flags_rake_task_files() {
         let source = b"task :foo\n";
         let diagnostics = crate::testutil::run_cop_full_internal(
             &Desc,
