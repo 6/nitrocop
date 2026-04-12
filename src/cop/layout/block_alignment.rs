@@ -1,4 +1,13 @@
-use crate::cop::shared::node_type::{CALL_NODE, LAMBDA_NODE};
+use ruby_prism::Visit;
+
+use crate::cop::shared::method_dispatch_predicates;
+use crate::cop::shared::method_identifier_predicates::is_assignment_method;
+use crate::cop::shared::node_type::{
+    AND_NODE, CALL_AND_WRITE_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE,
+    INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE, INDEX_OR_WRITE_NODE, MULTI_WRITE_NODE,
+    OR_NODE, SPLAT_NODE, node_type_tag,
+};
+use crate::cop::shared::node_type_groups::{is_any_def_type, is_assignment_type};
 use crate::cop::shared::util::begins_its_line;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -253,6 +262,18 @@ use crate::parse::source::SourceFile;
 /// Fix applied:
 /// - Ignore `&&`/`||`/`<<` wrapper candidates when the would-be same-line LHS
 ///   starts with a line-leading closer (`end`, `}`, `)`, or `]`)
+///
+/// ## Fixes applied (2026-04-12)
+///
+/// - Replaced the remaining byte-level alignment-target heuristics with a
+///   RuboCop-style `start_for_block` ancestor walk. nitrocop now follows the
+///   same same-line parents RuboCop does: assignments/setters, `&&` / `||`,
+///   splats, `<<`, and ordinary receiver chains, while still stopping at
+///   cross-line non-`masgn` parents, safe-navigation sends, and `[]` calls.
+/// - This fixes the remaining false positives where the closer belongs to a
+///   wrapped or chained block expression such as `end.values_at(...).map`,
+///   `end.keys[0]`, `end.transpose`, optional-argument lambdas, and stabby
+///   lambdas wrapped by `||`.
 pub struct BlockAlignment;
 
 impl Cop for BlockAlignment {
@@ -260,298 +281,240 @@ impl Cop for BlockAlignment {
         "Layout/BlockAlignment"
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE, LAMBDA_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        if let Some(lambda_node) = node.as_lambda_node() {
-            self.check_lambda_alignment(source, &lambda_node, config, diagnostics);
-            return;
-        }
+        let mut visitor = BlockAlignmentVisitor {
+            cop: self,
+            source,
+            diagnostics,
+            style: AlignWithStyle::from_config(config),
+            ancestors: Vec::new(),
+        };
+        visitor.visit(&parse_result.node());
+    }
+}
 
-        if let Some(call_node) = node.as_call_node() {
-            self.check_call_alignment(source, &call_node, config, diagnostics);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlignWithStyle {
+    Either,
+    StartOfBlock,
+    StartOfLine,
+}
+
+impl AlignWithStyle {
+    fn from_config(config: &CopConfig) -> Self {
+        match config.get_str("EnforcedStyleAlignWith", "either") {
+            "start_of_block" => Self::StartOfBlock,
+            "start_of_line" => Self::StartOfLine,
+            _ => Self::Either,
         }
     }
 }
 
-impl BlockAlignment {
-    fn check_call_alignment(
-        &self,
-        source: &SourceFile,
-        call_node: &ruby_prism::CallNode<'_>,
-        config: &CopConfig,
-        diagnostics: &mut Vec<Diagnostic>,
-    ) {
-        let block_node = match call_node.block().and_then(|b| b.as_block_node()) {
-            Some(b) => b,
-            None => return,
+struct BlockAlignmentVisitor<'a, 'pr> {
+    cop: &'a BlockAlignment,
+    source: &'a SourceFile,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    style: AlignWithStyle,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+}
+
+impl<'pr> Visit<'pr> for BlockAlignmentVisitor<'_, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        let block_node = match node.block().and_then(|b| b.as_block_node()) {
+            Some(block_node) => block_node,
+            None => {
+                ruby_prism::visit_call_node(self, node);
+                return;
+            }
         };
 
-        let style = config.get_str("EnforcedStyleAlignWith", "either");
-
-        let closing_loc = block_node.closing_loc();
-        let closing_slice = closing_loc.as_slice();
-        let is_do_end = closing_slice == b"end";
-        let is_brace = closing_slice == b"}";
-        if !is_do_end && !is_brace {
-            return;
-        }
-
-        // RuboCop's begins_its_line? check: only inspect alignment when the
-        // closing keyword/brace is the first non-whitespace on its line.
-        if !begins_its_line(source, closing_loc.start_offset()) {
-            return;
-        }
-        let bytes = source.as_bytes();
-
-        let opening_loc = block_node.opening_loc();
-        let (opening_line, _) = source.offset_to_line_col(opening_loc.start_offset());
-
-        // Find the indentation of the line containing the block opener.
-        let start_of_line_indent = line_indent(bytes, opening_loc.start_offset());
-
-        // Use the CallNode's location to get the expression start.
-        // In Prism, call_node.location() spans the entire expression including
-        // the full receiver chain (e.g., for `@account.things.where(...).in_batches do`,
-        // the CallNode location starts at `@account`). This replaces the previous
-        // heuristic line-based backward scanning (`find_chain_expression_start`),
-        // which couldn't handle multiline strings, interleaved comments, etc.
-        let call_start_offset = call_node.location().start_offset();
-        let (_, call_start_col) = source.offset_to_line_col(call_start_offset);
-
-        // Check for assignment: if the call expression is on the RHS of `=`/`+=`/etc.,
-        // walk backward from the call start to find the LHS variable.
-        // When there's an assignment, the alignment target is the LHS (matching RuboCop's
-        // behavior where `block_end_align_target` walks past assignment nodes).
-        let assignment_col = find_assignment_lhs_col(bytes, call_start_offset);
-        let accept_call_start = assignment_col.is_some()
-            && accept_intermediate_call_start(
-                bytes,
-                closing_loc.start_offset(),
-                closing_loc.as_slice().len(),
-            );
-        let splat_col = find_same_line_splat_col(bytes, call_start_offset);
-        let same_line_operator_col = find_same_line_operator_lhs(bytes, opening_loc.start_offset())
-            .or_else(|| find_same_line_operator_lhs(bytes, call_start_offset));
-
-        // The expression start column: if there's an assignment on the same line as
-        // the call start, use the LHS column. If the block call is wrapped in a
-        // same-line logical/shovel operator, or in a same-line splat
-        // (`wrap *items.map { ... }`), align with that wrapper instead of the
-        // inner call expression. Otherwise use the CallNode's column.
-        let expression_start_col = same_line_operator_col
-            .or(splat_col)
-            .or_else(|| (!accept_call_start).then_some(assignment_col).flatten())
-            .unwrap_or(call_start_col);
-
-        // Also compute the expression start line's indent.
-        let expression_start_indent = line_indent(bytes, call_start_offset);
-
-        // Find the column of the call expression on the do-line (for hash-value blocks).
-        let call_expr_col = find_call_expression_col(bytes, opening_loc.start_offset());
-        let accept_call_expr_col = splat_col.is_none() && same_line_operator_col.is_none();
-
-        let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
-
-        // Only flag if closing is on a different line than opening
-        if end_line == opening_line {
-            return;
-        }
-
-        let close_word = if is_brace { "`}`" } else { "`end`" };
-        let open_word = if is_brace { "`{`" } else { "`do`" };
-
-        match style {
-            "start_of_block" => {
-                // closing must align with do/{-line indent (first non-ws on that line)
-                if end_col != start_of_line_indent {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        end_line,
-                        end_col,
-                        format!("Align {} with {}.", close_word, open_word),
-                    ));
-                }
-            }
-            "start_of_line" => {
-                // closing must align with start of the expression
-                if end_col != expression_start_col && end_col != expression_start_indent {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        end_line,
-                        end_col,
-                        format!(
-                            "Align {} with the start of the line where the block is defined.",
-                            close_word
-                        ),
-                    ));
-                }
-            }
-            _ => {
-                // "either" (default): accept alignment with:
-                // - the do-line indent (start_of_block target), OR
-                // - the expression start column (start_of_line target — from CallNode
-                //   or assignment LHS), OR
-                // - the expression start line indent, OR
-                // - the CallNode start column (when the block closer is chained, i.e.,
-                //   end/} is followed by .method — RuboCop's ancestor walk stops when
-                //   the parent is on a different line, so the alignment target becomes
-                //   the CallNode itself rather than the outermost assignment), OR
-                // - the call expression column on the do-line (for hash-value blocks), OR
-                // - the same-line operator LHS column (for &&/||/<< before call on same line)
-                //
-                // NOTE: do_col (the column of the `do`/`{` keyword itself) is NOT a
-                // valid alignment target. RuboCop only accepts the indent of the do-line
-                // (start_of_line_indent) or the expression start column, not the do column.
-                //
-                // NOTE: Cross-line operator continuations (||/&& on previous line) are NOT
-                // valid alignment targets. RuboCop's `disqualified_parent?` stops the
-                // ancestry walk when the parent is on a different line (except for masgn).
-                // Accept call_start_col as an extra target only when the block is on the
-                // RHS of an assignment and RuboCop would stop its ancestor walk before the
-                // assignment target. That happens for:
-                // - rescue modifier wrappers: `result = foo { ... } rescue false`
-                // - safe-navigation chains: `result = foo { ... }&.path`
-                // - chained calls that immediately open another block:
-                //   `result = foo { ... }.check do ... end`
-                //
-                // Plain chained calls like `result = foo { ... }.to_json` do NOT qualify:
-                // RuboCop walks through the normal send node to the assignment and aligns
-                // the closer with the LHS.
-                // Only accept expression_start_indent when the call actually starts
-                // at the line's indent position (i.e., the call is the first thing on
-                // the line). When the call is mid-line (e.g., inside parens like
-                // `expect(auditable.audit(...) do`), the line indent is just the outer
-                // context's indentation and shouldn't be a valid alignment target.
-                let call_starts_at_indent = call_start_col == expression_start_indent;
-                if end_col != start_of_line_indent
-                    && end_col != expression_start_col
-                    && (!call_starts_at_indent || end_col != expression_start_indent)
-                    && (!accept_call_start || end_col != call_start_col)
-                    && (!accept_call_expr_col || end_col != call_expr_col)
-                    && same_line_operator_col.is_none_or(|c| end_col != c)
-                {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        end_line,
-                        end_col,
-                        format!(
-                            "Align {} with the start of the line where the block is defined.",
-                            close_word
-                        ),
-                    ));
-                }
-            }
-        }
+        let start_col = self.start_for_block_col(node.location().start_offset());
+        self.check_closing_alignment(
+            block_node.opening_loc().start_offset(),
+            &block_node.closing_loc(),
+            start_col,
+        );
+        ruby_prism::visit_call_node(self, node);
     }
 
-    /// Check alignment for lambda/proc blocks (`-> { }` or `-> do end`).
-    /// LambdaNode has opening_loc/closing_loc like BlockNode but is its own node type.
-    fn check_lambda_alignment(
-        &self,
-        source: &SourceFile,
-        lambda_node: &ruby_prism::LambdaNode<'_>,
-        config: &CopConfig,
-        diagnostics: &mut Vec<Diagnostic>,
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let start_col = self.start_for_block_col(node.operator_loc().start_offset());
+        self.check_closing_alignment(
+            node.opening_loc().start_offset(),
+            &node.closing_loc(),
+            start_col,
+        );
+        ruby_prism::visit_lambda_node(self, node);
+    }
+}
+
+impl BlockAlignmentVisitor<'_, '_> {
+    fn check_closing_alignment(
+        &mut self,
+        opening_offset: usize,
+        closing_loc: &ruby_prism::Location<'_>,
+        start_col: usize,
     ) {
-        let style = config.get_str("EnforcedStyleAlignWith", "either");
-
-        let closing_loc = lambda_node.closing_loc();
         let closing_slice = closing_loc.as_slice();
-        let is_do_end = closing_slice == b"end";
-        let is_brace = closing_slice == b"}";
-        if !is_do_end && !is_brace {
+        let (close_word, open_word) = if closing_slice == b"end" {
+            ("`end`", "`do`")
+        } else if closing_slice == b"}" {
+            ("`}`", "`{`")
+        } else {
+            return;
+        };
+
+        if !begins_its_line(self.source, closing_loc.start_offset()) {
             return;
         }
-
-        if !begins_its_line(source, closing_loc.start_offset()) {
-            return;
-        }
-        let bytes = source.as_bytes();
-
-        let opening_loc = lambda_node.opening_loc();
-        let (opening_line, _) = source.offset_to_line_col(opening_loc.start_offset());
-
-        let start_of_line_indent = line_indent(bytes, opening_loc.start_offset());
-
-        // Use the `->` operator itself. With wrapped lambda arguments, the node's
-        // overall span can begin after the stabby operator.
-        let lambda_start_offset = lambda_node.operator_loc().start_offset();
-        let (_, lambda_start_col) = source.offset_to_line_col(lambda_start_offset);
-
-        let assignment_col = find_assignment_lhs_col(bytes, lambda_start_offset);
-        let expression_start_col = assignment_col.unwrap_or(lambda_start_col);
-        let expression_start_indent = line_indent(bytes, lambda_start_offset);
-
-        let (end_line, end_col) = source.offset_to_line_col(closing_loc.start_offset());
-
+        let bytes = self.source.as_bytes();
+        let (opening_line, _) = self.source.offset_to_line_col(opening_offset);
+        let (end_line, end_col) = self.source.offset_to_line_col(closing_loc.start_offset());
         if end_line == opening_line {
             return;
         }
 
-        let close_word = if is_brace { "`}`" } else { "`end`" };
-        let open_word = if is_brace { "`{`" } else { "`do`" };
+        let do_line_indent = line_indent(bytes, opening_offset);
+        let is_aligned = match self.style {
+            AlignWithStyle::StartOfBlock => end_col == do_line_indent,
+            AlignWithStyle::StartOfLine => end_col == start_col,
+            AlignWithStyle::Either => end_col == start_col || end_col == do_line_indent,
+        };
 
-        match style {
-            "start_of_block" => {
-                if end_col != start_of_line_indent {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        end_line,
-                        end_col,
-                        format!("Align {} with {}.", close_word, open_word),
-                    ));
-                }
-            }
-            "start_of_line" => {
-                if end_col != expression_start_col && end_col != expression_start_indent {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        end_line,
-                        end_col,
-                        format!(
-                            "Align {} with the start of the line where the block is defined.",
-                            close_word
-                        ),
-                    ));
-                }
-            }
-            _ => {
-                // "either": accept alignment with do-line indent,
-                // expression start col, the lambda start col, or the expression
-                // start line indent only when the lambda actually starts there.
-                // NOTE: do_col (column of `{`/`do`) is NOT a valid target.
-                // NOTE: call_expr_col is NOT used for lambdas — the backward walk
-                // from `{`/`do` gives the `->` position, not a meaningful call expr.
-                let lambda_starts_at_indent = lambda_start_col == expression_start_indent;
-                if end_col != start_of_line_indent
-                    && end_col != expression_start_col
-                    && (!lambda_starts_at_indent || end_col != expression_start_indent)
-                    && end_col != lambda_start_col
-                {
-                    diagnostics.push(self.diagnostic(
-                        source,
-                        end_line,
-                        end_col,
-                        format!(
-                            "Align {} with the start of the line where the block is defined.",
-                            close_word
-                        ),
-                    ));
-                }
-            }
+        if is_aligned {
+            return;
         }
+
+        let message = match self.style {
+            AlignWithStyle::StartOfBlock => format!("Align {} with {}.", close_word, open_word),
+            AlignWithStyle::Either | AlignWithStyle::StartOfLine => format!(
+                "Align {} with the start of the line where the block is defined.",
+                close_word
+            ),
+        };
+        self.diagnostics
+            .push(self.cop.diagnostic(self.source, end_line, end_col, message));
     }
+
+    fn start_for_block_col(&self, initial_start_offset: usize) -> usize {
+        let Some(mut current_index) = self.ancestors.len().checked_sub(1) else {
+            return self.source.offset_to_line_col(initial_start_offset).1;
+        };
+        let initial_index = current_index;
+        let mut start_offset = initial_start_offset;
+
+        while let Some(parent_index) = current_index.checked_sub(1) {
+            if current_index != initial_index
+                && self.ancestors[current_index]
+                    .as_call_node()
+                    .is_some_and(|call| {
+                        call.block()
+                            .and_then(|block| block.as_block_node())
+                            .is_some()
+                    })
+            {
+                break;
+            }
+
+            let current = &self.ancestors[current_index];
+            let parent = &self.ancestors[parent_index];
+            if disqualified_parent(self.source, parent, current)
+                || !block_end_align_target(parent, current)
+            {
+                break;
+            }
+
+            current_index = parent_index;
+            start_offset = parent.location().start_offset();
+        }
+
+        self.source.offset_to_line_col(start_offset).1
+    }
+}
+
+fn block_end_align_target(parent: &ruby_prism::Node<'_>, current: &ruby_prism::Node<'_>) -> bool {
+    let tag = node_type_tag(parent);
+    if is_alignment_assignment_parent(parent)
+        || is_any_def_type(tag)
+        || tag == SPLAT_NODE
+        || tag == AND_NODE
+        || tag == OR_NODE
+    {
+        return true;
+    }
+
+    let Some(call) = parent.as_call_node() else {
+        return false;
+    };
+
+    if call.name().as_slice() == b"<<" {
+        return true;
+    }
+
+    if method_dispatch_predicates::is_safe_navigation(&call) {
+        return false;
+    }
+
+    call.receiver()
+        .is_some_and(|receiver| same_node(&receiver, current) && call.name().as_slice() != b"[]")
+}
+
+fn is_alignment_assignment_parent(node: &ruby_prism::Node<'_>) -> bool {
+    let tag = node_type_tag(node);
+    if is_assignment_type(tag)
+        || matches!(
+            tag,
+            CALL_AND_WRITE_NODE
+                | CALL_OPERATOR_WRITE_NODE
+                | CALL_OR_WRITE_NODE
+                | INDEX_AND_WRITE_NODE
+                | INDEX_OPERATOR_WRITE_NODE
+                | INDEX_OR_WRITE_NODE
+        )
+    {
+        return true;
+    }
+
+    node.as_call_node()
+        .is_some_and(|call| is_assignment_method(call.name().as_slice()))
+}
+
+fn disqualified_parent(
+    source: &SourceFile,
+    parent: &ruby_prism::Node<'_>,
+    current: &ruby_prism::Node<'_>,
+) -> bool {
+    let parent_line = source
+        .offset_to_line_col(parent.location().start_offset())
+        .0;
+    let current_line = source
+        .offset_to_line_col(current.location().start_offset())
+        .0;
+    parent_line != current_line && node_type_tag(parent) != MULTI_WRITE_NODE
+}
+
+fn same_node(left: &ruby_prism::Node<'_>, right: &ruby_prism::Node<'_>) -> bool {
+    node_type_tag(left) == node_type_tag(right)
+        && left.location().start_offset() == right.location().start_offset()
+        && left.location().end_offset() == right.location().end_offset()
 }
 
 /// Get the indentation (number of leading whitespace characters) for the line
@@ -583,6 +546,7 @@ fn line_indent(bytes: &[u8], offset: usize) -> usize {
 ///     .reduce([[], []]) do ...
 ///     end
 /// where `end` should align with `packages_lines` on the preceding assignment line.
+#[cfg(test)]
 fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
     let mut line_start = call_start_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -659,6 +623,7 @@ fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usi
 /// variable, matching RuboCop's behavior of aligning with the assignment target.
 /// Logical assignments like `||=`/`&&=` are intentionally excluded.
 /// Returns the column of the first character of the call expression.
+#[cfg(test)]
 fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
     // Find start of current line
     let mut line_start = do_offset;
@@ -745,6 +710,7 @@ fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
 /// through the LHS identifier to find the assignment target.
 /// Returns the new position (start of LHS), or `pos` unchanged if no
 /// assignment is found.
+#[cfg(test)]
 fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usize {
     // Skip whitespace before the call expression
     let mut p = pos;
@@ -873,6 +839,7 @@ fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usiz
 ///         ^
 /// When RuboCop's ancestor walk stops at `splat`, the closing `}` must align with
 /// the `*`, not with the call receiver.
+#[cfg(test)]
 fn find_same_line_splat_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
     let mut line_start = call_start_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -889,6 +856,7 @@ fn find_same_line_splat_col(bytes: &[u8], call_start_offset: usize) -> Option<us
 /// When the block sits on the RHS of an assignment, accept the inner call start
 /// as an alternate target only for the cases where RuboCop's ancestor walk stops
 /// before reaching the assignment node.
+#[cfg(test)]
 fn accept_intermediate_call_start(bytes: &[u8], closer_offset: usize, closer_len: usize) -> bool {
     let after = closer_offset + closer_len;
     if after >= bytes.len() {
@@ -942,6 +910,7 @@ fn accept_intermediate_call_start(bytes: &[u8], closer_offset: usize, closer_len
     false
 }
 
+#[cfg(test)]
 fn keyword_at(bytes: &[u8], pos: usize, keyword: &[u8]) -> bool {
     let Some(rest) = bytes.get(pos..) else {
         return false;
@@ -957,6 +926,7 @@ fn keyword_at(bytes: &[u8], pos: usize, keyword: &[u8]) -> bool {
     before_ok && after_ok
 }
 
+#[cfg(test)]
 fn chained_call_opens_block(bytes: &[u8], mut pos: usize) -> bool {
     while pos < bytes.len() && bytes[pos] != b'\n' {
         if bytes[pos] == b'{' {
@@ -979,6 +949,7 @@ fn chained_call_opens_block(bytes: &[u8], mut pos: usize) -> bool {
 ///   lists << tag.ul(:class => "foo") do
 ///
 /// Returns the column of the first non-whitespace token of the LHS expression.
+#[cfg(test)]
 fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usize> {
     let mut line_start = opener_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -1173,6 +1144,7 @@ fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usi
     None
 }
 
+#[cfg(test)]
 fn starts_with_line_leading_closer(bytes: &[u8], start: usize, end: usize) -> bool {
     if start >= end {
         return false;

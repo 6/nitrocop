@@ -227,3 +227,59 @@ left_side.find {
 } || right_side.any? do |item|
   item
      end
+
+# FP fix: multi-assignment with leading-dot chain still aligns with the lhs
+a, b, c = create_list(:form_submission, 3, user_account: user_account)
+           .zip(%w[A B C])
+           .map do |submission, form_type|
+             submission.update(form_type: form_type)
+             submission
+end
+
+# FP fix: chained send after end can stop at the surrounding masgn lhs
+changed_playlist, new, changed_position, unchanged = playlist.items.
+  sort_by(&:position).
+  group_by do |item|
+    if item.playlist_id_was != item.playlist_id
+      :changed_playlist
+    elsif item.position_was.nil?
+      :new
+    elsif item.position_was != item.position
+      :changed_position
+    else
+      :unchanged
+    end
+end.values_at(:changed_playlist, :new, :changed_position, :unchanged).map(&:to_a)
+
+# FP fix: chained [] after end should stop at the preceding send, not the assignment lhs
+entity_type = config.select do |_key, value|
+                value.any? do |bp|
+                  bp == bp_code
+                end
+              end.keys[0]
+
+# FP fix: lambda call used as an optional argument keeps the lambda column
+def print_tree(level = node_depth, max_depth = nil,
+               block = lambda { |node, prefix|
+                         puts "#{prefix} #{node.name}"
+                       })
+end
+
+# FP fix: stabby lambda inside || should align with the logical expression start
+auth.provided? && auth.basic? && auth.credentials &&
+  (conf.auth[:logic] || ->(data, u, p) {
+    %w(admin password) == [u, p]
+   }).(data, *auth.credentials)
+
+# FP fix: chained end.transpose in a lambda body still aligns with the masgn lhs
+-> (genotypes) do
+  print "Fits: "
+  fits, parall_infos = Parallel.map(0...genotypes.shape.first,
+      in_processes: nprocs, isolation: true) do |i|
+    env = parall_envs[i]
+    fits = ntrials.times.map { fitness_one genotypes[i, true], env: env }
+    fit = fits.to_na.mean
+    print "[m#{fit}] "
+    [fit, compr.parall_info]
+  end.transpose
+end
