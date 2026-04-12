@@ -397,3 +397,27 @@ end
 html = "<h2>#{
   ERB::Escape.html_escape((title).to_s)
 }</h2>"
+
+# Class inheritance with backslash continuation is not an inspectable
+# single-line expression for this cop.
+class Course::Assessment::Submission::LogsController < \
+  Course::Assessment::Submission::Controller
+
+  def index
+    authorize!(:manage, @assessment)
+  end
+end
+
+# Backslash groups inside a larger multiline operator chain should not be
+# reported independently; RuboCop judges the full expression.
+Arel.quoted('"') \
++ expr
+    .coalesce('')
+    .replace('\\', '\\\\')
+    .replace('"', '\"')
+    .replace("\b", '\b')
+    .replace("\f", '\f')
+    .replace("\n", '\n')
+    .replace("\r", '\r')
+    .replace("\t", '\t') \
++ '"'
