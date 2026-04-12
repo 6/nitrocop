@@ -19,6 +19,13 @@
 [ [ a, b ], [ 1, 7 ] ]
                      ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
 ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+# Multiline nested arrays also collapse across newlines
+array = [
+        ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+  [ 1, 2 ],
+  [ 3, 4 ]
+]
+^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
 # Constant array pattern without spaces
 case value
 in ADT[*head, tail]
