@@ -362,14 +362,21 @@ jobs:
               fi
             fi
 
-            # ── Include-gated comparison (20 cops with non-**/ Include patterns) ──
+            # ── Include-gated comparison (cops with non-**/ Include patterns) ──
             # Both tools fail to resolve these cops' Include patterns when config
             # is outside repo dir. Writing .rubocop_include_check.yml IN the repo
             # makes base_dir = repo_dir for both tools.
+            #
+            # Inherit from $REPO_CONFIG (not baseline_rubocop.yml directly) so
+            # the per-repo overlay's vendor excludes (vendor/**/*, _vendor/**/*,
+            # .*/**/*, etc.) still apply. Without this, the IG pipeline inspects
+            # vendored gem Rakefiles that the main pipeline excludes, and then
+            # merge_include_gated.py overrides main results with vendored-path
+            # offenses that no real user would ever see.
             IG_TIMEOUT=120
 
             cat > "$ABS_DEST/.rubocop_include_check.yml" << IGEOF
-          inherit_from: $WORKSPACE/bench/corpus/baseline_rubocop.yml
+          inherit_from: $REPO_CONFIG
           IGEOF
 
             echo "=== ig-nitrocop: ${REPO_ID} ==="
