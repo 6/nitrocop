@@ -193,11 +193,11 @@ jobs:
         run: |
           mkdir -p results/nitrocop results/rubocop results/ig-nitrocop results/ig-rubocop results/ig-context rubocop-cache
 
-          # Include-gated cops: Rails cops with non-**/ Include patterns that get
+          # Include-gated cops: cops with non-**/ Include patterns that get
           # zero data in the main comparison because both tools fail to resolve
           # cop-level Include patterns when config is outside repo dir.
           # See docs/investigation-target-dir-relativization.md.
-          IG_COPS="Rails/ActionControllerTestCase,Rails/AddColumnIndex,Rails/BulkChangeTable,Rails/CreateTableWithTimestamps,Rails/DangerousColumnNames,Rails/EnumSyntax,Rails/HttpPositionalArguments,Rails/HttpStatusNameConsistency,Rails/I18nLocaleAssignment,Rails/MigrationClassName,Rails/NotNullColumn,Rails/RedundantTravelBack,Rails/ResponseParsedBody,Rails/ReversibleMigration,Rails/ReversibleMigrationMethodDefinition,Rails/StrongParametersExpect,Rails/ThreeStateBooleanColumn,Rails/TimeZoneAssignment,Rails/UniqueValidationWithoutIndex,Rails/UnusedIgnoredColumns"
+          IG_COPS="Rails/ActionControllerTestCase,Rails/AddColumnIndex,Rails/BulkChangeTable,Rails/CreateTableWithTimestamps,Rails/DangerousColumnNames,Rails/EnumSyntax,Rails/HttpPositionalArguments,Rails/HttpStatusNameConsistency,Rails/I18nLocaleAssignment,Rails/MigrationClassName,Rails/NotNullColumn,Rails/Output,Rails/RedundantTravelBack,Rails/ResponseParsedBody,Rails/ReversibleMigration,Rails/ReversibleMigrationMethodDefinition,Rails/StrongParametersExpect,Rails/ThreeStateBooleanColumn,Rails/TimeZoneAssignment,Rails/UniqueValidationWithoutIndex,Rails/UnusedIgnoredColumns,Rake/ClassDefinitionInTask,Rake/Desc,Rake/DuplicateNamespace,Rake/DuplicateTask,Rake/MethodDefinitionInTask"
 
           while IFS= read -r row; do
             REPO_ID=$(echo "$row" | jq -r '.id')
@@ -355,7 +355,7 @@ jobs:
               env GIT_CEILING_DIRECTORIES=$(dirname "$ABS_DEST") \
               "$WORKSPACE/bin/nitrocop" \
                 --preview \
-                --config .rubocop_include_check.yml \
+                --config "$ABS_DEST/.rubocop_include_check.yml" \
                 --only "$IG_COPS" \
                 --format json \
                 --no-cache \
@@ -375,7 +375,7 @@ jobs:
                   GIT_CEILING_DIRECTORIES=$(dirname "$ABS_DEST") \
               bundle exec rubocop \
                 --require $WORKSPACE/bench/corpus/rescue_parser_crashes.rb \
-                --config .rubocop_include_check.yml \
+                --config "$ABS_DEST/.rubocop_include_check.yml" \
                 --only "$IG_COPS" \
                 --format json \
                 --force-exclusion \
