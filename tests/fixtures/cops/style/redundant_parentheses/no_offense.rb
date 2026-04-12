@@ -5,6 +5,10 @@ result = method_call(arg)
 arr = [1, 2, 3]
 # Chained parens
 x = (a && b).to_s
+# Chained receiver split by an inline comment
+suggested = (m * 1.5) # 50% increase to encourage higher donations
+  .round(-3) # Round to nearest $10
+  .clamp(20_00, 100_00) # Clamp between $20 and $100
 # Splat
 foo(*args)
 # do..end block in argument to unparenthesized method call — parens are required

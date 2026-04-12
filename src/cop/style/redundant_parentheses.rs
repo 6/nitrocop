@@ -289,6 +289,14 @@ use crate::parse::source::SourceFile;
 ///   treated like `(!x.m arg)`, but RuboCop only reports the implicit-receiver form. When the
 ///   unparenthesized predicate call is rooted at an explicit receiver (`selected`, `self`, `@obj`,
 ///   etc.), the parens stay accepted.
+///
+/// ## Investigation findings (2026-04-12)
+///
+/// ### FP root causes fixed:
+/// - **Receiver chains split by inline comments:** `(expr) # comment` followed by
+///   `.method` on the next line is still a chained receiver in RuboCop, so the
+///   parens are not a method argument. The chained-receiver scan now skips Ruby
+///   line comments between `)` and the next chain token.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -1694,13 +1702,27 @@ fn call_chain_starts_with_int(node: &ruby_prism::Node<'_>) -> bool {
 
 fn is_chained(content: &[u8], paren_node: &ruby_prism::ParenthesesNode<'_>) -> bool {
     let end_offset = paren_node.location().end_offset();
-    // Skip whitespace (including newlines) after the closing paren to find `.` or `&.`.
+    // Skip whitespace and line comments after the closing paren to find `.` or `&.`.
     // This handles multiline chains like:
     //   (expr)
     //     .method
+    // and:
+    //   (expr) # comment
+    //     .method
     let mut i = end_offset;
-    while i < content.len() && matches!(content[i], b' ' | b'\t' | b'\n' | b'\r') {
-        i += 1;
+    loop {
+        while i < content.len() && matches!(content[i], b' ' | b'\t' | b'\n' | b'\r') {
+            i += 1;
+        }
+
+        if i < content.len() && content[i] == b'#' {
+            while i < content.len() && !matches!(content[i], b'\n' | b'\r') {
+                i += 1;
+            }
+            continue;
+        }
+
+        break;
     }
     if i < content.len() {
         // `.method` (dot chaining)
