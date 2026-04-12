@@ -139,6 +139,19 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 ///
 /// Fix: only classify single-`#` comments as annotations/directives, and treat inline comments
 /// on `begin`/`else`/`rescue`/`ensure` lines as method documentation.
+///
+/// **Investigation (2026-04-12):** Remaining FNs came from four narrower mismatches:
+/// 1. A first-line shebang (`#!/usr/bin/env ruby`) was treated as documentation by the
+///    line scanner, but RuboCop does not attach the shebang to the following method.
+/// 2. Opal-style `%x{ ... #{ def ... } ... }` bodies needed two narrower fixes: recurse into
+///    Prism's `EmbeddedStatementsNode`, and treat the `#{` interpolation opener as code
+///    rather than documentation during the backward line scan.
+/// 3. Comments before the first child of a `begin ... rescue/ensure/else` body were treated
+///    as that child's documentation, but RuboCop's `ast_with_comments` keeps them on the
+///    wrapper instead. This includes implicit body wrappers like `module Foo ... rescue`.
+/// 4. Retroactive `private :foo` / `protected :foo` visibility was incorrectly applied to
+///    receiver defs like `def self.foo`; RuboCop only applies that sibling visibility to
+///    plain defs in the current scope.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -251,6 +264,19 @@ fn retroactive_visibility_from_siblings(
     }
 
     None
+}
+
+fn pending_visibility_for_def(
+    def_node: &ruby_prism::DefNode<'_>,
+    siblings: &[ruby_prism::Node<'_>],
+    preceding_visibility: Option<MethodVisibility>,
+) -> Option<MethodVisibility> {
+    if def_node.receiver().is_some() {
+        return preceding_visibility;
+    }
+
+    let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
+    retroactive_visibility_from_siblings(siblings, method_name).or(preceding_visibility)
 }
 
 fn standalone_visibility(node: &ruby_prism::Node<'_>) -> Option<MethodVisibility> {
@@ -384,6 +410,10 @@ fn inline_body_opener_comment(line: &[u8]) -> Option<&str> {
     std::str::from_utf8(&trimmed[hash_pos..]).ok()
 }
 
+fn is_interpolation_opener_line(trimmed: &[u8]) -> bool {
+    trimmed.starts_with(b"#{")
+}
+
 fn if_is_postfix_modifier(node: &ruby_prism::IfNode<'_>) -> bool {
     node.end_keyword_loc().is_none()
         && node.if_keyword_loc().is_some_and(|keyword| {
@@ -443,7 +473,7 @@ fn has_method_documentation_comment(source: &SourceFile, keyword_offset: usize) 
             break;
         }
 
-        if !trimmed.starts_with(b"#") {
+        if is_interpolation_opener_line(trimmed) || !trimmed.starts_with(b"#") {
             if !found_doc_comment {
                 if let Some(comment_text) = inline_body_opener_comment(line) {
                     if !is_annotation_or_directive_case_insensitive(comment_text) {
@@ -456,7 +486,8 @@ fn has_method_documentation_comment(source: &SourceFile, keyword_offset: usize) 
 
         seen_any_comment = true;
         let comment_text = std::str::from_utf8(trimmed).unwrap_or("");
-        if !is_annotation_or_directive_case_insensitive(comment_text) {
+        let is_first_line_shebang = line_idx == 0 && trimmed.starts_with(b"#!");
+        if !is_first_line_shebang && !is_annotation_or_directive_case_insensitive(comment_text) {
             found_doc_comment = true;
         }
 
@@ -478,6 +509,7 @@ struct DocumentationMethodVisitor<'a> {
     pending_visibility: HashMap<usize, Option<MethodVisibility>>,
     wrapped_comment_depth: usize,
     inline_non_public_depth: usize,
+    rescue_begin_first_child: bool,
 }
 
 impl DocumentationMethodVisitor<'_> {
@@ -538,6 +570,7 @@ impl DocumentationMethodVisitor<'_> {
 
         if self.wrapped_comment_depth == 0
             && !prefix_steals_comments
+            && !self.rescue_begin_first_child
             && has_method_documentation_comment(self.source, def_offset)
         {
             return;
@@ -570,9 +603,11 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
 
         for (idx, stmt) in stmt_nodes.iter().enumerate() {
             if let Some(def_node) = stmt.as_def_node() {
-                let method_name = std::str::from_utf8(def_node.name().as_slice()).unwrap_or("");
-                let vis = retroactive_visibility_from_siblings(&stmt_nodes[idx + 1..], method_name)
-                    .or(preceding_visibility);
+                let vis = pending_visibility_for_def(
+                    &def_node,
+                    &stmt_nodes[idx + 1..],
+                    preceding_visibility,
+                );
                 self.pending_visibility
                     .insert(def_node.location().start_offset(), vis);
             }
@@ -591,13 +626,11 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
                     if let Some(args) = call.arguments() {
                         for arg in args.arguments().iter() {
                             if let Some(inner_def) = arg.as_def_node() {
-                                let method_name =
-                                    std::str::from_utf8(inner_def.name().as_slice()).unwrap_or("");
-                                let vis = retroactive_visibility_from_siblings(
+                                let vis = pending_visibility_for_def(
+                                    &inner_def,
                                     &stmt_nodes[idx + 1..],
-                                    method_name,
-                                )
-                                .or(preceding_visibility);
+                                    preceding_visibility,
+                                );
                                 self.pending_visibility
                                     .insert(inner_def.location().start_offset(), vis);
                             }
@@ -645,6 +678,41 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
         self.with_fresh_wrapper_state(|this| ruby_prism::visit_block_node(this, node));
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let masks_preceding_comments = node.rescue_clause().is_some()
+            || node.else_clause().is_some()
+            || node.ensure_clause().is_some();
+
+        if masks_preceding_comments {
+            let saved = self.rescue_begin_first_child;
+            if let Some(statements) = node.statements() {
+                let mut first = true;
+                for stmt in statements.body().iter() {
+                    self.rescue_begin_first_child = first;
+                    self.visit(&stmt);
+                    first = false;
+                }
+            }
+            self.rescue_begin_first_child = false;
+
+            if let Some(rescue_clause) = node.rescue_clause() {
+                self.visit_rescue_node(&rescue_clause);
+            }
+            if let Some(else_clause) = node.else_clause() {
+                self.visit_else_node(&else_clause);
+            }
+            if let Some(ensure_clause) = node.ensure_clause() {
+                self.visit_ensure_node(&ensure_clause);
+            }
+            self.rescue_begin_first_child = saved;
+        } else {
+            let saved = self.rescue_begin_first_child;
+            self.rescue_begin_first_child = false;
+            ruby_prism::visit_begin_node(self, node);
+            self.rescue_begin_first_child = saved;
+        }
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if let Some(receiver) = node.receiver() {
             self.visit(&receiver);
@@ -673,6 +741,12 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
 
         if let Some(block) = node.block() {
             self.visit(&block);
+        }
+    }
+
+    fn visit_embedded_statements_node(&mut self, node: &ruby_prism::EmbeddedStatementsNode<'pr>) {
+        if let Some(statements) = node.statements() {
+            self.visit_statements_node(&statements);
         }
     }
 
@@ -779,6 +853,7 @@ impl Cop for DocumentationMethod {
             pending_visibility: HashMap::new(),
             wrapped_comment_depth: 0,
             inline_non_public_depth: 0,
+            rescue_begin_first_child: false,
         };
         visitor.visit(&parse_result.node());
     }
