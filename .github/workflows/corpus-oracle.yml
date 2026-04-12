@@ -191,7 +191,13 @@ jobs:
       - name: Run batch
         id: run-batch
         run: |
-          mkdir -p results/nitrocop results/rubocop rubocop-cache
+          mkdir -p results/nitrocop results/rubocop results/ig-nitrocop results/ig-rubocop results/ig-context rubocop-cache
+
+          # Include-gated cops: cops with non-**/ Include patterns that get
+          # zero data in the main comparison because both tools fail to resolve
+          # cop-level Include patterns when config is outside repo dir.
+          # See docs/investigation-target-dir-relativization.md.
+          IG_COPS="Rails/ActionControllerTestCase,Rails/AddColumnIndex,Rails/BulkChangeTable,Rails/CreateTableWithTimestamps,Rails/DangerousColumnNames,Rails/EnumSyntax,Rails/HttpPositionalArguments,Rails/HttpStatusNameConsistency,Rails/I18nLocaleAssignment,Rails/MigrationClassName,Rails/NotNullColumn,Rails/Output,Rails/RedundantTravelBack,Rails/ResponseParsedBody,Rails/ReversibleMigration,Rails/ReversibleMigrationMethodDefinition,Rails/StrongParametersExpect,Rails/ThreeStateBooleanColumn,Rails/TimeZoneAssignment,Rails/UniqueValidationWithoutIndex,Rails/UnusedIgnoredColumns,Rake/ClassDefinitionInTask,Rake/Desc,Rake/DuplicateNamespace,Rake/DuplicateTask,Rake/MethodDefinitionInTask"
 
           while IFS= read -r row; do
             REPO_ID=$(echo "$row" | jq -r '.id')
@@ -331,6 +337,66 @@ jobs:
                 echo "::warning::Rubocop result for ${REPO_ID} contains out-of-repo paths — not caching"
               fi
             fi
+
+            # ── Include-gated comparison (20 cops with non-**/ Include patterns) ──
+            # Both tools fail to resolve these cops' Include patterns when config
+            # is outside repo dir. Writing .rubocop_include_check.yml IN the repo
+            # makes base_dir = repo_dir for both tools.
+            IG_TIMEOUT=120
+
+            cat > "$ABS_DEST/.rubocop_include_check.yml" << IGEOF
+          inherit_from: $WORKSPACE/bench/corpus/baseline_rubocop.yml
+          IGEOF
+
+            echo "=== ig-nitrocop: ${REPO_ID} ==="
+            rc=0
+            (cd "$ABS_DEST" && \
+              timeout "${IG_TIMEOUT}" \
+              env GIT_CEILING_DIRECTORIES=$(dirname "$ABS_DEST") \
+              "$WORKSPACE/bin/nitrocop" \
+                --preview \
+                --config "$ABS_DEST/.rubocop_include_check.yml" \
+                --only "$IG_COPS" \
+                --format json \
+                --no-cache \
+                "$ABS_DEST" \
+                > "$WORKSPACE/results/ig-nitrocop/${REPO_ID}.json" \
+                2>"$WORKSPACE/results/ig-nitrocop/${REPO_ID}.err") || rc=$?
+            if [ "$rc" -eq 124 ]; then
+              echo "::warning::ig-nitrocop timed out after ${IG_TIMEOUT}s for ${REPO_ID}"
+            fi
+
+            echo "=== ig-rubocop: ${REPO_ID} ==="
+            rc=0
+            (cd "$ABS_DEST" && \
+              timeout "${IG_TIMEOUT}" \
+              env BUNDLE_GEMFILE=$WORKSPACE/bench/corpus/Gemfile \
+                  BUNDLE_PATH=$WORKSPACE/bench/corpus/vendor/bundle \
+                  GIT_CEILING_DIRECTORIES=$(dirname "$ABS_DEST") \
+              bundle exec rubocop \
+                --require $WORKSPACE/bench/corpus/rescue_parser_crashes.rb \
+                --config "$ABS_DEST/.rubocop_include_check.yml" \
+                --only "$IG_COPS" \
+                --format json \
+                --force-exclusion \
+                --cache false \
+                "$ABS_DEST" \
+                > "$WORKSPACE/results/ig-rubocop/${REPO_ID}.json" \
+                2>"$WORKSPACE/results/ig-rubocop/${REPO_ID}.err") || rc=$?
+            if [ "$rc" -eq 124 ]; then
+              echo "::warning::ig-rubocop timed out after ${IG_TIMEOUT}s for ${REPO_ID}"
+            fi
+
+            rm -f "$ABS_DEST/.rubocop_include_check.yml"
+
+            # Extract source context for include-gated offenses (same as main pipeline).
+            python3 bench/corpus/extract_context.py \
+              --nitrocop-json "results/ig-nitrocop/${REPO_ID}.json" \
+              --rubocop-json "results/ig-rubocop/${REPO_ID}.json" \
+              --repo-dir "$DEST" \
+              --output "results/ig-context/${REPO_ID}.json" \
+              --context-lines 7 \
+              2>/dev/null || true
 
             # ── Style-variant batch runs (all 3 batches, first 1000 repos) ──
             python3 bench/corpus/run_variant_batches.py \
@@ -534,6 +600,69 @@ jobs:
             ${COP_LIST:+--cop-list "$COP_LIST"} \
             $CONTEXT_DIR
 
+      - name: Diff include-gated results
+        run: |
+          IG_NC_DIR="all-results/results/ig-nitrocop"
+          IG_RC_DIR="all-results/results/ig-rubocop"
+          if [ -d "$IG_NC_DIR" ] && [ -d "$IG_RC_DIR" ]; then
+            # Use a dedicated cop list for the IG diff, restricted to the 20
+            # Include-gated cops. Without this, RuboCop's --only still emits
+            # Lint/Syntax for every parse error (it's a special cop that always
+            # runs), which inflates the IG diff with thousands of phantom FN
+            # unrelated to the 20 cops we're comparing.
+            IG_COP_LIST=$(mktemp)
+            cat > "$IG_COP_LIST" << 'IGCOPS'
+          Rails/ActionControllerTestCase
+          Rails/AddColumnIndex
+          Rails/BulkChangeTable
+          Rails/CreateTableWithTimestamps
+          Rails/DangerousColumnNames
+          Rails/EnumSyntax
+          Rails/HttpPositionalArguments
+          Rails/HttpStatusNameConsistency
+          Rails/I18nLocaleAssignment
+          Rails/MigrationClassName
+          Rails/NotNullColumn
+          Rails/RedundantTravelBack
+          Rails/ResponseParsedBody
+          Rails/ReversibleMigration
+          Rails/ReversibleMigrationMethodDefinition
+          Rails/StrongParametersExpect
+          Rails/ThreeStateBooleanColumn
+          Rails/TimeZoneAssignment
+          Rails/UniqueValidationWithoutIndex
+          Rails/UnusedIgnoredColumns
+          IGCOPS
+            IG_CONTEXT_DIR=""
+            if [ -d "all-results/results/ig-context" ]; then
+              IG_CONTEXT_DIR="--context-dir all-results/results/ig-context"
+            fi
+            python3 bench/corpus/diff_results.py \
+              --nitrocop-dir "$IG_NC_DIR" \
+              --rubocop-dir "$IG_RC_DIR" \
+              --manifest bench/corpus/manifest.jsonl \
+              --output-json include-gated-results.json \
+              --output-md include-gated-results.md \
+              --cop-list "$IG_COP_LIST" \
+              $IG_CONTEXT_DIR
+            rm -f "$IG_COP_LIST"
+            echo "Include-gated diff complete"
+            head -50 include-gated-results.md
+          else
+            echo "No include-gated results found"
+          fi
+
+      - name: Merge include-gated results
+        run: |
+          if [ -f include-gated-results.json ]; then
+            python3 bench/corpus/merge_include_gated.py \
+              --main corpus-results.json \
+              --include-gated include-gated-results.json \
+              --output corpus-results.json
+          else
+            echo "No include-gated results to merge"
+          fi
+
       - name: Generate variant batch configs (for style labels)
         run: python3 bench/corpus/gen_variant_batches.py --output-dir bench/corpus/variant_batches/
 
@@ -646,6 +775,8 @@ jobs:
           path: |
             corpus-results.json
             corpus-results.md
+            include-gated-results.json
+            include-gated-results.md
             style-variant-results.json
             style-variant-*.md
             tiers.json
@@ -816,6 +947,8 @@ jobs:
           path: |
             corpus-results.json
             corpus-results.md
+            include-gated-results.json
+            include-gated-results.md
             style-variant-results.json
             style-variant-*.md
             tiers.json
