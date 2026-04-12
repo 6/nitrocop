@@ -654,6 +654,10 @@ pub struct ResolvedConfig {
     /// `railties` is not in the lockfile, cops with `minimum_target_rails_version`
     /// are silently disabled regardless of `TargetRailsVersion` in config.
     railties_in_lockfile: bool,
+    /// The actual `railties` gem version from Gemfile.lock (e.g. 4.2 for "4.2.11.3").
+    /// When corpus runs force a higher `TargetRailsVersion`, some cops still need
+    /// the real lockfile version to mirror RuboCop's `requires_gem 'railties', '>= x.y'`.
+    railties_version: Option<f64>,
     /// The `rack` gem version from Gemfile.lock (e.g. 3.1 for "3.1.8").
     /// Used by `Rails/HttpStatusNameConsistency` and `RSpecRails/HttpStatusNameConsistency`
     /// which require `rack >= 3.1.0` (via RuboCop's `requires_gem 'rack', '>= 3.1.0'`).
@@ -691,6 +695,7 @@ impl ResolvedConfig {
             project_enabled_depts: HashSet::new(),
             dir_overrides: Vec::new(),
             railties_in_lockfile: false,
+            railties_version: None,
             rack_version: None,
             base_dir: None,
             migrated_schema_version: None,
@@ -1008,6 +1013,7 @@ pub fn load_config(
             // exclusion, causing false positives on vendored code.
             let defaults = fallback_default_excludes();
             let mut railties_in_lockfile = false;
+            let mut railties_version = None;
             let mut target_rails_version = None;
             let mut rack_version = None;
             for lock_name in &["Gemfile.lock", "gems.locked"] {
@@ -1016,6 +1022,7 @@ pub fn load_config(
                     if target_rails_version.is_none() {
                         if let Some(ver) = parse_gem_version_from_lockfile(&content, "railties") {
                             railties_in_lockfile = true;
+                            railties_version = Some(ver);
                             target_rails_version = Some(ver);
                         }
                     }
@@ -1034,6 +1041,7 @@ pub fn load_config(
                 global_excludes: defaults.global_excludes,
                 target_rails_version,
                 railties_in_lockfile,
+                railties_version,
                 rack_version,
                 ..ResolvedConfig::empty()
             });
@@ -1166,12 +1174,14 @@ pub fn load_config(
     // a config file outside the target project (e.g. corpus oracle CI).
     let lockfile_dir = &base_dir;
     let mut railties_in_lockfile = false;
+    let mut railties_version = None;
     let target_rails_version = base.target_rails_version.or_else(|| {
         for lock_name in &["Gemfile.lock", "gems.locked"] {
             let lock_path = lockfile_dir.join(lock_name);
             if let Ok(content) = std::fs::read_to_string(&lock_path) {
                 if let Some(ver) = parse_gem_version_from_lockfile(&content, "railties") {
                     railties_in_lockfile = true;
+                    railties_version = Some(ver);
                     return Some(ver);
                 }
             }
@@ -1187,8 +1197,9 @@ pub fn load_config(
         for lock_name in &["Gemfile.lock", "gems.locked"] {
             let lock_path = lockfile_dir.join(lock_name);
             if let Ok(content) = std::fs::read_to_string(&lock_path) {
-                if parse_gem_version_from_lockfile(&content, "railties").is_some() {
+                if let Some(ver) = parse_gem_version_from_lockfile(&content, "railties") {
                     railties_in_lockfile = true;
+                    railties_version = Some(ver);
                     break;
                 }
             }
@@ -1233,6 +1244,7 @@ pub fn load_config(
         project_enabled_depts,
         dir_overrides,
         railties_in_lockfile,
+        railties_version,
         rack_version,
         base_dir: Some(base_dir),
         migrated_schema_version: base.migrated_schema_version,
@@ -2287,6 +2299,12 @@ impl ResolvedConfig {
             .options
             .entry("__RailtiesInLockfile".to_string())
             .or_insert_with(|| Value::Bool(self.railties_in_lockfile));
+        if let Some(version) = self.railties_version {
+            config
+                .options
+                .entry("__RailtiesVersion".to_string())
+                .or_insert_with(|| Value::Number(serde_yml::Number::from(version)));
+        }
         // Inject rack version for HttpStatusNameConsistency cops
         // (requires_gem 'rack', '>= 3.1.0')
         if matches!(
