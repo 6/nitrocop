@@ -307,7 +307,7 @@ pub fn run(args: Args) -> Result<i32> {
 
     // Load config — use lockfile if available
     let config_start = std::time::Instant::now();
-    let config = if args.force_default_config {
+    let mut config = if args.force_default_config {
         let mut cfg = config::ResolvedConfig::empty();
         // When --only targets plugin-department cops (RSpec, Rails, etc.),
         // register those departments so the cops aren't silently disabled.
@@ -334,6 +334,12 @@ pub fn run(args: Args) -> Result<i32> {
     } else {
         load_config(args.config.as_deref(), target_dir, None)?
     };
+    // `--only Rails/Foo` or `--only RSpec/Bar` should enable the requested
+    // plugin department even when the project config doesn't explicitly load
+    // that plugin. RuboCop treats an explicit --only as a request to run the
+    // named cop; without this, plugin cops stay silently disabled in repos
+    // that have no require:/plugins: config.
+    config.register_departments_from_only(&args.only);
     let config_elapsed = config_start.elapsed();
 
     if args.debug {
