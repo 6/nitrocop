@@ -217,6 +217,29 @@ use crate::parse::source::SourceFile;
 ///   `checked_chain_ranges` suppression so those RSpec chains are checked at the
 ///   same boundary RuboCop uses.
 ///
+/// ## Fixes applied (2026-04-12)
+/// - **Phase 2 comment guard**: backslash continuations with inline comments in
+///   the continued lines (for example `attr_reader \` lists with trailing
+///   `# DEV(...)` comments) are now skipped. RuboCop will not collapse those
+///   comment-bearing expressions onto one line.
+/// - **Phase 2 branch-tail string continuations**: backslash string
+///   continuations that end directly before `else`/`elsif`/`when`/`rescue`/`end`
+///   are skipped without suppressing unrelated nested expressions. This matches
+///   RuboCop for string continuations inside `if ... else ... end` assignments
+///   while avoiding the broad FN regression from suppressing whole enclosing
+///   conditional ranges.
+/// - **Multiline interpolated string safety**: interpolated strings that contain
+///   literal newlines are now marked unsafe-to-split as whole nodes, except for
+///   `%`-newline delimiters like `x = %\n"#{foo}"` where the delimiter newline is
+///   not part of the string's effective value. RuboCop treats expressions like
+///   `\"<h2>#{\n  call\n}</h2>\"` as unsafe, but still flags newline-delimited
+///   percent strings that fit on one line.
+/// - **Safe-navigation block-chain precedence**: `Layout/SingleLineBlockChain`
+///   only takes precedence for ordinary `.` chains, not `&.` chains. Nitrocop
+///   now matches that by excluding safe-navigation callers from the
+///   single-line-block precedence collector, so patterns like
+///   `registry\n  .find { ... }\n  &.command_class` are correctly reported.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -253,9 +276,13 @@ impl Cop for RedundantLineBreak {
 
         // Pre-collect ranges of unsafe-to-split constructs:
         // if/unless/case/begin/def nodes, heredocs, and multiline strings.
-        let mut unsafe_collector = UnsafeRangeCollector { ranges: Vec::new() };
+        let mut unsafe_collector = UnsafeRangeCollector {
+            ranges: Vec::new(),
+            group_blocking_ranges: Vec::new(),
+        };
         unsafe_collector.visit(&parse_result.node());
         let unsafe_ranges = unsafe_collector.ranges;
+        let group_blocking_ranges = unsafe_collector.group_blocking_ranges;
 
         // Pre-collect block ranges (for InspectBlocks: false check)
         let mut block_collector = BlockRangeCollector {
@@ -305,7 +332,9 @@ impl Cop for RedundantLineBreak {
             diagnostics,
             &reported_starts,
             &unsafe_ranges,
+            &group_blocking_ranges,
             &block_ranges,
+            &comment_lines,
         );
     }
 }
@@ -325,12 +354,17 @@ impl Cop for RedundantLineBreak {
 struct UnsafeRangeCollector {
     /// (start_offset, end_offset) of nodes that make their parent unsafe to merge.
     ranges: Vec<(usize, usize)>,
+    /// Unsafe expression ranges that should also suppress nested Phase 2
+    /// backslash groups when they strictly contain the group.
+    group_blocking_ranges: Vec<(usize, usize)>,
 }
 
 impl<'pr> Visit<'pr> for UnsafeRangeCollector {
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         // Recurse into children so nested unsafe constructs (strings, regexps,
         // inner ifs) inside the if body are also collected. The if itself is
         // unsafe for its parent, but children may need their own unsafe ranges
@@ -341,24 +375,32 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_unless_node(self, node);
     }
 
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_case_node(self, node);
     }
 
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_case_match_node(self, node);
     }
 
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_begin_node(self, node);
     }
 
@@ -395,11 +437,28 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
                 self.ranges.push((loc.start_offset(), loc.end_offset()));
                 return;
             }
+
+            // Prism models `%`-newline delimiters like:
+            //
+            //   x = %
+            //   "#{foo}"
+            //
+            // as a multiline InterpolatedStringNode whose opening token ends
+            // with `\n`. RuboCop still treats these as safe-to-split because
+            // the delimiter newline is not part of the effective string value.
+            if open.as_slice().ends_with(b"\n") {
+                ruby_prism::visit_interpolated_string_node(self, node);
+                return;
+            }
         }
-        // Don't check source-level newlines here. Backslash line continuations
-        // ("foo #{x}" \ "bar #{y}") span source lines but the value has no \n.
-        // Instead, rely on recursion into child StringNode parts, which use
-        // unescaped() to correctly detect newlines in the decoded value.
+        // Multiline interpolated strings are unsafe in RuboCop even when the
+        // embedded send would fit on one line by itself. Treat only LITERAL
+        // newlines as unsafe here. Backslash string continuations such as
+        // `"foo #{x}" \` newline `"bar #{y}"` should still be checkable.
+        if contains_non_continuation_newline(node.location().as_slice()) {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
         ruby_prism::visit_interpolated_string_node(self, node);
     }
 
@@ -424,6 +483,8 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         if content.contains(&b'\n') {
             let loc = node.location();
             self.ranges.push((loc.start_offset(), loc.end_offset()));
+            self.group_blocking_ranges
+                .push((loc.start_offset(), loc.end_offset()));
         }
         // Still recurse into children to find nested unsafe constructs
         ruby_prism::visit_parentheses_node(self, node);
@@ -432,18 +493,24 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_until_node(self, node);
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_while_node(self, node);
     }
 
     fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
         let loc = node.location();
         self.ranges.push((loc.start_offset(), loc.end_offset()));
+        self.group_blocking_ranges
+            .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_for_node(self, node);
     }
 
@@ -575,9 +642,10 @@ impl SingleLineBlockCollector<'_, '_> {
                 continue;
             }
             // Found the containing node. Check if it's a CallNode with a dot.
-            return ancestor
-                .as_call_node()
-                .is_some_and(|c| c.call_operator_loc().is_some());
+            return ancestor.as_call_node().is_some_and(|c| {
+                c.call_operator_loc()
+                    .is_some_and(|loc| loc.as_slice() == b".")
+            });
         }
         false
     }
@@ -1255,7 +1323,9 @@ fn check_backslash_continuations(
     diagnostics: &mut Vec<Diagnostic>,
     already_reported: &HashSet<usize>,
     unsafe_ranges: &[(usize, usize)],
+    _group_blocking_ranges: &[(usize, usize)],
     block_ranges: &[(usize, usize, bool)],
+    comment_lines: &HashSet<usize>,
 ) {
     let content = source.as_bytes();
     let lines: Vec<&[u8]> = source.lines().collect();
@@ -1389,6 +1459,13 @@ fn check_backslash_continuations(
             }
         }
 
+        let has_comment = ((group_start + 1)..=(expression_end_idx + 1))
+            .any(|line_num| comment_lines.contains(&line_num));
+        if has_comment {
+            i = expression_end_idx + 1;
+            continue;
+        }
+
         // Build the combined single-line version.
         let indent = leading_whitespace_len(lines[group_start]);
         let mut combined = Vec::new();
@@ -1479,19 +1556,26 @@ fn is_string_concat_continuation(lines: &[&[u8]], group_start: usize, group_end:
             }
             let first_char = next_content[0];
             if first_char != b'\'' && first_char != b'"' {
+                if j + 1 == group_end && is_branch_terminator(next_content) {
+                    break;
+                }
                 return false;
             }
         }
     }
     if group_end < lines.len() {
-        let tail_content = trim_leading_whitespace(lines[group_end]);
+        let tail_content = trim_leading_whitespace(trim_trailing_whitespace(lines[group_end]));
         if tail_content.is_empty() {
             return false;
         }
         let first_char = tail_content[0];
-        if first_char != b'\'' && first_char != b'"' {
-            return false;
+        if first_char == b'\'' || first_char == b'"' {
+            return true;
         }
+        if is_branch_terminator(tail_content) {
+            return true;
+        }
+        return false;
     }
     true
 }
@@ -1561,6 +1645,33 @@ fn leading_whitespace_len(line: &[u8]) -> usize {
         }
     }
     count
+}
+
+fn contains_non_continuation_newline(bytes: &[u8]) -> bool {
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'\n' {
+            continue;
+        }
+
+        let mut j = i;
+        while j > 0 && (bytes[j - 1] == b' ' || bytes[j - 1] == b'\t') {
+            j -= 1;
+        }
+
+        if j == 0 || bytes[j - 1] != b'\\' {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_branch_terminator(trimmed: &[u8]) -> bool {
+    trimmed == b"end"
+        || trimmed == b"else"
+        || trimmed == b"ensure"
+        || trimmed.starts_with(b"elsif ")
+        || trimmed.starts_with(b"when ")
+        || trimmed.starts_with(b"rescue ")
 }
 
 /// Count the number of Unicode characters (code points) in a UTF-8 byte slice.

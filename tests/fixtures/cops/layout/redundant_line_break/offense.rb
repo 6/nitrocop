@@ -167,6 +167,12 @@ label = "#{name}::" \
 ^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
         "#{child_name}"
 
+# Percent-delimited interpolated strings with a newline delimiter still fit on
+# one line. RuboCop flags these even though Prism models them as multiline dstr.
+x = %
+^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+"#{@foo}"
+
 # Calls inside block bodies — individually checkable since the block
 # boundary stops the walk-up in RuboCop's on_send.
 existing_indexes_for(table_name).any? do |existing_index_column_names|
@@ -365,3 +371,42 @@ expect_any_instance_of(Machinery::InspectTask).
                                   _options|
     filter
   end.and_return(description)
+
+module Packwerk
+  module Commands
+    class << self
+      def for(name_or_alias)
+        registry
+        ^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+          .find { |command| command.matches_command?(name_or_alias) }
+          &.command_class
+      end
+    end
+  end
+end
+
+module WinRM
+  module PSRP
+    class MessageFactory
+      class << self
+        def session_capability_message(runspace_pool_id)
+          Message.new(
+          ^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+            runspace_pool_id,
+            Message::MESSAGE_TYPES[:session_capability],
+            render('session_capability')
+          )
+        end
+      end
+    end
+  end
+end
+
+describe WinRM::PSRP::ReceiveResponseReader do
+  before do
+    allow(transport).to receive(:send_request).and_return(
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      REXML::Document.new(test_data_xml_template.result(binding))
+    )
+  end
+end
