@@ -48,6 +48,17 @@ use crate::parse::source::SourceFile;
 /// `code = X; code = Y; rescue; Result.new(code:); end`). Fixed by making the
 /// suppression name-aware: collect variable names read in rescue/ensure handlers
 /// and suppress body writes for those names, regardless of block capture.
+///
+/// ## FN fix: nested exclusive branch ancestry (2026-04-12)
+///
+/// In tail-position `if`/`elsif` chains, RuboCop still flags assignments like
+/// `value = "a"` because only the assignment expression's value is returned;
+/// the local itself is never read. nitrocop missed nested-branch variants when
+/// a later mutually exclusive branch self-referenced the same variable
+/// (`value = value + "c"`), because the branch model only compared the
+/// immediate branch IDs and treated nested `elsif` branches as compatible.
+/// Fixed by preserving enclosing branch ancestry in VariableForce branch
+/// contexts and using that ancestry when checking branch exclusivity.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {

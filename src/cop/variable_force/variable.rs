@@ -1,4 +1,5 @@
 use super::assignment::Assignment;
+use super::engine::branches_exclusive_in_contexts;
 use super::reference::Reference;
 
 /// A declared local variable with its full lifetime state.
@@ -153,19 +154,7 @@ fn is_exclusive(
     b: Option<usize>,
     branch_contexts: &[super::engine::BranchContext],
 ) -> bool {
-    let (a_id, b_id) = match (a, b) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return false,
-    };
-    if a_id == b_id {
-        return false;
-    }
-    if a_id >= branch_contexts.len() || b_id >= branch_contexts.len() {
-        return false;
-    }
-    let a_ctx = &branch_contexts[a_id];
-    let b_ctx = &branch_contexts[b_id];
-    a_ctx.parent_id == b_ctx.parent_id && a_ctx.child_index != b_ctx.child_index
+    branches_exclusive_in_contexts(a, b, branch_contexts)
 }
 
 /// How a variable was first declared.

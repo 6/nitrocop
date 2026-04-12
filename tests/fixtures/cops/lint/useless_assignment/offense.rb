@@ -234,8 +234,8 @@ def single_overwrite_then_block
   puts result
 end
 
-# An exclusive outer-branch read must not suppress the earlier rescue-clause
-# offense in the rescue chain.
+# An exclusive outer-branch read must not suppress rescue-clause offenses in
+# the rescue chain.
 def rescue_chain_read_in_else(flag)
   if flag
     begin
@@ -245,6 +245,7 @@ def rescue_chain_read_in_else(flag)
       ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `score`.
     rescue OtherError
       score = 99
+      ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `score`.
     end
   else
     puts score
@@ -262,6 +263,27 @@ def final_rescue_assignment(flag)
     connection = disconnect(connection) unless connection.nil?
     ^^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `connection`.
     raise e
+  end
+end
+
+# FN fix: references from later mutually exclusive nested branches must not
+# keep earlier tail-position branch assignments alive.
+def nested_if_chain_tail(flag_a, flag_b, flag_c)
+  value = ""
+  if flag_a
+    if flag_b
+      value = "a"
+      ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `value`.
+    else
+      value = "b"
+      ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `value`.
+    end
+  elsif flag_c
+    value = value + "c"
+    ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `value`.
+  else
+    value = "d"
+    ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `value`.
   end
 end
 

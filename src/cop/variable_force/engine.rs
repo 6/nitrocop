@@ -34,6 +34,61 @@ pub struct BranchContext {
     pub parent_id: usize,
     /// Which child of the conditional this branch is (0=then, 1=else, etc.).
     pub child_index: usize,
+    /// The enclosing branch context active when this branch was entered.
+    /// This preserves nested `elsif` / branch ancestry so exclusivity checks
+    /// can distinguish sibling branches across nested conditionals.
+    pub enclosing_branch_id: Option<usize>,
+    /// True when this context wraps a predicate assignment (`if (x = 1)`).
+    /// Predicate evaluation is conditional from the perspective of later code,
+    /// but it is not mutually exclusive with the guarded body that follows.
+    pub predicate_context: bool,
+}
+
+pub(crate) fn branches_exclusive_in_contexts(
+    a: Option<usize>,
+    b: Option<usize>,
+    branch_contexts: &[BranchContext],
+) -> bool {
+    let (a_id, b_id) = match (a, b) {
+        (Some(a), Some(b)) => (a, b),
+        _ => return false,
+    };
+    if a_id == b_id {
+        return false;
+    }
+
+    let a_path = branch_lineage(a_id, branch_contexts);
+    let b_path = branch_lineage(b_id, branch_contexts);
+
+    for a_id in a_path {
+        let a_ctx = &branch_contexts[a_id];
+        for &b_id in &b_path {
+            let b_ctx = &branch_contexts[b_id];
+            if a_ctx.predicate_context || b_ctx.predicate_context {
+                continue;
+            }
+            if a_ctx.parent_id == b_ctx.parent_id && a_ctx.child_index != b_ctx.child_index {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+fn branch_lineage(start_id: usize, branch_contexts: &[BranchContext]) -> Vec<usize> {
+    let mut lineage = Vec::new();
+    let mut current = Some(start_id);
+
+    while let Some(id) = current {
+        let Some(context) = branch_contexts.get(id) else {
+            break;
+        };
+        lineage.push(id);
+        current = context.enclosing_branch_id;
+    }
+
+    lineage
 }
 
 /// The VariableForce engine. Walks the Prism AST and builds a complete
@@ -83,13 +138,30 @@ impl<'a> Engine<'a> {
     /// `parent_id` identifies the conditional node (use its start offset),
     /// `child_index` identifies which child (0=then, 1=else, etc.).
     fn push_branch(&mut self, parent_id: usize, child_index: usize) {
+        self.push_branch_with_kind(parent_id, child_index, false);
+    }
+
+    fn push_predicate_branch(&mut self, parent_id: usize, child_index: usize) {
+        self.push_branch_with_kind(parent_id, child_index, true);
+    }
+
+    fn push_branch_with_kind(
+        &mut self,
+        parent_id: usize,
+        child_index: usize,
+        predicate_context: bool,
+    ) {
         let id = self.next_branch_id;
         self.next_branch_id += 1;
+        let enclosing_branch_id = self.current_branch_id();
         self.branch_contexts.push(BranchContext {
             id,
             parent_id,
             child_index,
+            enclosing_branch_id,
+            predicate_context,
         });
+        self.table.branch_contexts.clone_from(&self.branch_contexts);
         self.branch_stack.push(id);
     }
 
@@ -106,16 +178,7 @@ impl<'a> Engine<'a> {
     /// Check if two branch IDs are mutually exclusive (belong to the same
     /// conditional parent but are different children).
     pub fn branches_exclusive(&self, a: Option<usize>, b: Option<usize>) -> bool {
-        let (a_id, b_id) = match (a, b) {
-            (Some(a), Some(b)) => (a, b),
-            _ => return false,
-        };
-        if a_id == b_id {
-            return false;
-        }
-        let a_ctx = &self.branch_contexts[a_id];
-        let b_ctx = &self.branch_contexts[b_id];
-        a_ctx.parent_id == b_ctx.parent_id && a_ctx.child_index != b_ctx.child_index
+        branches_exclusive_in_contexts(a, b, &self.branch_contexts)
     }
 
     /// Mark assignments as referenced for loop back-edges.
@@ -804,7 +867,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
+            self.push_predicate_branch(parent_id, 0);
         }
         self.visit(&node.predicate());
         if pred_has_write {
@@ -837,7 +900,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
+            self.push_predicate_branch(parent_id, 0);
         }
         self.visit(&node.predicate());
         if pred_has_write {
@@ -882,9 +945,11 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&pred);
             if pred_has_write {
                 self.branch_depth += 1;
+                self.push_predicate_branch(parent_id, 0);
             }
             self.visit(&pred);
             if pred_has_write {
+                self.pop_branch();
                 self.branch_depth -= 1;
             }
         }
@@ -925,9 +990,11 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&pred);
             if pred_has_write {
                 self.branch_depth += 1;
+                self.push_predicate_branch(parent_id, 0);
             }
             self.visit(&pred);
             if pred_has_write {
+                self.pop_branch();
                 self.branch_depth -= 1;
             }
         }
@@ -972,7 +1039,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_predicate_branch(parent_id, 0);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -984,7 +1051,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_predicate_branch(parent_id, 0);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -1028,7 +1095,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_predicate_branch(parent_id, 0);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -1040,7 +1107,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_predicate_branch(parent_id, 0);
             }
             self.visit(&node.predicate());
             if pred_has_write {
