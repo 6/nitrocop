@@ -13,13 +13,13 @@ Every offense is compared by file path, line number, and cop name.
 | Repos | 5589 |
 | Repos with 100% match | 3687 |
 | Files inspected | 590,714 |
-| Offenses compared | 28,391,738 |
-| Matches (both agree) | 28,368,262 |
-| FP (nitrocop extra) | 13,282 |
+| Offenses compared | 28,389,835 |
+| Matches (both agree) | 28,366,396 |
+| FP (nitrocop extra) | 13,245 |
 | FN (nitrocop missing) | 10,194 |
 | Registered cops | 915 |
-| Cops with exact match | 854 |
-| Cops with divergence | 30 |
+| Cops with exact match | 855 |
+| Cops with divergence | 29 |
 | Cops with no corpus data | 31 |
 | **Match rate (default config)** | **99.91%** |
 | **Match rate (all variants)** | **99.82%** |
@@ -44,8 +44,8 @@ Results using each cop's default RuboCop configuration.
 | Performance | 52 | 52 | 0 | 0 | 112,143 | 0 | 0 | 100.0% |
 | RSpec | 113 | 112 | 0 | 1 | 2,908,776 | 0 | 0 | 100.0% |
 | RSpecRails | 8 | 7 | 0 | 1 | 35,273 | 0 | 0 | 100.0% |
-| Rails | 138 | 98 | 16 | 24 | 454,059 | 9,820 | 1,526 | 97.5% |
-| Rake | 5 | 1 | 4 | 0 | 3,934 | 111 | 1,986 | 65.2% |
+| Rails | 138 | 99 | 15 | 24 | 452,289 | 9,815 | 1,526 | 97.5% |
+| Rake | 5 | 1 | 4 | 0 | 3,838 | 79 | 1,986 | 65.0% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
 | Style | 287 | 282 | 3 | 2 | 14,768,486 | 23 | 142 | 99.9% |
 
@@ -66,8 +66,8 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Performance | 52 | 52 | 0 | 0 | 112,143 | 0 | 0 | 100.0% |
 | RSpec | 113 | 112 | 0 | 1 | 3,993,190 | 0 | 0 | 100.0% |
 | RSpecRails | 8 | 7 | 0 | 1 | 50,807 | 0 | 0 | 100.0% |
-| Rails | 138 | 92 | 22 | 24 | 508,304 | 9,883 | 1,585 | 97.7% |
-| Rake | 5 | 1 | 4 | 0 | 3,934 | 111 | 1,986 | 65.2% |
+| Rails | 138 | 93 | 21 | 24 | 506,534 | 9,878 | 1,585 | 97.7% |
+| Rake | 5 | 1 | 4 | 0 | 3,838 | 79 | 1,986 | 65.0% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
 | Style | 287 | 278 | 7 | 2 | 24,346,455 | 21,982 | 32,786 | 99.7% |
 
@@ -106,7 +106,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 ## Diverging Cops
 
-30 cops diverge from RuboCop on the corpus (default config). 854 cops match RuboCop exactly. 31 cops have no corpus data.
+29 cops diverge from RuboCop on the corpus (default config). 855 cops match RuboCop exactly. 31 cops have no corpus data.
  18 additional cops diverge only in non-default style variants.
 
 | Cop | Matches | FP | FN | Match % |
@@ -123,7 +123,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Rails/ResponseParsedBody | 2,924 | 544 | 0 | 84.3% |
 | Rails/ReversibleMigrationMethodDefinition | 3,015 | 0 | 31 | 98.9% |
 | Rails/BulkChangeTable | 2,469 | 37 | 0 | 98.5% |
-| Rails/Output | 31,466 | 5 | 0 | 99.9% |
 | Lint/RedundantCopDisableDirective | 2,125 | 955 | 191 | 64.9% |
 | Rails/I18nLocaleAssignment | 722 | 62 | 0 | 92.0% |
 | Lint/UselessAssignment | 26,872 | 239 | 374 | 97.7% |
@@ -133,10 +132,10 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Layout/SpaceAroundOperators (space, space) | 33,981 | 146 | 20 | 99.5% |
 | Rails/TimeZoneAssignment | 277 | 0 | 3 | 98.9% |
 | Rails/AddColumnIndex | 201 | 3 | 4 | 96.6% |
-| Rake/DuplicateTask | 289 | 91 | 0 | 76.0% |
+| Rake/DuplicateTask | 281 | 64 | 0 | 81.4% |
 | Style/ConditionalAssignment (default) | 12,977 | 1 | 128 | 99.0% |
 | ↳ Style/ConditionalAssignment (assign_inside_condition) | 24,557 | 13 | 375 | 98.4% |
-| Rake/MethodDefinitionInTask | 1,549 | 13 | 0 | 99.1% |
+| Rake/MethodDefinitionInTask | 1,538 | 8 | 0 | 99.4% |
 | Rails/UnusedIgnoredColumns | 0 | 40 | 0 | 0.0% |
 | Style/RedundantParentheses | 23,590 | 13 | 13 | 99.8% |
 | Rails/MigrationClassName | 11 | 11 | 0 | 50.0% |
@@ -145,7 +144,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Style/DocumentationMethod | 1,095,463 | 9 | 1 | 99.9% |
 | Rails/Delegate | 21,191 | 1 | 0 | 99.9% |
 | Rails/RedundantTravelBack | 62 | 11 | 0 | 84.9% |
-| Rake/Desc | 1,979 | 0 | 1,984 | 49.9% |
+| Rake/Desc | 1,908 | 0 | 1,984 | 49.0% |
 
 **Variant-only divergence** (perfect in default config, diverge in non-default styles):
 
@@ -353,18 +352,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rails/Output</strong> — 31,466 matches, 5 FP, 0 FN (99.9%)</summary>
-
-**Default config** (5 FP, 0 FN):
-
-- FP: `liaoziyang__stackneveroverflow__8f4dce2: vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb:268  [Do not write to stdout. Use Rails's logger if you want to log.]`
-- FP: `liaoziyang__stackneveroverflow__8f4dce2: vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb:451  [Do not write to stdout. Use Rails's logger if you want to log.]`
-- FP: `liaoziyang__stackneveroverflow__8f4dce2: vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb:831  [Do not write to stdout. Use Rails's logger if you want to log.]`
-- ... and 2 more FP
-
-</details>
-
-<details>
 <summary><strong>Lint/RedundantCopDisableDirective</strong> — 2,125 matches, 955 FP, 191 FN (64.9%)</summary>
 
 **Default config** (955 FP, 191 FN):
@@ -490,14 +477,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rake/DuplicateTask</strong> — 289 matches, 91 FP, 0 FN (76.0%)</summary>
+<summary><strong>Rake/DuplicateTask</strong> — 281 matches, 64 FP, 0 FN (81.4%)</summary>
 
-**Default config** (91 FP, 0 FN):
+**Default config** (64 FP, 0 FN):
 
 - FP: `HellRok__Taylor__adb375f: scripts/export/Rakefile:56  [Task `transpile` is defined at both /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 55) and /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 56).]`
 - FP: `HellRok__Taylor__adb375f: scripts/export/Rakefile:61  [Task `build` is defined at both /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 60) and /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 61).]`
 - FP: `HellRok__Taylor__adb375f: scripts/export/Rakefile:62  [Task `build` is defined at both /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 60) and /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 62).]`
-- ... and 88 more FP
+- ... and 61 more FP
 
 </details>
 
@@ -526,14 +513,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rake/MethodDefinitionInTask</strong> — 1,549 matches, 13 FP, 0 FN (99.1%)</summary>
+<summary><strong>Rake/MethodDefinitionInTask</strong> — 1,538 matches, 8 FP, 0 FN (99.4%)</summary>
 
-**Default config** (13 FP, 0 FN):
+**Default config** (8 FP, 0 FN):
 
 - FP: `X140Yu__debug_cocoapods_plugins_in_vscode__e4cafdb: cocoapods/Rakefile:87  [Do not define a method in rake task, because it will be defined to the top level.]`
 - FP: `deanpcmad__sidekiq-limit_fetch__1dbfd35: demo/Rakefile:66  [Do not define a method in rake task, because it will be defined to the top level.]`
 - FP: `deanpcmad__sidekiq-limit_fetch__1dbfd35: demo/Rakefile:77  [Do not define a method in rake task, because it will be defined to the top level.]`
-- ... and 10 more FP
+- ... and 5 more FP
 
 </details>
 
@@ -642,7 +629,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rake/Desc</strong> — 1,979 matches, 0 FP, 1,984 FN (49.9%)</summary>
+<summary><strong>Rake/Desc</strong> — 1,908 matches, 0 FP, 1,984 FN (49.0%)</summary>
 
 **Default config** (0 FP, 1,984 FN):
 
@@ -6551,7 +6538,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary>Perfect cops (854 cops with 100% match rate)</summary>
+<summary>Perfect cops (855 cops with 100% match rate)</summary>
 
 | Cop | Matches |
 |-----|--------:|
@@ -6662,6 +6649,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Layout/FirstArrayElementLineBreak | 30,456 |
 | Style/ImplicitRuntimeError | 30,398 |
 | FactoryBot/SyntaxMethods | 29,877 |
+| Rails/Output | 29,696 |
 | Layout/ClassStructure | 28,635 |
 | RSpec/StubbedMock | 26,970 |
 | Lint/UnusedMethodArgument | 26,863 |
@@ -7288,13 +7276,13 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Rails/FindById | 96 |
 | Style/RedundantEach | 96 |
 | RSpec/SingleArgumentMessageChain | 91 |
-| Rake/ClassDefinitionInTask | 87 |
 | Performance/RedundantStringChars | 87 |
 | Rails/DuplicateScope | 86 |
 | Style/FileEmpty | 84 |
 | Lint/FormatParameterMismatch | 83 |
 | Rails/UnusedRenderContent | 82 |
 | Style/HashFetchChain | 82 |
+| Rake/ClassDefinitionInTask | 81 |
 | Style/EachForSimpleLoop | 80 |
 | Lint/DisjunctiveAssignmentInConstructor | 79 |
 | Lint/IdentityComparison | 79 |
