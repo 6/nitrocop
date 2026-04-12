@@ -1625,4 +1625,66 @@ renamed:
 
         fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn run_linter_does_not_use_scan_root_for_external_config_excludes() {
+        let dir = std::env::temp_dir().join("nitrocop_test_linter_scan_root_excludes");
+        let repo = dir.join("repo");
+        let config_dir = dir.join("config");
+        let spec_dir = repo.join("spec").join("models");
+        let file = spec_dir.join("widget_spec.rb");
+        let config_path = config_dir.join("baseline.yml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&spec_dir).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(&file, "class WidgetSpec\n  def helper\n  end\nend\n").unwrap();
+        fs::write(
+            &config_path,
+            "Style/DocumentationMethod:\n  Enabled: true\n",
+        )
+        .unwrap();
+
+        let config = crate::config::load_config(Some(&config_path), None, None).unwrap();
+        let registry = crate::cop::registry::CopRegistry::default_registry();
+        let tier_map = crate::cop::tiers::TierMap::load();
+        let allowlist = crate::cop::autocorrect_allowlist::AutocorrectAllowlist::load();
+        let mut args = args_for_paths(
+            vec![repo.clone()],
+            vec!["Style/DocumentationMethod".to_string()],
+        );
+        args.preview = true;
+        let cop_filters = build_cop_filters_for_args(&config, &registry, &tier_map, &args);
+        let doc_method_idx = registry
+            .cops()
+            .iter()
+            .position(|c| c.name() == "Style/DocumentationMethod")
+            .unwrap();
+        let discovered = crate::fs::discover_files(std::slice::from_ref(&repo), &config).unwrap();
+
+        assert!(
+            cop_filters.is_cop_match(doc_method_idx, &file),
+            "expected Style/DocumentationMethod to match {}",
+            file.display()
+        );
+
+        let result = run_linter(
+            &discovered,
+            &config,
+            &registry,
+            &args,
+            &tier_map,
+            &allowlist,
+        );
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.cop_name == "Style/DocumentationMethod"),
+            "expected Style/DocumentationMethod offense, got {:?}",
+            result.diagnostics
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

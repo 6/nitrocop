@@ -147,8 +147,11 @@ pub struct CopFilterSet {
     /// Used to relativize absolute file paths before glob matching.
     base_dir: Option<PathBuf>,
     /// Root of the scanned target repo/directory, if one was provided on the CLI.
-    /// For external configs, plugin cops like `Rails/*` still need `db/**/*.rb`
-    /// matched relative to the inspected repo root rather than the caller's CWD.
+    /// For external configs, some cop Include patterns (for example
+    /// `db/**/*.rb`) still need to match relative to the inspected repo root
+    /// rather than the caller's CWD. Do not use this for Exclude matching:
+    /// RuboCop resolves Exclude patterns relative to the config file/base_dir,
+    /// not the scan target.
     scan_root: Option<PathBuf>,
     /// Sub-directories containing their own `.rubocop.yml` files.
     /// Sorted deepest-first so `nearest_config_dir` finds the most specific match.
@@ -168,7 +171,7 @@ pub struct CopFilterSet {
 }
 
 impl CopFilterSet {
-    /// Set the scan root for Include/Exclude pattern resolution.
+    /// Set the scan root for Include-pattern resolution.
     /// Called by the linter when a target directory is provided on the CLI.
     pub fn set_scan_root(&mut self, root: PathBuf) {
         self.scan_root = Some(root);
@@ -300,7 +303,7 @@ impl CopFilterSet {
     /// Checks both the original path and the path relativized to the nearest
     /// config directory (supports per-directory `.rubocop.yml` path relativity):
     /// - Include: matches if EITHER path matches (supports absolute + relative patterns)
-    /// - Exclude: matches if EITHER path matches (catches project-relative patterns)
+    /// - Exclude: matches only RuboCop-resolved config/base-dir path forms
     pub fn is_cop_match(&self, index: usize, path: &Path) -> bool {
         let filter = &self.filters[index];
         if !filter.enabled {
@@ -347,13 +350,12 @@ impl CopFilterSet {
             return false;
         }
 
-        // Exclude: file is excluded if EITHER path form matches.
-        // This catches project-relative Exclude patterns (lib/tasks/*.rake)
-        // even when the file path has a prefix (bench/repos/mastodon/...).
+        // Exclude: file is excluded if EITHER RuboCop-resolved path form
+        // matches. Do NOT use scan_root here: external configs resolve Exclude
+        // patterns from the config/base dir, not the scanned repo root.
         let excluded = filter.is_excluded(path)
             || rel_path.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
-            || rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel))
             || stripped.is_some_and(|s| filter.is_excluded(s));
         if excluded {
             return false;
@@ -387,16 +389,11 @@ impl CopFilterSet {
             .as_deref()
             .filter(|bd| self.config_dir.as_deref() != Some(*bd))
             .and_then(|bd| path.strip_prefix(bd).ok());
-        let rel_to_scan_root = self
-            .scan_root
-            .as_deref()
-            .and_then(|root| path.strip_prefix(root).ok());
         let stripped = path.strip_prefix("./").ok();
         filter.is_excluded(path)
             || rel_to_nearest.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_root.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
-            || rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel))
             || stripped.is_some_and(|s| filter.is_excluded(s))
     }
 

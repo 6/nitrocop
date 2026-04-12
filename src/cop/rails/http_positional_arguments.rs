@@ -35,9 +35,7 @@ fn hash_elements<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<Vec<ruby_prism
 }
 
 fn hash_pairs<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<Vec<ruby_prism::AssocNode<'pr>>> {
-    let Some(elements) = hash_elements(node) else {
-        return None;
-    };
+    let elements = hash_elements(node)?;
 
     let pairs: Vec<ruby_prism::AssocNode<'pr>> = elements
         .into_iter()
@@ -92,7 +90,7 @@ fn needs_conversion<'pr>(node: &'pr ruby_prism::Node<'pr>) -> bool {
     }
 
     pairs.iter().all(|pair: &ruby_prism::AssocNode<'pr>| {
-        !special_keyword_arg(&pair.key()) && !(format_arg(&pair.key()) && pairs.len() == 1)
+        !(special_keyword_arg(&pair.key()) || format_arg(&pair.key()) && pairs.len() == 1)
     })
 }
 
