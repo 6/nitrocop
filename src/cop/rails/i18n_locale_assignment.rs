@@ -4,6 +4,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// ## Corpus investigation (2026-04-12)
+///
+/// FP=62, FN=0. The false positives were namespaced constants such as
+/// `Pagy::I18n.locale = ...` and `Mongoid::Fields::I18n.locale = ...`.
+/// RuboCop only matches `(const {nil? cbase} :I18n)`, so qualified paths must
+/// be excluded even when their final segment is `I18n`.
 pub struct I18nLocaleAssignment;
 
 impl Cop for I18nLocaleAssignment {
@@ -46,8 +52,9 @@ impl Cop for I18nLocaleAssignment {
             None => return,
         };
 
-        // Handle both ConstantReadNode (I18n) and ConstantPathNode (::I18n)
-        if constant_predicates::constant_short_name(&recv) != Some(b"I18n") {
+        // RuboCop matches only bare `I18n` or root-qualified `::I18n`,
+        // not namespaced constants like `Pagy::I18n`.
+        if !constant_predicates::is_simple_constant(&recv, b"I18n") {
             return;
         }
 
