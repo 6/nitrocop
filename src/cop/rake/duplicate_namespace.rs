@@ -12,10 +12,12 @@ use crate::parse::source::SourceFile;
 /// If namespaces are defined with the same name, Rake executes both
 /// in definition order. This is usually unintentional and confusing.
 ///
-/// Matches RuboCop's `OnNamespace` which fires on any `namespace` send,
-/// not just calls with blocks. A blockless `namespace` call uses only
-/// ancestor namespace names for the duplicate key, matching the
-/// `each_ancestor(:block)` walk in the Ruby implementation.
+/// RuboCop's `OnNamespace` fires on any `namespace` send, not just calls with
+/// `do/end` blocks. In Prism, `namespace :install, &builder.construct(:install)`
+/// exposes a `BlockArgumentNode` rather than a real `BlockNode`, so we have to
+/// treat it like a blockless namespace and key it from ancestor namespaces
+/// only — otherwise the two sibling `&builder.construct(:install)` calls get
+/// different keys and the duplicate goes unreported.
 pub struct DuplicateNamespace;
 
 impl Cop for DuplicateNamespace {
@@ -104,9 +106,13 @@ impl DuplicateNamespaceVisitor<'_> {
 impl<'pr> Visit<'pr> for DuplicateNamespaceVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let name = node.name().as_slice();
+        let has_block_body = node
+            .block()
+            .and_then(|block| block.as_block_node())
+            .is_some();
 
         if name == b"namespace" && node.receiver().is_none() {
-            if node.block().is_some() {
+            if has_block_body {
                 // Namespace call with a block: include the call's own name in the path
                 if let Some(ns_name) = crate::cop::rake::extract_task_name(node) {
                     let full_name = self.full_namespace_name(&ns_name);

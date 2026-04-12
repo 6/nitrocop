@@ -4686,6 +4686,64 @@ fn no_redundant_disable_include_mismatch_cop() {
 }
 
 #[test]
+fn rake_duplicate_namespace_matches_rake_files_by_default() {
+    let dir = temp_dir("rake_duplicate_namespace_rake_file");
+    let file = write_file(
+        &dir,
+        "lib/tasks/test.rake",
+        b"namespace :db do\nend\n\nnamespace :db do\nend\n",
+    );
+    let mut config = nitrocop::config::ResolvedConfig::empty();
+    config.register_departments_from_only(&["Rake/DuplicateNamespace".to_string()]);
+    let registry = CopRegistry::default_registry();
+    let tier_map = TierMap::load();
+    let mut filters = config.build_cop_filters(&registry, &tier_map, true);
+    filters.set_scan_root(dir.clone());
+    let duplicate_namespace_idx = registry
+        .cops()
+        .iter()
+        .position(|cop| cop.name() == "Rake/DuplicateNamespace")
+        .unwrap();
+
+    assert_eq!(
+        filters.is_cop_match(duplicate_namespace_idx, &file),
+        true,
+        "Expected .rake files to match DuplicateNamespace include filters"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn rake_duplicate_namespace_ignores_nested_rakefile_by_default() {
+    let dir = temp_dir("rake_duplicate_namespace_nested_rakefile");
+    let file = write_file(
+        &dir,
+        "activerecord/Rakefile",
+        b"namespace :db do\nend\n\nnamespace :db do\nend\n",
+    );
+    let mut config = nitrocop::config::ResolvedConfig::empty();
+    config.register_departments_from_only(&["Rake/DuplicateNamespace".to_string()]);
+    let registry = CopRegistry::default_registry();
+    let tier_map = TierMap::load();
+    let mut filters = config.build_cop_filters(&registry, &tier_map, true);
+    filters.set_scan_root(dir.clone());
+    let duplicate_namespace_idx = registry
+        .cops()
+        .iter()
+        .position(|cop| cop.name() == "Rake/DuplicateNamespace")
+        .unwrap();
+
+    assert_eq!(
+        filters.is_cop_match(duplicate_namespace_idx, &file),
+        false,
+        "Expected nested subdir/Rakefile to be skipped by default"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn no_redundant_disable_self_referential() {
     // Disabling Lint/RedundantCopDisableDirective itself is legitimate and
     // should never be flagged as redundant.
