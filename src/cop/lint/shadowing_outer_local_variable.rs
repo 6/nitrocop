@@ -106,6 +106,16 @@ impl ShadowingContext {
             .any(|(s, e, depth)| *s <= offset && offset < *e && *depth > branch_expr_depth_base)
     }
 
+    /// Return the deepest expression nesting that covers `offset`.
+    fn max_expression_depth_at(&self, offset: usize) -> usize {
+        self.expression_ranges
+            .iter()
+            .filter(|(s, e, _)| *s <= offset && offset < *e)
+            .map(|(_, _, depth)| *depth)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Check if a given offset is inside a Ractor.new block.
     fn is_in_ractor_block(&self, offset: usize) -> bool {
         self.ractor_block_ranges
@@ -417,12 +427,18 @@ impl ShadowingContext {
                     && bi.single_stmt
                     && !has_block_boundary
                 {
+                    // Match RuboCop's check 6 only when the block is the
+                    // top-level RHS expression. Chained receivers like
+                    // `foo = list.select { |foo| }.first` keep the block nested
+                    // under another call in parser gem, so RuboCop still flags.
+                    let param_expr_depth = self.max_expression_depth_at(param_offset);
                     let in_top_level_assignment_rhs =
                         self.assignment_rhs_ranges
                             .iter()
                             .any(|(_, lhs, rhs_start, rhs_end, _)| {
                                 *rhs_start <= param_offset
                                     && param_offset < *rhs_end
+                                    && param_expr_depth == bi.expression_depth_base + 1
                                     && bi.start <= *lhs
                                     && *lhs < bi.end
                                     && !self.is_in_expression_at(*lhs, bi.expression_depth_base)
@@ -473,6 +489,20 @@ impl ShadowingContext {
 ///    offsets sit before the body. Fix: track a `defs` local-scope span
 ///    (params + body) plus singleton-class body ranges, and suppress only when
 ///    the match crosses those boundaries.
+///
+/// 5. **FN: conditional-parent propagation crossed multi-statement ancestors.**
+///    The check-5/6 compatibility layer for nested blocks should only propagate
+///    through ancestor branches while each intermediate branch remains
+///    single-statement. Pushing the first multi-statement ancestor wrongly
+///    suppressed nested blocks under an outer `else`, such as the corpus
+///    `property_schema` example from cenit.
+///
+/// 6. **FN: assignment-RHS branch suppression was too broad for chained calls.**
+///    The Prism-only compensation for `foo = find { |foo| }` in a sibling branch
+///    also suppressed chained RHS forms like
+///    `section = list.select { |section| }.first`, but RuboCop only suppresses
+///    the direct-RHS case. Fix: only apply that compatibility path when the
+///    block is exactly one expression layer deep inside the assignment RHS.
 ///
 /// ## Migration to VariableForce
 ///
@@ -1286,6 +1316,9 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 .rev()
                 .filter(|e| e.is_body)
             {
+                if !is_innermost && !entry.single_stmt {
+                    break;
+                }
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
@@ -1298,11 +1331,6 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
                 is_innermost = false;
-                // Stop propagating at multi-statement boundaries — the block
-                // no longer "represents" the branch at the next level.
-                if !entry.single_stmt {
-                    break;
-                }
             }
         }
 
@@ -1368,6 +1396,9 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 .rev()
                 .filter(|e| e.is_body)
             {
+                if !is_innermost && !entry.single_stmt {
+                    break;
+                }
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
@@ -1375,9 +1406,6 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
                 });
                 is_innermost = false;
-                if !entry.single_stmt {
-                    break;
-                }
             }
         }
 

@@ -601,3 +601,81 @@ if defined?(Net::HTTP)
     end
   end
 end
+
+# FN fix: nested else branch retains outer local from enclosing else scope
+# (corpus: cenit-io/cenit parser.rb:396)
+def do_parse_json(json_schema, data_type, options)
+  if json_schema["type"] == "complex"
+    skip
+  else
+    property_schema = nil
+    if (properties = json_schema["properties"])
+      if properties.size == 1
+        property_schema = data_type.merge_schema(properties.values.first)
+      else
+        properties.each do |property_name, property_schema|
+                                           ^^^^^^^^^^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `property_schema`.
+          next if options[:ignore].include?(property_name.to_sym)
+          property_schema = data_type.merge_schema(property_schema)
+        end
+      end
+    end
+  end
+end
+
+# FN fix: reassignment RHS block param still shadows previously-declared local
+# (corpus: dbrady/ssh-config config_file.rb:139)
+def unalias!(*args)
+  if args.size >= 2
+    name = args.shift
+    section = @sections_by_name[name]
+  else
+    section = @sections.select { |section| section.has_alias?(args[0]) }.first
+                                  ^^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `section`.
+  end
+  section
+end
+
+# FN fix: proc param in branch-local hash value shadows earlier branch local
+# (corpus: ruby/tk fontchooser.rb:167)
+def set_for(target)
+  if target.kind_of?(TkFont)
+    configs = {
+      font: target.actual_hash
+    }
+  elsif target.kind_of?(Hash)
+    fnt = target[:font] rescue ""
+    fnt = fnt.actual_hash if fnt.kind_of?(TkFont)
+    configs = {
+      font: fnt,
+      command: proc { |fnt, *args|
+                       ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `fnt`.
+        target[:font] = TkFont.actual_hash(fnt)
+      }
+    }
+  else
+    configs = {}
+  end
+  configs
+end
+
+# FN fix: loop counter remains visible after while before nested each block
+# (corpus: ruby/typeprof box.rb:663)
+def pass_arguments(a_args, opt_positionals, rest_positionals)
+  start_rest = 0
+  end_rest = a_args.positionals.size
+  i = 0
+  while i < opt_positionals.size && start_rest < end_rest
+    i += 1
+    start_rest += 1
+  end
+
+  if start_rest < end_rest
+    if rest_positionals
+      (start_rest..end_rest - 1).each do |i|
+                                          ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `i`.
+        use(i)
+      end
+    end
+  end
+end
