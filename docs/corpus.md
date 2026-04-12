@@ -102,7 +102,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 | Repo | Issue | Files Dropped | Error |
 |------|-------|--------------|-------|
-| jruby__jruby__0303464 | crashed_rubocop | all |  |
+| jruby__jruby__0303464 | crashed_rubocop | all | `An error occurred while Layout/EndAlignment cop was inspecting /home/runner/work/nitrocop/nitrocop/repos/jruby__jruby__0303464/spec/ruby/language/method_spec.rb:1216:13.` |
 
 ## Diverging Cops
 
@@ -6546,7 +6546,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 | Repo | Status | Error |
 |------|--------|-------|
-| jruby__jruby__0303464 | crashed_rubocop |  |
+| jruby__jruby__0303464 | crashed_rubocop | `An error occurred while Layout/EndAlignment cop was inspecting /home/runner/work/nitrocop/nitrocop/repos/jruby__jruby__0303464/spec/ruby/language/method_spec.rb:1216:13.` |
 
 </details>
 
