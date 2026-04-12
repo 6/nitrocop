@@ -73,3 +73,15 @@ def foo
     ^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.all` on line 58.
     .map { |e| e.name }
 end
+
+# Block pass is not a real block for continuation alignment
+foo.bar
+     .select(&:baz)
+     ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.bar` on line 64.
+     .collect(&:id)
+     ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.collect` with `.bar` on line 64.
+
+# Value side of []= is not "parenthesized args" for this cop
+headers['Cookie'] = final_cookies_hash
+  .map { |k, v| "#{k}=#{v}" }
+  ^^^^ Layout/MultilineMethodCallIndentation: Align `.map` with `final_cookies_hash` on line 69.

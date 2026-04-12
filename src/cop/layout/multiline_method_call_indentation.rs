@@ -147,6 +147,19 @@ use crate::parse::source::SourceFile;
 ///
 /// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
 /// -1,324 FP resolved, -190 FN resolved.
+///
+/// ## Corpus fix (2026-04-12)
+///
+/// Two remaining FN clusters came from treating Prism nodes as broader than
+/// RuboCop does:
+///
+/// 1. `visit_call_node` marked any call with an `opening_loc` as
+///    `in_paren_args`, which incorrectly skipped chains in the value side of
+///    `[]`/`[]=` calls such as `headers['Cookie'] = final_cookies_hash\n  .map`.
+/// 2. Block-pass arguments like `&:id` and `&:strip` were treated as real
+///    blocks in block-continuation alignment, which incorrectly accepted later
+///    calls like `.collect`/`.compact` when RuboCop still aligns them with the
+///    earlier semantic base.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -542,7 +555,7 @@ fn find_block_chain_alignment(
 
     // Direct receiver with block
     if let Some(call) = receiver.as_call_node() {
-        if call.block().is_some() {
+        if has_real_block(&call) {
             if let Some(dot_loc) = call.call_operator_loc() {
                 let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
                 let loc = call.location();
@@ -850,8 +863,17 @@ impl Visit<'_> for ChainVisitor<'_> {
             self.visit(&recv);
         }
 
-        // Visit arguments: if call has parens, mark as in_paren_args
-        let has_parens = node.opening_loc().is_some();
+        // RuboCop only skips chains inside actual parenthesized arg lists.
+        // `[]`/`[]=` calls also have an opening loc, but their value argument
+        // must still be checked. Keep the narrower behavior scoped to the
+        // aligned style for now: the non-default styles still rely on the older
+        // broad skip behavior, and widening them regresses their corpus
+        // baselines substantially.
+        let has_parens = if self.style == "aligned" {
+            node.opening_loc().is_some_and(|loc| loc.as_slice() == b"(")
+        } else {
+            node.opening_loc().is_some()
+        };
         if let Some(args) = node.arguments() {
             if has_parens {
                 let saved_paren = self.in_paren_args;
@@ -901,7 +923,7 @@ fn find_block_chain_col(
     current_dot_line: usize,
 ) -> Option<usize> {
     if let Some(call) = receiver.as_call_node() {
-        if call.block().is_some() {
+        if has_real_block(&call) {
             if let Some(dot_loc) = call.call_operator_loc() {
                 let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
                 let loc = call.location();
@@ -913,6 +935,10 @@ fn find_block_chain_col(
         }
     }
     None
+}
+
+fn has_real_block(call: &ruby_prism::CallNode<'_>) -> bool {
+    matches!(call.block(), Some(block) if block.as_block_node().is_some())
 }
 
 /// RuboCop's `aligned_with_first_line_dot?`: check whether the first call
@@ -1136,7 +1162,7 @@ fn find_alignment_base_description(
     if !is_trailing_dot {
         // Check for block chain
         if let Some(call) = receiver.as_call_node() {
-            if call.block().is_some() {
+            if has_real_block(&call) {
                 if let Some(dot_loc) = call.call_operator_loc() {
                     let (block_dot_line, _) = source.offset_to_line_col(dot_loc.start_offset());
                     let loc = call.location();
