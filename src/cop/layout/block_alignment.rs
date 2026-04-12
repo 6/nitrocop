@@ -546,6 +546,7 @@ fn line_indent(bytes: &[u8], offset: usize) -> usize {
 ///     .reduce([[], []]) do ...
 ///     end
 /// where `end` should align with `packages_lines` on the preceding assignment line.
+#[cfg(test)]
 fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
     let mut line_start = call_start_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -622,6 +623,7 @@ fn find_assignment_lhs_col(bytes: &[u8], call_start_offset: usize) -> Option<usi
 /// variable, matching RuboCop's behavior of aligning with the assignment target.
 /// Logical assignments like `||=`/`&&=` are intentionally excluded.
 /// Returns the column of the first character of the call expression.
+#[cfg(test)]
 fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
     // Find start of current line
     let mut line_start = do_offset;
@@ -708,6 +710,7 @@ fn find_call_expression_col(bytes: &[u8], do_offset: usize) -> usize {
 /// through the LHS identifier to find the assignment target.
 /// Returns the new position (start of LHS), or `pos` unchanged if no
 /// assignment is found.
+#[cfg(test)]
 fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usize {
     // Skip whitespace before the call expression
     let mut p = pos;
@@ -836,6 +839,7 @@ fn skip_assignment_backward(bytes: &[u8], line_start: usize, pos: usize) -> usiz
 ///         ^
 /// When RuboCop's ancestor walk stops at `splat`, the closing `}` must align with
 /// the `*`, not with the call receiver.
+#[cfg(test)]
 fn find_same_line_splat_col(bytes: &[u8], call_start_offset: usize) -> Option<usize> {
     let mut line_start = call_start_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -852,6 +856,7 @@ fn find_same_line_splat_col(bytes: &[u8], call_start_offset: usize) -> Option<us
 /// When the block sits on the RHS of an assignment, accept the inner call start
 /// as an alternate target only for the cases where RuboCop's ancestor walk stops
 /// before reaching the assignment node.
+#[cfg(test)]
 fn accept_intermediate_call_start(bytes: &[u8], closer_offset: usize, closer_len: usize) -> bool {
     let after = closer_offset + closer_len;
     if after >= bytes.len() {
@@ -905,6 +910,7 @@ fn accept_intermediate_call_start(bytes: &[u8], closer_offset: usize, closer_len
     false
 }
 
+#[cfg(test)]
 fn keyword_at(bytes: &[u8], pos: usize, keyword: &[u8]) -> bool {
     let Some(rest) = bytes.get(pos..) else {
         return false;
@@ -920,6 +926,7 @@ fn keyword_at(bytes: &[u8], pos: usize, keyword: &[u8]) -> bool {
     before_ok && after_ok
 }
 
+#[cfg(test)]
 fn chained_call_opens_block(bytes: &[u8], mut pos: usize) -> bool {
     while pos < bytes.len() && bytes[pos] != b'\n' {
         if bytes[pos] == b'{' {
@@ -942,6 +949,7 @@ fn chained_call_opens_block(bytes: &[u8], mut pos: usize) -> bool {
 ///   lists << tag.ul(:class => "foo") do
 ///
 /// Returns the column of the first non-whitespace token of the LHS expression.
+#[cfg(test)]
 fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usize> {
     let mut line_start = opener_offset;
     while line_start > 0 && bytes[line_start - 1] != b'\n' {
@@ -1136,6 +1144,7 @@ fn find_same_line_operator_lhs(bytes: &[u8], opener_offset: usize) -> Option<usi
     None
 }
 
+#[cfg(test)]
 fn starts_with_line_leading_closer(bytes: &[u8], start: usize, end: usize) -> bool {
     if start >= end {
         return false;
