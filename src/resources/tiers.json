@@ -543,6 +543,7 @@
     "Rails/NotNullColumn": "stable",
     "Rails/OrderArguments": "stable",
     "Rails/OrderById": "stable",
+    "Rails/Output": "stable",
     "Rails/OutputSafety": "stable",
     "Rails/Pick": "stable",
     "Rails/Pluck": "stable",

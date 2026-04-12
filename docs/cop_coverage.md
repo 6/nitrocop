@@ -100,9 +100,9 @@
 | 86 | Style/RedundantSelf | 78,224 | 2015 | — | High |
 | 87 | Style/NumericLiterals | 87,322 | 1965 | — | High |
 | 88 | Naming/MethodParameterName | 45,644 | 1931 | — | High |
-| 89 | Rails/Output | 31,466 | 1909 | — | High |
-| 90 | RSpec/ContextWording | 106,534 | 1908 | — | High |
-| 91 | Layout/ArgumentAlignment | 97,962 | 1907 | — | High |
+| 89 | RSpec/ContextWording | 106,534 | 1908 | — | High |
+| 90 | Layout/ArgumentAlignment | 97,962 | 1907 | — | High |
+| 91 | Rails/Output | 29,696 | 1906 | — | High |
 | 92 | Rails/RakeEnvironment | 7,188 | 1905 | — | High |
 | 93 | Naming/PredicateMethod | 13,636 | 1877 | — | High |
 | 94 | Style/RedundantPercentQ | 15,192 | 1871 | — | High |
@@ -160,7 +160,7 @@
 | 146 | RSpec/HookArgument | 21,766 | 1340 | — | High |
 | 147 | Style/TrailingCommaInArrayLiteral | 35,147 | 1335 | — | High |
 | 148 | Performance/StringInclude | 7,250 | 1334 | — | High |
-| 149 | Rake/Desc | 3,963 | 1329 | — | High |
+| 149 | Rake/Desc | 3,892 | 1328 | — | High |
 | 150 | Rails/SchemaComment | 55,812 | 1312 | — | High |
 | 151 | Rails/NegateInclude | 5,821 | 1280 | — | High |
 | 152 | Lint/MissingSuper | 14,007 | 1274 | — | High |
@@ -461,9 +461,9 @@
 | 447 | Style/MinMaxComparison | 578 | 265 | — | Medium |
 | 448 | Rails/OrderById | 2,607 | 263 | — | Medium |
 | 449 | RSpec/LetSetup | 10,666 | 260 | — | Medium |
-| 450 | Rake/MethodDefinitionInTask | 1,549 | 259 | — | Medium |
-| 451 | Layout/DefEndAlignment | 664 | 259 | — | Medium |
-| 452 | Style/EnvHome | 670 | 258 | — | Medium |
+| 450 | Layout/DefEndAlignment | 664 | 259 | — | Medium |
+| 451 | Style/EnvHome | 670 | 258 | — | Medium |
+| 452 | Rake/MethodDefinitionInTask | 1,538 | 257 | — | Medium |
 | 453 | RSpec/LetBeforeExamples | 2,279 | 256 | — | Medium |
 | 454 | Rails/SquishedSQLHeredocs | 5,903 | 254 | — | Medium |
 | 455 | Lint/Syntax | 6,627 | 252 | — | Medium |
@@ -511,7 +511,7 @@
 | 497 | Layout/EmptyComment | 6,695 | 204 | — | Medium |
 | 498 | Style/HashExcept | 381 | 204 | — | Medium |
 | 499 | RSpec/IdenticalEqualityAssertion | 623 | 201 | — | Medium |
-| 500 | Rake/DuplicateTask | 289 | 201 | — | Medium |
+| 500 | Rake/DuplicateTask | 281 | 199 | — | Medium |
 | 501 | Rails/IndexBy | 581 | 198 | — | Medium |
 | 502 | Style/SafeNavigationChainLength | 1,000 | 197 | — | Medium |
 | 503 | Performance/UnfreezeString | 689 | 196 | — | Medium |
@@ -729,9 +729,9 @@
 | 715 | Style/RedundantRegexpConstructor | 475 | 45 | — | Low |
 | 716 | Lint/RedundantCopEnableDirective | 118 | 44 | — | Low |
 | 717 | Lint/UselessDefaultValueArgument | 112 | 44 | — | Low |
-| 718 | Rake/ClassDefinitionInTask | 87 | 44 | — | Low |
-| 719 | Lint/DuplicateCaseCondition | 59 | 44 | — | Low |
-| 720 | Style/CombinableDefined | 121 | 43 | — | Low |
+| 718 | Lint/DuplicateCaseCondition | 59 | 44 | — | Low |
+| 719 | Style/CombinableDefined | 121 | 43 | — | Low |
+| 720 | Rake/ClassDefinitionInTask | 81 | 42 | — | Low |
 | 721 | Style/NumberedParameters | 499 | 41 | — | Low |
 | 722 | RSpec/ContainExactly | 318 | 41 | — | Low |
 | 723 | FactoryBot/RedundantFactoryOption | 179 | 40 | — | Low |
