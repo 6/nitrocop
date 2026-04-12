@@ -211,6 +211,14 @@ impl CopConfig {
             .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)))
     }
 
+    /// Get the actual `railties` gem version from the project's Gemfile.lock.
+    /// Returns `None` if `railties` was not found in the lockfile.
+    pub fn railties_version(&self) -> Option<f64> {
+        self.options
+            .get("__RailtiesVersion")
+            .and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|u| u as f64)))
+    }
+
     /// Whether `railties` was found in the project's Gemfile.lock.
     /// Mirrors RuboCop 1.84+'s `requires_gem 'railties'` API.
     fn railties_in_lockfile(&self) -> bool {

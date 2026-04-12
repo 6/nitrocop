@@ -5,7 +5,7 @@ use crate::parse::codemap::CodeMap;
 use crate::parse::source::SourceFile;
 use ruby_prism::Visit;
 
-/// Mirrors RuboCop's first positional data-argument check for Rails HTTP helpers.
+/// Mirrors RuboCop's positional data-argument check for Rails HTTP helpers.
 ///
 /// Prism splits old request data across `HashNode`, `KeywordHashNode`,
 /// `ForwardingArgumentsNode`, and kw-splat shapes. RuboCop also flags plain
@@ -14,9 +14,12 @@ use ruby_prism::Visit;
 /// special keyword args like `params:` / `headers:`, kw-splats, and forwarded
 /// args / kwargs.
 ///
-/// RuboCop only uses `minimum_target_rails_version 5.0` here; it does not gate
-/// the cop behind `requires_gem 'railties'`. So `TargetRailsVersion` alone must
-/// enable the cop, even when no lockfile metadata is present.
+/// FP=8342 came from corpus baseline runs forcing `TargetRailsVersion: 7.0`
+/// even on legacy Rails 3.x/4.x repos. RuboCop still suppresses this cop there
+/// because the actual `railties` lockfile version is below 5.0, while nitrocop
+/// only looked at the injected target version. The fix keeps the existing
+/// target-version gate but also skips when the real lockfile `railties` version
+/// is known and below 5.0.
 pub struct HttpPositionalArguments;
 
 const HTTP_METHODS: &[&[u8]] = &[b"get", b"post", b"put", b"patch", b"delete", b"head"];
@@ -116,10 +119,13 @@ impl Cop for HttpPositionalArguments {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        // minimum_target_rails_version 5.0
-        // This cop does NOT use `requires_gem 'railties'`, so do not require
-        // `__RailtiesInLockfile` here.
         if !config.target_rails_version().is_some_and(|v| v >= 5.0) {
+            return;
+        }
+        // Corpus baseline config forces TargetRailsVersion: 7.0 globally, but
+        // RuboCop still disables this cop for repos whose actual lockfile
+        // `railties` version is below 5.0.
+        if config.railties_version().is_some_and(|v| v < 5.0) {
             return;
         }
 
@@ -267,6 +273,10 @@ mod tests {
             "__RailtiesInLockfile".to_string(),
             serde_yml::Value::Bool(true),
         );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(version)),
+        );
         CopConfig {
             options,
             ..CopConfig::default()
@@ -364,6 +374,37 @@ mod tests {
             diagnostics.len(),
             1,
             "Should fire with TargetRailsVersion even without railties in lockfile"
+        );
+    }
+
+    #[test]
+    fn skipped_when_actual_railties_version_is_below_minimum() {
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(4.2)),
+        );
+        let config = CopConfig {
+            options,
+            ..CopConfig::default()
+        };
+        let diagnostics = crate::testutil::run_cop_full_internal(
+            &HttpPositionalArguments,
+            b"get \"show\", id: \"1\"\n",
+            config,
+            "spec/some_spec.rb",
+        );
+        assert!(
+            diagnostics.is_empty(),
+            "Should not fire when the actual railties version is below 5.0"
         );
     }
 }
