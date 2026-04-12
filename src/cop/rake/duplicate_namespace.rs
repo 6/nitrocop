@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use ruby_prism::Visit;
 
+use crate::cop::rake::RAKE_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -12,15 +13,12 @@ use crate::parse::source::SourceFile;
 /// in definition order. This is usually unintentional and confusing.
 ///
 /// RuboCop's `OnNamespace` fires on any `namespace` send, not just calls with
-/// `do/end` blocks. That matters in two corpus-backed cases:
-/// - `namespace :install, &builder.construct(:install)` is a `BlockArgumentNode`
-///   in Prism, not a real block wrapper, so RuboCop treats it like a blockless
-///   namespace and keys it from ancestor namespaces only.
-/// - rubocop-rake's default Include is `Rakefile`, not `**/Rakefile`, so this
-///   cop must ignore nested `subdir/Rakefile` paths unless the repo config opts in.
+/// `do/end` blocks. In Prism, `namespace :install, &builder.construct(:install)`
+/// exposes a `BlockArgumentNode` rather than a real `BlockNode`, so we have to
+/// treat it like a blockless namespace and key it from ancestor namespaces
+/// only — otherwise the two sibling `&builder.construct(:install)` calls get
+/// different keys and the duplicate goes unreported.
 pub struct DuplicateNamespace;
-
-const DUPLICATE_NAMESPACE_DEFAULT_INCLUDE: &[&str] = &["Rakefile", "**/*.rake"];
 
 impl Cop for DuplicateNamespace {
     fn name(&self) -> &'static str {
@@ -32,7 +30,7 @@ impl Cop for DuplicateNamespace {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        DUPLICATE_NAMESPACE_DEFAULT_INCLUDE
+        RAKE_DEFAULT_INCLUDE
     }
 
     fn check_source(
