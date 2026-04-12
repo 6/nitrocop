@@ -239,6 +239,11 @@ use crate::parse::source::SourceFile;
 ///   now matches that by excluding safe-navigation callers from the
 ///   single-line-block precedence collector, so patterns like
 ///   `registry\n  .find { ... }\n  &.command_class` are correctly reported.
+/// - **Phase 2 enclosing-expression guard**: the text fallback now skips
+///   backslash groups that are already covered by a larger multiline AST call
+///   chain, or by a class-header inheritance span like `class Foo < \ Bar`.
+///   RuboCop judges those larger expressions as a whole, so nitrocop must not
+///   emit extra inner reports for long operator chains or superclass headers.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -319,8 +324,13 @@ impl Cop for RedundantLineBreak {
         };
         visitor.visit(&parse_result.node());
 
-        let reported_starts = visitor.reported_starts;
-        diagnostics.extend(visitor.ast_diagnostics);
+        let RedundantLineBreakVisitor {
+            reported_starts,
+            ast_diagnostics,
+            checked_chain_ranges,
+            ..
+        } = visitor;
+        diagnostics.extend(ast_diagnostics);
 
         // Phase 2: Backslash continuation detection (existing text-based approach)
         check_backslash_continuations(
@@ -333,6 +343,7 @@ impl Cop for RedundantLineBreak {
             &reported_starts,
             &unsafe_ranges,
             &group_blocking_ranges,
+            &checked_chain_ranges,
             &block_ranges,
             &comment_lines,
         );
@@ -354,8 +365,8 @@ impl Cop for RedundantLineBreak {
 struct UnsafeRangeCollector {
     /// (start_offset, end_offset) of nodes that make their parent unsafe to merge.
     ranges: Vec<(usize, usize)>,
-    /// Unsafe expression ranges that should also suppress nested Phase 2
-    /// backslash groups when they strictly contain the group.
+    /// Expression ranges that should also suppress Phase 2 backslash groups
+    /// when they cover the whole group.
     group_blocking_ranges: Vec<(usize, usize)>,
 }
 
@@ -410,6 +421,16 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         // Must recurse: inner assignments need to see unsafe ranges from
         // strings, ifs, etc. nested inside this def body.
         ruby_prism::visit_def_node(self, node);
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        if let Some(superclass) = node.superclass() {
+            let loc = node.location();
+            let super_loc = superclass.location();
+            self.group_blocking_ranges
+                .push((loc.start_offset(), super_loc.end_offset()));
+        }
+        ruby_prism::visit_class_node(self, node);
     }
 
     fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
@@ -1323,7 +1344,8 @@ fn check_backslash_continuations(
     diagnostics: &mut Vec<Diagnostic>,
     already_reported: &HashSet<usize>,
     unsafe_ranges: &[(usize, usize)],
-    _group_blocking_ranges: &[(usize, usize)],
+    group_blocking_ranges: &[(usize, usize)],
+    checked_chain_ranges: &[(usize, usize)],
     block_ranges: &[(usize, usize, bool)],
     comment_lines: &HashSet<usize>,
 ) {
@@ -1357,6 +1379,19 @@ fn check_backslash_continuations(
 
         let trimmed_content = trim_leading_whitespace(trimmed);
         if trimmed_content.starts_with(b"#") {
+            i += 1;
+            continue;
+        }
+
+        // RuboCop never reports `class Foo < \` superclass header breaks here.
+        if trimmed_content.starts_with(b"class ") && trimmed_content.contains(&b'<') {
+            i += 1;
+            continue;
+        }
+
+        // A backslash on an already-dotted chain segment (e.g. `.replace(...) \`)
+        // belongs to the larger multiline chain, which RuboCop judges as a whole.
+        if starts_with_method_chain_dot(trimmed_content) {
             i += 1;
             continue;
         }
@@ -1442,6 +1477,29 @@ fn check_backslash_continuations(
             .any(|&(us, _ue)| us >= group_byte_start && us < group_byte_end);
         if has_unsafe {
             i = final_line_idx + 1;
+            continue;
+        }
+
+        // Some constructs should suppress the text fallback even when the
+        // unsafe node starts before the backslash group. Examples:
+        // - `class Foo < \` newline `Bar`
+        // - backslash groups nested inside a larger multiline `CallNode`
+        //   that the AST phase already judged as a whole.
+        let blocked_by_enclosing_range = group_blocking_ranges
+            .iter()
+            .any(|&(bs, be)| bs <= group_byte_start && be >= group_byte_end);
+        if blocked_by_enclosing_range {
+            i = expression_end_idx + 1;
+            continue;
+        }
+
+        let covered_by_checked_chain = checked_chain_ranges.iter().any(|&(cs, ce)| {
+            cs <= group_byte_start
+                && ce >= group_byte_end
+                && (cs < group_byte_start || ce > group_byte_end)
+        });
+        if covered_by_checked_chain {
+            i = expression_end_idx + 1;
             continue;
         }
 

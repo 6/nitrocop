@@ -410,3 +410,43 @@ describe WinRM::PSRP::ReceiveResponseReader do
     )
   end
 end
+
+!current_course_user&.
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  email_unsubscribed
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  .instance_variable_get(:@patch_only_once)
+
+o.col_type.nil? \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  foo
+
+warn 'Please use one of the standard log levels: ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'debug, info, warn, or error'
+
+Message.new(
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  runspace_pool_id,
+  Message::MESSAGE_TYPES[:session_capability],
+  render('session_capability')
+)
+
+allow(transport).to receive(:send_request).and_return(
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  REXML::Document.new(test_data_xml_template.result(binding))
+)
+
+render :partial => "commentbox", :layout => false,
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  :content_type => "text/html", :locals => { :comment => comment }
+
+1 \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  + 2
