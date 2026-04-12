@@ -998,20 +998,46 @@ pub fn load_config(
             let Some(config_dir) = start_dir else {
                 return Ok(ResolvedConfig::empty());
             };
-            let base_dir = config_dir
-                .canonicalize()
-                .unwrap_or_else(|_| config_dir.clone());
+            // With no config file, RuboCop still resolves path parameters from
+            // the current working directory. This matters for explicit file
+            // paths in subdirectories: lockfile-derived project metadata (for
+            // example TargetRailsVersion from Gemfile.lock) must come from the
+            // repo root CWD, not the file's own parent directory.
+            let base_dir = std::env::current_dir().unwrap_or_else(|_| config_dir.clone());
             // Even without a config file, apply RuboCop's default AllCops.Exclude
             // patterns (vendor/**/* etc.). RuboCop always loads config/default.yml
             // which includes these excludes, regardless of whether a project has
             // .rubocop.yml. Without this, repos without config files get zero file
             // exclusion, causing false positives on vendored code.
             let defaults = fallback_default_excludes();
+            let mut railties_in_lockfile = false;
+            let mut target_rails_version = None;
+            let mut rack_version = None;
+            for lock_name in &["Gemfile.lock", "gems.locked"] {
+                let lock_path = base_dir.join(lock_name);
+                if let Ok(content) = std::fs::read_to_string(&lock_path) {
+                    if target_rails_version.is_none() {
+                        if let Some(ver) = parse_gem_version_from_lockfile(&content, "railties") {
+                            railties_in_lockfile = true;
+                            target_rails_version = Some(ver);
+                        }
+                    }
+                    if rack_version.is_none() {
+                        rack_version = parse_gem_version_from_lockfile(&content, "rack");
+                    }
+                    if target_rails_version.is_some() && rack_version.is_some() {
+                        break;
+                    }
+                }
+            }
             return Ok(ResolvedConfig {
                 config_dir: Some(config_dir.clone()),
                 dir_overrides: load_dir_overrides(&config_dir),
                 base_dir: Some(base_dir),
                 global_excludes: defaults.global_excludes,
+                target_rails_version,
+                railties_in_lockfile,
+                rack_version,
                 ..ResolvedConfig::empty()
             });
         }
@@ -4267,6 +4293,31 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn no_config_explicit_file_uses_cwd_for_lockfile_resolution() {
+        let repo = std::env::temp_dir().join("nitrocop_test_no_config_explicit_file");
+        let nested = repo.join("test").join("functional").join("cms");
+        let file = nested.join("content_controller_test.rb");
+        let old_cwd = std::env::current_dir().unwrap();
+        let _ = fs::remove_dir_all(&repo);
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            repo.join("Gemfile.lock"),
+            "GEM\n  specs:\n    railties (3.2.22.5)\n",
+        )
+        .unwrap();
+        fs::write(&file, "get :show, :path => 'about'\n").unwrap();
+
+        std::env::set_current_dir(&repo).unwrap();
+        let config = load_config(None, Some(&file), None).unwrap();
+        std::env::set_current_dir(old_cwd).unwrap();
+
+        assert_eq!(config.base_dir(), Some(repo.as_path()));
+        assert_eq!(config.target_rails_version, Some(3.2));
+
+        fs::remove_dir_all(&repo).ok();
+    }
+
     // ---- EnabledState / Pending / NewCops tests ----
 
     #[test]
@@ -4580,6 +4631,17 @@ mod tests {
         // Core departments still work
         assert!(config.is_cop_enabled("Style/Foo", Path::new("a.rb"), &[], &[]));
         assert!(config.is_cop_enabled("Lint/Foo", Path::new("a.rb"), &[], &[]));
+    }
+
+    #[test]
+    fn register_departments_from_only_enables_requested_plugin_department() {
+        let mut config =
+            load_config(Some(Path::new("/nonexistent/.rubocop.yml")), None, None).unwrap();
+        assert!(!config.is_cop_enabled("Rails/Output", Path::new("a.rb"), &[], &[]));
+
+        config.register_departments_from_only(&["Rails/Output".to_string()]);
+
+        assert!(config.is_cop_enabled("Rails/Output", Path::new("a.rb"), &[], &[]));
     }
 
     #[test]

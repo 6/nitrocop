@@ -126,6 +126,32 @@ pub struct LintResult {
     pub skip_summary: SkipSummary,
 }
 
+fn build_cop_filters_for_args(
+    config: &ResolvedConfig,
+    registry: &CopRegistry,
+    tier_map: &TierMap,
+    args: &Args,
+) -> CopFilterSet {
+    let mut cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
+
+    // External configs still need cop Include patterns resolved relative to the
+    // scanned repo root, not only the config directory or process CWD.
+    if let Some(target) = args.paths.first() {
+        if target.is_dir() {
+            let abs = if target.is_absolute() {
+                target.clone()
+            } else {
+                std::env::current_dir()
+                    .map(|cwd| cwd.join(target))
+                    .unwrap_or_else(|_| target.clone())
+            };
+            cop_filters.set_scan_root(abs);
+        }
+    }
+
+    cop_filters
+}
+
 /// Lint a single SourceFile (already loaded into memory). Used for --stdin mode.
 pub fn lint_source(
     source: &SourceFile,
@@ -135,7 +161,7 @@ pub fn lint_source(
     tier_map: &TierMap,
     allowlist: &crate::cop::autocorrect_allowlist::AutocorrectAllowlist,
 ) -> LintResult {
-    let cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
+    let cop_filters = build_cop_filters_for_args(config, registry, tier_map, args);
     let base_configs = config.precompute_cop_configs(registry);
     let has_dir_overrides = config.has_dir_overrides();
     let (diagnostics, _corrected_bytes, corrected_count) = lint_source_inner(
@@ -176,7 +202,7 @@ pub fn run_linter(
     crate::schema::init(config.config_dir());
 
     // Build cop filters once before the parallel loop
-    let cop_filters = config.build_cop_filters(registry, tier_map, args.preview);
+    let cop_filters = build_cop_filters_for_args(config, registry, tier_map, args);
     // Pre-compute base cop configs once (avoids HashMap clone per cop per file)
     let base_configs = config.precompute_cop_configs(registry);
     let has_dir_overrides = config.has_dir_overrides();
@@ -843,7 +869,7 @@ fn emit_syntax_diagnostics(
     };
     let owned_filters;
     let active_filters = if let Some(ref file_config) = effective_config {
-        owned_filters = file_config.build_cop_filters(registry, tier_map, args.preview);
+        owned_filters = build_cop_filters_for_args(file_config, registry, tier_map, args);
         &owned_filters
     } else {
         cop_filters
@@ -932,7 +958,7 @@ pub(crate) fn emit_invalid_utf8_diagnostic(
     };
     let owned_filters;
     let active_filters = if let Some(ref file_config) = effective_config {
-        owned_filters = file_config.build_cop_filters(registry, tier_map, args.preview);
+        owned_filters = build_cop_filters_for_args(file_config, registry, tier_map, args);
         &owned_filters
     } else {
         cop_filters
@@ -1041,7 +1067,7 @@ fn lint_source_once(
     let owned_filters;
     let owned_base_configs;
     let (active_filters, active_base_configs) = if let Some(ref file_config) = effective_config {
-        owned_filters = file_config.build_cop_filters(registry, tier_map, args.preview);
+        owned_filters = build_cop_filters_for_args(file_config, registry, tier_map, args);
         owned_base_configs = file_config.precompute_cop_configs(registry);
         (&owned_filters, owned_base_configs.as_slice())
     } else {
@@ -1302,7 +1328,49 @@ fn lint_source_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
+
+    fn args_for_paths(paths: Vec<PathBuf>, only: Vec<String>) -> Args {
+        Args {
+            paths,
+            config: None,
+            format: "json".to_string(),
+            only,
+            except: vec![],
+            no_color: false,
+            debug: false,
+            rubocop_only: false,
+            list_cops: false,
+            list_autocorrectable_cops: false,
+            migrate: false,
+            doctor: false,
+            rules: false,
+            tier: None,
+            stdin: None,
+            init: false,
+            no_cache: true,
+            cache: "true".to_string(),
+            cache_clear: false,
+            fail_level: "convention".to_string(),
+            fail_fast: false,
+            force_exclusion: false,
+            list_target_files: false,
+            display_cop_names: false,
+            parallel: false,
+            require_libs: vec![],
+            ignore_disable_comments: false,
+            force_default_config: false,
+            autocorrect: false,
+            autocorrect_all: false,
+            preview: false,
+            quiet_skips: false,
+            strict: None,
+            verify: false,
+            rubocop_cmd: "bundle exec rubocop".to_string(),
+            corpus_check: None,
+        }
+    }
 
     // --- validate_corrected_bytes ---
 
@@ -1507,5 +1575,54 @@ renamed:
     #[test]
     fn encoding_comment_utf8_still_detected() {
         assert!(has_encoding_magic_comment(b"# encoding: utf-8\nx = 1\n"));
+    }
+
+    #[test]
+    fn run_linter_preserves_scan_root_for_external_config_pattern_cops() {
+        let dir = std::env::temp_dir().join("nitrocop_test_linter_scan_root_external_config");
+        let repo = dir.join("repo");
+        let config_dir = dir.join("config");
+        let test_dir = repo.join("test").join("functional");
+        let file = test_dir.join("widgets_controller_test.rb");
+        let config_path = config_dir.join("baseline.yml");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&test_dir).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(&file, "get :show, :id => 12\n").unwrap();
+        fs::write(
+            &config_path,
+            "AllCops:\n  TargetRailsVersion: 7.0\nRails/HttpPositionalArguments:\n  Enabled: true\n  Include:\n    - 'test/**/*'\n",
+        )
+        .unwrap();
+
+        let config = crate::config::load_config(Some(&config_path), None, None).unwrap();
+        let registry = crate::cop::registry::CopRegistry::default_registry();
+        let tier_map = crate::cop::tiers::TierMap::load();
+        let allowlist = crate::cop::autocorrect_allowlist::AutocorrectAllowlist::load();
+        let args = args_for_paths(
+            vec![repo.clone()],
+            vec!["Rails/HttpPositionalArguments".to_string()],
+        );
+        let discovered = crate::fs::discover_files(std::slice::from_ref(&repo), &config).unwrap();
+
+        let result = run_linter(
+            &discovered,
+            &config,
+            &registry,
+            &args,
+            &tier_map,
+            &allowlist,
+        );
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.cop_name == "Rails/HttpPositionalArguments"),
+            "expected Rails/HttpPositionalArguments offense, got {:?}",
+            result.diagnostics
+        );
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
