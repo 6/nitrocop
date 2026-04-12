@@ -13,14 +13,14 @@ Every offense is compared by file path, line number, and cop name.
 | Repos | 5589 |
 | Repos with 100% match | 3687 |
 | Files inspected | 590,714 |
-| Offenses compared | 28,390,815 |
-| Matches (both agree) | 28,367,781 |
-| FP (nitrocop extra) | 14,822 |
-| FN (nitrocop missing) | 8,212 |
+| Offenses compared | 28,391,738 |
+| Matches (both agree) | 28,368,262 |
+| FP (nitrocop extra) | 13,282 |
+| FN (nitrocop missing) | 10,194 |
 | Registered cops | 915 |
-| Cops with exact match | 856 |
-| Cops with divergence | 31 |
-| Cops with no corpus data | 28 |
+| Cops with exact match | 854 |
+| Cops with divergence | 30 |
+| Cops with no corpus data | 31 |
 | **Match rate (default config)** | **99.91%** |
 | **Match rate (all variants)** | **99.82%** |
 | Repos with errors | 1 |
@@ -44,8 +44,8 @@ Results using each cop's default RuboCop configuration.
 | Performance | 52 | 52 | 0 | 0 | 112,143 | 0 | 0 | 100.0% |
 | RSpec | 113 | 112 | 0 | 1 | 2,908,776 | 0 | 0 | 100.0% |
 | RSpecRails | 8 | 7 | 0 | 1 | 35,273 | 0 | 0 | 100.0% |
-| Rails | 138 | 100 | 17 | 21 | 454,000 | 11,170 | 1,530 | 97.2% |
-| Rake | 5 | 1 | 4 | 0 | 3,512 | 301 | 0 | 92.1% |
+| Rails | 138 | 98 | 16 | 24 | 454,059 | 9,820 | 1,526 | 97.5% |
+| Rake | 5 | 1 | 4 | 0 | 3,934 | 111 | 1,986 | 65.2% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
 | Style | 287 | 282 | 3 | 2 | 14,768,486 | 23 | 142 | 99.9% |
 
@@ -66,8 +66,8 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Performance | 52 | 52 | 0 | 0 | 112,143 | 0 | 0 | 100.0% |
 | RSpec | 113 | 112 | 0 | 1 | 3,993,190 | 0 | 0 | 100.0% |
 | RSpecRails | 8 | 7 | 0 | 1 | 50,807 | 0 | 0 | 100.0% |
-| Rails | 138 | 94 | 23 | 21 | 508,245 | 11,233 | 1,589 | 97.5% |
-| Rake | 5 | 1 | 4 | 0 | 3,512 | 301 | 0 | 92.1% |
+| Rails | 138 | 92 | 22 | 24 | 508,304 | 9,883 | 1,585 | 97.7% |
+| Rake | 5 | 1 | 4 | 0 | 3,934 | 111 | 1,986 | 65.2% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
 | Style | 287 | 278 | 7 | 2 | 24,346,455 | 21,982 | 32,786 | 99.7% |
 
@@ -78,23 +78,23 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Coursemology__coursemology2__70d42e7 | 15 | 14 | 3 | 533 | 1 |
 | noosfero__noosfero__299a0b9 | 15 | 12 | 3 | 646 | 2 |
 | GSA__search-gov__4acf0bf | 14 | 12 | 4 | 275 | 15 |
-| hummingbird-me__kitsu-server__41dd55c | 14 | 12 | 2 | 366 | 2 |
+| forem__forem__72d7c44 | 14 | 10 | 5 | 542 | 10 |
 | sharetribe__sharetribe__c5b7b8f | 14 | 11 | 4 | 344 | 21 |
 | WikiEducationFoundation__WikiEduDashboard__0d6258c | 13 | 11 | 2 | 206 | 2 |
 | antiwork__gumroad__782a69f | 13 | 11 | 5 | 320 | 61 |
 | benwbrum__fromthepage__fe3b4ed | 13 | 11 | 4 | 371 | 18 |
 | department-of-veterans-affairs__vets-api__038d1df | 13 | 13 | 3 | 921 | 9 |
 | discourse__discourse__9c8f125 | 13 | 12 | 4 | 447 | 173 |
-| forem__forem__72d7c44 | 13 | 10 | 4 | 542 | 10 |
 | hitobito__hitobito__195efd2 | 13 | 12 | 3 | 287 | 7 |
+| hummingbird-me__kitsu-server__41dd55c | 13 | 11 | 2 | 366 | 2 |
+| scinote-eln__scinote-web__8435988 | 13 | 12 | 5 | 223 | 20 |
 | akicho8__shogi-extend__3650350 | 12 | 9 | 4 | 119 | 17 |
 | alphagov__whitehall__a640792 | 12 | 8 | 5 | 163 | 83 |
-| autolab__Autolab__674efe9 | 12 | 10 | 3 | 242 | 3 |
 | chengdh__manage-huo-baby__afc35d0 | 12 | 7 | 6 | 1,088 | 17 |
+| demarche-numerique__demarche.numerique.gouv.fr__420d1b2 | 12 | 8 | 6 | 236 | 32 |
 | ekylibre__ekylibre__1d5a3b5 | 12 | 10 | 4 | 760 | 34 |
 | hackclub__hcb__651ab54 | 12 | 9 | 4 | 325 | 5 |
 | otwcode__otwarchive__412f04f | 12 | 10 | 4 | 128 | 12 |
-| riseuplabs__crabgrass-core__6113d78 | 12 | 9 | 5 | 277 | 19 |
 
 ## RuboCop Warnings
 
@@ -106,7 +106,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 ## Diverging Cops
 
-31 cops diverge from RuboCop on the corpus (default config). 856 cops match RuboCop exactly. 28 cops have no corpus data.
+30 cops diverge from RuboCop on the corpus (default config). 854 cops match RuboCop exactly. 31 cops have no corpus data.
  18 additional cops diverge only in non-default style variants.
 
 | Cop | Matches | FP | FN | Match % |
@@ -123,30 +123,29 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Rails/ResponseParsedBody | 2,924 | 544 | 0 | 84.3% |
 | Rails/ReversibleMigrationMethodDefinition | 3,015 | 0 | 31 | 98.9% |
 | Rails/BulkChangeTable | 2,469 | 37 | 0 | 98.5% |
-| Rails/Output | 28,098 | 1,425 | 0 | 95.1% |
+| Rails/Output | 31,466 | 5 | 0 | 99.9% |
 | Lint/RedundantCopDisableDirective | 2,125 | 955 | 191 | 64.9% |
 | Rails/I18nLocaleAssignment | 722 | 62 | 0 | 92.0% |
 | Lint/UselessAssignment | 26,872 | 239 | 374 | 97.7% |
-| Rails/UniqueValidationWithoutIndex | 564 | 46 | 1 | 92.3% |
+| Rails/UniqueValidationWithoutIndex | 0 | 610 | 0 | 0.0% |
 | Layout/RedundantLineBreak | 276,059 | 295 | 250 | 99.8% |
 | Layout/SpaceAroundOperators (default) | 151,351 | 182 | 143 | 99.7% |
 | ↳ Layout/SpaceAroundOperators (space, space) | 33,981 | 146 | 20 | 99.5% |
 | Rails/TimeZoneAssignment | 277 | 0 | 3 | 98.9% |
 | Rails/AddColumnIndex | 201 | 3 | 4 | 96.6% |
-| Rake/DuplicateTask | 122 | 159 | 0 | 43.4% |
+| Rake/DuplicateTask | 289 | 91 | 0 | 76.0% |
 | Style/ConditionalAssignment (default) | 12,977 | 1 | 128 | 99.0% |
 | ↳ Style/ConditionalAssignment (assign_inside_condition) | 24,557 | 13 | 375 | 98.4% |
-| Rake/MethodDefinitionInTask | 1,413 | 120 | 0 | 92.1% |
+| Rake/MethodDefinitionInTask | 1,549 | 13 | 0 | 99.1% |
+| Rails/UnusedIgnoredColumns | 0 | 40 | 0 | 0.0% |
 | Style/RedundantParentheses | 23,590 | 13 | 13 | 99.8% |
 | Rails/MigrationClassName | 11 | 11 | 0 | 50.0% |
 | Lint/ShadowingOuterLocalVariable | 4,315 | 4 | 10 | 99.6% |
-| Rake/ClassDefinitionInTask | 69 | 12 | 0 | 85.1% |
-| Rake/DuplicateNamespace | 20 | 10 | 0 | 66.6% |
+| Rake/DuplicateNamespace | 30 | 7 | 2 | 76.9% |
 | Style/DocumentationMethod | 1,095,463 | 9 | 1 | 99.9% |
 | Rails/Delegate | 21,191 | 1 | 0 | 99.9% |
-| Rails/ActionControllerTestCase | 1,306 | 359 | 0 | 78.4% |
-| Rails/EnumSyntax | 256 | 175 | 3 | 58.9% |
 | Rails/RedundantTravelBack | 62 | 11 | 0 | 84.9% |
+| Rake/Desc | 1,979 | 0 | 1,984 | 49.9% |
 
 **Variant-only divergence** (perfect in default config, diverge in non-default styles):
 
@@ -354,14 +353,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rails/Output</strong> — 28,098 matches, 1,425 FP, 0 FN (95.1%)</summary>
+<summary><strong>Rails/Output</strong> — 31,466 matches, 5 FP, 0 FN (99.9%)</summary>
 
-**Default config** (1,425 FP, 0 FN):
+**Default config** (5 FP, 0 FN):
 
-- FP: `AgileVentures__WebsiteOne__15f7edb: db/migrate/20140716134701_import_getting_started_static_page.rb:8  [Do not write to stdout. Use Rails's logger if you want to log.]`
-- FP: `AgileVentures__WebsiteOne__15f7edb: db/seeds.rb:14  [Do not write to stdout. Use Rails's logger if you want to log.]`
-- FP: `AgileVentures__WebsiteOne__15f7edb: db/seeds.rb:19  [Do not write to stdout. Use Rails's logger if you want to log.]`
-- ... and 97 more FP
+- FP: `liaoziyang__stackneveroverflow__8f4dce2: vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb:268  [Do not write to stdout. Use Rails's logger if you want to log.]`
+- FP: `liaoziyang__stackneveroverflow__8f4dce2: vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb:451  [Do not write to stdout. Use Rails's logger if you want to log.]`
+- FP: `liaoziyang__stackneveroverflow__8f4dce2: vendor/bundle/ruby/2.3.0/gems/rdoc-4.3.0/lib/rdoc/ruby_lex.rb:831  [Do not write to stdout. Use Rails's logger if you want to log.]`
+- ... and 2 more FP
 
 </details>
 
@@ -410,15 +409,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rails/UniqueValidationWithoutIndex</strong> — 564 matches, 46 FP, 1 FN (92.3%)</summary>
+<summary><strong>Rails/UniqueValidationWithoutIndex</strong> — 0 matches, 610 FP, 0 FN (0.0%)</summary>
 
-**Default config** (46 FP, 1 FN):
+**Default config** (610 FP, 0 FN):
 
-- FP: `Coursemology__coursemology2__70d42e7: app/models/course/assessment/question_bundle_question.rb:9  [Uniqueness validation should have a unique index on the database column.]`
-- FP: `Coursemology__coursemology2__70d42e7: app/models/course/scholaistic_assessment.rb:5  [Uniqueness validation should have a unique index on the database column.]`
-- FP: `Gokul595__api_guard__120328a: spec/dummy/app/models/admin.rb:10  [Uniqueness validation should have a unique index on the database column.]`
-- ... and 43 more FP
-- FN: `taskrabbit__rails_engines_example__17b5ee5: apps/account/app/models/account/user.rb:9  [Uniqueness validation should have a unique index on the database column.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/models/gift.rb:11  [Uniqueness validation should have a unique index on the database column.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/models/gift.rb:12  [Uniqueness validation should have a unique index on the database column.]`
+- FP: `24pullrequests__24pullrequests__381028d: app/models/label.rb:5  [Uniqueness validation should have a unique index on the database column.]`
+- ... and 97 more FP
 
 </details>
 
@@ -492,14 +490,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rake/DuplicateTask</strong> — 122 matches, 159 FP, 0 FN (43.4%)</summary>
+<summary><strong>Rake/DuplicateTask</strong> — 289 matches, 91 FP, 0 FN (76.0%)</summary>
 
-**Default config** (159 FP, 0 FN):
+**Default config** (91 FP, 0 FN):
 
-- FP: `AssetSync__asset_sync__aab9010: Rakefile:48  [Task `default` is defined at both /home/runner/work/nitrocop/nitrocop/repos/AssetSync__asset_sync__aab9010/Rakefile (line 44) and /home/runner/work/nitrocop/nitrocop/repos/AssetSync__asset_sync__aab9010/Rakefile (line 48).]`
-- FP: `Betterment__delayed__00d575c: Rakefile:38  [Task `default` is defined at both /home/runner/work/nitrocop/nitrocop/repos/Betterment__delayed__00d575c/Rakefile (line 34) and /home/runner/work/nitrocop/nitrocop/repos/Betterment__delayed__00d575c/Rakefile (line 38).]`
-- FP: `DefactoSoftware__Hours__d695140: Rakefile:22  [Task `spec` is defined at both /home/runner/work/nitrocop/nitrocop/repos/DefactoSoftware__Hours__d695140/Rakefile (line 10) and /home/runner/work/nitrocop/nitrocop/repos/DefactoSoftware__Hours__d695140/Rakefile (line 22).]`
-- ... and 97 more FP
+- FP: `HellRok__Taylor__adb375f: scripts/export/Rakefile:56  [Task `transpile` is defined at both /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 55) and /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 56).]`
+- FP: `HellRok__Taylor__adb375f: scripts/export/Rakefile:61  [Task `build` is defined at both /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 60) and /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 61).]`
+- FP: `HellRok__Taylor__adb375f: scripts/export/Rakefile:62  [Task `build` is defined at both /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 60) and /home/runner/work/nitrocop/nitrocop/repos/HellRok__Taylor__adb375f/scripts/export/Rakefile (line 62).]`
+- ... and 88 more FP
 
 </details>
 
@@ -528,14 +526,26 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rake/MethodDefinitionInTask</strong> — 1,413 matches, 120 FP, 0 FN (92.1%)</summary>
+<summary><strong>Rake/MethodDefinitionInTask</strong> — 1,549 matches, 13 FP, 0 FN (99.1%)</summary>
 
-**Default config** (120 FP, 0 FN):
+**Default config** (13 FP, 0 FN):
 
-- FP: `Azure__azure-storage-ruby__d668658: Rakefile:116  [Do not define a method in rake task, because it will be defined to the top level.]`
-- FP: `Azure__azure-storage-ruby__d668658: Rakefile:138  [Do not define a method in rake task, because it will be defined to the top level.]`
-- FP: `CocoaPods__CocoaPods__458dd19: Rakefile:65  [Do not define a method in rake task, because it will be defined to the top level.]`
-- ... and 97 more FP
+- FP: `X140Yu__debug_cocoapods_plugins_in_vscode__e4cafdb: cocoapods/Rakefile:87  [Do not define a method in rake task, because it will be defined to the top level.]`
+- FP: `deanpcmad__sidekiq-limit_fetch__1dbfd35: demo/Rakefile:66  [Do not define a method in rake task, because it will be defined to the top level.]`
+- FP: `deanpcmad__sidekiq-limit_fetch__1dbfd35: demo/Rakefile:77  [Do not define a method in rake task, because it will be defined to the top level.]`
+- ... and 10 more FP
+
+</details>
+
+<details>
+<summary><strong>Rails/UnusedIgnoredColumns</strong> — 0 matches, 40 FP, 0 FN (0.0%)</summary>
+
+**Default config** (40 FP, 0 FN):
+
+- FP: `alphagov__whitehall__a640792: app/models/edition.rb:2  [Remove `news_article_type_id` from `ignored_columns` because the column does not exist.]`
+- FP: `alphagov__whitehall__a640792: app/models/offsite_link.rb:2  [Remove `parent_id` from `ignored_columns` because the column does not exist.]`
+- FP: `antiwork__gumroad__782a69f: app/models/affiliate.rb:11  [Remove `archived_at` from `ignored_columns` because the column does not exist.]`
+- ... and 37 more FP
 
 </details>
 
@@ -584,26 +594,16 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rake/ClassDefinitionInTask</strong> — 69 matches, 12 FP, 0 FN (85.1%)</summary>
+<summary><strong>Rake/DuplicateNamespace</strong> — 30 matches, 7 FP, 2 FN (76.9%)</summary>
 
-**Default config** (12 FP, 0 FN):
+**Default config** (7 FP, 2 FN):
 
-- FP: `Shopify__measured__bdc3e44: Rakefile:32  [Do not define a class in rake task, because it will be defined to the top level.]`
-- FP: `ankane__groupdate__520f223: Rakefile:44  [Do not define a class in rake task, because it will be defined to the top level.]`
-- FP: `gogotanaka__Rubype__99cdd21: Rakefile:31  [Do not define a class in rake task, because it will be defined to the top level.]`
-- ... and 9 more FP
-
-</details>
-
-<details>
-<summary><strong>Rake/DuplicateNamespace</strong> — 20 matches, 10 FP, 0 FN (66.6%)</summary>
-
-**Default config** (10 FP, 0 FN):
-
-- FP: `Faveod__arel-extensions__b8d316b: Rakefile:29  [Namespace `test` is defined at both /home/runner/work/nitrocop/nitrocop/repos/Faveod__arel-extensions__b8d316b/Rakefile (line 17) and /home/runner/work/nitrocop/nitrocop/repos/Faveod__arel-extensions__b8d316b/Rakefile (line 29).]`
-- FP: `Faveod__arel-extensions__b8d316b: Rakefile:53  [Namespace `test` is defined at both /home/runner/work/nitrocop/nitrocop/repos/Faveod__arel-extensions__b8d316b/Rakefile (line 17) and /home/runner/work/nitrocop/nitrocop/repos/Faveod__arel-extensions__b8d316b/Rakefile (line 53).]`
-- FP: `gonzalo-bulnes__simple_token_authentication__f1cba4e: Rakefile:48  [Namespace `spec` is defined at both /home/runner/work/nitrocop/nitrocop/repos/gonzalo-bulnes__simple_token_authentication__f1cba4e/Rakefile (line 41) and /home/runner/work/nitrocop/nitrocop/repos/gonzalo-bulnes__simple_token_authentication__f1cba4e/Rakefile (line 48).]`
-- ... and 7 more FP
+- FP: `michaelherold__ksuid-ruby__c58690d: activerecord-ksuid/Rakefile:72  [Namespace `spec` is defined at both /home/runner/work/nitrocop/nitrocop/repos/michaelherold__ksuid-ruby__c58690d/activerecord-ksuid/Rakefile (line 55) and /home/runner/work/nitrocop/nitrocop/repos/michaelherold__ksuid-ruby__c58690d/activerecord-ksuid/Rakefile (line 72).]`
+- FP: `rails__rails__d7c8ae6: activerecord/Rakefile:80  [Namespace `test` is defined at both /home/runner/work/nitrocop/nitrocop/repos/rails__rails__d7c8ae6/activerecord/Rakefile (line 36) and /home/runner/work/nitrocop/nitrocop/repos/rails__rails__d7c8ae6/activerecord/Rakefile (line 80).]`
+- FP: `rails__rails__d7c8ae6: activerecord/Rakefile:231  [Namespace `db` is defined at both /home/runner/work/nitrocop/nitrocop/repos/rails__rails__d7c8ae6/activerecord/Rakefile (line 71) and /home/runner/work/nitrocop/nitrocop/repos/rails__rails__d7c8ae6/activerecord/Rakefile (line 231).]`
+- ... and 4 more FP
+- FN: `elcuervo__airplay__468f8cc: Rakefile:76  [Namespace `` is defined at both Rakefile:75 and Rakefile:76.]`
+- FN: `elcuervo__airplay__468f8cc: Rakefile:77  [Namespace `` is defined at both Rakefile:75 and Rakefile:77.]`
 
 </details>
 
@@ -630,33 +630,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rails/ActionControllerTestCase</strong> — 1,306 matches, 359 FP, 0 FN (78.4%)</summary>
-
-**Default config** (359 FP, 0 FN):
-
-- FP: `Apipie__apipie-demo__ed07d23: test/functional/v1/tweets_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
-- FP: `Apipie__apipie-demo__ed07d23: test/functional/v1/users_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
-- FP: `Apipie__apipie-demo__ed07d23: test/functional/v2/tweets_controller_test.rb:4  [Use `ActionDispatch::IntegrationTest` instead of `ActionController::TestCase`.]`
-- ... and 97 more FP
-
-</details>
-
-<details>
-<summary><strong>Rails/EnumSyntax</strong> — 256 matches, 175 FP, 3 FN (58.9%)</summary>
-
-**Default config** (175 FP, 3 FN):
-
-- FP: `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/campaign.rb:21  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
-- FP: `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/campaign.rb:22  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
-- FP: `Ariel-Thomas__adventurers-league-log__9d605f8: app/models/character.rb:31  [Use Rails 7+ enum syntax: `enum :status, { active: 0 }`.]`
-- ... and 97 more FP
-- FN: `sudara__alonetone__ebf728b: app/models/account_request.rb:12  [Enum defined with keyword arguments in `entity_type` enum declaration. Use positional arguments instead.]`
-- FN: `sudara__alonetone__ebf728b: app/models/account_request.rb:22  [Enum defined with keyword arguments in `status` enum declaration. Use positional arguments instead.]`
-- FN: `sudara__alonetone__ebf728b: app/models/playlist.rb:43  [Enum defined with keyword arguments in `cover_quality` enum declaration. Use positional arguments instead.]`
-
-</details>
-
-<details>
 <summary><strong>Rails/RedundantTravelBack</strong> — 62 matches, 11 FP, 0 FN (84.9%)</summary>
 
 **Default config** (11 FP, 0 FN):
@@ -665,6 +638,18 @@ Results combining default config and every non-default `EnforcedStyle` option.
 - FP: `department-of-veterans-affairs__vets-api__038d1df: modules/vaos/spec/services/v2/appointment_service_spec.rb:2551  [Redundant `travel_back` detected. It is automatically called after each test.]`
 - FP: `department-of-veterans-affairs__vets-api__038d1df: modules/vaos/spec/services/vaos/v2/create_eps_draft_appointment_spec.rb:752  [Redundant `travel_back` detected. It is automatically called after each test.]`
 - ... and 8 more FP
+
+</details>
+
+<details>
+<summary><strong>Rake/Desc</strong> — 1,979 matches, 0 FP, 1,984 FN (49.9%)</summary>
+
+**Default config** (0 FP, 1,984 FN):
+
+- FN: `AndyObtiva__glimmer-dsl-swt__449cf07: Rakefile:56  [Describe the task with `desc` method.]`
+- FN: `AndyObtiva__glimmer-dsl-web__fd77e68: Rakefile:41  [Describe the task with `desc` method.]`
+- FN: `AndyObtiva__glimmer__90326e6: Rakefile:52  [Describe the task with `desc` method.]`
+- ... and 97 more FN
 
 </details>
 
@@ -6566,7 +6551,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary>Perfect cops (856 cops with 100% match rate)</summary>
+<summary>Perfect cops (854 cops with 100% match rate)</summary>
 
 | Cop | Matches |
 |-----|--------:|
@@ -6980,7 +6965,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Style/YodaCondition | 1,935 |
 | Rails/RedundantActiveRecordAllMethod | 1,903 |
 | Style/EachWithObject | 1,899 |
-| Rake/Desc | 1,888 |
 | Lint/EmptyClass | 1,884 |
 | RSpec/ExcessiveDocstringSpacing | 1,882 |
 | Style/ClassEqualityComparison | 1,882 |
@@ -7052,7 +7036,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Performance/Casecmp | 1,166 |
 | FactoryBot/FactoryClassName | 1,160 |
 | Metrics/CollectionLiteralLength | 1,160 |
-| Rails/HttpStatusNameConsistency | 1,143 |
 | Rails/StripHeredoc | 1,137 |
 | Style/PercentQLiterals | 1,121 |
 | Style/StringMethods | 1,099 |
@@ -7305,6 +7288,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Rails/FindById | 96 |
 | Style/RedundantEach | 96 |
 | RSpec/SingleArgumentMessageChain | 91 |
+| Rake/ClassDefinitionInTask | 87 |
 | Performance/RedundantStringChars | 87 |
 | Rails/DuplicateScope | 86 |
 | Style/FileEmpty | 84 |
@@ -7347,7 +7331,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Rails/MailerName | 44 |
 | Rails/ArelStar | 42 |
 | Lint/RequireParentheses | 41 |
-| Rails/UnusedIgnoredColumns | 40 |
 | Lint/EmptyEnsure | 38 |
 | Rails/RedundantAllowNil | 36 |
 | Style/TrailingMethodEndStatement | 36 |
