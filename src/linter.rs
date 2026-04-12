@@ -1363,7 +1363,7 @@ mod tests {
             force_default_config: false,
             autocorrect: false,
             autocorrect_all: false,
-            preview: false,
+            preview: true,
             quiet_skips: false,
             strict: None,
             verify: false,
