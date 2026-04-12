@@ -360,6 +360,15 @@ class PrivateModuleFunction
   end
 end
 
+# Bare private still makes a following receiver def non-public for this cop.
+class PrivateSingletonSection
+  private
+
+  def self.discover_extensions
+    42
+  end
+end
+
 # Methods inside private def wrapper body are NOT themselves private
 module Jb
   module CollectionRendererExtension

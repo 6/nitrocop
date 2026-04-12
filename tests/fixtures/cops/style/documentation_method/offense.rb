@@ -1,3 +1,9 @@
+#!/usr/bin/env ruby
+def reload!
+^ Style/DocumentationMethod: Missing method documentation comment.
+  42
+end
+
 def foo
 ^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
   puts 'bar'
@@ -199,6 +205,89 @@ end
 # Comment above belongs to the singleton class, not the inner def
 class << some_obj; def singleton_stolen; end; end
                    ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+
+def json!
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def reload!
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def self.supports_ranges?
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def __id__
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def self.compile(str, options)
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def helper.append_javascript_pack_tag(name, **options)
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def cocoapods_generate_specs_cp_repos_dir
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+class RetroactivePrivateInstanceOnly
+  def self.supports_ranges?
+  ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+    42
+  end
+
+  def supports_ranges?; self.class.supports_ranges?; end
+  private :supports_ranges?
+end
+
+module OpalInterpolation
+  %x{
+    if (typeof Opal.eval === 'undefined') {
+      #{
+        def self.eval(str)
+        ^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+          42
+        end
+      }
+    }
+  }
+
+  %x{
+    (function() {
+      'use strict';
+      #{
+        def __id__
+        ^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+          42
+        end
+      }
+    })()
+  }
+end
+
+class BeginEnsureWrapper
+  # Documented outer method
+  def outer
+    begin
+      # Comment belongs to the begin/ensure wrapper, not the nested def.
+      def helper.append_javascript_pack_tag(name, **options)
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+        42
+      end
+    ensure
+      cleanup
+    end
+  end
+end
+
+module RescueWrappedWithJson
+  # Get parsed JSON from the output, raising an error if parsing fails
+  #
+  #: () -> Hash[Symbol, untyped]
+  def json!
+  ^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+    42
+  end
+rescue
+  []
+end
 
 def json!
 ^ Style/DocumentationMethod: Missing method documentation comment.
