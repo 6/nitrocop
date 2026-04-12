@@ -193,11 +193,14 @@ jobs:
         run: |
           mkdir -p results/nitrocop results/rubocop results/ig-nitrocop results/ig-rubocop results/ig-context rubocop-cache
 
-          # Include-gated cops: Rails cops with non-**/ Include patterns that get
+          # Include-gated cops: cops with non-**/ Include patterns that get
           # zero data in the main comparison because both tools fail to resolve
           # cop-level Include patterns when config is outside repo dir.
+          # Derived from the vendored plugin configs at workflow start so adding
+          # a new plugin or cop picks up the right cops automatically.
           # See docs/investigation-target-dir-relativization.md.
-          IG_COPS="Rails/ActionControllerTestCase,Rails/AddColumnIndex,Rails/BulkChangeTable,Rails/CreateTableWithTimestamps,Rails/DangerousColumnNames,Rails/EnumSyntax,Rails/HttpPositionalArguments,Rails/HttpStatusNameConsistency,Rails/I18nLocaleAssignment,Rails/MigrationClassName,Rails/NotNullColumn,Rails/RedundantTravelBack,Rails/ResponseParsedBody,Rails/ReversibleMigration,Rails/ReversibleMigrationMethodDefinition,Rails/StrongParametersExpect,Rails/ThreeStateBooleanColumn,Rails/TimeZoneAssignment,Rails/UniqueValidationWithoutIndex,Rails/UnusedIgnoredColumns"
+          IG_COPS=$(python3 bench/corpus/compute_ig_cops.py)
+          echo "IG_COPS=$IG_COPS"
 
           while IFS= read -r row; do
             REPO_ID=$(echo "$row" | jq -r '.id')
@@ -605,34 +608,12 @@ jobs:
           IG_NC_DIR="all-results/results/ig-nitrocop"
           IG_RC_DIR="all-results/results/ig-rubocop"
           if [ -d "$IG_NC_DIR" ] && [ -d "$IG_RC_DIR" ]; then
-            # Use a dedicated cop list for the IG diff, restricted to the 20
-            # Include-gated cops. Without this, RuboCop's --only still emits
-            # Lint/Syntax for every parse error (it's a special cop that always
-            # runs), which inflates the IG diff with thousands of phantom FN
-            # unrelated to the 20 cops we're comparing.
+            # Restrict the IG diff to the auto-derived ig cop list. Without this,
+            # RuboCop's --only still emits Lint/Syntax for every parse error
+            # (it's a special cop that always runs), which inflates the IG diff
+            # with thousands of phantom FN unrelated to the cops we're comparing.
             IG_COP_LIST=$(mktemp)
-            cat > "$IG_COP_LIST" << 'IGCOPS'
-          Rails/ActionControllerTestCase
-          Rails/AddColumnIndex
-          Rails/BulkChangeTable
-          Rails/CreateTableWithTimestamps
-          Rails/DangerousColumnNames
-          Rails/EnumSyntax
-          Rails/HttpPositionalArguments
-          Rails/HttpStatusNameConsistency
-          Rails/I18nLocaleAssignment
-          Rails/MigrationClassName
-          Rails/NotNullColumn
-          Rails/RedundantTravelBack
-          Rails/ResponseParsedBody
-          Rails/ReversibleMigration
-          Rails/ReversibleMigrationMethodDefinition
-          Rails/StrongParametersExpect
-          Rails/ThreeStateBooleanColumn
-          Rails/TimeZoneAssignment
-          Rails/UniqueValidationWithoutIndex
-          Rails/UnusedIgnoredColumns
-          IGCOPS
+            python3 bench/corpus/compute_ig_cops.py | tr ',' '\n' > "$IG_COP_LIST"
             IG_CONTEXT_DIR=""
             if [ -d "all-results/results/ig-context" ]; then
               IG_CONTEXT_DIR="--context-dir all-results/results/ig-context"
