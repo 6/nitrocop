@@ -7,7 +7,13 @@ pub mod method_definition_in_task;
 use super::registry::CopRegistry;
 
 /// Default Include patterns for Rake cops.
-pub const RAKE_DEFAULT_INCLUDE: &[&str] = &["**/Rakefile", "**/*.rake"];
+///
+/// Matches rubocop-rake's `config/default.yml` exactly: root-only `Rakefile`
+/// (NOT `**/Rakefile`) plus `**/*.rake` at any depth. The `Rakefile` pattern
+/// intentionally does not have a `**/` prefix so nested `demo/Rakefile`,
+/// `cocoapods/Rakefile`, etc. are not inspected — RuboCop only lints the
+/// root-level Rakefile unless a repo's own config opts in.
+pub const RAKE_DEFAULT_INCLUDE: &[&str] = &["Rakefile", "**/*.rake"];
 
 /// Extract the task or namespace name from the first argument of a call node.
 /// Handles `:name` (symbol), `"name"` (string), and `name: [deps]` (hash) patterns.
