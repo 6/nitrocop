@@ -369,3 +369,31 @@ end
 # Backslash continuation followed by modifier `until`
 current_context = current_context.parent \
   until current_context.is_a?(NamespaceObject)
+
+# Backslash continuation with an inline comment in the continued argument list.
+# RuboCop will not collapse the comment onto a single line.
+class AttrReaderWithComment
+  attr_reader \
+    :filepath, # DEV(1.0): Rename to `uds_path`
+    :timeout
+end
+
+# Backslash string continuation inside an `if` expression branch. The enclosing
+# conditional makes the whole assignment unsafe to collapse.
+if raise_error
+  error_msg = if nilable
+    "The setting foo expects a " \
+    "String or nil, but value was bad." \
+  else
+    "The setting foo expects a " \
+    "String, but value was bad." \
+  end
+
+  error_msg = "#{error_msg} Please update your configure block. "
+end
+
+# Multiline interpolated strings are unsafe to collapse even when the
+# interpolated call would fit on one line by itself.
+html = "<h2>#{
+  ERB::Escape.html_escape((title).to_s)
+}</h2>"
