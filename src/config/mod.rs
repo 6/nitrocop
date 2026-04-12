@@ -4306,10 +4306,11 @@ mod tests {
         fs::write(&file, "get :show, :path => 'about'\n").unwrap();
 
         std::env::set_current_dir(&repo).unwrap();
+        let expected_base_dir = std::env::current_dir().unwrap();
         let config = load_config(None, Some(&file), None).unwrap();
         std::env::set_current_dir(old_cwd).unwrap();
 
-        assert_eq!(config.base_dir(), Some(repo.as_path()));
+        assert_eq!(config.base_dir(), Some(expected_base_dir.as_path()));
         assert_eq!(config.target_rails_version, Some(3.2));
 
         fs::remove_dir_all(&repo).ok();
