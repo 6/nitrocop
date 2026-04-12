@@ -218,6 +218,15 @@ use ruby_prism::Visit;
 /// but extra trailing space (`x ||=  0`) is still an offense. The AST path was
 /// incorrectly checking `||=`/`&&=` like generic operator assignments, which
 /// flagged leading-only spacing that RuboCop allows.
+///
+/// ## Corpus fix (2026-04-12)
+///
+/// Plain-assignment leading space needs RuboCop's dedicated neighbor search,
+/// not the generic adjacent-operator alignment shortcut. Using the generic path
+/// incorrectly suppressed offenses across blank-line-separated groups
+/// (`tag    = ...`, `ems1      = ...`) and against same-line chained writes
+/// (`Reline.input  = @input  = ...`, `SetUIDBit = ReadBit  = 4`). RuboCop
+/// only considers the first assignment token on each neighbor line here.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -662,7 +671,7 @@ fn check_text_scanner_extra_space(
         }
     }
 
-    if multi_before && is_aligned_standalone(source, op_start, op_bytes) {
+    if multi_before && !is_plain_assignment && is_aligned_standalone(source, op_start, op_bytes) {
         multi_before = false;
     }
 
@@ -1118,13 +1127,11 @@ fn find_assignment_aligned_in_direction(
                 }
                 if indent == my_indent {
                     relevant_indent_at_level = true;
-                    // Check if this line has an assignment `=` in code
                     let abs_start = line_starts[check_idx];
-                    if line_has_assignment_equals_sign_in_code(line_bytes, abs_start, code_map) {
-                        // Found assignment — check alignment via end column
-                        let aligned =
-                            line_has_operator_ending_at_char_col(line_bytes, char_end_col);
-                        return Some(aligned);
+                    if let Some(first_end_col) =
+                        first_assignment_operator_end_char_col(line_bytes, abs_start, code_map)
+                    {
+                        return Some(first_end_col == char_end_col);
                     }
                     // Same-indent non-assignment line — continue searching
                 } else {
@@ -1156,49 +1163,47 @@ fn compute_line_starts(bytes: &[u8]) -> Vec<usize> {
     starts
 }
 
-/// Check if a line contains an assignment-like `=` token (`=` or operator
-/// assignment like `+=`/`||=`), using the code map to skip strings/comments.
+/// Return the character end column of the first assignment token on a line.
 ///
-/// This intentionally excludes comparison operators such as `==`, `>=`, and
-/// `===`, matching RuboCop's `assignment_tokens.select(&:equal_sign?)`.
-fn line_has_assignment_equals_sign_in_code(
+/// This mirrors RuboCop's `assignment_tokens.uniq(&:line)`, which only lets
+/// the first `=`/operator-assignment token on each line participate in plain
+/// assignment alignment checks.
+fn first_assignment_operator_end_char_col(
     line: &[u8],
     line_abs_start: usize,
     code_map: &CodeMap,
-) -> bool {
+) -> Option<usize> {
     for i in 0..line.len() {
-        if line[i] == b'=' {
-            let abs_offset = line_abs_start + i;
-            if !code_map.is_code(abs_offset) {
-                continue;
-            }
-
-            if i + 1 < line.len() && matches!(line[i + 1], b'>' | b'=' | b'~') {
-                continue;
-            }
-
-            if i == 0 {
-                continue;
-            }
-
-            let prev = line[i - 1];
-            if matches!(prev, b' ' | b'\t')
-                || prev.is_ascii_alphanumeric()
-                || matches!(prev, b'_' | b')' | b']')
-            {
-                return true;
-            }
-
-            if matches!(prev, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'&') {
-                return true;
-            }
-
-            if matches!(prev, b'<' | b'>') && i >= 2 && line[i - 2] == prev {
-                return true;
-            }
+        if line[i] != b'=' {
+            continue;
         }
+
+        let abs_offset = line_abs_start + i;
+        if !code_map.is_code(abs_offset) {
+            continue;
+        }
+
+        if i + 1 < line.len() && matches!(line[i + 1], b'>' | b'=' | b'~') {
+            continue;
+        }
+
+        if i == 0 {
+            continue;
+        }
+
+        let prev = line[i - 1];
+        let is_assignment_token = matches!(prev, b' ' | b'\t')
+            || prev.is_ascii_alphanumeric()
+            || matches!(prev, b'_' | b')' | b']')
+            || matches!(prev, b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'&')
+            || (matches!(prev, b'<' | b'>') && i >= 2 && line[i - 2] == prev);
+        if !is_assignment_token {
+            continue;
+        }
+
+        return Some(bytes_to_char_col(line, i + 1));
     }
-    false
+    None
 }
 
 fn is_aligned_rhs_standalone(source: &SourceFile, start: usize, token_match: bool) -> bool {
@@ -1505,6 +1510,7 @@ impl OperatorChecker<'_> {
 
         if self.allow_for_alignment
             && multi_space_before
+            && !assignment_like_leading
             && self.is_aligned_with_adjacent(start, op_bytes)
         {
             multi_space_before = false;

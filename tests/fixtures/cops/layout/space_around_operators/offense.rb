@@ -138,3 +138,46 @@ tag    = Tag.create name: 'tag 1'
        ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
 baz(qux)
 options = nil
+
+# Extra space before => with a block value
+FILE_SIGNATURES = {
+  'environ'  => proc do |response|
+             ^^ Layout/SpaceAroundOperators: Operator `=>` should be surrounded by a single space.
+    next if !response.body.include?('DOCUMENT_ROOT=')
+  end,
+}
+
+# Extra leading space before = after a blank line in an assignment group
+note_1 = Note.create name: 'test', content: 'dummy content'
+note_2 = Note.create name: 'test 2', content: 'dummy content'
+
+tag    = Tag.create name: 'tag 1', note_id: note_1.id
+       ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+Tag.create name: 'tag 2'
+@json_expected = '{}'
+
+# Extra leading space before = must not align across blank-line-separated groups
+vm1      = FactoryBot.create(:vm_or_template)
+         ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+@vm_perf1 = FactoryBot.create(:vim_performance_state, :resource => vm1)
+vm1.delete
+
+@vm_perf2 = FactoryBot.create(:vim_performance_state, :resource => FactoryBot.create(:vm_or_template))
+
+ems1      = FactoryBot.create(:ext_management_system)
+          ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+@ems_perf1 = FactoryBot.create(:vim_performance_state, :resource => ems1)
+
+# Extra leading space before = in chained assignments on the same line
+temp_stdin  = Tempfile.new 'temp_stdin'
+temp_stdout = Tempfile.new 'temp_stdout'
+
+Reline.input  = @input  = File.open(temp_stdin.path, 'w+')
+                        ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+Reline.output = @output = File.open(temp_stdout.path, 'w+')
+
+# Only the first = on each neighbor line participates in assignment alignment
+SetUIDBit = ReadBit  = 4
+                     ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+SetGIDBit = WriteBit = 2
+StickyBit = ExecBit  = 1
