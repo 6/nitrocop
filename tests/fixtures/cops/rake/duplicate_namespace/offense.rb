@@ -40,3 +40,9 @@ end
 namespace
 namespace
 ^^^^^^^^^ Rake/DuplicateNamespace: Namespace `` is defined at both test.rb (line 36) and test.rb (line 37).
+
+namespace :install, &builder.construct(:install)
+^ Rake/DuplicateNamespace: Namespace `` is defined at both test.rb (line 36) and test.rb (line 39).
+
+namespace :release, &builder.construct(:release)
+^ Rake/DuplicateNamespace: Namespace `` is defined at both test.rb (line 36) and test.rb (line 41).

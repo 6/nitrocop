@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use ruby_prism::Visit;
 
-use crate::cop::rake::RAKE_DEFAULT_INCLUDE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
@@ -12,11 +11,16 @@ use crate::parse::source::SourceFile;
 /// If namespaces are defined with the same name, Rake executes both
 /// in definition order. This is usually unintentional and confusing.
 ///
-/// Matches RuboCop's `OnNamespace` which fires on any `namespace` send,
-/// not just calls with blocks. A blockless `namespace` call uses only
-/// ancestor namespace names for the duplicate key, matching the
-/// `each_ancestor(:block)` walk in the Ruby implementation.
+/// RuboCop's `OnNamespace` fires on any `namespace` send, not just calls with
+/// `do/end` blocks. That matters in two corpus-backed cases:
+/// - `namespace :install, &builder.construct(:install)` is a `BlockArgumentNode`
+///   in Prism, not a real block wrapper, so RuboCop treats it like a blockless
+///   namespace and keys it from ancestor namespaces only.
+/// - rubocop-rake's default Include is `Rakefile`, not `**/Rakefile`, so this
+///   cop must ignore nested `subdir/Rakefile` paths unless the repo config opts in.
 pub struct DuplicateNamespace;
+
+const DUPLICATE_NAMESPACE_DEFAULT_INCLUDE: &[&str] = &["Rakefile", "**/*.rake"];
 
 impl Cop for DuplicateNamespace {
     fn name(&self) -> &'static str {
@@ -28,7 +32,7 @@ impl Cop for DuplicateNamespace {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        RAKE_DEFAULT_INCLUDE
+        DUPLICATE_NAMESPACE_DEFAULT_INCLUDE
     }
 
     fn check_source(
@@ -104,9 +108,13 @@ impl DuplicateNamespaceVisitor<'_> {
 impl<'pr> Visit<'pr> for DuplicateNamespaceVisitor<'_> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let name = node.name().as_slice();
+        let has_block_body = node
+            .block()
+            .and_then(|block| block.as_block_node())
+            .is_some();
 
         if name == b"namespace" && node.receiver().is_none() {
-            if node.block().is_some() {
+            if has_block_body {
                 // Namespace call with a block: include the call's own name in the path
                 if let Some(ns_name) = crate::cop::rake::extract_task_name(node) {
                     let full_name = self.full_namespace_name(&ns_name);
