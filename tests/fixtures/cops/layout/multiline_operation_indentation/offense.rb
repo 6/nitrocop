@@ -37,3 +37,23 @@ result2 = "hello".capitalize +
   ^ Layout/MultilineOperationIndentation: Align the operands of an expression in an assignment spanning multiple lines.
   "foo"
   ^ Layout/MultilineOperationIndentation: Align the operands of an expression in an assignment spanning multiple lines.
+
+# Same-column chained + in a plain method body is still an offense
+def lyrics
+  "hello".capitalize +
+  "world" +
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+  "foo"
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+end
+
+# Interpolated string chain from corpus FN
+def bottle_verse(bottle_number)
+  "#{bottle_number} of beer on the wall, ".capitalize +
+  "#{bottle_number} of beer.\n" +
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+  "#{bottle_number.action}, " +
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+  "#{bottle_number.successor} of beer on the wall.\n"
+  ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
+end

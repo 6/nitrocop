@@ -1,3 +1,11 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+use ruby_prism::Visit;
+
+use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{AND_NODE, CALL_NODE, OR_NODE};
 use crate::cop::shared::util::{begins_its_line, indentation_of};
 use crate::cop::{Cop, CopConfig};
@@ -23,12 +31,155 @@ use crate::parse::source::SourceFile;
 /// is needed because RuboCop's `argument_in_method_call` (which requires
 /// AST parent traversal) accepts alignment in method-arg and nested-if
 /// contexts that we cannot detect from Prism without parent pointers.
+///
+/// Key fix (2026-04-12): replaced the unconditional same-column fallback for
+/// operator calls with real ancestor-based method-argument detection. Plain
+/// chained `+` calls in method bodies like `"a" +\n"b"` are offenses, but
+/// the same shape remains accepted when it is actually a method argument
+/// (for example `raise Error,\n"a" +\n"b"` or `it "a" +\n"b" do ... end`).
+/// Keep the old permissive fallback for `EnforcedStyle=indented`; that variant
+/// still has separate corpus divergence and tightening it here caused large
+/// regressions unrelated to the aligned-style FN fix.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
     b"+", b"-", b"*", b"/", b"%", b"**", b"==", b"!=", b"<", b">", b"<=", b">=", b"<=>", b"&",
     b"|", b"^", b"<<", b">>",
 ];
+
+#[derive(Clone, Copy, Default)]
+struct CallContext {
+    method_argument: bool,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct CallKey {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct CacheKey {
+    parse_result_ptr: usize,
+    source_path_hash: u64,
+    source_len: usize,
+}
+
+thread_local! {
+    static CALL_CONTEXT_CACHE: RefCell<Option<(CacheKey, HashMap<CallKey, CallContext>)>> =
+        const { RefCell::new(None) };
+}
+
+struct CallContextVisitor<'pr> {
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+    contexts: HashMap<CallKey, CallContext>,
+}
+
+impl<'pr> Visit<'pr> for CallContextVisitor<'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.contexts.insert(
+            call_key(node),
+            CallContext {
+                method_argument: operator_call_argument_context(&self.ancestors, node),
+            },
+        );
+
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+fn call_key(call: &ruby_prism::CallNode<'_>) -> CallKey {
+    let loc = call.location();
+    CallKey {
+        start: loc.start_offset(),
+        end: loc.end_offset(),
+    }
+}
+
+fn location_within_offsets(
+    inner_start: usize,
+    inner_end: usize,
+    outer: ruby_prism::Location<'_>,
+) -> bool {
+    inner_start >= outer.start_offset() && inner_end <= outer.end_offset()
+}
+
+fn operator_call_argument_context(
+    ancestors: &[ruby_prism::Node<'_>],
+    node: &ruby_prism::CallNode<'_>,
+) -> bool {
+    let current = node.location();
+    let current_start = current.start_offset();
+    let current_end = current.end_offset();
+    let len = ancestors.len().saturating_sub(1);
+
+    for ancestor in ancestors[..len].iter().rev() {
+        if ancestor.as_block_node().is_some() {
+            return false;
+        }
+
+        let Some(call) = ancestor.as_call_node() else {
+            continue;
+        };
+
+        if method_identifier_predicates::is_setter_method(call.name().as_slice()) {
+            continue;
+        }
+
+        if call.arguments().is_some_and(|args| {
+            args.arguments()
+                .iter()
+                .any(|arg| location_within_offsets(current_start, current_end, arg.location()))
+        }) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn call_context(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    source: &SourceFile,
+    call: &ruby_prism::CallNode<'_>,
+) -> CallContext {
+    let mut path_hasher = DefaultHasher::new();
+    source.path_str().hash(&mut path_hasher);
+    let cache_key = CacheKey {
+        parse_result_ptr: parse_result as *const _ as usize,
+        source_path_hash: path_hasher.finish(),
+        source_len: source.as_bytes().len(),
+    };
+
+    CALL_CONTEXT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let needs_rebuild = !matches!(cache.as_ref(), Some((key, _)) if *key == cache_key);
+
+        if needs_rebuild {
+            let mut visitor = CallContextVisitor {
+                ancestors: Vec::new(),
+                contexts: HashMap::new(),
+            };
+            visitor.visit(&parse_result.node());
+            *cache = Some((cache_key, visitor.contexts));
+        }
+
+        cache
+            .as_ref()
+            .and_then(|(_, contexts)| contexts.get(&call_key(call)).copied())
+            .unwrap_or_default()
+    })
+}
 
 impl Cop for MultilineOperationIndentation {
     fn name(&self) -> &'static str {
@@ -43,7 +194,7 @@ impl Cop for MultilineOperationIndentation {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -79,13 +230,17 @@ impl Cop for MultilineOperationIndentation {
                 return;
             }
 
-            // Delegate to shared binary checker with accept_left_alignment=true.
-            // We can't replicate RuboCop's `argument_in_method_call` (requires
-            // AST parent traversal), so we accept same-column alignment for
-            // operator calls to avoid FP in method-arg and nested-if contexts.
             let first_arg = &args[0];
-            diagnostics
-                .extend(self.check_binary_node(source, &receiver, first_arg, config, style, true));
+            let context = call_context(parse_result, source, &call_node);
+            diagnostics.extend(self.check_binary_node(
+                source,
+                &receiver,
+                first_arg,
+                config,
+                style,
+                context.method_argument,
+                true,
+            ));
             return;
         }
 
@@ -103,6 +258,7 @@ impl Cop for MultilineOperationIndentation {
                 config,
                 style,
                 false,
+                false,
             ));
             return;
         }
@@ -119,6 +275,7 @@ impl Cop for MultilineOperationIndentation {
                 &or_node.right(),
                 config,
                 style,
+                false,
                 false,
             ));
         }
@@ -228,6 +385,10 @@ fn has_assignment_before_col(line_bytes: &[u8], col: usize) -> bool {
 
 fn line_ends_with_assignment_operator(line_bytes: &[u8]) -> bool {
     last_significant_index(line_bytes).is_some_and(|idx| is_assignment_operator(line_bytes, idx))
+}
+
+fn line_ends_with_backslash(line_bytes: &[u8]) -> bool {
+    last_significant_index(line_bytes).is_some_and(|idx| line_bytes[idx] == b'\\')
 }
 
 fn modifier_keyword(before_expr: &[u8]) -> Option<&'static str> {
@@ -349,6 +510,30 @@ fn assignment_context(
                 rhs_begins_line: true,
             });
         }
+
+        if line_ends_with_backslash(prev_line) {
+            let mut continued_line = left_line - 1;
+            loop {
+                let line_bytes = source.lines().nth(continued_line - 1).unwrap_or(b"");
+                let end =
+                    last_significant_index(line_bytes).map_or(line_bytes.len(), |idx| idx + 1);
+                if has_assignment_before_col(line_bytes, end) {
+                    return Some(AssignmentContext {
+                        rhs_begins_line: true,
+                    });
+                }
+
+                if continued_line <= 1 {
+                    break;
+                }
+
+                let above = source.lines().nth(continued_line - 2).unwrap_or(b"");
+                if !line_ends_with_backslash(above) {
+                    break;
+                }
+                continued_line -= 1;
+            }
+        }
     }
     None
 }
@@ -384,7 +569,8 @@ impl MultilineOperationIndentation {
         right: &ruby_prism::Node<'_>,
         config: &CopConfig,
         style: &str,
-        accept_left_alignment: bool,
+        method_argument_context: bool,
+        operator_call: bool,
     ) -> Vec<Diagnostic> {
         let (left_line, left_col) = source.offset_to_line_col(left.location().start_offset());
         let (left_end_line, _) = source.offset_to_line_col(left.location().end_offset());
@@ -415,7 +601,10 @@ impl MultilineOperationIndentation {
         let keyword_context = keyword_context_on_line(source, left_line, left_col);
         let assignment_context = assignment_context(source, left_line, left_col);
         let should_align = assignment_context.is_some_and(|ctx| ctx.rhs_begins_line)
-            || (style == "aligned" && (keyword_context.is_some() || assignment_context.is_some()));
+            || (style == "aligned"
+                && (keyword_context.is_some()
+                    || assignment_context.is_some()
+                    || method_argument_context));
         let expected_indent = left_indent
             + if keyword_context.is_some_and(|ctx| ctx.special_indentation) {
                 2 * width
@@ -431,11 +620,7 @@ impl MultilineOperationIndentation {
             // continuations when the left operand is offset from the base indent
             // (genuine alignment, not just same-indent-level chains).
             right_col == expected_indent || right_col == left_col
-        } else if accept_left_alignment {
-            // For operator method calls (+, -, etc.) without AST parent info,
-            // we can't detect RuboCop's `argument_in_method_call` context
-            // (e.g. `raise Exception, "a" +\n"b"` or `+` inside if-as-operand).
-            // Accept same-column alignment as a safe fallback to avoid FP.
+        } else if operator_call && style == "indented" {
             right_col == expected_indent || right_col == left_col
         } else {
             right_col == expected_indent
