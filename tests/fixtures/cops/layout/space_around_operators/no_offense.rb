@@ -258,3 +258,6 @@ loop do
   data, inetAddr  = @ClientSocket.recvfrom_nonblock(READ_SIZE)
   break
 end
+
+# Standalone nested assignment is accepted when there is no later assignment group
+SetUIDBit = ReadBit  = 4
