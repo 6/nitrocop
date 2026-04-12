@@ -1,3 +1,4 @@
+# coding: US-ASCII
 class Foo
 
 ^ Layout/EmptyLinesAroundClassBody: Extra empty line detected at class body beginning.
@@ -51,6 +52,16 @@ class MultilineBoth <
 ^ Layout/EmptyLinesAroundClassBody: Extra empty line detected at class body beginning.
   def method
   end
+
+^ Layout/EmptyLinesAroundClassBody: Extra empty line detected at class body end.
+end
+class SafeHighBitRange
+
+^ Layout/EmptyLinesAroundClassBody: Extra empty line detected at class body beginning.
+  REGEX = /[\x80-\xfd]/n
+end
+class SafeHighBitRangeEnd
+  REGEX = /[\x80-\xfd]/n
 
 ^ Layout/EmptyLinesAroundClassBody: Extra empty line detected at class body end.
 end

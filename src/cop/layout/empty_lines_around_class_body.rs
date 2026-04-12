@@ -19,7 +19,8 @@ use ruby_prism::Visit;
 /// - skips files RuboCop never reaches because its parser fatally rejects
 ///   them, including non-UTF-8 sources that only declare `vim: fileencoding=`
 ///   and non-UTF-8-declared regex literals that contain unmatched high-bit
-///   `\xNN` escape runs
+///   `\xNN` escape runs outside character classes, while still checking safe
+///   ranges like `/[\x00\x7f-\xff]/` and `/[\x80-\xfd]/n`
 pub struct EmptyLinesAroundClassBody;
 
 impl Cop for EmptyLinesAroundClassBody {
@@ -543,7 +544,14 @@ impl ruby_prism::Visit<'_> for HighBitRegexEscapeFinder<'_> {
 
 fn regex_has_fatal_high_bit_hex_escape(content: &[u8]) -> bool {
     let mut index = 0;
-    while index + 3 < content.len() {
+    while index < content.len() {
+        if is_unescaped_open_bracket(content, index) {
+            if let Some(end) = find_char_class_end(content, index) {
+                index = end + 1;
+                continue;
+            }
+        }
+
         let Some(run_len) = high_bit_hex_escape_run_length(content, index) else {
             index += 1;
             continue;
@@ -556,6 +564,52 @@ fn regex_has_fatal_high_bit_hex_escape(content: &[u8]) -> bool {
     }
 
     false
+}
+
+fn is_unescaped_open_bracket(content: &[u8], index: usize) -> bool {
+    content.get(index) == Some(&b'[') && !backslash_is_escaped(content, index)
+}
+
+fn find_char_class_end(content: &[u8], open: usize) -> Option<usize> {
+    let mut index = open + 1;
+
+    if content.get(index) == Some(&b'^') {
+        index += 1;
+    }
+    if content.get(index) == Some(&b']') {
+        index += 1;
+    }
+
+    while index < content.len() {
+        if is_unescaped_open_bracket(content, index) {
+            if let Some(marker) = content.get(index + 1).copied() {
+                if matches!(marker, b':' | b'.' | b'=') {
+                    index += 2;
+                    while index + 1 < content.len() {
+                        if content[index] == marker && content[index + 1] == b']' {
+                            index += 2;
+                            break;
+                        }
+                        index += 1;
+                    }
+                    continue;
+                }
+            }
+
+            if let Some(nested_end) = find_char_class_end(content, index) {
+                index = nested_end + 1;
+                continue;
+            }
+        }
+
+        if content[index] == b']' && !backslash_is_escaped(content, index) {
+            return Some(index);
+        }
+
+        index += 1;
+    }
+
+    None
 }
 
 fn high_bit_hex_escape_run_length(content: &[u8], start: usize) -> Option<usize> {
@@ -1087,6 +1141,40 @@ mod tests {
             diags.is_empty(),
             "high-bit regex escapes in non-UTF-8-declared files are fatal in RuboCop, so this cop should skip the file: {:?}",
             diags
+        );
+    }
+
+    #[test]
+    fn no_empty_lines_still_flags_safe_us_ascii_char_class_ranges() {
+        let src = b"# coding: US-ASCII\nclass Foo\n\n  REGEX = /[\\x80-\\xfd]/n\nend\n";
+        let diags = run_cop_full(&EmptyLinesAroundClassBody, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "safe high-bit ranges inside regexp character classes should still be checked, got: {:?}",
+            diags
+        );
+        assert_eq!(diags[0].location.line, 3);
+        assert_eq!(
+            diags[0].message,
+            "Extra empty line detected at class body beginning."
+        );
+    }
+
+    #[test]
+    fn no_empty_lines_still_flags_safe_binary_char_class_ranges() {
+        let src = b"# -*- coding: binary -*-\nclass Foo\n\n  def bfilter(str)\n    str.gsub(/[\\x00\\x7f-\\xff]/, '')\n  end\nend\n";
+        let diags = run_cop_full(&EmptyLinesAroundClassBody, src);
+        assert_eq!(
+            diags.len(),
+            1,
+            "binary-encoded regexp character classes should still be checked, got: {:?}",
+            diags
+        );
+        assert_eq!(diags[0].location.line, 3);
+        assert_eq!(
+            diags[0].message,
+            "Extra empty line detected at class body beginning."
         );
     }
 

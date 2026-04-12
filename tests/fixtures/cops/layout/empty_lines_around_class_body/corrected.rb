@@ -1,3 +1,4 @@
+# coding: US-ASCII
 class Foo
   def bar; end
 end
@@ -31,4 +32,10 @@ class MultilineBoth <
   BaseClass
   def method
   end
+end
+class SafeHighBitRange
+  REGEX = /[\x80-\xfd]/n
+end
+class SafeHighBitRangeEnd
+  REGEX = /[\x80-\xfd]/n
 end
