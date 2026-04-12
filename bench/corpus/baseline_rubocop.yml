@@ -5,11 +5,6 @@
 # Cops that are Enabled: false in vendor defaults are explicitly enabled
 # below so we test ALL implementations against the corpus.
 # NewCops: enable covers Enabled: pending cops automatically.
-#
-# cache-bust: 2026-04-12-ig-cops-refresh
-# Bump this comment to invalidate the rubocop result cache. Needed after
-# changes to the set of cops that run in the main vs ig pipelines so stale
-# cached baselines don't cause asymmetric FP/FN.
 
 plugins:
   - rubocop-rails

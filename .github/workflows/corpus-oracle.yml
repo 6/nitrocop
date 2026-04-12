@@ -125,20 +125,41 @@ jobs:
       - name: Compute rubocop cache keys
         id: rubocop-cache-key
         run: |
-          # Rubocop results are deterministic for a given (repo SHA, rubocop version, config).
-          # Cache key = hash of Gemfile + config + per-repo excludes + parser crash patch +
-          # variant batch script. Including run_variant_batches.py ensures cache invalidation
-          # when variant invocation changes (e.g., adding vendor exclusions).
-          EXCLUDES_FILE="bench/corpus/repo_excludes.json"
-          RESCUE_FILE="bench/corpus/rescue_parser_crashes.rb"
-          VARIANT_SCRIPT="bench/corpus/run_variant_batches.py"
-          EXTRA_HASH=""
-          for f in "$EXCLUDES_FILE" "$RESCUE_FILE" "$VARIANT_SCRIPT"; do
-            if [ -f "$f" ]; then
-              EXTRA_HASH="${EXTRA_HASH}$(sha256sum "$f" | cut -c1-16)"
-            fi
+          # Rubocop results are deterministic for a given (repo SHA, rubocop
+          # version, config, invocation). Hash every file whose content could
+          # change what rubocop produces so the cache self-invalidates on any
+          # meaningful change — no manual cache-bust comments needed.
+          CACHE_INPUTS=(
+            # Workflow itself — catches rubocop invocation flag changes,
+            # overlay config path moves, and IG/main pipeline splits.
+            .github/workflows/corpus-oracle.yml
+            # Baseline config and gem pins.
+            bench/corpus/Gemfile
+            bench/corpus/Gemfile.lock
+            bench/corpus/baseline_rubocop.yml
+            # Per-repo overlay + derived IG cop list.
+            bench/corpus/gen_repo_config.py
+            bench/corpus/compute_ig_cops.py
+            bench/corpus/repo_excludes.json
+            bench/corpus/rescue_parser_crashes.rb
+            bench/corpus/run_variant_batches.py
+            # Vendored plugin configs — a plugin bump changes cop behavior
+            # even if nothing in bench/corpus/ does.
+            vendor/rubocop/config/default.yml
+            vendor/rubocop-rails/config/default.yml
+            vendor/rubocop-rake/config/default.yml
+            vendor/rubocop-rspec/config/default.yml
+            vendor/rubocop-rspec_rails/config/default.yml
+            vendor/rubocop-performance/config/default.yml
+            vendor/rubocop-factory_bot/config/default.yml
+          )
+          # Concatenate existing files in a stable order and hash the result.
+          # Missing files are skipped (e.g., an unrelated plugin removal).
+          EXISTING=()
+          for f in "${CACHE_INPUTS[@]}"; do
+            [ -f "$f" ] && EXISTING+=("$f")
           done
-          KEY_HASH=$(echo "${EXTRA_HASH}" | cat - bench/corpus/Gemfile bench/corpus/baseline_rubocop.yml | sha256sum | cut -c1-16)
+          KEY_HASH=$(cat "${EXISTING[@]}" | sha256sum | cut -c1-16)
           echo "hash=${KEY_HASH}" >> "$GITHUB_OUTPUT"
 
       - name: Restore cached rubocop results
