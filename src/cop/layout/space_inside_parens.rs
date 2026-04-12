@@ -1,6 +1,6 @@
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
-    HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
+    FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
     PINNED_EXPRESSION_NODE, SUPER_NODE, YIELD_NODE,
 };
 use crate::cop::{Cop, CopConfig};
@@ -107,6 +107,24 @@ use crate::parse::source::SourceFile;
 /// checking for a `:` immediately preceded by an identifier character
 /// (excluding `::` constant resolution). This feeds into
 /// `ignores_open_side()` alongside the existing command-form check.
+///
+/// ## Corpus investigation (2026-04-12)
+///
+/// Variant-style corpus runs still diverged in three narrow ways while the
+/// default `no_space` style remained perfect:
+///
+/// 1. `FindPatternNode` constant patterns such as `Point(*, 1,*a)` were never
+///    visited, so `space` / `compact` missed both missing-space offenses.
+/// 2. `compact` style allows `((` and `))` with no gap, but it still removes a
+///    single space between consecutive parens. The previous Rust port only
+///    skipped missing-space offenses for consecutive parens; it never emitted
+///    the matching compact-only removal for `g( ( x ))` / `g( f( x ) )`.
+/// 3. `space` / `compact` falsely flagged the closing side after backslash-
+///    continued strings like `select( "value \\\n  more")`. RuboCop compares
+///    adjacent tokens, and the string token starts on the previous line, so the
+///    closing `)` is not considered a same-line pair. We now suppress only that
+///    narrow close-side case by recognizing an unmatched quote on the closing
+///    line whose previous physical line ends with `\`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -128,6 +146,7 @@ impl Cop for SpaceInsideParens {
             CALL_NODE,
             DEF_NODE,
             DEFINED_NODE,
+            FIND_PATTERN_NODE,
             HASH_PATTERN_NODE,
             MULTI_TARGET_NODE,
             MULTI_WRITE_NODE,
@@ -213,6 +232,24 @@ impl Cop for SpaceInsideParens {
                 );
             }
             "compact" => {
+                check_compact_consecutive_open_parens_space(
+                    self,
+                    source,
+                    diagnostics,
+                    &mut corrections,
+                    bytes,
+                    open_end,
+                    open_side,
+                );
+                check_compact_consecutive_close_parens_space(
+                    self,
+                    source,
+                    diagnostics,
+                    &mut corrections,
+                    bytes,
+                    close_side,
+                    close_start,
+                );
                 if !ignore_open_side {
                     check_missing_open_space(
                         self,
@@ -309,6 +346,14 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
     if let Some(hash_pattern) = node.as_hash_pattern_node() {
         let open = hash_pattern.opening_loc()?;
         let close = hash_pattern.closing_loc()?;
+        if open.as_slice() == b"(" && close.as_slice() == b")" {
+            return Some((open.start_offset(), open.end_offset(), close.start_offset()));
+        }
+    }
+
+    if let Some(find_pattern) = node.as_find_pattern_node() {
+        let open = find_pattern.opening_loc()?;
+        let close = find_pattern.closing_loc()?;
         if open.as_slice() == b"(" && close.as_slice() == b")" {
             return Some((open.start_offset(), open.end_offset(), close.start_offset()));
         }
@@ -531,8 +576,65 @@ fn previous_same_line_code(bytes: &[u8], close_start: usize) -> Option<usize> {
     if idx == line_start {
         None
     } else {
-        Some(idx - 1)
+        let code_idx = idx - 1;
+        if continued_string_close_on_line(bytes, line_start, code_idx) {
+            return None;
+        }
+
+        Some(code_idx)
     }
+}
+
+fn continued_string_close_on_line(bytes: &[u8], line_start: usize, quote_idx: usize) -> bool {
+    let Some(&quote) = bytes.get(quote_idx) else {
+        return false;
+    };
+    if !matches!(quote, b'"' | b'\'') {
+        return false;
+    }
+    if !line_has_unmatched_quote(bytes, line_start, quote_idx, quote) {
+        return false;
+    }
+    previous_line_ends_with_backslash(bytes, line_start)
+}
+
+fn line_has_unmatched_quote(bytes: &[u8], line_start: usize, quote_idx: usize, quote: u8) -> bool {
+    let mut quote_count = 0;
+    let mut idx = line_start;
+    while idx <= quote_idx {
+        if bytes[idx] == quote && !is_escaped(bytes, line_start, idx) {
+            quote_count += 1;
+        }
+        idx += 1;
+    }
+    quote_count % 2 == 1
+}
+
+fn is_escaped(bytes: &[u8], line_start: usize, idx: usize) -> bool {
+    let mut backslashes = 0;
+    let mut cursor = idx;
+    while cursor > line_start && bytes[cursor - 1] == b'\\' {
+        backslashes += 1;
+        cursor -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn previous_line_ends_with_backslash(bytes: &[u8], line_start: usize) -> bool {
+    if line_start == 0 {
+        return false;
+    }
+
+    let mut idx = line_start - 1;
+    if bytes[idx] != b'\n' {
+        return false;
+    }
+
+    while idx > 0 && matches!(bytes[idx - 1], b' ' | b'\t' | b'\r') {
+        idx -= 1;
+    }
+
+    idx > 0 && bytes[idx - 1] == b'\\'
 }
 
 fn ends_space_character_literal(bytes: &[u8], line_start: usize, space_offset: usize) -> bool {
@@ -638,6 +740,36 @@ fn check_missing_open_space(
     );
 }
 
+fn check_compact_consecutive_open_parens_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    bytes: &[u8],
+    open_end: usize,
+    open_side: NextSameLineItem,
+) {
+    let NextSameLineItem::Code(code_start) = open_side else {
+        return;
+    };
+    if bytes.get(code_start) != Some(&b'(') {
+        return;
+    }
+    if bytes.get(open_end..code_start) != Some(b" ".as_slice()) {
+        return;
+    }
+
+    push_remove_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        open_end,
+        code_start,
+        MSG,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_missing_close_space(
     cop: &SpaceInsideParens,
@@ -665,6 +797,36 @@ fn check_missing_close_space(
         corrections,
         close_start,
         MSG_NO_SPACE,
+    );
+}
+
+fn check_compact_consecutive_close_parens_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    bytes: &[u8],
+    close_side: Option<usize>,
+    close_start: usize,
+) {
+    let Some(prev_code) = close_side else {
+        return;
+    };
+    if bytes.get(prev_code) != Some(&b')') {
+        return;
+    }
+    if bytes.get(prev_code + 1..close_start) != Some(b" ".as_slice()) {
+        return;
+    }
+
+    push_remove_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        prev_code + 1,
+        close_start,
+        MSG,
     );
 }
 
@@ -725,6 +887,86 @@ mod tests {
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
+
+    fn style_config(style: &str) -> CopConfig {
+        use std::collections::HashMap;
+
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String(style.into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn space_style_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/space_inside_parens/space_offense.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: space\n")
+            .expect("fixture should start with space config directive");
+
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideParens,
+            source.as_bytes(),
+            style_config("space"),
+        );
+    }
+
+    #[test]
+    fn space_style_no_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/space_inside_parens/space_no_offense.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: space\n")
+            .expect("fixture should start with space config directive");
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideParens,
+            source.as_bytes(),
+            style_config("space"),
+        );
+    }
+
+    #[test]
+    fn compact_style_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/space_inside_parens/compact_offense.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: compact\n")
+            .expect("fixture should start with compact config directive");
+
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideParens,
+            source.as_bytes(),
+            style_config("compact"),
+        );
+    }
+
+    #[test]
+    fn compact_style_no_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/space_inside_parens/compact_no_offense.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: compact\n")
+            .expect("fixture should start with compact config directive");
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &SpaceInsideParens,
+            source.as_bytes(),
+            style_config("compact"),
+        );
+    }
 
     #[test]
     fn space_style_flags_missing_spaces() {
