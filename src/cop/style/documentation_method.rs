@@ -152,6 +152,14 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 /// 4. Retroactive `private :foo` / `protected :foo` visibility was incorrectly applied to
 ///    receiver defs like `def self.foo`; RuboCop only applies that sibling visibility to
 ///    plain defs in the current scope.
+///
+/// **Investigation (2026-04-16):** Remaining FPs in rescue-wrapped scopes came from
+/// `visit_begin_node` walking `begin ... rescue/ensure/else` bodies with a manual
+/// `for stmt in statements` loop. That bypassed the normal statement-list logic that
+/// records preceding `private`/`protected` visibility for following defs, so methods in
+/// explicit `begin ... rescue` blocks and implicit class/module rescue bodies were
+/// incorrectly treated as public. Fix: reuse the normal statement-list visitor for
+/// rescue-wrapped bodies while still masking preceding comments only for the first child.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -524,6 +532,68 @@ impl DocumentationMethodVisitor<'_> {
         result
     }
 
+    fn register_pending_visibility<'pr>(
+        &mut self,
+        stmt: &ruby_prism::Node<'pr>,
+        later_siblings: &[ruby_prism::Node<'pr>],
+        preceding_visibility: Option<MethodVisibility>,
+    ) {
+        if let Some(def_node) = stmt.as_def_node() {
+            let vis = pending_visibility_for_def(&def_node, later_siblings, preceding_visibility);
+            self.pending_visibility
+                .insert(def_node.location().start_offset(), vis);
+        }
+
+        // Register inner DefNodes of modifier calls (module_function/ruby2_keywords)
+        // so they inherit the enclosing preceding visibility. RuboCop's on_def checks
+        // `non_public?(parent)` for modifier_node? parents, which uses the parent
+        // call's visibility in the statement list.
+        if let Some(call) = stmt.as_call_node() {
+            if call.receiver().is_none()
+                && matches!(
+                    call.name().as_slice(),
+                    b"module_function" | b"ruby2_keywords"
+                )
+            {
+                if let Some(args) = call.arguments() {
+                    for arg in args.arguments().iter() {
+                        if let Some(inner_def) = arg.as_def_node() {
+                            let vis = pending_visibility_for_def(
+                                &inner_def,
+                                later_siblings,
+                                preceding_visibility,
+                            );
+                            self.pending_visibility
+                                .insert(inner_def.location().start_offset(), vis);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_statement_list<'pr>(
+        &mut self,
+        node: &ruby_prism::StatementsNode<'pr>,
+        rescue_begin_masks_first_child: bool,
+    ) {
+        let stmt_nodes: Vec<_> = node.body().iter().collect();
+        let mut preceding_visibility = None;
+
+        for (idx, stmt) in stmt_nodes.iter().enumerate() {
+            self.register_pending_visibility(stmt, &stmt_nodes[idx + 1..], preceding_visibility);
+
+            let saved_rescue_first = self.rescue_begin_first_child;
+            self.rescue_begin_first_child = rescue_begin_masks_first_child && idx == 0;
+            self.visit(stmt);
+            self.rescue_begin_first_child = saved_rescue_first;
+
+            if let Some(vis) = standalone_visibility(stmt) {
+                preceding_visibility = Some(vis);
+            }
+        }
+    }
+
     fn check_def(
         &mut self,
         def_node: &ruby_prism::DefNode<'_>,
@@ -598,53 +668,7 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
     }
 
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
-        let stmt_nodes: Vec<_> = node.body().iter().collect();
-        let mut preceding_visibility = None;
-
-        for (idx, stmt) in stmt_nodes.iter().enumerate() {
-            if let Some(def_node) = stmt.as_def_node() {
-                let vis = pending_visibility_for_def(
-                    &def_node,
-                    &stmt_nodes[idx + 1..],
-                    preceding_visibility,
-                );
-                self.pending_visibility
-                    .insert(def_node.location().start_offset(), vis);
-            }
-
-            // Register inner DefNodes of modifier calls (module_function/ruby2_keywords)
-            // so they inherit the enclosing preceding visibility. RuboCop's on_def checks
-            // `non_public?(parent)` for modifier_node? parents, which uses the parent
-            // call's visibility in the statement list.
-            if let Some(call) = stmt.as_call_node() {
-                if call.receiver().is_none()
-                    && matches!(
-                        call.name().as_slice(),
-                        b"module_function" | b"ruby2_keywords"
-                    )
-                {
-                    if let Some(args) = call.arguments() {
-                        for arg in args.arguments().iter() {
-                            if let Some(inner_def) = arg.as_def_node() {
-                                let vis = pending_visibility_for_def(
-                                    &inner_def,
-                                    &stmt_nodes[idx + 1..],
-                                    preceding_visibility,
-                                );
-                                self.pending_visibility
-                                    .insert(inner_def.location().start_offset(), vis);
-                            }
-                        }
-                    }
-                }
-            }
-
-            self.visit(stmt);
-
-            if let Some(vis) = standalone_visibility(stmt) {
-                preceding_visibility = Some(vis);
-            }
-        }
+        self.visit_statement_list(node, false);
     }
 
     fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
@@ -686,12 +710,7 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
         if masks_preceding_comments {
             let saved = self.rescue_begin_first_child;
             if let Some(statements) = node.statements() {
-                let mut first = true;
-                for stmt in statements.body().iter() {
-                    self.rescue_begin_first_child = first;
-                    self.visit(&stmt);
-                    first = false;
-                }
+                self.visit_statement_list(&statements, true);
             }
             self.rescue_begin_first_child = false;
 
