@@ -470,6 +470,54 @@ pub fn assert_cop_no_offenses_full_with_config(
     );
 }
 
+// ---- Variant fixture helpers ----
+
+/// Parse a `# nitrocop-config:` directive from fixture bytes and return
+/// (config, source_without_directive).
+///
+/// The directive format is: `# nitrocop-config: Key1: value1, Key2: value2`
+/// This is used by `cop_variant_fixture_tests!` to auto-discover variant
+/// fixtures and run them with the correct config.
+pub fn parse_variant_fixture(fixture_bytes: &[u8]) -> (CopConfig, Vec<u8>) {
+    let text = std::str::from_utf8(fixture_bytes).expect("fixture must be valid UTF-8");
+    let first_line = text.lines().next().unwrap_or("");
+
+    if let Some(config_str) = first_line.strip_prefix("# nitrocop-config: ") {
+        use std::collections::HashMap;
+        let mut options = HashMap::new();
+        for pair in config_str.split(", ") {
+            let pair = pair.trim();
+            if let Some((key, value)) = pair.split_once(": ") {
+                options.insert(
+                    key.trim().to_string(),
+                    serde_yml::Value::String(value.trim().to_string()),
+                );
+            }
+        }
+
+        let source = text
+            .strip_prefix(first_line)
+            .unwrap_or(text)
+            .strip_prefix('\n')
+            .unwrap_or(text)
+            .as_bytes()
+            .to_vec();
+
+        (
+            CopConfig {
+                options,
+                ..CopConfig::default()
+            },
+            source,
+        )
+    } else {
+        panic!(
+            "Variant fixture must start with '# nitrocop-config: ...' but got: {:?}",
+            first_line
+        );
+    }
+}
+
 // ---- Autocorrect testing helpers ----
 
 /// Run all three cop methods with corrections enabled. Returns (diagnostics, corrections).
@@ -987,6 +1035,21 @@ pub fn assert_no_orphaned_fixtures(fixture_dir: &str, cop_source_path: &str) {
             // Non-standard filename — must appear in the cop source via include_bytes!
             if cop_source.contains(filename) {
                 continue;
+            }
+
+            // Variant fixtures (offense.<variant>.rb / no_offense.<variant>.rb)
+            // are auto-discovered by cop_variant_fixture_tests! which lists the
+            // variant name as an identifier. Check if the variant name appears
+            // in the cop source near "cop_variant_fixture_tests".
+            if let Some(variant) = filename
+                .strip_prefix("offense.")
+                .or_else(|| filename.strip_prefix("no_offense."))
+                .and_then(|s| s.strip_suffix(".rb"))
+            {
+                if cop_source.contains("cop_variant_fixture_tests!") && cop_source.contains(variant)
+                {
+                    continue;
+                }
             }
         }
 

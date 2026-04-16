@@ -462,6 +462,79 @@ macro_rules! cop_scenario_fixture_tests {
     };
 }
 
+/// Generate variant fixture tests for a cop.
+///
+/// For each variant name, generates tests that load `offense.<variant>.rb` and/or
+/// `no_offense.<variant>.rb` from the fixture directory. Each fixture must start
+/// with a `# nitrocop-config:` directive specifying the variant config.
+///
+/// Unlike `cop_fixture_tests!`, both offense and no_offense files are optional —
+/// only existing files are tested. This allows pre-populating just the examples
+/// available from the corpus.
+///
+/// Usage:
+/// ```ignore
+/// #[cfg(test)]
+/// mod tests {
+///     use super::*;
+///     crate::cop_fixture_tests!(CopStruct, "cops/dept/cop_name");
+///     crate::cop_variant_fixture_tests!(CopStruct, "cops/dept/cop_name",
+///         semantic, always_braces, braces_for_chaining,
+///     );
+/// }
+/// ```
+#[macro_export]
+macro_rules! cop_variant_fixture_tests {
+    ($cop:expr, $path:literal, $($variant:ident),+ $(,)?) => {
+        $(
+            $crate::cop_variant_fixture_tests!(@maybe_offense $cop, $path, $variant);
+            $crate::cop_variant_fixture_tests!(@maybe_no_offense $cop, $path, $variant);
+        )+
+    };
+
+    // Internal: generate offense test if fixture file exists
+    (@maybe_offense $cop:expr, $path:literal, $variant:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<offense_ $variant _variant_fixture>]() {
+                let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                let fixture_path = manifest
+                    .join("tests/fixtures")
+                    .join($path)
+                    .join(concat!("offense.", stringify!($variant), ".rb"));
+                if !fixture_path.exists() {
+                    return; // skip — fixture not present
+                }
+                let bytes = std::fs::read(&fixture_path)
+                    .unwrap_or_else(|e| panic!("Failed to read {}: {e}", fixture_path.display()));
+                let (config, source) = $crate::testutil::parse_variant_fixture(&bytes);
+                $crate::testutil::assert_cop_offenses_full_with_config(&$cop, &source, config);
+            }
+        }
+    };
+
+    // Internal: generate no_offense test if fixture file exists
+    (@maybe_no_offense $cop:expr, $path:literal, $variant:ident) => {
+        paste::paste! {
+            #[test]
+            fn [<no_offense_ $variant _variant_fixture>]() {
+                let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+                let fixture_path = manifest
+                    .join("tests/fixtures")
+                    .join($path)
+                    .join(concat!("no_offense.", stringify!($variant), ".rb"));
+                if !fixture_path.exists() {
+                    return; // skip — fixture not present
+                }
+                let bytes = std::fs::read(&fixture_path)
+                    .unwrap_or_else(|e| panic!("Failed to read {}: {e}", fixture_path.display()));
+                let (config, source) = $crate::testutil::parse_variant_fixture(&bytes);
+                $crate::testutil::assert_cop_no_offenses_full_with_config(&$cop, &source, config);
+            }
+        }
+    };
+}
+
 /// Generate autocorrect fixture tests for a cop.
 ///
 /// If `testdata/<path>/corrected.rb` exists, this generates a test that:

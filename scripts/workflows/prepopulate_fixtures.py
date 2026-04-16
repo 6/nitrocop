@@ -5,8 +5,9 @@ Confirmed FN code bugs append ready-made test snippets to offense.rb.
 Confirmed FP code bugs stay in task.md as source context for the agent
 to distill into a clean no_offense.rb case manually.
 
-This gives the agent a workspace where `cargo test` already fails for
-known FN bugs, without committing raw corpus snippets into no_offense.rb.
+Variant fixture files (offense.<variant>.rb / no_offense.<variant>.rb) are
+created from variant oracle data for ALL diverging variants of the cop,
+providing cross-variant regression protection via `cargo test`.
 
 Usage:
     python3 prepopulate_fixtures.py <task.md> <cop> <fixture_dir>
@@ -54,6 +55,70 @@ def extract_diagnostics_from_task(task_path: Path) -> list[dict]:
     return results
 
 
+def extract_variant_examples_from_task(task_path: Path) -> list[dict]:
+    """Parse variant FP/FN examples from the task markdown.
+
+    Returns list of {variant, kind (fp/fn), source, message} dicts.
+    Extracts from the 'Variant FP/FN Examples' or 'Style Variant Divergence'
+    sections."""
+    text = task_path.read_text()
+    results = []
+
+    # Find variant example sections: ### Style: `<label>`
+    variant_pattern = re.compile(
+        r'### Style: `([^`]+)`\s*\n(.*?)(?=### Style:|### How to fix|## [A-Z]|\Z)',
+        re.DOTALL,
+    )
+    for vm in variant_pattern.finditer(text):
+        variant_label = vm.group(1).strip()
+        section = vm.group(2)
+
+        # Extract FP examples (code blocks under "False Positives")
+        fp_section = re.search(
+            r'\*\*False Positives\*\*.*?\n(.*?)(?=\*\*False Negatives\*\*|\Z)',
+            section, re.DOTALL,
+        )
+        if fp_section:
+            for code_match in re.finditer(r'```ruby\n(.*?)```', fp_section.group(1), re.DOTALL):
+                source = code_match.group(1).strip()
+                if source:
+                    results.append({
+                        "variant": variant_label,
+                        "kind": "fp",
+                        "source": source,
+                    })
+
+        # Extract FN examples (code blocks under "False Negatives")
+        fn_section = re.search(
+            r'\*\*False Negatives\*\*.*?\n(.*?)(?=\*\*False Positives\*\*|\Z)',
+            section, re.DOTALL,
+        )
+        if fn_section:
+            for code_match in re.finditer(r'```ruby\n(.*?)```', fn_section.group(1), re.DOTALL):
+                source = code_match.group(1).strip()
+                if source:
+                    results.append({
+                        "variant": variant_label,
+                        "kind": "fn",
+                        "source": source,
+                    })
+
+    return results
+
+
+def infer_config_directive(variant_label: str) -> str:
+    """Infer the # nitrocop-config: directive from a variant label.
+
+    Labels are typically style values like 'comma', 'semantic', 'tabs'.
+    Multi-param labels use commas: 'separator, separator, always_ignore'."""
+    parts = [p.strip() for p in variant_label.split(",")]
+    if len(parts) == 1:
+        return f"# nitrocop-config: EnforcedStyle: {parts[0]}"
+    # Multi-param: try common patterns
+    # For now, join as-is — the agent can refine
+    return f"# nitrocop-config: EnforcedStyle: {variant_label}"
+
+
 def normalize_fixture_snippet(source: str) -> str:
     """Trim noisy boundary lines from extracted corpus snippets.
 
@@ -79,10 +144,9 @@ def normalize_fixture_snippet(source: str) -> str:
 def prepopulate(task_path: Path, cop: str, fixture_dir: Path) -> dict:
     """Append confirmed FN code bug examples to offense.rb.
 
-    Returns {"fp_context": int, "fn_added": int}."""
+    Also creates variant fixture files from variant oracle examples.
+    Returns {"fp_context": int, "fn_added": int, "variant_files": int}."""
     diagnostics = extract_diagnostics_from_task(task_path)
-    if not diagnostics:
-        return {"fp_context": 0, "fn_added": 0}
 
     offense_path = fixture_dir / "offense.rb"
     fn_added = 0
@@ -100,7 +164,69 @@ def prepopulate(task_path: Path, cop: str, fixture_dir: Path) -> dict:
                 f.write(f"\n{snippet}\n")
                 fn_added += 1
 
-    return {"fp_context": len(fp_examples), "fn_added": fn_added}
+    # Create variant fixture files from ALL diverging variants
+    variant_examples = extract_variant_examples_from_task(task_path)
+    variant_files = 0
+
+    # Group by variant and kind
+    by_variant: dict[str, dict[str, list[str]]] = {}
+    for ex in variant_examples:
+        vd = by_variant.setdefault(ex["variant"], {"fp": [], "fn": []})
+        vd[ex["kind"]].append(ex["source"])
+
+    for variant_label, examples in by_variant.items():
+        # Sanitize variant name for filename: "comma" -> "comma",
+        # "separator, separator" -> skip (multi-param too complex for auto-fixture)
+        if "," in variant_label:
+            continue
+
+        variant_slug = re.sub(r"[^a-z0-9]+", "_", variant_label.lower()).strip("_")
+        config_directive = infer_config_directive(variant_label)
+
+        # FP examples → no_offense.<variant>.rb
+        # (patterns nitrocop flags but RuboCop does not — should NOT flag)
+        if examples["fp"]:
+            no_offense_path = fixture_dir / f"no_offense.{variant_slug}.rb"
+            if not no_offense_path.exists():
+                snippets = []
+                for src in examples["fp"][:5]:  # cap at 5 per variant
+                    snippet = normalize_fixture_snippet(src)
+                    if snippet:
+                        snippets.append(snippet)
+                if snippets:
+                    content = config_directive + "\n" + "\n\n".join(snippets) + "\n"
+                    no_offense_path.write_text(content)
+                    variant_files += 1
+
+        # FN examples → offense.<variant>.rb
+        # (patterns RuboCop flags but nitrocop misses — SHOULD flag)
+        # Note: these need ^ annotations to be valid offense fixtures.
+        # We add them as comments since we don't have annotation data.
+        # The agent must add proper annotations.
+        if examples["fn"]:
+            offense_path_v = fixture_dir / f"offense.{variant_slug}.rb"
+            if not offense_path_v.exists():
+                snippets = []
+                for src in examples["fn"][:5]:
+                    snippet = normalize_fixture_snippet(src)
+                    if snippet:
+                        snippets.append(snippet)
+                if snippets:
+                    header = (
+                        f"{config_directive}\n"
+                        f"# TODO: Add ^ offense annotations below.\n"
+                        f"# These are FN examples from the corpus — RuboCop flags them\n"
+                        f"# but nitrocop misses. The agent must add proper annotations.\n"
+                    )
+                    content = header + "\n".join(snippets) + "\n"
+                    offense_path_v.write_text(content)
+                    variant_files += 1
+
+    return {
+        "fp_context": len(fp_examples),
+        "fn_added": fn_added,
+        "variant_files": variant_files,
+    }
 
 
 def main():
@@ -125,6 +251,7 @@ def main():
         f"Left {result['fp_context']} FP examples in task.md for manual no_offense.rb distillation"
     )
     print(f"Added {result['fn_added']} FN examples to offense.rb")
+    print(f"Created {result['variant_files']} variant fixture files")
 
 
 if __name__ == "__main__":
