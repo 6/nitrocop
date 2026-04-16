@@ -54,6 +54,15 @@ use ruby_prism::Visit;
 ///      Fixed by checking the Prism parent chain directly and only ignoring hashes
 ///      that are actually the last argument of a `CallNode`, `SuperNode`, or
 ///      `YieldNode`.
+///
+/// 5. **`&block` after explicit hash (`ignore_explicit` FN, 2026-04-16):** Prism stores
+///    block-pass arguments as `BlockArgumentNode` on `call.block()` / `super.block()`,
+///    not in `arguments()`. The previous last-argument check only looked at positional
+///    arguments, so `foo({a: 1,\n  b: 2}, &block)` incorrectly treated the explicit hash
+///    as the last argument and skipped it under `ignore_explicit`. RuboCop still inspects
+///    that hash because the trailing `&block` is the actual last argument. Fixed by
+///    treating a trailing `BlockArgumentNode` as disqualifying the hash from "last
+///    argument hash" handling.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -247,10 +256,16 @@ fn is_last_argument_hash(
     };
 
     if let Some(call) = parent.as_call_node() {
-        return is_last_argument(call.arguments());
+        return is_last_argument(call.arguments())
+            && call
+                .block()
+                .is_none_or(|block| block.as_block_argument_node().is_none());
     }
     if let Some(super_node) = parent.as_super_node() {
-        return is_last_argument(super_node.arguments());
+        return is_last_argument(super_node.arguments())
+            && super_node
+                .block()
+                .is_none_or(|block| block.as_block_argument_node().is_none());
     }
     if let Some(yield_node) = parent.as_yield_node() {
         return is_last_argument(yield_node.arguments());
@@ -1072,6 +1087,17 @@ mod tests {
             &HashAlignment,
             include_bytes!(
                 "../../../tests/fixtures/cops/layout/hash_alignment/ignore_explicit_offense.rb"
+            ),
+            variant_config("key", "key", "ignore_explicit"),
+        );
+    }
+
+    #[test]
+    fn ignore_explicit_block_argument_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/offense.ignore_explicit.rb"
             ),
             variant_config("key", "key", "ignore_explicit"),
         );
