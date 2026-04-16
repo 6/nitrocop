@@ -17,6 +17,12 @@
 ///   accepts multiline arrays with `[ <spaces>\n  # comment` after the opening
 ///   bracket. Fixed by detecting the trailing-comma array-pattern context and by
 ///   treating comment-on-next-line as an allowed multiline opening-bracket case.
+/// - compact fix (2026-04-16): RuboCop collapses adjacent bracket tokens even
+///   when they are separated by newlines inside the same array node. That means
+///   multiline `[\n  [ ... ]\n]` needs outer `[[`/`]]`, and a closing `]` from
+///   an index/reference expression like `html_options[:class]` also collapses
+///   against the outer closing bracket. Fixed by letting compact adjacency scans
+///   skip newline whitespace while still excluding `%w/%i/%W/%I` delimiters.
 use crate::cop::shared::node_type::{ARRAY_NODE, ARRAY_PATTERN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -492,13 +498,13 @@ fn next_line_starts_with_comment(bytes: &[u8], pos: usize) -> bool {
     bytes.get(i) == Some(&b'#')
 }
 
-/// Check if the next non-whitespace character on the same line after `pos` is `[`.
-/// Stops at newlines — RuboCop only collapses adjacent brackets on the same line.
+/// Check if the next non-whitespace character after `pos` is `[`.
+/// Compact style skips newline tokens between adjacent brackets.
 fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i < bytes.len() {
         match bytes[i] {
-            b' ' | b'\t' => i += 1,
+            b' ' | b'\t' | b'\n' | b'\r' => i += 1,
             b'[' => return true,
             _ => return false,
         }
@@ -506,15 +512,15 @@ fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
     false
 }
 
-/// Check if the previous non-whitespace character on the same line before `pos` is `]`
+/// Check if the previous non-whitespace character before `pos` is `]`
 /// from a real bracket array (not `%w[...]`, `%i[...]`, etc.).
-/// Stops at newlines — RuboCop only collapses adjacent brackets on the same line.
+/// Compact style skips newline tokens between adjacent brackets.
 fn is_adjacent_bracket_backward(bytes: &[u8], pos: usize) -> bool {
     let mut i = pos;
     while i > 0 {
         i -= 1;
         match bytes[i] {
-            b' ' | b'\t' => continue,
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
             b']' => {
                 // Found `]` — find its matching `[` via bracket counting,
                 // then check it's not a %w[/%i[/etc. delimiter.
@@ -706,24 +712,34 @@ mod tests {
     }
 
     #[test]
-    fn compact_multiline_no_collapse_across_lines() {
+    fn compact_corpus_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &SpaceInsideArrayLiteralBrackets,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/space_inside_array_literal_brackets/offense.compact.rb"
+            ),
+            compact_config(),
+        );
+    }
+
+    #[test]
+    fn compact_collapses_adjacent_brackets_across_newlines() {
         use crate::testutil::run_cop_full_with_config;
-        // RuboCop does NOT collapse brackets across newlines — only same-line.
-        // Opening [ on one line, inner [ on the next → no collapse offense.
+
         let src = b"multiline = [\n  [ 1, 2, 3, 4 ],\n  [ 3, 4, 5, 6 ]]\n";
         let diags =
             run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
         assert!(
-            !diags.iter().any(|d| d.message.contains("detected")),
-            "multiline [ \\n [ should NOT collapse across lines"
+            diags.iter().any(|d| d.message.contains("detected")),
+            "multiline [ \\n [ should collapse under compact style"
         );
-        // Closing ] on one line, outer ] on the next → no collapse offense.
-        let src = b"multiline = [[ 1, 2, 3, 4 ],\n  [ 3, 4, 5, 6 ]\n]\n";
+
+        let src = b"css_classes = [\n  html_options[:class]\n]\n";
         let diags =
             run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
         assert!(
-            !diags.iter().any(|d| d.message.contains("detected")),
-            "multiline ] \\n ] should NOT collapse across lines"
+            diags.iter().any(|d| d.message.contains("detected")),
+            "multiline ] after a reference bracket should collapse under compact style"
         );
     }
 }
