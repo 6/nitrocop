@@ -107,6 +107,25 @@ use crate::parse::source::SourceFile;
 /// checking for a `:` immediately preceded by an identifier character
 /// (excluding `::` constant resolution). This feeds into
 /// `ignores_open_side()` alongside the existing command-form check.
+///
+/// ## Corpus investigation (2026-04-16)
+///
+/// The remaining `compact`-style misses came from treating raw `(` / `)`
+/// bytes as if they always represented paren tokens. RuboCop only collapses
+/// true consecutive paren tokens:
+///
+/// 1. `g( ( 3 + 5 ) * x )` should remove the space between `(` and `(`.
+/// 2. `g( f( x ) )` / `uri_parse( to_absolute(...) )` should remove the space
+///    between `)` and `)`.
+/// 3. `warning(%(\n...\n))` must still require a space before the outer `)`
+///    because the inner `)` belongs to a percent-string delimiter, not a
+///    nested paren token.
+///
+/// Fix: for `compact`, opening-side collapse now only allows adjacent `((`
+/// and reports `"( ("` as extraneous space, while closing-side collapse only
+/// treats adjacent/spaced `))` as collapsible when the last inner child is
+/// itself a paren-carrying node. That matches RuboCop's token-based behavior
+/// without weakening ordinary string/literal cases.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -214,25 +233,25 @@ impl Cop for SpaceInsideParens {
             }
             "compact" => {
                 if !ignore_open_side {
-                    check_missing_open_space(
+                    check_compact_open_space(
                         self,
                         source,
                         diagnostics,
                         &mut corrections,
+                        open_end,
                         bytes,
                         open_side,
-                        true,
                     );
                 }
-                check_missing_close_space(
+                check_compact_close_space(
                     self,
                     source,
                     diagnostics,
                     &mut corrections,
+                    node,
                     bytes,
                     close_side,
                     close_start,
-                    true,
                 );
             }
             _ => {
@@ -638,6 +657,52 @@ fn check_missing_open_space(
     );
 }
 
+fn check_compact_open_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    open_end: usize,
+    bytes: &[u8],
+    open_side: NextSameLineItem,
+) {
+    let NextSameLineItem::Code(code_start) = open_side else {
+        return;
+    };
+
+    if bytes.get(code_start) == Some(&b'(') {
+        if code_start == open_end {
+            return;
+        }
+
+        push_remove_offense(
+            cop,
+            source,
+            diagnostics,
+            corrections,
+            open_end,
+            code_start,
+            MSG,
+        );
+        return;
+    }
+
+    if code_start == 0 {
+        return;
+    }
+    if bytes.get(code_start - 1) == Some(&b' ') {
+        return;
+    }
+    push_insert_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        code_start,
+        MSG_NO_SPACE,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_missing_close_space(
     cop: &SpaceInsideParens,
@@ -666,6 +731,103 @@ fn check_missing_close_space(
         close_start,
         MSG_NO_SPACE,
     );
+}
+
+fn check_compact_close_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node: &ruby_prism::Node<'_>,
+    bytes: &[u8],
+    close_side: Option<usize>,
+    close_start: usize,
+) {
+    let Some(prev_code) = close_side else {
+        return;
+    };
+
+    if bytes.get(prev_code) == Some(&b')')
+        && compact_allows_consecutive_close_paren(node, bytes, prev_code)
+    {
+        if prev_code + 1 == close_start {
+            return;
+        }
+
+        push_remove_offense(
+            cop,
+            source,
+            diagnostics,
+            corrections,
+            prev_code + 1,
+            close_start,
+            MSG,
+        );
+        return;
+    }
+
+    if prev_code + 1 != close_start {
+        return;
+    }
+
+    push_insert_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        close_start,
+        MSG_NO_SPACE,
+    );
+}
+
+fn compact_allows_consecutive_close_paren(
+    node: &ruby_prism::Node<'_>,
+    bytes: &[u8],
+    prev_code: usize,
+) -> bool {
+    let Some(last_inner) = last_compact_inner_node(node) else {
+        return false;
+    };
+
+    paren_offsets(&last_inner, bytes).is_some_and(|(_, _, inner_close)| inner_close == prev_code)
+}
+
+fn last_compact_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    if let Some(paren) = node.as_parentheses_node() {
+        let body = paren.body()?;
+        if let Some(stmts) = body.as_statements_node() {
+            return stmts.body().iter().last();
+        }
+        return Some(body);
+    }
+
+    if let Some(call) = node.as_call_node() {
+        return call
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(yield_node) = node.as_yield_node() {
+        return yield_node
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(super_node) = node.as_super_node() {
+        return super_node
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(pinned) = node.as_pinned_expression_node() {
+        return Some(pinned.expression());
+    }
+
+    if let Some(defined) = node.as_defined_node() {
+        return Some(defined.value());
+    }
+
+    None
 }
 
 fn push_remove_offense(
@@ -724,6 +886,11 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
+    crate::cop_variant_fixture_tests!(
+        SpaceInsideParens,
+        "cops/layout/space_inside_parens",
+        compact
+    );
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
 
     #[test]
