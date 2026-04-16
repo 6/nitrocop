@@ -73,6 +73,26 @@ use ruby_prism::Visit;
 ///    range_end` check fails.
 ///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
 ///    switched `heredoc_range_end()` to use it.
+///
+/// ## Corpus investigation (2026-04-16, tabs variant: FP=19, FN=10)
+///
+/// Nested heredoc closing delimiters inside an enclosing heredoc interpolation
+/// diverged in both directions under `EnforcedStyle: tabs`.
+///
+/// 1. **FP on inner closing delimiters**: lines like the inner `HTML` in
+///    `<<~OUTER ... #{<<~INNER ... INNER} ... OUTER` were flagged even though
+///    RuboCop suppresses them because their leading spaces are still inside the
+///    outer heredoc body range.
+///
+/// 2. **FN on outer closing delimiters**: the matching outer `OUTER` line was
+///    sometimes missed because `CodeMap::heredoc_range_end()` used a binary
+///    search that assumed raw heredoc ranges never overlap. Nested heredocs
+///    violate that assumption, so the lookup could resolve the wrong range.
+///
+/// Fix: make `heredoc_range_end()` return the OUTERMOST raw heredoc containing
+/// the line start. That mirrors RuboCop's `string_literal_ranges`: inner
+/// closing delimiters stay suppressed by the outer heredoc body, while the
+/// outer closing delimiter is still checked.
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {

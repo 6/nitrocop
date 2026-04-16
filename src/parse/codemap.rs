@@ -158,24 +158,31 @@ impl CodeMap {
         Self::in_ranges(&self.xstring_ranges, offset)
     }
 
-    /// Returns the end offset of the heredoc range containing `offset`, or None
-    /// if the offset is not inside a heredoc range.
+    /// Returns the end offset of the OUTERMOST heredoc range containing
+    /// `offset`, or None if the offset is not inside a heredoc range.
     /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
     /// heredocs, where adjacent ranges would otherwise merge and lose internal
     /// boundaries.
+    ///
+    /// This intentionally prefers the outermost containing range when heredocs
+    /// are nested via interpolation inside another heredoc. RuboCop suppresses
+    /// inner closing delimiters in that case because their indentation is still
+    /// inside the outer heredoc body, but still checks the outer closing
+    /// delimiter itself.
     pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
-        self.raw_heredoc_ranges
-            .binary_search_by(|&(start, end)| {
-                if offset < start {
-                    std::cmp::Ordering::Greater
-                } else if offset >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .map(|idx| self.raw_heredoc_ranges[idx].1)
+        let mut range_end: Option<usize> = None;
+
+        for &(start, end) in &self.raw_heredoc_ranges {
+            if start > offset {
+                break;
+            }
+
+            if offset < end {
+                range_end = Some(range_end.map_or(end, |current_end| current_end.max(end)));
+            }
+        }
+
+        range_end
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation
