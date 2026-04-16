@@ -23,6 +23,12 @@
 ///   an index/reference expression like `html_options[:class]` also collapses
 ///   against the outer closing bracket. Fixed by letting compact adjacency scans
 ///   skip newline whitespace while still excluding `%w/%i/%W/%I` delimiters.
+/// - compact follow-up (2026-04-16): RuboCop never reaches this cop in
+///   non-UTF-8 regex-escape files such as jruby's `test_windows_1252.rb`; it
+///   emits only `Lint/Syntax` there. nitrocop still parsed the trailing array
+///   literals and reported compact-style offenses. Fixed by skipping files with
+///   a non-UTF-8 encoding comment and regex literals containing invalid high-bit
+///   `\xHH` escape runs.
 use crate::cop::shared::node_type::{ARRAY_NODE, ARRAY_PATTERN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
@@ -52,6 +58,10 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
         diagnostics: &mut Vec<Diagnostic>,
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        if rubocop_skips_non_utf8_regex_escape_file(source) {
+            return;
+        }
+
         let (opening, closing, is_array_pattern) = if let Some(array) = node.as_array_node() {
             match (array.opening_loc(), array.closing_loc()) {
                 (Some(o), Some(c)) => (o, c, false),
@@ -586,6 +596,227 @@ fn begins_its_line_raw(bytes: &[u8], pos: usize) -> bool {
     }
 }
 
+fn rubocop_skips_non_utf8_regex_escape_file(source: &SourceFile) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    has_non_utf8_encoding_comment(&lines)
+        && lines
+            .iter()
+            .copied()
+            .any(line_contains_high_hex_escape_in_regex_literal)
+}
+
+fn has_non_utf8_encoding_comment(lines: &[&[u8]]) -> bool {
+    let mut idx = 0;
+
+    if idx < lines.len() && starts_with_shebang(lines[idx]) {
+        idx += 1;
+    }
+
+    while idx < lines.len() && is_blank_line(lines[idx]) {
+        idx += 1;
+    }
+
+    let Some(line) = lines.get(idx) else {
+        return false;
+    };
+    if !is_encoding_comment(line) {
+        return false;
+    }
+
+    let lower = normalized_ascii_string(line).to_ascii_lowercase();
+    let Some(keyword_idx) = lower.find("encoding").or_else(|| lower.find("coding")) else {
+        return false;
+    };
+    let after_keyword = &lower[keyword_idx..];
+    let value = after_keyword
+        .split_once([':', '='])
+        .map(|(_, rhs)| rhs.trim_start())
+        .unwrap_or("");
+    let enc_name: String = value
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .collect();
+
+    if enc_name.is_empty() {
+        return false;
+    }
+
+    !(enc_name == "utf"
+        || enc_name == "utf8"
+        || enc_name.starts_with("utf-8")
+        || enc_name.starts_with("utf_8")
+        || enc_name == "binary"
+        || enc_name.starts_with("ascii-8bit")
+        || enc_name.starts_with("ascii_8bit")
+        || enc_name == "us-ascii"
+        || enc_name == "ascii")
+}
+
+fn starts_with_shebang(line: &[u8]) -> bool {
+    normalized_ascii_bytes(line).starts_with(b"#!")
+}
+
+fn is_blank_line(line: &[u8]) -> bool {
+    first_non_padding_byte(line).is_none()
+}
+
+fn first_non_padding_byte(line: &[u8]) -> Option<u8> {
+    line.iter()
+        .copied()
+        .filter(|&b| b != 0x00)
+        .find(|&b| b != b' ' && b != b'\t' && b != b'\r')
+}
+
+fn is_encoding_comment(line: &[u8]) -> bool {
+    let s = normalized_ascii_string(line);
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with("# encoding:") || lower.starts_with("# coding:") {
+        return true;
+    }
+    if lower.starts_with("# -*-") {
+        return lower.contains("encoding") || lower.contains("coding");
+    }
+    false
+}
+
+fn normalized_ascii_string(line: &[u8]) -> String {
+    String::from_utf8(normalized_ascii_bytes(line)).expect("ASCII normalization must stay ASCII")
+}
+
+fn normalized_ascii_bytes(line: &[u8]) -> Vec<u8> {
+    line.iter()
+        .copied()
+        .filter(|&b| b != 0x00 && b.is_ascii())
+        .collect()
+}
+
+fn line_contains_high_hex_escape_in_regex_literal(line: &[u8]) -> bool {
+    let mut start = 0;
+
+    while start < line.len() {
+        let Some(open_idx) = line[start..].iter().position(|&byte| byte == b'/') else {
+            return false;
+        };
+        let slash_idx = start + open_idx;
+        if !looks_like_regex_open(line, slash_idx) {
+            start = slash_idx + 1;
+            continue;
+        }
+
+        let body_start = slash_idx + 1;
+        let mut idx = body_start;
+        let mut escaped = false;
+
+        while idx < line.len() {
+            let byte = line[idx];
+
+            if escaped {
+                escaped = false;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'\\' {
+                escaped = true;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'/' {
+                if contains_non_utf8_hex_escape(&line[body_start..idx]) {
+                    return true;
+                }
+                start = idx + 1;
+                break;
+            }
+
+            idx += 1;
+        }
+
+        if idx >= line.len() {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn looks_like_regex_open(line: &[u8], slash_idx: usize) -> bool {
+    let prev = line[..slash_idx]
+        .iter()
+        .rfind(|&&byte| !byte.is_ascii_whitespace())
+        .copied();
+
+    !matches!(
+        prev,
+        Some(
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b')'
+            | b']'
+            | b'}'
+            | b'"'
+            | b'\''
+            | b'/',
+        )
+    )
+}
+
+fn contains_non_utf8_hex_escape(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < body.len() {
+        if body[i] == b'\\' && body[i + 1] == b'x' {
+            let (d1, d2) = (body[i + 2], body[i + 3]);
+            if d1.is_ascii_hexdigit() && d2.is_ascii_hexdigit() {
+                let byte = hex_pair_to_byte(d1, d2);
+                if byte >= 0x80 {
+                    let mut bytes = vec![byte];
+                    let mut j = i + 4;
+                    while j + 3 < body.len()
+                        && body[j] == b'\\'
+                        && body[j + 1] == b'x'
+                        && body[j + 2].is_ascii_hexdigit()
+                        && body[j + 3].is_ascii_hexdigit()
+                    {
+                        let next = hex_pair_to_byte(body[j + 2], body[j + 3]);
+                        if next >= 0x80 {
+                            bytes.push(next);
+                            j += 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    if std::str::from_utf8(&bytes).is_err() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 4;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn hex_pair_to_byte(h1: u8, h2: u8) -> u8 {
+    hex_digit_val(h1) * 16 + hex_digit_val(h2)
+}
+
+fn hex_digit_val(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -740,6 +971,19 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.message.contains("detected")),
             "multiline ] after a reference bracket should collapse under compact style"
+        );
+    }
+
+    #[test]
+    fn compact_skips_non_utf8_regex_escape_files() {
+        use crate::testutil::run_cop_full_with_config;
+
+        let src = b"# encoding:windows-1252\nassert_match(/^[\\xdfz]+$/i, \"sszzsszz\")\na = [0x8a, 0x8c]\n";
+        let diags =
+            run_cop_full_with_config(&SpaceInsideArrayLiteralBrackets, src, compact_config());
+        assert!(
+            diags.is_empty(),
+            "RuboCop only emits Lint/Syntax for non-UTF-8 regex escape files"
         );
     }
 }
