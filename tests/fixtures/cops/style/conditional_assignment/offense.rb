@@ -161,3 +161,69 @@ end
 # ternary with local variable assignment (FN case)
 opts[:response_timeout].nil? ? response_timeout = 0.9 : response_timeout = opts[:response_timeout].to_f
 ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+# FN: nested if/elsif/else with shovel assignment should ignore branch indentation
+module ApplicationHelper
+  def custom_pagy_nav(pagy)
+    html = '<div class="flex items-center gap-2">'
+    pagy.series.each do |item|
+      if item.to_s == pagy.page.to_s
+      ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+        html << link_to(item, url_for(page: item), class: "btn btn-sm btn-neutral min-w-[2.5rem] pointer-events-none")
+      elsif item.to_s == "gap"
+        html << link_to("…", url_for(page: item), class: "btn btn-sm btn-ghost min-w-[2.5rem] pointer-events-none btn-disabled")
+      else
+        html << link_to(item, url_for(page: item), class: "btn btn-sm btn-ghost min-w-[2.5rem]")
+      end
+    end
+  end
+end
+
+# FN: nested setter assignment should ignore branch indentation in line-length checks
+module MassiveRecord
+  module Adapters
+    module Thrift
+      class Scanner
+        def open
+          if created_at.empty?
+          ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+            self.opened_scanner = connection.scannerOpen(table_name, key, formatted_column_family_names, {})
+          else
+            self.opened_scanner = connection.scannerOpenTs(table_name, key, formatted_column_family_names, created_at, {})
+          end
+        end
+      end
+    end
+  end
+end
+
+# FN: nested index setter assignment inside an outer else branch should still be flagged
+class Skyline::PublishedPublicationsController < Skyline::ApplicationController
+  def destroy
+    if @article.depublishable?
+      @article.depublish
+      messages[:success] = t(:success, :scope => [:published_publication, @article.class, :destroy, :flashes])
+    else
+      if @article.persistent?
+      ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+        notifications[:error] = t(:error_persistent, :scope => [:published_publication, @article.class, :destroy, :flashes])
+      else
+        notifications[:error] = t(:error, :scope => [:published_publication, @article.class, :destroy, :flashes])
+      end
+    end
+  end
+end
+
+# FN: nested local variable assignment with a long RHS should ignore branch indentation
+module ScumblrTask
+  class Base
+    def create_event(event, level = "Error")
+      if(event.respond_to?(:message))
+      ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+        details = "An error occurred in #{self.class.task_type_name}. Error: #{event.try(:message)}\n\n#{event.try(:backtrace)}"
+      else
+        details = event.to_s
+      end
+    end
+  end
+end
