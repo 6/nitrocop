@@ -119,6 +119,14 @@ def infer_config_directive(variant_label: str) -> str:
     return f"# nitrocop-config: EnforcedStyle: {variant_label}"
 
 
+MIN_FN_SNIPPET_LINES = 2
+"""Minimum lines for an FN snippet to be valid as an offense fixture.
+
+Corpus FN examples are often just the first line of a multi-line construct
+(e.g., a bare `if` without the body/else/end). These incomplete single-line
+fragments can't trigger the cop and cause fixture test failures."""
+
+
 def normalize_fixture_snippet(source: str) -> str:
     """Trim noisy boundary lines from extracted corpus snippets.
 
@@ -160,6 +168,9 @@ def prepopulate(task_path: Path, cop: str, fixture_dir: Path) -> dict:
             for ex in fn_examples:
                 snippet = normalize_fixture_snippet(ex["source"])
                 if not snippet:
+                    continue
+                # Skip snippets too short to be valid offense fixtures
+                if snippet.count("\n") + 1 < MIN_FN_SNIPPET_LINES:
                     continue
                 f.write(f"\n{snippet}\n")
                 fn_added += 1
@@ -209,8 +220,11 @@ def prepopulate(task_path: Path, cop: str, fixture_dir: Path) -> dict:
                 snippets = []
                 for src in examples["fn"][:5]:
                     snippet = normalize_fixture_snippet(src)
-                    if snippet:
-                        snippets.append(snippet)
+                    if not snippet:
+                        continue
+                    if snippet.count("\n") + 1 < MIN_FN_SNIPPET_LINES:
+                        continue
+                    snippets.append(snippet)
                 if snippets:
                     header = (
                         f"{config_directive}\n"

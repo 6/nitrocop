@@ -52,6 +52,21 @@ super { |x| x.foo }
 ```
 """
 
+TASK_WITH_SHORT_FN = """
+# Fix Style/Foo — 0 FP, 2 FN
+
+## Pre-diagnostic Results
+
+### FN #1: `repo: file.rb:5`
+**NOT DETECTED — CODE BUG**
+The cop fails to detect this pattern. Fix the detection logic.
+
+Ready-made test snippet (add to offense.rb, adjust `^` count):
+```ruby
+if item.to_s == pagy.page.to_s
+```
+"""
+
 TASK_WITH_CONFIG_ONLY = """
 # Fix Style/Bar — 0 FP, 1 FN
 
@@ -224,7 +239,9 @@ TASK_WITH_VARIANT_EXAMPLES = """
 - `SomeRepo: file.rb:10`
   Message: Prefer `do...end` over `{...}` for procedural blocks.
   ```ruby
-  items.each { |x| puts x }
+  items.each { |x|
+    puts x
+  }
   ```
 
 ### Style: `always_braces`
@@ -295,7 +312,7 @@ def test_variant_fn_creates_offense_fixture():
         assert semantic_off.exists(), "offense.semantic.rb should be created"
         content = semantic_off.read_text()
         assert content.startswith("# nitrocop-config: EnforcedStyle: semantic")
-        assert "items.each { |x| puts x }" in content
+        assert "items.each { |x|" in content
         assert "TODO" in content  # should note annotations needed
 
 
@@ -328,6 +345,19 @@ def test_variant_fixtures_not_overwritten():
         assert "items.map" not in content
 
 
+def test_short_fn_snippets_skipped():
+    """Single-line FN snippets are too short to be valid offense fixtures."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        make_fixtures(tmp)
+        task = tmp / "task.md"
+        task.write_text(TASK_WITH_SHORT_FN)
+        result = prepopulate_fixtures.prepopulate(task, "Style/Foo", tmp)
+        assert result["fn_added"] == 0
+        content = (tmp / "offense.rb").read_text()
+        assert "pagy" not in content
+
+
 def test_variant_no_examples_no_files():
     """Task without variant examples creates no variant files."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -348,6 +378,7 @@ if __name__ == "__main__":
     test_mixed_fp_and_fn()
     test_empty_task()
     test_fp_noise_is_not_written_into_no_offense()
+    test_short_fn_snippets_skipped()
     test_variant_fp_creates_no_offense_fixture()
     test_variant_fn_creates_offense_fixture()
     test_variant_multi_param_skipped()
