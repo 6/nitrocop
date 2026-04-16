@@ -431,6 +431,44 @@ impl<'a> Engine<'a> {
             }
         }
     }
+
+    fn declare_and_assign_for_targets(&mut self, node: &ruby_prism::Node<'_>) {
+        struct TargetCollector {
+            targets: Vec<(Vec<u8>, usize)>,
+        }
+
+        impl<'pr> ruby_prism::Visit<'pr> for TargetCollector {
+            fn visit_local_variable_target_node(
+                &mut self,
+                node: &ruby_prism::LocalVariableTargetNode<'pr>,
+            ) {
+                self.targets.push((
+                    node.name().as_slice().to_vec(),
+                    node.location().start_offset(),
+                ));
+            }
+
+            fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'_>) {}
+            fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'_>) {}
+            fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'_>) {}
+        }
+
+        let mut collector = TargetCollector {
+            targets: Vec::new(),
+        };
+        collector.visit(node);
+
+        for (name, offset) in collector.targets {
+            if !self.table.variable_exists(&name) {
+                self.declare_variable(name.clone(), offset, DeclarationKind::ForIndex);
+            }
+
+            let mut assignment = Assignment::new(offset, AssignmentKind::For);
+            assignment.in_branch = self.branch_depth > 0;
+            assignment.branch_id = self.current_branch_id();
+            self.table.assign_to_variable(&name, assignment);
+        }
+    }
 }
 
 // ── Prism Visitor ──────────────────────────────────────────────────────
@@ -919,6 +957,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         ruby_prism::visit_in_node(self, node);
     }
 
+    fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
+        // `expr => pattern` creates local variables that remain visible in the
+        // surrounding scope. Declare them before visiting descendants so later
+        // reads in the same method can resolve them through VariableTable.
+        declare_and_assign_pattern_targets(self, &node.pattern());
+        ruby_prism::visit_match_required_node(self, node);
+    }
+
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
         let parent_id = node.location().start_offset();
         if let Some(pred) = node.predicate() {
@@ -1208,19 +1254,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
         self.visit(&node.collection());
         let index = node.index();
-        if let Some(target) = index.as_local_variable_target_node() {
-            let name = target.name().as_slice().to_vec();
-            let offset = target.location().start_offset();
-            if !self.table.variable_exists(&name) {
-                self.declare_variable(name.clone(), offset, DeclarationKind::ForIndex);
-            }
-            let mut a = Assignment::new(offset, AssignmentKind::For);
-            a.in_branch = self.branch_depth > 0;
-            a.branch_id = self.current_branch_id();
-            self.table.assign_to_variable(&name, a);
-        } else {
-            self.visit(&index);
-        }
+        self.declare_and_assign_for_targets(&index);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
