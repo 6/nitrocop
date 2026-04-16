@@ -219,6 +219,9 @@ impl<'a> TrivialAccessorsVisitor<'a> {
         if let Some(ivar_read) = single_stmt.as_instance_variable_read_node() {
             let ivar_name = ivar_read.name();
             let ivar_bytes = ivar_name.as_slice();
+            if ivar_bytes.len() <= 1 {
+                return;
+            }
             let ivar_without_at = &ivar_bytes[1..];
 
             // Skip if method has any parameters (requireds, optionals, rest,
@@ -259,6 +262,9 @@ impl<'a> TrivialAccessorsVisitor<'a> {
         if let Some(ivar_write) = single_stmt.as_instance_variable_write_node() {
             let ivar_name = ivar_write.name();
             let ivar_bytes = ivar_name.as_slice();
+            if ivar_bytes.len() <= 1 {
+                return;
+            }
             let ivar_without_at = &ivar_bytes[1..];
 
             let is_setter = name_bytes.ends_with(b"=");
@@ -368,4 +374,13 @@ impl<'pr> Visit<'pr> for TrivialAccessorsVisitor<'_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(TrivialAccessors, "cops/style/trivial_accessors");
+
+    #[test]
+    fn no_panic_on_bare_at_ivar() {
+        // Fuzz crash: Prism produces InstanceVariableReadNode with name :"@"
+        // (bare @ with no identifier) on malformed input. Previously panicked
+        // on `&ivar_bytes[1..]` when ivar_bytes was only 1 byte.
+        let source = b"*o(\n@";
+        let _diags = crate::testutil::run_cop_full(&TrivialAccessors, source);
+    }
 }
