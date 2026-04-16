@@ -58,13 +58,14 @@ on:
           - minimax
         default: codex
       mode:
-        description: 'Mode passed to agent-cop-fix (auto = fix for ≤500 divergence, reduce for >500)'
+        description: 'Mode passed to agent-cop-fix (auto = fix for ≤500 divergence, reduce for >500, per-variant = one dispatch per diverging variant)'
         type: choice
         options:
           - auto
           - fix
           - retry
           - reduce
+          - per-variant
         default: auto
       delay:
         description: 'Minutes to wait before dispatching (0 = immediate)'

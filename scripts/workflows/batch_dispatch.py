@@ -178,6 +178,8 @@ def main() -> int:
 
     # ── Print selection ────────────────────────────────────────────────
     def _cop_mode(cop_entry: dict) -> str:
+        if mode == "per-variant":
+            return "per-variant"
         if mode == "auto":
             total = cop_entry["fp"] + cop_entry["fn"]
             return "reduce" if total > REDUCE_MODE_THRESHOLD else "fix"
@@ -194,30 +196,71 @@ def main() -> int:
     dispatched = 0
     failed = 0
 
-    for c in cops:
-        cop = c["cop"]
-        cop_mode = _cop_mode(c)
-        issue_num = cop_issues.get(cop)
-        issue_suffix = f", issue #{issue_num}" if issue_num else ""
-        print(f"Dispatching: {cop} ({backend}, {cop_mode}{issue_suffix})...",
-              end=" ", flush=True)
-        cmd = [
-            "gh", "workflow", "run", "agent-cop-fix.yml",
-            "-f", f"cop={cop}",
-            "-f", f"backend={backend}",
-            "-f", f"mode={cop_mode}",
-        ]
-        if issue_num:
-            cmd += ["-f", f"issue_number={issue_num}"]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode == 0:
-            dispatched += 1
-            print("ok")
-        else:
-            failed += 1
-            print(f"FAILED: {r.stderr.strip()}")
-        # Small delay to avoid GitHub rate limits
-        time.sleep(1)
+    if mode == "per-variant":
+        # Per-variant mode: for each cop, load variant data and dispatch
+        # one workflow per diverging variant instead of one per cop.
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from dispatch_cops import load_variant_data_for_cop  # noqa: E402
+
+        for c in cops:
+            cop = c["cop"]
+            issue_num = cop_issues.get(cop)
+            variants = load_variant_data_for_cop(cop)
+            diverging = [v for v in variants if v["fp"] + v["fn"] > 0]
+
+            if not diverging:
+                print(f"Skipping {cop}: no diverging variants found")
+                continue
+
+            for v in diverging:
+                label = v.get("style_label", "?")
+                issue_suffix = f", issue #{issue_num}" if issue_num else ""
+                print(
+                    f"Dispatching: {cop} variant={label} ({backend}, fix{issue_suffix})...",
+                    end=" ", flush=True,
+                )
+                cmd = [
+                    "gh", "workflow", "run", "agent-cop-fix.yml",
+                    "-f", f"cop={cop}",
+                    "-f", f"backend={backend}",
+                    "-f", "mode=fix",
+                    "-f", f"variant={label}",
+                ]
+                if issue_num:
+                    cmd += ["-f", f"issue_number={issue_num}"]
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode == 0:
+                    dispatched += 1
+                    print("ok")
+                else:
+                    failed += 1
+                    print(f"FAILED: {r.stderr.strip()}")
+                time.sleep(1)
+    else:
+        for c in cops:
+            cop = c["cop"]
+            cop_mode = _cop_mode(c)
+            issue_num = cop_issues.get(cop)
+            issue_suffix = f", issue #{issue_num}" if issue_num else ""
+            print(f"Dispatching: {cop} ({backend}, {cop_mode}{issue_suffix})...",
+                  end=" ", flush=True)
+            cmd = [
+                "gh", "workflow", "run", "agent-cop-fix.yml",
+                "-f", f"cop={cop}",
+                "-f", f"backend={backend}",
+                "-f", f"mode={cop_mode}",
+            ]
+            if issue_num:
+                cmd += ["-f", f"issue_number={issue_num}"]
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                dispatched += 1
+                print("ok")
+            else:
+                failed += 1
+                print(f"FAILED: {r.stderr.strip()}")
+            # Small delay to avoid GitHub rate limits
+            time.sleep(1)
 
     print(f"\nDispatched {dispatched}/{len(cops)}"
           + (f" ({failed} failed)" if failed else ""))

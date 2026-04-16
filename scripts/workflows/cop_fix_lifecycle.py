@@ -134,15 +134,24 @@ def snake_case(s: str) -> str:
     return s.lower()
 
 
-def cop_identifiers(cop: str) -> dict[str, str]:
-    """Compute branch/filter identifiers from a cop name like Style/NegatedWhile."""
+def cop_identifiers(cop: str, *, variant: str = "") -> dict[str, str]:
+    """Compute branch/filter identifiers from a cop name like Style/NegatedWhile.
+
+    When variant is set, the branch prefix includes the variant name to avoid
+    collisions with full-cop or other variant-scoped PRs.
+    """
     dept, name = cop.split("/", 1)
     dept_dir = DEPT_MAP.get(dept, snake_case(dept))
     cop_snake = snake_case(name)
+    if variant:
+        variant_slug = re.sub(r"[^a-z0-9]+", "_", variant.lower()).strip("_")
+        branch_prefix = f"fix/{dept_dir}-{cop_snake}-variant-{variant_slug}"
+    else:
+        branch_prefix = f"fix/{dept_dir}-{cop_snake}"
     return {
         "dept_dir": dept_dir,
         "cop_snake": cop_snake,
-        "branch_prefix": f"fix/{dept_dir}-{cop_snake}",
+        "branch_prefix": branch_prefix,
         "filter": f"cop::{dept_dir}::{cop_snake}",
     }
 
@@ -171,9 +180,10 @@ def cmd_init(args: list[str]) -> int:
     p.add_argument("--backend-input", required=True)
     p.add_argument("--strength-input", default="hard")  # kept for compat, always hard
     p.add_argument("--run-id", required=True)
+    p.add_argument("--variant", default="")
     opts = p.parse_args(args)
 
-    ids = cop_identifiers(opts.cop)
+    ids = cop_identifiers(opts.cop, variant=opts.variant)
     branch = f"{ids['branch_prefix']}-{opts.run_id}"
 
     _output("branch_prefix", ids["branch_prefix"])
@@ -181,8 +191,11 @@ def cmd_init(args: list[str]) -> int:
     _output("filter", ids["filter"])
     _output("dept_dir", ids["dept_dir"])
     _output("cop_snake", ids["cop_snake"])
+    if opts.variant:
+        _output("variant", opts.variant)
 
-    _notice(f"{opts.mode.title()} cop: {opts.cop} (backend input: {opts.backend_input})")
+    variant_note = f", variant: {opts.variant}" if opts.variant else ""
+    _notice(f"{opts.mode.title()} cop: {opts.cop} (backend input: {opts.backend_input}{variant_note})")
     return 0
 
 
@@ -498,20 +511,23 @@ def cmd_claim_pr(args: list[str]) -> int:
     p.add_argument("--issue-number", default="")
     p.add_argument("--code-bugs", required=True)
     p.add_argument("--tokens", required=True)
+    p.add_argument("--variant", default="")
     opts = p.parse_args(args)
 
     task_file = _env_path("TASK_FILE")
     claim_body_file = _env_path("CLAIM_BODY_FILE")
 
-    # Check for existing PR
+    # Check for existing PR (variant-scoped PRs have distinct titles)
+    variant_suffix = f" (variant: {opts.variant})" if opts.variant else ""
+    search_title = f"[bot] Fix {opts.cop}{variant_suffix}"
     r = _run_ok([
         "gh", "pr", "list", "--state", "open",
-        "--search", f"[bot] Fix {opts.cop} in:title",
+        "--search", f"{search_title} in:title",
         "--json", "number,title,url", "--jq", ".[0].url // empty",
     ])
     existing = r.stdout.strip() if r.returncode == 0 else ""
     if existing:
-        _error(f"Skipping {opts.cop} — PR already open: {existing}")
+        _error(f"Skipping {opts.cop}{variant_suffix} — PR already open: {existing}")
         return 1
 
     # Create branch via API
@@ -549,11 +565,12 @@ def cmd_claim_pr(args: list[str]) -> int:
     )
     write_and_read(claim_body_file, body)
 
+    pr_title = f"[bot] Fix {opts.cop}{variant_suffix}{mode_note}"
     pr_cmd = [
         "gh", "pr", "create",
         "--draft", "--base", "main", "--head", opts.branch,
         "--label", f"type:cop-fix,{model_label_name}",
-        "--title", f"[bot] Fix {opts.cop}{mode_note}",
+        "--title", pr_title,
         "--body-file", str(claim_body_file),
     ]
     # Retry: the branch was just created via API and may not be visible yet

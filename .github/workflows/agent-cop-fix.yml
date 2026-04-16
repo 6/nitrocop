@@ -1,7 +1,9 @@
 name: Agent Cop Fix
 
 run-name: >-
-  Agent Cop Fix: ${{ github.event.inputs.cop }} (${{ github.event.inputs.mode }})
+  Agent Cop Fix: ${{ github.event.inputs.cop }}${{
+    github.event.inputs.variant && format(' [{0}]', github.event.inputs.variant) || ''
+  }} (${{ github.event.inputs.mode }})
 
 permissions:
   contents: write
@@ -38,6 +40,10 @@ on:
         type: string
       extra_context:
         description: 'Additional instructions for the agent (optional)'
+        required: false
+        type: string
+      variant:
+        description: 'Optional: scope to a single EnforcedStyle variant (e.g., comma, semantic)'
         required: false
         type: string
 
@@ -95,6 +101,7 @@ jobs:
             --mode "${{ github.event.inputs.mode }}" \
             --backend-input "${{ github.event.inputs.backend }}" \
             --run-id "${{ github.run_id }}" \
+            --variant "${{ github.event.inputs.variant }}" \
             >> "$GITHUB_OUTPUT"
 
       # --- App token (needed for push + PR creation as 6[bot]) ---
@@ -118,10 +125,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          VARIANT_ARG=""
+          if [ -n "${{ github.event.inputs.variant }}" ]; then
+            VARIANT_ARG="--variant ${{ github.event.inputs.variant }}"
+          fi
           python3 scripts/dispatch_cops.py task \
             "${{ github.event.inputs.cop }}" \
             --binary target/debug/nitrocop \
-            --output "$TASK_FILE"
+            --output "$TASK_FILE" \
+            $VARIANT_ARG
           echo "=== Task prompt stats ==="
           wc -l "$TASK_FILE"
           grep -c "CODE BUG\|CONFIG/CONTEXT\|CONFIRMED\|NOT REPRODUCED" "$TASK_FILE" || echo "no diagnostics"
@@ -208,6 +220,7 @@ jobs:
             --issue-number "${{ github.event.inputs.issue_number }}" \
             --code-bugs "${{ steps.task.outputs.code_bugs }}" \
             --tokens "${{ steps.task.outputs.tokens }}" \
+            --variant "${{ github.event.inputs.variant }}" \
             >> "$GITHUB_OUTPUT"
 
       - name: Build prompt

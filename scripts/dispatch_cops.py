@@ -1631,8 +1631,15 @@ def generate_task(
     cop: str,
     input_path: Path | None = None,
     binary_path: Path | None = None,
+    *,
+    variant_filter: str | None = None,
 ) -> str:
-    """Generate the full task markdown for a cop."""
+    """Generate the full task markdown for a cop.
+
+    When variant_filter is set, the task is scoped to a single EnforcedStyle
+    variant. The agent receives only that variant's FP/FN examples and is
+    instructed not to regress the default config or other variants.
+    """
     if cop in BLOCKED_COPS:
         reason = BLOCKED_COPS[cop]
         print(f"Error: {cop} is blocked from agent dispatch: {reason}", file=sys.stderr)
@@ -1697,11 +1704,31 @@ def generate_task(
     # Load variant data early for title/framing
     variants = load_variant_data_for_cop(cop)
     diverging_variants = [v for v in variants if v["fp"] + v["fn"] > 0]
+
+    # When scoped to a single variant, filter down to just that variant.
+    if variant_filter:
+        matched = [
+            v for v in diverging_variants
+            if variant_filter.lower() in v.get("style_label", "").lower()
+        ]
+        if not matched:
+            print(
+                f"Warning: variant filter '{variant_filter}' matched no diverging variants. "
+                f"Available: {[v.get('style_label', '?') for v in diverging_variants]}",
+                file=sys.stderr,
+            )
+        diverging_variants = matched
+
     default_perfect = corpus.get("fp", 0) + corpus.get("fn", 0) == 0
     variant_fp = sum(v["fp"] for v in diverging_variants)
     variant_fn = sum(v["fn"] for v in diverging_variants)
 
-    if default_perfect and diverging_variants:
+    if variant_filter and diverging_variants:
+        label = diverging_variants[0].get("style_label", variant_filter)
+        parts.append(
+            f"# Fix {cop} — variant `{label}`: {variant_fp:,} FP, {variant_fn:,} FN\n"
+        )
+    elif default_perfect and diverging_variants:
         parts.append(f"# Fix {cop} — variant divergence: {variant_fp:,} FP, {variant_fn:,} FN\n")
     else:
         parts.append(f"# Fix {cop} — {corpus['fp']} FP, {corpus['fn']} FN\n")
@@ -1842,6 +1869,30 @@ You are fixing ONE cop in **nitrocop**, a Rust Ruby linter that uses Prism for p
 Mark offenses with `^` markers on the line AFTER the offending source line.
 The `^` characters must align with the offending columns. The message format is `{cop}: <message text>`.
 See the **Current Fixture** sections below for real examples from this cop.""")
+
+    # Variant-scoped constraint: tell the agent exactly what it's fixing and what it must not break.
+    if variant_filter and diverging_variants:
+        label = diverging_variants[0].get("style_label", variant_filter)
+        params = _infer_variant_style_params(diverging_variants[0])
+        style_arg = f"--style {params[0][0]}={params[0][1]}" if len(params) == 1 else ""
+        parts.append(f"""
+### ⚠ Variant-Scoped Task
+
+You are fixing ONLY the `{label}` variant of this cop.
+
+**Rules:**
+- Your changes MUST NOT regress the default config or any other variant.
+- Focus exclusively on the FP/FN examples shown in the variant section below.
+- Use `# nitrocop-config:` directives in fixture files to test this variant specifically.
+- Validate with:{f'''
+  ```bash
+  python3 scripts/check_cop.py {cop} --rerun --clone --sample 15 {style_arg}
+  ```''' if style_arg else ' CI `--check-variants` (this is a multi-param variant).'}
+- Also confirm the default config is not regressed:
+  ```bash
+  python3 scripts/check_cop.py {cop} --rerun --clone --sample 15
+  ```
+""")
 
     # Add diagnostic-aware guidance
     # Check if config issues are FP-only (likely config-resolution bugs in nitrocop)
@@ -3376,6 +3427,11 @@ def main():
     task_parser.add_argument("--output", "-o", type=Path, help="Output file path (default: stdout)")
     task_parser.add_argument("--input", type=Path, help="Path to corpus-results.json")
     task_parser.add_argument("--binary", type=Path, help="Path to nitrocop binary for pre-diagnostic classification")
+    task_parser.add_argument(
+        "--variant",
+        type=str,
+        help="Scope task to a single EnforcedStyle variant (e.g., comma, semantic)",
+    )
 
     changed_parser = subparsers.add_parser("changed", help="Detect cops changed between two refs")
     changed_parser.add_argument("--base", default="origin/main", help="Base ref")
@@ -3447,7 +3503,7 @@ def main():
 
     if args.command == "task":
         binary = args.binary.resolve() if args.binary else None
-        task = generate_task(args.cop, args.input, binary)
+        task = generate_task(args.cop, args.input, binary, variant_filter=args.variant)
         if args.output:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(task)

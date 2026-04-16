@@ -59,6 +59,20 @@ def test_cop_identifiers_metrics():
     assert ids["cop_snake"] == "abc_size"
 
 
+def test_cop_identifiers_with_variant():
+    ids = cop_fix_lifecycle.cop_identifiers("Style/BlockDelimiters", variant="semantic")
+    assert ids["dept_dir"] == "style"
+    assert ids["cop_snake"] == "block_delimiters"
+    assert ids["branch_prefix"] == "fix/style-block_delimiters-variant-semantic"
+    assert ids["filter"] == "cop::style::block_delimiters"
+
+
+def test_cop_identifiers_variant_empty_string():
+    """Empty variant string behaves the same as no variant."""
+    ids = cop_fix_lifecycle.cop_identifiers("Style/BlockDelimiters", variant="")
+    assert ids["branch_prefix"] == "fix/style-block_delimiters"
+
+
 # ── cmd_init ────────────────────────────────────────────────────────────
 
 def test_init_outputs(tmp_path):
@@ -819,6 +833,8 @@ if __name__ == "__main__":
     test_cop_identifiers_rspec()
     test_cop_identifiers_factory_bot()
     test_cop_identifiers_metrics()
+    test_cop_identifiers_with_variant()
+    test_cop_identifiers_variant_empty_string()
     test_build_claim_body_with_issue()
     test_build_claim_body_without_issue()
     test_build_task_body()

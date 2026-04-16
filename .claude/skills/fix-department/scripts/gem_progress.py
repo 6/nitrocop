@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
+
 """Gem conformance progress report from corpus oracle results.
 
 Shows per-gem conformance status to help prioritize which gem to bring
@@ -421,7 +422,7 @@ def print_summary(gems: dict[str, dict], run_date: str, summary: dict, has_regis
         quickest_name, quickest = min(candidates, key=lambda x: x[1]["diverging"])
         if quickest_name != best_name:
             print(f"  Quickest win: {quickest_name} ({quickest['diverging']} diverging) — least work to complete")
-        print(f"  Note: No remaining gem has 0 untested cops — true 100% needs all cops to trigger on corpus.")
+        print("  Note: No remaining gem has 0 untested cops — true 100% needs all cops to trigger on corpus.")
 
     # Show quick-win info
     if best["fp_only"] > 0:
@@ -584,7 +585,7 @@ def print_gem_detail(gem_name: str, gems: dict[str, dict], run_date: str,
                 if s.get("fn", 0) > 0:
                     parts.append(f"FN={s['fn']}")
                 print(f"  {s['cop']:<{cop_w}}  {' '.join(parts)}")
-            print(f"  (Investigate via bench/synthetic/synthetic-results.json, source at bench/synthetic/project/)")
+            print("  (Investigate via bench/synthetic/synthetic-results.json, source at bench/synthetic/project/)")
             print()
 
     # Strategy recommendation
@@ -611,7 +612,7 @@ def print_gem_detail(gem_name: str, gems: dict[str, dict], run_date: str,
                 print(f"  Note: All corpus-tested cops are perfect, but {g['untested']} cops never triggered.")
             else:
                 print(f"  Note: {g['untested']} cops have no corpus data — cannot claim full 100% until they're exercised.")
-            print(f"  These cops may be correct but are unverified against real-world code.")
+            print("  These cops may be correct but are unverified against real-world code.")
     else:
         print("This gem is at 100% corpus conformance! All cops tested and verified.")
 
