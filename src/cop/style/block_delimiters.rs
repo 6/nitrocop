@@ -33,6 +33,21 @@ use std::collections::HashSet;
 /// argument (e.g., `foo(a: items.map { ... })`) had its inner calls not marked as
 /// having return values used, causing false positives in semantic style where functional
 /// blocks with braces were incorrectly flagged as procedural.
+///
+/// ## Fix (2026-04-16): `always_braces` lambda-body suppression and parser parity
+///
+/// Variant oracle still had 3 false positives under `EnforcedStyle: always_braces`.
+/// Two were blocks nested inside ignored stabby-lambda bodies passed as
+/// non-parenthesized arguments. The old lambda-body suppression manually recursed
+/// through only a few node shapes, so it missed inner blocks inside hash literals
+/// and heredoc interpolation. Fixed by deep-walking the whole lambda body subtree
+/// and marking every nested call/super block as ignored.
+///
+/// The remaining FP was JRuby's `test_windows_1252.rb`: RuboCop's parser reports
+/// only `Lint/Syntax` on non-UTF-8 encoded files that contain high-byte content or
+/// `\xHH` escapes in the declared encoding context (for example `\xdf` in a
+/// windows-1252 file), so `Style/BlockDelimiters` never runs there. Prism parses
+/// those files successfully, so this cop now skips that same file family.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -50,6 +65,9 @@ impl Cop for BlockDelimiters {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
+        if has_non_utf8_encoding_with_non_ascii_bytes(source.as_bytes()) {
+            return;
+        }
         let procedural_methods = config
             .get_string_array("ProceduralMethods")
             .unwrap_or_else(|| vec!["tap".to_string()]);
@@ -1018,90 +1036,122 @@ fn collect_ignored_blocks(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usi
 /// Recursively find all blocks inside a node body and mark them as ignored.
 /// Used for lambda bodies where we need to suppress all nested blocks.
 fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usize>) {
-    if let Some(call) = node.as_call_node() {
-        if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-                ignored.insert(block_node.opening_loc().start_offset());
-            }
+    let mut collector = IgnoredBlockCollector { ignored };
+    collector.visit(node);
+}
+
+struct IgnoredBlockCollector<'a> {
+    ignored: &'a mut HashSet<usize>,
+}
+
+impl<'a> Visit<'_> for IgnoredBlockCollector<'a> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'_>) {
+        if let Some(block) = node.block().and_then(|block| block.as_block_node()) {
+            self.ignored.insert(block.opening_loc().start_offset());
         }
-        if let Some(receiver) = call.receiver() {
-            collect_ignored_blocks_from_body(&receiver, ignored);
+        ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'_>) {
+        if let Some(block) = node.block().and_then(|block| block.as_block_node()) {
+            self.ignored.insert(block.opening_loc().start_offset());
         }
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                collect_ignored_blocks_from_body(&arg, ignored);
-            }
+        ruby_prism::visit_super_node(self, node);
+    }
+
+    fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'_>) {
+        if let Some(block) = node.block() {
+            self.ignored.insert(block.opening_loc().start_offset());
         }
-        if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-                if let Some(body) = block_node.body() {
-                    collect_ignored_blocks_from_body(&body, ignored);
+        ruby_prism::visit_forwarding_super_node(self, node);
+    }
+}
+
+/// Check if a file has a non-UTF-8 encoding magic comment and content that
+/// makes RuboCop's parser bail out before this cop runs.
+fn has_non_utf8_encoding_with_non_ascii_bytes(bytes: &[u8]) -> bool {
+    let mut start = 0;
+    for _ in 0..3 {
+        let end = bytes[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| start + p)
+            .unwrap_or(bytes.len());
+        let line = &bytes[start..end];
+        let trimmed: Vec<u8> = line.iter().copied().filter(|b| *b != b'\r').collect();
+        if trimmed.starts_with(b"#") {
+            let lower: Vec<u8> = trimmed.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(pos) = find_subsequence(&lower, b"encoding")
+                .or_else(|| find_subsequence(&lower, b"coding"))
+            {
+                let after = &lower[pos..];
+                let value_start = after
+                    .iter()
+                    .position(|&b| b == b':' || b == b'=')
+                    .map(|p| p + 1)
+                    .unwrap_or(after.len());
+                let value = &after[value_start..];
+                let value_trimmed: Vec<u8> =
+                    value.iter().copied().skip_while(|b| *b == b' ').collect();
+                let enc_end = value_trimmed
+                    .iter()
+                    .position(|b| !b.is_ascii_alphanumeric() && *b != b'-' && *b != b'_')
+                    .unwrap_or(value_trimmed.len());
+                let enc_name = &value_trimmed[..enc_end];
+                if enc_name == b"utf"
+                    || enc_name == b"utf8"
+                    || enc_name.starts_with(b"utf-8")
+                    || enc_name.starts_with(b"utf_8")
+                    || enc_name == b"binary"
+                    || enc_name.starts_with(b"ascii-8bit")
+                    || enc_name.starts_with(b"ascii_8bit")
+                    || enc_name == b"us-ascii"
+                    || enc_name == b"ascii"
+                {
+                    return false;
+                }
+                if !enc_name.is_empty() {
+                    return bytes.iter().any(|&b| b >= 0x80) || has_high_hex_escapes(bytes);
                 }
             }
         }
-        return;
-    }
-
-    if let Some(stmts) = node.as_statements_node() {
-        for stmt in stmts.body().iter() {
-            collect_ignored_blocks_from_body(&stmt, ignored);
+        start = end + 1;
+        if start >= bytes.len() {
+            break;
         }
-        return;
     }
+    false
+}
 
-    // Assignment nodes — recurse into the value expression
-    // e.g., `result = items.find { |item| ... }` inside a lambda body
-    if let Some(write) = node.as_local_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_instance_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_class_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_global_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_constant_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_local_variable_operator_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_instance_variable_operator_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    // Multi-write: a, b = expr
-    if let Some(write) = node.as_multi_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
 
-    // IfNode, UnlessNode, etc. — recurse into their bodies for completeness
-    if let Some(if_node) = node.as_if_node() {
-        if let Some(stmts) = if_node.statements() {
-            for stmt in stmts.body().iter() {
-                collect_ignored_blocks_from_body(&stmt, ignored);
+fn has_high_hex_escapes(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+    for window in bytes.windows(4) {
+        if window[0] == b'\\' && window[1] == b'x' {
+            let high = window[2];
+            let low = window[3];
+            if matches!(high, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F') && low.is_ascii_hexdigit() {
+                return true;
             }
         }
-        if let Some(subsequent) = if_node.subsequent() {
-            collect_ignored_blocks_from_body(&subsequent, ignored);
-        }
     }
+    false
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters");
+    crate::cop_variant_fixture_tests!(
+        BlockDelimiters,
+        "cops/style/block_delimiters",
+        always_braces,
+    );
 
     #[test]
     fn no_offense_proc_in_keyword_arg() {
@@ -1402,6 +1452,21 @@ mod tests {
         assert!(
             diags.is_empty(),
             "Should not flag block inside assignment in lambda body in keyword arg, got: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn no_offense_windows_1252_file_that_rubocop_treats_as_syntax_error() {
+        let source = b"# encoding:windows-1252\nassert_match(/^(\\xdf)\\1$/i, \"\\xdf\\xdf\")\nassert_match(/^(\\xdf)\\1$/i, \"ssss\")\nassert_match(/^[\\xdfz]+$/i, \"sszzsszz\")\nitems.each do |item|\n  item\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &BlockDelimiters,
+            source,
+            config_with_style("always_braces"),
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not flag blocks in windows-1252 files RuboCop treats as syntax errors, got: {:?}",
             diags
         );
     }
