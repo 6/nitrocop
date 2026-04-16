@@ -73,3 +73,21 @@ def foo
     ^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.all` on line 58.
     .map { |e| e.name }
 end
+
+.compact
+^ Layout/MultilineMethodCallIndentation: Align `.compact` with `(organisations_string || "")` on line 238.
+
+.create_for_missing_param(@method_description, name)
+^ Layout/MultilineMethodCallIndentation: Align `.create_for_missing_param` with `Apipie::Generator::Swagger::ParamDescription` on line 82.
+
+map{ |rule| rule.split( hash_delimiter, 2 ) }]
+^ Layout/MultilineMethodCallIndentation: Align `map` with `string_or_hash.to_s.split( /[\n\r]/ ).reject( &:empty? ).` on line 367.
+
+map { |var| var % payload } | [payload]
+^ Layout/MultilineMethodCallIndentation: Align `map` with `[ ';%s', "\";%s#", "';%s#" ].` on line 53.
+
+gsub( '__TIME__', payload_delay_from_options( options ) )
+^ Layout/MultilineMethodCallIndentation: Align `gsub` with `injected.` on line 376.
+
+map { |k, v| "#{Cookie.encode( k )}=#{Cookie.encode( v )}" }.join( ';' )
+^ Layout/MultilineMethodCallIndentation: Align `map` with `final_cookies_hash.` on line 816.
