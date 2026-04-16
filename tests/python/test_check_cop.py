@@ -57,6 +57,70 @@ def test_relevant_repos_for_cop_unions_activity_and_divergence():
     }
 
 
+def test_canary_repos_returns_top_n_by_nitrocop_total():
+    data = {
+        "by_repo": [
+            {"repo": "small", "status": "ok", "nitrocop_total": 10},
+            {"repo": "big", "status": "ok", "nitrocop_total": 1000},
+            {"repo": "medium", "status": "ok", "nitrocop_total": 500},
+            {"repo": "broken", "status": "error", "nitrocop_total": 99999},
+        ],
+    }
+    assert check_cop.canary_repos(data, exclude=set(), n=2) == {"big", "medium"}
+
+
+def test_canary_repos_excludes_already_sampled():
+    data = {
+        "by_repo": [
+            {"repo": "a", "status": "ok", "nitrocop_total": 100},
+            {"repo": "b", "status": "ok", "nitrocop_total": 200},
+            {"repo": "c", "status": "ok", "nitrocop_total": 300},
+        ],
+    }
+    # b and c are already sampled, so canary should only return "a"
+    assert check_cop.canary_repos(data, exclude={"b", "c"}, n=2) == {"a"}
+
+
+def test_canary_repos_empty_when_no_by_repo():
+    assert check_cop.canary_repos({}, exclude=set()) == set()
+
+
+def test_relevant_repos_with_sample_includes_canaries():
+    """When --sample is set, canary repos are added to catch wholesale regressions."""
+    data = {
+        "cop_activity_repos": {
+            "Style/Foo": [f"cop-active-{i}" for i in range(20)],
+        },
+        "by_repo_cop": {},
+        # High-activity canary repos that the cop has no baseline activity in
+        "by_repo": [
+            {"repo": f"cop-active-{i}", "status": "ok", "nitrocop_total": 1}
+            for i in range(20)
+        ] + [
+            {"repo": "canary-big", "status": "ok", "nitrocop_total": 100000},
+            {"repo": "canary-medium", "status": "ok", "nitrocop_total": 50000},
+        ],
+    }
+    result = check_cop.relevant_repos_for_cop("Style/Foo", data, sample=5)
+    # Should include canary repos even though they're not in cop_activity_repos
+    assert "canary-big" in result
+    assert "canary-medium" in result
+
+
+def test_relevant_repos_no_sample_does_not_add_canaries():
+    """When --sample is not set, no canaries are added (return all relevant)."""
+    data = {
+        "cop_activity_repos": {"Style/Foo": ["cop-active"]},
+        "by_repo_cop": {},
+        "by_repo": [
+            {"repo": "canary-big", "status": "ok", "nitrocop_total": 100000},
+        ],
+    }
+    result = check_cop.relevant_repos_for_cop("Style/Foo", data)
+    assert result == {"cop-active"}
+    assert "canary-big" not in result
+
+
 def test_run_nitrocop_per_repo_skips_missing_corpus_when_no_relevant_repos():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

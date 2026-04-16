@@ -353,6 +353,33 @@ def load_manifest() -> dict[str, dict]:
     return _load_manifest_from_file(MANIFEST_PATH)
 
 
+CANARY_REPO_COUNT = 5
+"""Number of high-activity canary repos to always include in --sample runs.
+
+Canaries catch wholesale regressions where a change to shared infrastructure
+(e.g., codemap.rs, linter.rs) breaks many files across the corpus but doesn't
+show up in the cop-specific sample. They're selected by highest nitrocop_total
+(total offenses across all cops), which correlates with total code exercised.
+"""
+
+
+def canary_repos(data: dict, exclude: set[str], n: int = CANARY_REPO_COUNT) -> set[str]:
+    """Return the top-N highest-activity repos as canaries for wholesale regressions.
+
+    Ranks by `nitrocop_total` (total offenses across all cops) — a rough proxy
+    for how much Ruby code is exercised. Excludes repos already in the sample.
+    """
+    by_repo = data.get("by_repo", [])
+    if not by_repo:
+        return set()
+    ranked = sorted(
+        (r for r in by_repo if r.get("status") == "ok" and r.get("repo") not in exclude),
+        key=lambda r: r.get("nitrocop_total", 0),
+        reverse=True,
+    )
+    return {r["repo"] for r in ranked[:n]}
+
+
 def relevant_repos_for_cop(
     cop_name: str, data: dict, *, sample: int | None = None,
     include_gated: bool = False,
@@ -371,7 +398,12 @@ def relevant_repos_for_cop(
     the oracle due to Include pattern resolution failure).
 
     When sample is set, cap to N repos — always including diverging repos,
-    then filling with highest-offense repos for coverage.
+    then filling with highest-offense repos for coverage.  The sample also
+    always includes CANARY_REPO_COUNT high-activity repos (ranked by
+    nitrocop_total) even if the cop has no baseline activity in them.  These
+    canaries catch wholesale regressions from changes to shared
+    infrastructure (codemap.rs, linter.rs, cross-cop helpers) that would
+    otherwise not show up in a cop-specific sample.
     """
     relevant = set(data.get("cop_activity_repos", {}).get(cop_name, []))
     for repo_id, cops in data.get("by_repo_cop", {}).items():
@@ -438,6 +470,17 @@ def relevant_repos_for_cop(
             print(f"  --sample: {len(sampled)}/{len(relevant)} repos "
                   f"({len(diverging)} diverging + {len(sampled) - len(diverging)} by offense count)",
                   file=sys.stderr)
+
+        # Always add canary repos to catch wholesale regressions from
+        # changes to shared infrastructure (codemap.rs, linter.rs, etc.)
+        # that break files where the cop has no baseline activity.
+        canaries = canary_repos(data, exclude=sampled)
+        if canaries:
+            sampled |= canaries
+            print(f"  --sample: added {len(canaries)} canary repos by nitrocop_total "
+                  f"({', '.join(sorted(canaries))})",
+                  file=sys.stderr)
+
         return sampled
 
     return relevant
