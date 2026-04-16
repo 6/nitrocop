@@ -22,9 +22,9 @@ pub struct CodeMap {
     /// NOT skip xstring content (RuboCop's string_literal_ranges excludes xstr).
     xstring_ranges: Vec<(usize, usize)>,
     /// Sorted (but NOT merged) heredoc ranges for boundary detection.
-    /// When adjacent heredoc ranges merge (stacked heredocs), the merged range
-    /// loses internal boundaries. This field preserves per-heredoc boundaries
-    /// for `heredoc_range_end()` to detect closing delimiters accurately.
+    /// Adjacent heredocs need distinct boundaries, and nested heredocs can
+    /// overlap. This field preserves the raw per-heredoc ranges so callers can
+    /// resolve the correct enclosing boundary for closing-delimiter checks.
     raw_heredoc_ranges: Vec<(usize, usize)>,
     /// Sorted, non-overlapping (start, end) byte ranges of `#{}` interpolation
     /// content inside heredocs. These regions are marked as non-code by the main
@@ -158,24 +158,25 @@ impl CodeMap {
         Self::in_ranges(&self.xstring_ranges, offset)
     }
 
-    /// Returns the end offset of the heredoc range containing `offset`, or None
-    /// if the offset is not inside a heredoc range.
-    /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
-    /// heredocs, where adjacent ranges would otherwise merge and lose internal
-    /// boundaries.
+    /// Returns the end offset of the OUTERMOST raw heredoc range containing
+    /// `offset`, or None if the offset is not inside a heredoc range.
+    /// Uses raw (unmerged) ranges because nested heredocs overlap and adjacent
+    /// heredocs abut; callers like Layout/IndentationStyle need the enclosing
+    /// boundary, not an arbitrary inner one.
     pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
-        self.raw_heredoc_ranges
-            .binary_search_by(|&(start, end)| {
-                if offset < start {
-                    std::cmp::Ordering::Greater
-                } else if offset >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .map(|idx| self.raw_heredoc_ranges[idx].1)
+        let mut outer_end = None;
+
+        for &(_start, end) in self
+            .raw_heredoc_ranges
+            .iter()
+            .take_while(|&&(start, _)| start <= offset)
+        {
+            if offset < end {
+                outer_end = Some(outer_end.map_or(end, |current: usize| current.max(end)));
+            }
+        }
+
+        outer_end
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation

@@ -19,3 +19,15 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Nested heredoc closing delimiters inside an outer heredoc interpolation
+# should not be flagged
+def build
+	<<~OUTER
+		#{if cond
+			<<~INNER
+				body
+      INNER
+			end}
+	OUTER
+end

@@ -17,3 +17,15 @@ execute <<-SQL
 	SELECT * FROM users
   SQL
 ^ Layout/IndentationStyle: Space detected in indentation.
+
+# The outer nested heredoc closing delimiter should still be flagged
+def build
+	<<~OUTER
+		#{if cond
+			<<~INNER
+				body
+      INNER
+			end}
+  OUTER
+^ Layout/IndentationStyle: Space detected in indentation.
+end
