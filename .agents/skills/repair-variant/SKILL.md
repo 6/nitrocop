@@ -171,7 +171,7 @@ cargo test --release -p nitrocop --lib -- cop::<dept>::<cop_name_snake>
 git add src/cop/<dept>/<cop_name>.rs tests/fixtures/cops/<dept>/<cop_name>/
 git commit -m "Fix <variant> variant: <brief description>
 
-Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>"
 git push origin HEAD
 ```
 
