@@ -22,6 +22,10 @@ undef foo, bar
 FeatureHelper.instance_eval { undef test_method }
                                     ^^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:test_method` instead.
 
+# FN fix: inline begin/undef/rescue on one line still needs the undef argument checked.
+begin undef setup_rdoc; rescue NameError; nil end
+            ^^^^^^^^^^ Lint/SymbolConversion: Unnecessary symbol conversion; use `:setup_rdoc` instead.
+
 # FN fix: bare symbols whose source doesn't match correction should be flagged
 # in consistent mode. Prism gives value "~" for :~@ (source :~@, correction :~).
 # bloom-lang/bud and rubyworks/facets patterns.
