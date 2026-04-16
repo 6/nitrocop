@@ -20,3 +20,12 @@ def name
       default_name
     end
 end
+
+# RuboCop does not treat module_function as an indented_internal_methods divider.
+m = Module.new do
+  module_function
+
+  def invoked_as_script?
+    File.expand_path($0) == File.expand_path(__FILE__)
+  end
+end
