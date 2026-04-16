@@ -42,6 +42,15 @@ use std::collections::HashSet;
 /// The prior implementation propagated `rv_used` recursively through hashes/arrays
 /// and condition predicates, which turned many procedural `do...end` blocks into
 /// false "functional" offenses under `EnforcedStyle: semantic`.
+///
+/// ## Fix (2026-04-16): suppress nested ignored blocks in lambda argument bodies
+///
+/// Under `EnforcedStyle: always_braces`, RuboCop ignores any block nested inside an
+/// ignored lambda argument on a non-parenthesized send. The previous Prism port only
+/// descended through a few lambda-body node types, so nested `do...end` blocks inside
+/// hash values or string interpolation were still checked and falsely flagged.
+/// Fixed by walking the entire ignored lambda body and suppressing every descendant
+/// `BlockNode`, matching RuboCop's `ignore_node` + `part_of_ignored_node?` behavior.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -1088,91 +1097,31 @@ fn collect_ignored_blocks(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usi
 /// Recursively find all blocks inside a node body and mark them as ignored.
 /// Used for lambda bodies where we need to suppress all nested blocks.
 fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usize>) {
-    if let Some(call) = node.as_call_node() {
-        if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-                ignored.insert(block_node.opening_loc().start_offset());
-            }
-        }
-        if let Some(receiver) = call.receiver() {
-            collect_ignored_blocks_from_body(&receiver, ignored);
-        }
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                collect_ignored_blocks_from_body(&arg, ignored);
-            }
-        }
-        if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-                if let Some(body) = block_node.body() {
-                    collect_ignored_blocks_from_body(&body, ignored);
-                }
-            }
-        }
-        return;
+    struct DescendantBlockCollector<'a> {
+        ignored: &'a mut HashSet<usize>,
     }
 
-    if let Some(stmts) = node.as_statements_node() {
-        for stmt in stmts.body().iter() {
-            collect_ignored_blocks_from_body(&stmt, ignored);
+    impl<'a, 'pr> Visit<'pr> for DescendantBlockCollector<'a> {
+        fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+            self.ignored.insert(node.opening_loc().start_offset());
+            ruby_prism::visit_block_node(self, node);
         }
-        return;
     }
 
-    // Assignment nodes — recurse into the value expression
-    // e.g., `result = items.find { |item| ... }` inside a lambda body
-    if let Some(write) = node.as_local_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_instance_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_class_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_global_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_constant_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_local_variable_operator_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_instance_variable_operator_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    // Multi-write: a, b = expr
-    if let Some(write) = node.as_multi_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-
-    // IfNode, UnlessNode, etc. — recurse into their bodies for completeness
-    if let Some(if_node) = node.as_if_node() {
-        if let Some(stmts) = if_node.statements() {
-            for stmt in stmts.body().iter() {
-                collect_ignored_blocks_from_body(&stmt, ignored);
-            }
-        }
-        if let Some(subsequent) = if_node.subsequent() {
-            collect_ignored_blocks_from_body(&subsequent, ignored);
-        }
-    }
+    let mut collector = DescendantBlockCollector { ignored };
+    collector.visit(node);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters");
-    crate::cop_variant_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters", semantic);
+    crate::cop_variant_fixture_tests!(
+        BlockDelimiters,
+        "cops/style/block_delimiters",
+        semantic,
+        always_braces,
+    );
 
     #[test]
     fn no_offense_proc_in_keyword_arg() {
