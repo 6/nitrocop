@@ -17,6 +17,12 @@ use ruby_prism::Visit;
 ///   Fix: push block context before visiting receiver/arguments/body, keep `lambda`
 ///   as a scope boundary, and only treat regular dot calls with receivers as chained
 ///   sends.
+/// - FN=2 under `EnforcedStyle: return_nil`: nested bare returns inside another
+///   return expression, such as `return redirect(...) && return`, were skipped
+///   because `visit_return_node` never recursed into the return arguments.
+///   RuboCop still walks that subtree and flags the inner bare `return`, so we
+///   must always traverse return arguments even when the current return itself
+///   is already in the correct style or suppressed as an iterator-block exit.
 pub struct ReturnNil;
 
 impl Cop for ReturnNil {
@@ -99,41 +105,43 @@ impl<'pr> Visit<'pr> for ReturnNilVisitor<'_, '_> {
     fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'pr>) {
         // RuboCop suppresses the offense when `return` is inside an iterator block
         // to avoid double-reporting with Lint/NonLocalExitFromIterator.
-        if self.inside_iterator_block() {
-            return;
-        }
-
-        match self.enforced_style {
-            "return" => {
-                // Flag `return nil` — prefer `return`
-                if let Some(args) = node.arguments() {
-                    let arg_list: Vec<_> = args.arguments().iter().collect();
-                    if arg_list.len() == 1 && arg_list[0].as_nil_node().is_some() {
+        if !self.inside_iterator_block() {
+            match self.enforced_style {
+                "return" => {
+                    // Flag `return nil` — prefer `return`
+                    if let Some(args) = node.arguments() {
+                        let arg_list: Vec<_> = args.arguments().iter().collect();
+                        if arg_list.len() == 1 && arg_list[0].as_nil_node().is_some() {
+                            let loc = node.location();
+                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                            self.diagnostics.push(self.cop.diagnostic(
+                                self.source,
+                                line,
+                                column,
+                                "Use `return` instead of `return nil`.".to_string(),
+                            ));
+                        }
+                    }
+                }
+                "return_nil" => {
+                    // Flag bare `return` — prefer `return nil`
+                    if node.arguments().is_none() {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
                             line,
                             column,
-                            "Use `return` instead of `return nil`.".to_string(),
+                            "Use `return nil` instead of `return`.".to_string(),
                         ));
                     }
                 }
+                _ => {}
             }
-            "return_nil" => {
-                // Flag bare `return` — prefer `return nil`
-                if node.arguments().is_none() {
-                    let loc = node.location();
-                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use `return nil` instead of `return`.".to_string(),
-                    ));
-                }
-            }
-            _ => {}
+        }
+
+        if let Some(args) = node.arguments() {
+            self.visit(&args.as_node());
         }
     }
 
@@ -232,4 +240,5 @@ impl<'pr> Visit<'pr> for ReturnNilVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReturnNil, "cops/style/return_nil");
+    crate::cop_variant_fixture_tests!(ReturnNil, "cops/style/return_nil", return_nil);
 }
