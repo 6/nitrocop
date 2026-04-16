@@ -1,4 +1,7 @@
-use crate::cop::shared::node_type::{BLOCK_ARGUMENT_NODE, CALL_NODE};
+use crate::cop::shared::node_type::{
+    BLOCK_ARGUMENT_NODE, CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE,
+    INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -48,6 +51,18 @@ use super::trailing_comma;
 /// preserve the braced-hash `consistent_comma` carveout, fall back to
 /// `EnforcedStyle` when the multiline-specific key is absent, and implement the
 /// `diff_comma` newline predicate (including `\r\n`).
+///
+/// Investigation (2026-04-16)
+///
+/// Root cause of 8 FNs under `diff_comma`: compound index assignments like
+/// `a[\n  x\n] ||= y`, `a[\n  x\n] += y`, and `a[\n  x\n] &&= y` are parsed
+/// as IndexOrWriteNode / IndexOperatorWriteNode / IndexAndWriteNode in Prism,
+/// NOT as CallNode. The cop only inspected CallNode, so these multiline `[]`
+/// calls were never checked. In RuboCop's AST these contain an inner `send`
+/// node for `a.[](x)` that triggers `on_send`.
+/// Fix: add INDEX_OR_WRITE_NODE, INDEX_AND_WRITE_NODE, and
+/// INDEX_OPERATOR_WRITE_NODE to interested_node_types and extract the same
+/// trailing-comma-relevant info (arguments, closing bracket loc) from them.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -56,7 +71,13 @@ impl Cop for TrailingCommaInArguments {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_ARGUMENT_NODE, CALL_NODE]
+        &[
+            BLOCK_ARGUMENT_NODE,
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -68,60 +89,35 @@ impl Cop for TrailingCommaInArguments {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call_node = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
-
-        let has_closing_token = call_node.closing_loc().is_some();
-        let (closing_start, node_end_offset) = match call_node.closing_loc() {
-            Some(loc) => {
-                let start = loc.start_offset();
-                (start, start)
+        // Extract call info from either a CallNode or an index write node.
+        // In RuboCop's AST, `a[x] ||= y` contains an inner `send` node for
+        // `a.[](x)` that triggers `on_send`. In Prism these are separate
+        // IndexOrWriteNode / IndexAndWriteNode / IndexOperatorWriteNode types.
+        let info = if let Some(call_node) = node.as_call_node() {
+            match extract_call_info(source, &call_node) {
+                Some(i) => i,
+                None => return,
             }
-            None if call_node.name().as_slice() == b"[]" => {
-                let end = call_node.location().end_offset();
-                (end, end.saturating_sub(1))
+        } else {
+            match extract_index_write_info(source, node) {
+                Some(i) => i,
+                None => return,
             }
-            None => return,
         };
 
-        let arguments = match call_node.arguments() {
-            Some(args) => args,
-            None => return,
-        };
-
-        let arg_list = arguments.arguments();
-        let last_arg = match arg_list.last() {
-            Some(a) => a,
-            None => return,
-        };
-
-        let last_end = last_arg.location().end_offset();
         let bytes = source.as_bytes();
-        let has_heredoc = arg_list
-            .iter()
-            .any(|arg| trailing_comma::is_heredoc_node(&arg));
 
-        // Skip if there's a block argument (&block) between last arg and closing paren.
-        // The comma before &block is a separator, not a trailing comma.
-        if let Some(block) = call_node.block() {
-            if block.as_block_argument_node().is_some() {
-                return;
-            }
-        }
-
-        // Check for a trailing comma between the last argument and closing paren.
-        if closing_start > bytes.len() || node_end_offset > bytes.len() {
+        // Check for a trailing comma between the last argument and closing bracket.
+        if info.closing_start > bytes.len() || info.node_end_offset > bytes.len() {
             return;
         }
 
         // Arguments uses a stricter comma check that rejects any non-whitespace
         // content (unlike the simpler has_trailing_comma used by array/hash).
         // For heredocs, only check on the same line (no newline crossing).
-        let has_comma = if last_end < closing_start {
-            let search_range = &bytes[last_end..closing_start];
-            if has_heredoc {
+        let has_comma = if info.last_end < info.closing_start {
+            let search_range = &bytes[info.last_end..info.closing_start];
+            if info.has_heredoc {
                 is_only_horizontal_whitespace_and_comma(search_range)
             } else {
                 trailing_comma::is_only_whitespace_and_comma(search_range)
@@ -136,48 +132,45 @@ impl Cop for TrailingCommaInArguments {
         };
 
         // Determine if the call is multiline and whether a trailing comma should be present
-        let close_line = source.offset_to_line_col(node_end_offset).0;
-        let call_start_line = source
-            .offset_to_line_col(call_node.location().start_offset())
-            .0;
+        let close_line = source.offset_to_line_col(info.node_end_offset).0;
+        let call_start_line = source.offset_to_line_col(info.call_start_offset).0;
         let call_is_multiline = close_line > call_start_line;
 
-        // Expand KeywordHashNode to count individual keyword args.
-        let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
-        let effective_args = elem_locs.len();
-
         let is_multiline = call_is_multiline
-            && !(has_closing_token
-                && effective_args == 1
-                && !crate::cop::shared::util::begins_its_line(source, node_end_offset));
+            && !(info.has_closing_token
+                && info.effective_args == 1
+                && !crate::cop::shared::util::begins_its_line(source, info.node_end_offset));
         let should_have_comma = match style {
             "comma" => {
                 is_multiline
-                    && trailing_comma::no_elements_on_same_line(source, &elem_locs, node_end_offset)
+                    && trailing_comma::no_elements_on_same_line(
+                        source,
+                        &info.elem_locs,
+                        info.node_end_offset,
+                    )
             }
             "consistent_comma" => {
                 is_multiline
                     && !method_name_and_arguments_on_same_line(
                         source,
-                        &call_node,
-                        &last_arg,
-                        call_start_line,
+                        &info.last_arg,
+                        info.method_line,
                         close_line,
-                        last_end,
+                        info.last_end,
                     )
             }
             "diff_comma" => {
-                is_multiline && last_item_precedes_newline(bytes, last_end, closing_start)
+                is_multiline && last_item_precedes_newline(bytes, info.last_end, info.closing_start)
             }
             _ => false,
         };
 
-        if has_comma && !should_have_comma && last_end < closing_start {
+        if has_comma && !should_have_comma && info.last_end < info.closing_start {
             if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
                 bytes,
-                last_end,
-                closing_start,
-                has_heredoc,
+                info.last_end,
+                info.closing_start,
+                info.has_heredoc,
             ) {
                 let (line, column) = source.offset_to_line_col(abs_offset);
                 diagnostics.push(self.diagnostic(
@@ -191,7 +184,7 @@ impl Cop for TrailingCommaInArguments {
                 ));
             }
         } else if !has_comma && should_have_comma {
-            let (line, column) = source.offset_to_line_col(last_end);
+            let (line, column) = source.offset_to_line_col(info.last_end);
             diagnostics.push(self.diagnostic(
                 source,
                 line,
@@ -200,6 +193,129 @@ impl Cop for TrailingCommaInArguments {
             ));
         }
     }
+}
+
+/// Common data extracted from a CallNode or index write node for trailing
+/// comma analysis.
+struct CallInfo<'a> {
+    closing_start: usize,
+    node_end_offset: usize,
+    has_closing_token: bool,
+    last_end: usize,
+    last_arg: ruby_prism::Node<'a>,
+    has_heredoc: bool,
+    elem_locs: Vec<(usize, usize)>,
+    effective_args: usize,
+    call_start_offset: usize,
+    /// Line of the method selector (or call start for index writes).
+    method_line: usize,
+}
+
+/// Extract trailing-comma-relevant info from a CallNode.
+fn extract_call_info<'a>(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'a>,
+) -> Option<CallInfo<'a>> {
+    let has_closing_token = call_node.closing_loc().is_some();
+    let (closing_start, node_end_offset) = match call_node.closing_loc() {
+        Some(loc) => {
+            let start = loc.start_offset();
+            (start, start)
+        }
+        None if call_node.name().as_slice() == b"[]" => {
+            let end = call_node.location().end_offset();
+            (end, end.saturating_sub(1))
+        }
+        None => return None,
+    };
+
+    let arguments = call_node.arguments()?;
+    let arg_list = arguments.arguments();
+    let last_arg = arg_list.last()?;
+
+    let last_end = last_arg.location().end_offset();
+    let has_heredoc = arg_list
+        .iter()
+        .any(|arg| trailing_comma::is_heredoc_node(&arg));
+
+    // Skip if there's a block argument (&block) between last arg and closing paren.
+    if let Some(block) = call_node.block() {
+        if block.as_block_argument_node().is_some() {
+            return None;
+        }
+    }
+
+    let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+    let effective_args = elem_locs.len();
+    let call_start_offset = call_node.location().start_offset();
+    let call_start_line = source.offset_to_line_col(call_start_offset).0;
+    let method_line = call_node
+        .message_loc()
+        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
+        .unwrap_or(call_start_line);
+
+    Some(CallInfo {
+        closing_start,
+        node_end_offset,
+        has_closing_token,
+        last_end,
+        last_arg,
+        has_heredoc,
+        elem_locs,
+        effective_args,
+        call_start_offset,
+        method_line,
+    })
+}
+
+/// Extract trailing-comma-relevant info from an IndexOrWriteNode,
+/// IndexAndWriteNode, or IndexOperatorWriteNode. These represent `a[x] ||= y`,
+/// `a[x] &&= y`, and `a[x] += y` respectively. In RuboCop's AST these contain
+/// an inner `send` node for the `[]` call that triggers `on_send`.
+fn extract_index_write_info<'a>(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'a>,
+) -> Option<CallInfo<'a>> {
+    let (arguments, closing_loc, call_start_offset) = if let Some(n) = node.as_index_or_write_node()
+    {
+        (n.arguments()?, n.closing_loc(), n.location().start_offset())
+    } else if let Some(n) = node.as_index_and_write_node() {
+        (n.arguments()?, n.closing_loc(), n.location().start_offset())
+    } else if let Some(n) = node.as_index_operator_write_node() {
+        (n.arguments()?, n.closing_loc(), n.location().start_offset())
+    } else {
+        return None;
+    };
+
+    let closing_start = closing_loc.start_offset();
+    let node_end_offset = closing_start;
+
+    let arg_list = arguments.arguments();
+    let last_arg = arg_list.last()?;
+
+    let last_end = last_arg.location().end_offset();
+    let has_heredoc = arg_list
+        .iter()
+        .any(|arg| trailing_comma::is_heredoc_node(&arg));
+
+    let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+    let effective_args = elem_locs.len();
+    let call_start_line = source.offset_to_line_col(call_start_offset).0;
+
+    Some(CallInfo {
+        closing_start,
+        node_end_offset,
+        has_closing_token: true,
+        last_end,
+        last_arg,
+        has_heredoc,
+        elem_locs,
+        effective_args,
+        call_start_offset,
+        // Index writes have no explicit method selector; fall back to call start
+        // line, matching RuboCop's `node.loc.selector&.line || node.loc.line`.
+        method_line: call_start_line,
+    })
 }
 
 /// Like `is_only_whitespace_and_comma`, but stops at the first newline. This
@@ -219,9 +335,8 @@ fn is_only_horizontal_whitespace_and_comma(bytes: &[u8]) -> bool {
 
 fn method_name_and_arguments_on_same_line(
     source: &SourceFile,
-    call_node: &ruby_prism::CallNode<'_>,
     last_arg: &ruby_prism::Node<'_>,
-    call_start_line: usize,
+    method_line: usize,
     close_line: usize,
     last_end: usize,
 ) -> bool {
@@ -240,10 +355,6 @@ fn method_name_and_arguments_on_same_line(
         return true;
     }
 
-    let method_line = call_node
-        .message_loc()
-        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
-        .unwrap_or(call_start_line);
     method_line == last_arg_end_line
 }
 
