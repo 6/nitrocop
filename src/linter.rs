@@ -314,6 +314,7 @@ pub fn run_linter(
             };
             let parse_result = crate::parse::parse_source(source.as_bytes());
             let code_map = CodeMap::from_parse_result(source.as_bytes(), &parse_result);
+            let has_any_parse_errors = parse_result.errors().next().is_some();
             for (i, cop) in registry.cops().iter().enumerate() {
                 if !cop_filters.is_cop_match(i, &source.path) {
                     continue;
@@ -321,7 +322,11 @@ pub fn run_linter(
                 let cop_config = &base_configs[i];
                 let t0 = std::time::Instant::now();
                 let mut d = Vec::new();
-                cop.check_lines(&source, cop_config, &mut d, None);
+                if !has_any_parse_errors
+                    || cop.should_run_line_checks_on_invalid_syntax(cop_config, &parse_result)
+                {
+                    cop.check_lines(&source, cop_config, &mut d, None);
+                }
                 let lines_ns = t0.elapsed().as_nanos() as u64;
                 let t1 = std::time::Instant::now();
                 cop.check_source(&source, &parse_result, &code_map, cop_config, &mut d, None);
@@ -1055,6 +1060,7 @@ fn lint_source_once(
 
     let mut diagnostics = Vec::new();
     let mut corrections: Vec<crate::correction::Correction> = Vec::new();
+    let has_any_parse_errors = parse_result.errors().next().is_some();
 
     let cop_start = std::time::Instant::now();
     let filter_start = std::time::Instant::now();
@@ -1112,9 +1118,13 @@ fn lint_source_once(
             && cop.supports_autocorrect()
             && cop_config.should_autocorrect(autocorrect_mode)
             && (autocorrect_mode == crate::cli::AutocorrectMode::All || allowlist.contains(name));
+        let should_run_lines = !has_any_parse_errors
+            || cop.should_run_line_checks_on_invalid_syntax(cop_config, &parse_result);
 
         if should_correct {
-            cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
+            if should_run_lines {
+                cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
+            }
             cop.check_source(
                 source,
                 &parse_result,
@@ -1124,7 +1134,9 @@ fn lint_source_once(
                 Some(&mut corrections),
             );
         } else {
-            cop.check_lines(source, cop_config, &mut diagnostics, None);
+            if should_run_lines {
+                cop.check_lines(source, cop_config, &mut diagnostics, None);
+            }
             cop.check_source(
                 source,
                 &parse_result,
@@ -1161,9 +1173,13 @@ fn lint_source_once(
             && cop.supports_autocorrect()
             && cop_config.should_autocorrect(autocorrect_mode)
             && (autocorrect_mode == crate::cli::AutocorrectMode::All || allowlist.contains(name));
+        let should_run_lines = !has_any_parse_errors
+            || cop.should_run_line_checks_on_invalid_syntax(cop_config, &parse_result);
 
         if should_correct {
-            cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
+            if should_run_lines {
+                cop.check_lines(source, cop_config, &mut diagnostics, Some(&mut corrections));
+            }
             cop.check_source(
                 source,
                 &parse_result,
@@ -1173,7 +1189,9 @@ fn lint_source_once(
                 Some(&mut corrections),
             );
         } else {
-            cop.check_lines(source, cop_config, &mut diagnostics, None);
+            if should_run_lines {
+                cop.check_lines(source, cop_config, &mut diagnostics, None);
+            }
             cop.check_source(
                 source,
                 &parse_result,

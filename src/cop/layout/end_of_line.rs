@@ -13,6 +13,12 @@ use crate::parse::source::SourceFile;
 /// files as "Carriage return character missing." on every line, causing 108 false
 /// positives in the corpus.
 ///
+/// RuboCop also suppresses this cop entirely when the file is parse-invalid,
+/// because `Layout/EndOfLine` runs in `on_new_investigation` and invalid files
+/// go through `on_other_file` instead. The remaining `crlf` corpus false
+/// positives were LF-only files with fatal parser errors (`Invalid retry
+/// without rescue` and invalid UTF-8), which nitrocop was still scanning.
+///
 /// @example EnforcedStyle: native (default)
 ///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
 ///   # enforced on Windows, and LF is enforced on other platforms.
@@ -46,6 +52,14 @@ impl Cop for EndOfLine {
 
     fn supports_autocorrect(&self) -> bool {
         true
+    }
+
+    fn should_run_line_checks_on_invalid_syntax(
+        &self,
+        config: &CopConfig,
+        _parse_result: &ruby_prism::ParseResult<'_>,
+    ) -> bool {
+        config.get_str("EnforcedStyle", "native") != "crlf"
     }
 
     fn check_lines(
@@ -163,6 +177,17 @@ impl Cop for EndOfLine {
 mod tests {
     use super::*;
     use crate::parse::source::SourceFile;
+    use std::collections::HashMap;
+
+    fn crlf_config() -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
 
     crate::cop_scenario_fixture_tests!(
         EndOfLine,
@@ -215,14 +240,7 @@ mod tests {
 
     #[test]
     fn crlf_style_accepts_crlf() {
-        use std::collections::HashMap;
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("crlf".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = crlf_config();
         let source = SourceFile::from_bytes("test.rb", b"x = 1\r\ny = 2\r\n".to_vec());
         let mut diags = Vec::new();
         EndOfLine.check_lines(&source, &config, &mut diags, None);
@@ -246,14 +264,7 @@ mod tests {
     #[test]
     fn autocorrect_insert_cr_crlf_style() {
         // Only 1 correction (first LF-only line) since cop breaks after first offense
-        use std::collections::HashMap;
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("crlf".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = crlf_config();
         let input = b"x = 1\ny = 2\n";
         let (_diags, corrections) =
             crate::testutil::run_cop_autocorrect_with_config(&EndOfLine, input, config);
@@ -265,18 +276,41 @@ mod tests {
 
     #[test]
     fn crlf_style_flags_lf() {
-        use std::collections::HashMap;
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("crlf".into()),
-            )]),
-            ..CopConfig::default()
-        };
+        let config = crlf_config();
         let source = SourceFile::from_bytes("test.rb", b"x = 1\ny = 2\n".to_vec());
         let mut diags = Vec::new();
         EndOfLine.check_lines(&source, &config, &mut diags, None);
         assert_eq!(diags.len(), 1, "crlf style should flag first LF-only line");
         assert_eq!(diags[0].message, "Carriage return character missing.");
+    }
+
+    #[test]
+    fn crlf_style_invalid_retry_fixture_no_offense() {
+        let fixture =
+            include_bytes!("../../../tests/fixtures/cops/layout/end_of_line/no_offense.crlf.rb");
+        let fixture = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture
+            .strip_prefix("# nitrocop-config: EnforcedStyle: crlf\n")
+            .expect("fixture should start with crlf config directive");
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &EndOfLine,
+            source.as_bytes(),
+            crlf_config(),
+        );
+    }
+
+    #[test]
+    fn crlf_style_invalid_utf8_no_offense() {
+        let diags = crate::testutil::run_cop_full_with_config(
+            &EndOfLine,
+            b"# vim: set fileencoding=euc-jp\n\xff\n",
+            crlf_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "invalid UTF-8 source should not trigger EndOfLine in crlf style: {:?}",
+            diags,
+        );
     }
 }

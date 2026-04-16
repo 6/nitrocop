@@ -329,6 +329,11 @@ pub trait Cop: Send + Sync {
     }
 
     /// Line-based check — runs before AST traversal.
+    ///
+    /// RuboCop only calls `on_new_investigation` when `valid_syntax?` is true.
+    /// nitrocop normally still runs line-based cops on parse-invalid files to
+    /// avoid Prism-only false negatives, but individual cops can opt out via
+    /// `should_run_line_checks_on_invalid_syntax`.
     #[allow(unused_variables)]
     fn check_lines(
         &self,
@@ -337,6 +342,20 @@ pub trait Cop: Send + Sync {
         diagnostics: &mut Vec<Diagnostic>,
         corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+    }
+
+    /// Whether `check_lines` should still run when Prism reported parse errors.
+    ///
+    /// Default: `true`, since nitrocop intentionally keeps many line-based cops
+    /// active on parse-invalid files. Override only when RuboCop suppresses the
+    /// cop entirely by routing the file through `on_other_file`.
+    #[allow(unused_variables)]
+    fn should_run_line_checks_on_invalid_syntax(
+        &self,
+        config: &CopConfig,
+        parse_result: &ruby_prism::ParseResult<'_>,
+    ) -> bool {
+        true
     }
 
     /// Source-based check — runs once per file with full parse context and CodeMap.

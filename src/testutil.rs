@@ -199,8 +199,13 @@ pub fn run_cop_with_config(
     config: CopConfig,
 ) -> Vec<Diagnostic> {
     let source = SourceFile::from_bytes("test.rb", source_bytes.to_vec());
+    let parse_result = crate::parse::parse_source(source.as_bytes());
     let mut diagnostics = Vec::new();
-    cop.check_lines(&source, &config, &mut diagnostics, None);
+    if !parse_result.errors().next().is_some()
+        || cop.should_run_line_checks_on_invalid_syntax(&config, &parse_result)
+    {
+        cop.check_lines(&source, &config, &mut diagnostics, None);
+    }
     diagnostics
 }
 
@@ -219,8 +224,13 @@ pub fn assert_cop_offenses_with_config(cop: &dyn Cop, fixture_bytes: &[u8], conf
     let filename = parsed.filename.as_deref().unwrap_or("test.rb");
     let mut expected = parsed.expected;
     let source = SourceFile::from_bytes(filename, parsed.source);
+    let parse_result = crate::parse::parse_source(source.as_bytes());
     let mut diagnostics = Vec::new();
-    cop.check_lines(&source, &config, &mut diagnostics, None);
+    if !parse_result.errors().next().is_some()
+        || cop.should_run_line_checks_on_invalid_syntax(&config, &parse_result)
+    {
+        cop.check_lines(&source, &config, &mut diagnostics, None);
+    }
 
     // Sort both for order-independent comparison
     expected.sort_by_key(|e| (e.line, e.column));
@@ -291,8 +301,13 @@ pub fn assert_cop_no_offenses(cop: &dyn Cop, source_bytes: &[u8]) {
 /// Assert a cop produces no offenses on the given source bytes with a specific config.
 pub fn assert_cop_no_offenses_with_config(cop: &dyn Cop, source_bytes: &[u8], config: CopConfig) {
     let source = SourceFile::from_bytes("test.rb", source_bytes.to_vec());
+    let parse_result = crate::parse::parse_source(source.as_bytes());
     let mut diagnostics = Vec::new();
-    cop.check_lines(&source, &config, &mut diagnostics, None);
+    if !parse_result.errors().next().is_some()
+        || cop.should_run_line_checks_on_invalid_syntax(&config, &parse_result)
+    {
+        cop.check_lines(&source, &config, &mut diagnostics, None);
+    }
 
     assert!(
         diagnostics.is_empty(),
@@ -328,11 +343,15 @@ pub fn run_cop_full_internal(
     let source = SourceFile::from_bytes(filename, source_bytes.to_vec());
     let parse_result = crate::parse::parse_source(source.as_bytes());
     let code_map = CodeMap::from_parse_result(source.as_bytes(), &parse_result);
+    let should_run_lines = !parse_result.errors().next().is_some()
+        || cop.should_run_line_checks_on_invalid_syntax(&config, &parse_result);
 
     let mut diagnostics = Vec::new();
 
     // Line-based checks
-    cop.check_lines(&source, &config, &mut diagnostics, None);
+    if should_run_lines {
+        cop.check_lines(&source, &config, &mut diagnostics, None);
+    }
 
     // Source-based checks
     cop.check_source(
@@ -499,12 +518,16 @@ pub fn run_cop_autocorrect_internal(
     let source = SourceFile::from_bytes(filename, source_bytes.to_vec());
     let parse_result = crate::parse::parse_source(source.as_bytes());
     let code_map = CodeMap::from_parse_result(source.as_bytes(), &parse_result);
+    let should_run_lines = !parse_result.errors().next().is_some()
+        || cop.should_run_line_checks_on_invalid_syntax(&config, &parse_result);
 
     let mut diagnostics = Vec::new();
     let mut corrections = Vec::new();
 
     // Line-based checks
-    cop.check_lines(&source, &config, &mut diagnostics, Some(&mut corrections));
+    if should_run_lines {
+        cop.check_lines(&source, &config, &mut diagnostics, Some(&mut corrections));
+    }
 
     // Source-based checks
     cop.check_source(
