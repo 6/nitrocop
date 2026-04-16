@@ -1,6 +1,6 @@
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
-    HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
+    FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
     PINNED_EXPRESSION_NODE, SUPER_NODE, YIELD_NODE,
 };
 use crate::cop::{Cop, CopConfig};
@@ -107,6 +107,21 @@ use crate::parse::source::SourceFile;
 /// checking for a `:` immediately preceded by an identifier character
 /// (excluding `::` constant resolution). This feeds into
 /// `ignores_open_side()` alongside the existing command-form check.
+///
+/// ## Corpus investigation (2026-04-16)
+///
+/// Variant-only `EnforcedStyle: space` divergence remained in two narrow cases:
+///
+/// 1. **Find patterns were missing entirely.** Prism represents
+///    `in Point(*, 1, *a)` as `FindPatternNode`, not `ArrayPatternNode`, so the
+///    cop never visited or extracted the `(`/`)` pair.
+/// 2. **Close-side checks were too eager for backslash-continued strings.**
+///    RuboCop compares adjacent tokens, so a multiline string argument like
+///    `select( "...\n...")` does not pair its closing `"` with the `)` on the
+///    second line. The previous byte scanner only looked at same-line
+///    characters and incorrectly flagged the close side. Fix: ignore the
+///    close-side missing-space check only when `)` immediately follows the end
+///    of a continued multiline string literal.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -128,6 +143,7 @@ impl Cop for SpaceInsideParens {
             CALL_NODE,
             DEF_NODE,
             DEFINED_NODE,
+            FIND_PATTERN_NODE,
             HASH_PATTERN_NODE,
             MULTI_TARGET_NODE,
             MULTI_WRITE_NODE,
@@ -187,6 +203,7 @@ impl Cop for SpaceInsideParens {
         let close_side = previous_same_line_code(bytes, close_start);
 
         let ignore_open_side = ignores_open_side(node, bytes, open_start);
+        let ignore_missing_close_side = ignores_missing_close_side(bytes, close_side, close_start);
 
         match style {
             "space" => {
@@ -201,16 +218,18 @@ impl Cop for SpaceInsideParens {
                         false,
                     );
                 }
-                check_missing_close_space(
-                    self,
-                    source,
-                    diagnostics,
-                    &mut corrections,
-                    bytes,
-                    close_side,
-                    close_start,
-                    false,
-                );
+                if !ignore_missing_close_side {
+                    check_missing_close_space(
+                        self,
+                        source,
+                        diagnostics,
+                        &mut corrections,
+                        bytes,
+                        close_side,
+                        close_start,
+                        false,
+                    );
+                }
             }
             "compact" => {
                 if !ignore_open_side {
@@ -224,16 +243,18 @@ impl Cop for SpaceInsideParens {
                         true,
                     );
                 }
-                check_missing_close_space(
-                    self,
-                    source,
-                    diagnostics,
-                    &mut corrections,
-                    bytes,
-                    close_side,
-                    close_start,
-                    true,
-                );
+                if !ignore_missing_close_side {
+                    check_missing_close_space(
+                        self,
+                        source,
+                        diagnostics,
+                        &mut corrections,
+                        bytes,
+                        close_side,
+                        close_start,
+                        true,
+                    );
+                }
             }
             _ => {
                 if !ignore_open_side {
@@ -314,6 +335,14 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
         }
     }
 
+    if let Some(find_pattern) = node.as_find_pattern_node() {
+        let open = find_pattern.opening_loc()?;
+        let close = find_pattern.closing_loc()?;
+        if open.as_slice() == b"(" && close.as_slice() == b")" {
+            return Some((open.start_offset(), open.end_offset(), close.start_offset()));
+        }
+    }
+
     if let Some(pinned_expression) = node.as_pinned_expression_node() {
         let open = pinned_expression.lparen_loc();
         let close = pinned_expression.rparen_loc();
@@ -366,6 +395,81 @@ fn ignores_open_side(node: &ruby_prism::Node<'_>, bytes: &[u8], open_start: usiz
     }
 
     command_form_prefix(bytes, open_start).is_some() || label_value_paren(bytes, open_start)
+}
+
+fn ignores_missing_close_side(bytes: &[u8], close_side: Option<usize>, close_start: usize) -> bool {
+    let Some(prev_code) = close_side else {
+        return false;
+    };
+    if prev_code + 1 != close_start {
+        return false;
+    }
+
+    continued_multiline_string_end(bytes, prev_code)
+}
+
+fn continued_multiline_string_end(bytes: &[u8], quote_offset: usize) -> bool {
+    let Some(&quote) = bytes.get(quote_offset) else {
+        return false;
+    };
+    if !matches!(quote, b'\'' | b'"') {
+        return false;
+    }
+
+    let line_start = bytes[..quote_offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    if has_unescaped_quote_on_line(bytes, line_start, quote_offset, quote) {
+        return false;
+    }
+    if line_start == 0 {
+        return false;
+    }
+
+    previous_line_ends_with_backslash(bytes, line_start - 1)
+}
+
+fn has_unescaped_quote_on_line(
+    bytes: &[u8],
+    line_start: usize,
+    quote_offset: usize,
+    quote: u8,
+) -> bool {
+    let mut idx = line_start;
+    while idx < quote_offset {
+        if bytes[idx] == quote && !is_escaped(bytes, line_start, idx) {
+            return true;
+        }
+        idx += 1;
+    }
+    false
+}
+
+fn is_escaped(bytes: &[u8], line_start: usize, idx: usize) -> bool {
+    let mut backslashes = 0;
+    let mut pos = idx;
+    while pos > line_start && bytes[pos - 1] == b'\\' {
+        backslashes += 1;
+        pos -= 1;
+    }
+    backslashes % 2 == 1
+}
+
+fn previous_line_ends_with_backslash(bytes: &[u8], newline_offset: usize) -> bool {
+    let line_start = bytes[..newline_offset]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+
+    let mut idx = newline_offset;
+    while idx > line_start && matches!(bytes[idx - 1], b' ' | b'\t' | b'\r') {
+        idx -= 1;
+    }
+
+    idx > line_start && bytes[idx - 1] == b'\\'
 }
 
 /// Detects when `(` is used as a hash value in label syntax, e.g. `key: (expr)`.
@@ -724,6 +828,7 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
+    crate::cop_variant_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens", space);
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
 
     #[test]
@@ -784,6 +889,29 @@ mod tests {
             "command-form parens should only check the closing side"
         );
         assert_eq!(diags[0].location.column, 13);
+        assert!(diags[0].message.contains("No space"));
+    }
+
+    #[test]
+    fn space_style_single_line_string_still_requires_closing_space() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("space".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"select( \"hello\")\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "single-line string args should still require a closing-side space"
+        );
+        assert_eq!(diags[0].location.column, 15);
         assert!(diags[0].message.contains("No space"));
     }
 }
