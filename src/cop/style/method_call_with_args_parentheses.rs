@@ -211,6 +211,28 @@ use crate::parse::source::SourceFile;
 ///    exempt. RuboCop only keeps parentheses when the call is in a
 ///    conditional-style parent or is not the last expression. Added explicit
 ///    non-last-expression tracking and narrowed the exemption to those cases.
+///
+/// ## Variant fix (2026-04-16)
+///
+/// Remaining `omit_parentheses` false positives came from two Prism-specific
+/// gaps in legitimate-call detection:
+///
+/// 1. RuboCop scans the whole send node's descendants, including the receiver
+///    subtree. Calls such as `%w[1 2 3].map { ... }.join('-')`,
+///    `(items || []).join(', ')`, and `new(*args).send(:run!)` therefore keep
+///    parentheses because the receiver side contains an `any_block`, logical
+///    operator, or splat. nitrocop only scanned argument descendants, so it
+///    flagged these receiver-driven ambiguous cases.
+///
+/// 2. `call_in_argument_with_block?` in RuboCop allows parens on a call with
+///    its own block when the whole block expression is itself an argument to an
+///    outer call/super/yield, for example `self.result = run_callbacks(:x) do`.
+///    Prism models setter and `[]=` parents as `CallNode`s, but nitrocop
+///    collapsed their RHS children into plain `Assignment` context, which
+///    preserved offense behavior for ordinary RHS calls but lost the narrower
+///    "block used as outer call argument" allowance. Track assignment-like call
+///    parents separately so standalone `x = foo(:arg) do` still flags while
+///    setter/index RHS block expressions match RuboCop.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -296,6 +318,7 @@ enum ParentKind {
     WhenBody,
     MatchPattern,
     Assignment,
+    AssignmentLikeCall,
     Conditional,
     ConditionalBody,
     ClassConstructor,
@@ -752,8 +775,13 @@ impl ParenVisitor<'_> {
         false
     }
 
-    fn call_in_argument_with_block(&self, _call: &ruby_prism::CallNode<'_>) -> bool {
-        false
+    fn call_in_argument_with_block(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        call.block()
+            .is_some_and(|block| block.as_block_node().is_some())
+            && matches!(
+                self.immediate_parent(),
+                Some(ParentKind::Call | ParentKind::AssignmentLikeCall)
+            )
     }
 
     fn call_as_argument_or_chain(&self) -> bool {
@@ -824,6 +852,12 @@ impl ParenVisitor<'_> {
 
     /// Check for forwarded args, ambiguous literals, logical operators, and blocks in descendants
     fn has_ambiguous_content_in_descendants(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        if let Some(recv) = call.receiver() {
+            if is_ambiguous_descendant(&recv, self.source) {
+                return true;
+            }
+        }
+
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
                 if is_ambiguous_descendant(&arg, self.source) {
@@ -865,15 +899,16 @@ impl ParenVisitor<'_> {
         if self.parent_stack.len() >= 2 {
             let parent = self.parent_stack[self.parent_stack.len() - 1];
             let grandparent = self.parent_stack[self.parent_stack.len() - 2];
-            if parent == ParentKind::Assignment
-                && matches!(
-                    grandparent,
-                    ParentKind::Conditional
-                        | ParentKind::ConditionalBody
-                        | ParentKind::When
-                        | ParentKind::WhenBody
-                )
-            {
+            if matches!(
+                parent,
+                ParentKind::Assignment | ParentKind::AssignmentLikeCall
+            ) && matches!(
+                grandparent,
+                ParentKind::Conditional
+                    | ParentKind::ConditionalBody
+                    | ParentKind::When
+                    | ParentKind::WhenBody
+            ) {
                 return true;
             }
         }
@@ -1124,7 +1159,7 @@ fn call_child_parent_kind(
 ) -> ParentKind {
     if let Some(equal_loc) = call.equal_loc() {
         if child_start_offset > equal_loc.start_offset() {
-            return ParentKind::Assignment;
+            return ParentKind::AssignmentLikeCall;
         }
     }
 
@@ -2590,6 +2625,24 @@ mod tests {
     }
 
     #[test]
+    fn omit_accepts_receiver_with_ambiguous_descendant() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"date = %w[1 2 3].map { |key| value[key] }.join('-')\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when the receiver contains ambiguous descendants"
+        );
+    }
+
+    #[test]
     fn omit_accepts_parenthesized_ambiguous_descendant() {
         use std::collections::HashMap;
         let config = CopConfig {
@@ -2838,6 +2891,43 @@ mod tests {
         let source = b"foo(:arg) do\n  bar\nend\n";
         let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
         assert_eq!(diags.len(), 1, "Should flag parens in do-end block call");
+    }
+
+    #[test]
+    fn omit_accepts_setter_rhs_block_argument_call() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"self.value = foo(:arg) do\n  bar\nend\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when a block expression is the RHS of a setter call"
+        );
+    }
+
+    #[test]
+    fn omit_flags_local_assignment_rhs_block_call() {
+        use std::collections::HashMap;
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("omit_parentheses".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"value = foo(:arg) do\n  bar\nend\n";
+        let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should still flag standalone assignment RHS block calls"
+        );
     }
 
     #[test]
