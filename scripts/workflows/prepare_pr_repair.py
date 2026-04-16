@@ -742,7 +742,7 @@ def main() -> None:
             params = _infer_variant_style_params(v)
             if len(params) == 1:
                 style_cmds.append(
-                    f'python3 scripts/check_cop.py "$cop" --verbose --rerun --clone '
+                    f'python3 scripts/check_cop.py "{cop}" --verbose --rerun --clone '
                     f'--style {params[0][0]}={params[0][1]}'
                 )
         if style_cmds:
