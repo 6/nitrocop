@@ -57,6 +57,18 @@ x = case foo
       2
     end
 
+# Corpus FN: case/when with multiline when body inside a block is still flagged
+data.each do |name, value|
+  value = case name
+  ^ Style/ConditionalAssignment: Assign variables inside of conditionals.
+            when 'dom'
+              next if !value
+              self::DOM.from_rpc_data(value)
+            else
+              value
+            end
+end
+
 # unless/else
 x = unless foo
 ^ Style/ConditionalAssignment: Assign variables inside of conditionals.
@@ -145,6 +157,16 @@ x = case foo
     else
       3
     end
+
+# case/in with multiline branch is still flagged
+value = case name
+^ Style/ConditionalAssignment: Assign variables inside of conditionals.
+        in "a"
+          something
+          other
+        else
+          value
+        end
 
 # Shovel operator assignment to conditional
 bar << if foo

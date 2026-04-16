@@ -35,6 +35,24 @@ x = if foo
       2
     end
 
+# case/else with direct multiline else body remains allowed
+x = case foo
+    when "a"
+      1
+    else
+      something_else
+      2
+    end
+
+# case/in else with direct multiline else body remains allowed
+x = case foo
+    in "a"
+      1
+    else
+      something_else
+      2
+    end
+
 # Method call that looks like ternary but is not assignment
 bar << foo? ? 1 : 2
 

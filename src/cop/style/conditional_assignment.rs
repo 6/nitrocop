@@ -74,6 +74,14 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// (starting column) to the first line's length, double-counting indentation.
 /// RuboCop's `longest_line` computes each branch line's length independently
 /// of the node's column position. Dropped `node_col` to match.
+///
+/// Variant quirk (2026-04-16, `EnforcedStyle: assign_inside_condition`):
+/// RuboCop's `SingleLineConditionsOnly` check looks at the top-level branch
+/// nodes returned by Parser. For `case`/`case in`, that means multiline
+/// `when`/`in` bodies still count as single-line unless the `else` branch
+/// itself is a `begin` node. nitrocop was inspecting Prism's nested
+/// `StatementsNode`s instead, which incorrectly skipped multiline
+/// `case`/`case in` assignments such as `value = case name; when ...; foo; bar;`.
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -856,17 +864,12 @@ fn has_begin_type_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> b
     false
 }
 
-/// Check if any when branch or else branch of a case is begin_type?.
+/// Check if RuboCop would treat any top-level case branch as begin_type? for
+/// `assign_inside_condition`'s `SingleLineConditionsOnly`.
+///
+/// Parser exposes `when` branches as `when` nodes, so multiline `when` bodies
+/// do NOT count here. Only the direct `else` branch can be `begin_type?`.
 fn has_begin_type_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
-    for condition in case_node.conditions().iter() {
-        if let Some(when_node) = condition.as_when_node() {
-            if let Some(stmts) = when_node.statements() {
-                if stmts_is_begin_type(&stmts) {
-                    return true;
-                }
-            }
-        }
-    }
     if let Some(else_clause) = case_node.else_clause() {
         if let Some(stmts) = else_clause.statements() {
             if stmts_is_begin_type(&stmts) {
@@ -877,17 +880,13 @@ fn has_begin_type_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     false
 }
 
-/// Check if any in branch or else branch of a case_match is begin_type?.
+/// Check if RuboCop would treat any top-level `case in` branch as begin_type?
+/// for `assign_inside_condition`'s `SingleLineConditionsOnly`.
+///
+/// As with `case`, Parser exposes `in` branches as `in_pattern` nodes, so
+/// multiline branch bodies do NOT count here. Only the direct `else` branch
+/// can be `begin_type?`.
 fn has_begin_type_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool {
-    for condition in cm.conditions().iter() {
-        if let Some(in_node) = condition.as_in_node() {
-            if let Some(stmts) = in_node.statements() {
-                if stmts_is_begin_type(&stmts) {
-                    return true;
-                }
-            }
-        }
-    }
     if let Some(else_clause) = cm.else_clause() {
         if let Some(stmts) = else_clause.statements() {
             if stmts_is_begin_type(&stmts) {
