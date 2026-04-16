@@ -204,23 +204,34 @@ pub fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: 
     i < region.len() && region[i] == b'\n'
 }
 
-/// Collect element (start_offset, end_offset) pairs from an iterator of nodes.
-/// Expands any KeywordHashNode into its individual assoc elements, matching
-/// RuboCop's behavior where keyword args are treated as separate elements.
+/// Collect element (start_offset, end_offset) pairs from method arguments.
+///
+/// Mirrors RuboCop's `elements(node)` behavior for calls:
+/// - ordinary arguments stay as-is
+/// - a multiline implicit keyword hash is promoted into its assoc pairs
+/// - a single-line implicit keyword hash stays a single effective argument
 pub fn effective_element_locations<'a>(
+    source: &SourceFile,
     elements: impl Iterator<Item = ruby_prism::Node<'a>>,
 ) -> Vec<(usize, usize)> {
     let mut locations = Vec::new();
     for elem in elements {
         if let Some(kw_hash) = elem.as_keyword_hash_node() {
-            for child in kw_hash.elements().iter() {
-                let loc = child.location();
-                locations.push((loc.start_offset(), loc.end_offset()));
-            }
-        } else {
             let loc = elem.location();
-            locations.push((loc.start_offset(), loc.end_offset()));
+            let start_line = source.offset_to_line_col(loc.start_offset()).0;
+            let end_line = source.offset_to_line_col(loc.end_offset()).0;
+
+            if start_line != end_line {
+                for child in kw_hash.elements().iter() {
+                    let child_loc = child.location();
+                    locations.push((child_loc.start_offset(), child_loc.end_offset()));
+                }
+                continue;
+            }
         }
+
+        let loc = elem.location();
+        locations.push((loc.start_offset(), loc.end_offset()));
     }
     locations
 }

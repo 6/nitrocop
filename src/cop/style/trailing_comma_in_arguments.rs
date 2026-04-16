@@ -48,6 +48,18 @@ use super::trailing_comma;
 /// preserve the braced-hash `consistent_comma` carveout, fall back to
 /// `EnforcedStyle` when the multiline-specific key is absent, and implement the
 /// `diff_comma` newline predicate (including `\r\n`).
+///
+/// Investigation (2026-04-16)
+///
+/// Root cause of the remaining `comma` variant drift: Prism represents all
+/// keyword args as one `KeywordHashNode`, but nitrocop always expanded that node
+/// into individual pairs for `no_elements_on_same_line` and the single-argument
+/// multiline exemption. RuboCop only promotes a braceless keyword hash when the
+/// hash argument itself spans multiple lines. A single-line keyword hash inside
+/// a multiline call remains one effective argument, so `foo(\n  a: 1, b: 2,\n)`
+/// keeps its trailing comma while `foo(\n  bar,\n  a: 1, b: 2\n)` still needs
+/// one. Fix: only expand `KeywordHashNode` elements when that argument spans
+/// multiple source lines.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -143,7 +155,7 @@ impl Cop for TrailingCommaInArguments {
         let call_is_multiline = close_line > call_start_line;
 
         // Expand KeywordHashNode to count individual keyword args.
-        let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+        let elem_locs = trailing_comma::effective_element_locations(source, arg_list.iter());
         let effective_args = elem_locs.len();
 
         let is_multiline = call_is_multiline
@@ -485,13 +497,15 @@ mod tests {
     }
 
     #[test]
-    fn comma_style_mixed_args_keyword_sharing_line_no_offense() {
-        // Positional arg + keyword args where keywords share a line
+    fn comma_style_mixed_args_keyword_sharing_line_offense() {
+        // A single-line keyword hash stays one effective argument, so this
+        // multiline call still needs a trailing comma after the last argument.
         let source = b"foo(\n  1,\n  a: 2, b: 3\n)\n";
         let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
-        assert!(
-            diags.is_empty(),
-            "comma style should not flag when keyword args share a line (mixed args)"
+        assert_eq!(
+            diags.len(),
+            1,
+            "comma style should flag when the last argument is a single-line keyword hash"
         );
     }
 
@@ -547,6 +561,17 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.diff_comma.rb"
             ),
             alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.consistent_comma.rb"
+            ),
+            alias_style_config("consistent_comma"),
         );
     }
 }
