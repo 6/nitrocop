@@ -17,6 +17,11 @@ use ruby_prism::Visit;
 ///   Fix: push block context before visiting receiver/arguments/body, keep `lambda`
 ///   as a scope boundary, and only treat regular dot calls with receivers as chained
 ///   sends.
+/// - Variant FN=2 under `EnforcedStyle: return_nil`: nested bare `return` inside another
+///   return expression, such as `return redirect_back_or_to(...) && return`, was missed.
+///   The custom `visit_return_node` handled the current return but did not recurse into
+///   its arguments, so Prism never visited the inner return node. Fix: keep traversing
+///   return arguments after checking the current node so nested returns are linted too.
 pub struct ReturnNil;
 
 impl Cop for ReturnNil {
@@ -99,42 +104,42 @@ impl<'pr> Visit<'pr> for ReturnNilVisitor<'_, '_> {
     fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'pr>) {
         // RuboCop suppresses the offense when `return` is inside an iterator block
         // to avoid double-reporting with Lint/NonLocalExitFromIterator.
-        if self.inside_iterator_block() {
-            return;
-        }
-
-        match self.enforced_style {
-            "return" => {
-                // Flag `return nil` — prefer `return`
-                if let Some(args) = node.arguments() {
-                    let arg_list: Vec<_> = args.arguments().iter().collect();
-                    if arg_list.len() == 1 && arg_list[0].as_nil_node().is_some() {
+        if !self.inside_iterator_block() {
+            match self.enforced_style {
+                "return" => {
+                    // Flag `return nil` — prefer `return`
+                    if let Some(args) = node.arguments() {
+                        let arg_list: Vec<_> = args.arguments().iter().collect();
+                        if arg_list.len() == 1 && arg_list[0].as_nil_node().is_some() {
+                            let loc = node.location();
+                            let (line, column) = self.source.offset_to_line_col(loc.start_offset());
+                            self.diagnostics.push(self.cop.diagnostic(
+                                self.source,
+                                line,
+                                column,
+                                "Use `return` instead of `return nil`.".to_string(),
+                            ));
+                        }
+                    }
+                }
+                "return_nil" => {
+                    // Flag bare `return` — prefer `return nil`
+                    if node.arguments().is_none() {
                         let loc = node.location();
                         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
                         self.diagnostics.push(self.cop.diagnostic(
                             self.source,
                             line,
                             column,
-                            "Use `return` instead of `return nil`.".to_string(),
+                            "Use `return nil` instead of `return`.".to_string(),
                         ));
                     }
                 }
+                _ => {}
             }
-            "return_nil" => {
-                // Flag bare `return` — prefer `return nil`
-                if node.arguments().is_none() {
-                    let loc = node.location();
-                    let (line, column) = self.source.offset_to_line_col(loc.start_offset());
-                    self.diagnostics.push(self.cop.diagnostic(
-                        self.source,
-                        line,
-                        column,
-                        "Use `return nil` instead of `return`.".to_string(),
-                    ));
-                }
-            }
-            _ => {}
         }
+
+        ruby_prism::visit_return_node(self, node);
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
@@ -232,4 +237,30 @@ impl<'pr> Visit<'pr> for ReturnNilVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(ReturnNil, "cops/style/return_nil");
+
+    fn return_nil_config() -> crate::cop::CopConfig {
+        use std::collections::HashMap;
+        crate::cop::CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("return_nil".into()),
+            )]),
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn return_nil_style_offense_fixture() {
+        let fixture =
+            include_bytes!("../../../tests/fixtures/cops/style/return_nil/return_nil_offense.rb");
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: return_nil\n")
+            .expect("fixture should start with return_nil config directive");
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &ReturnNil,
+            source.as_bytes(),
+            return_nil_config(),
+        );
+    }
 }
