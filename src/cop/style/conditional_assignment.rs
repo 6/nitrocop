@@ -74,6 +74,14 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// (starting column) to the first line's length, double-counting indentation.
 /// RuboCop's `longest_line` computes each branch line's length independently
 /// of the node's column position. Dropped `node_col` to match.
+///
+/// Variant fix (2026-04-16): for `EnforcedStyle=assign_inside_condition`,
+/// `SingleLineConditionsOnly` uses RuboCop's raw branch deconstruction. That
+/// means `case`/`case in` `when`/`in` nodes are never treated as `begin_type?`
+/// just because their bodies contain multiple statements; only the `else`
+/// branch body can trigger the single-line skip. nitrocop was inspecting the
+/// branch bodies directly, which missed real offenses like `x = case foo; when
+/// "a"; something; 1; else; 2; end`.
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -856,17 +864,13 @@ fn has_begin_type_branches_unless(unless_node: &ruby_prism::UnlessNode<'_>) -> b
     false
 }
 
-/// Check if any when branch or else branch of a case is begin_type?.
+/// Check if the `else` branch body of a case is begin_type?.
+///
+/// RuboCop's `allowed_single_line?([*branches, else_branch])` receives raw
+/// `when` nodes, not their bodies. `when` nodes are never `begin_type?`, even
+/// when the branch body contains multiple statements, so only the `else` body
+/// can suppress an offense here.
 fn has_begin_type_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
-    for condition in case_node.conditions().iter() {
-        if let Some(when_node) = condition.as_when_node() {
-            if let Some(stmts) = when_node.statements() {
-                if stmts_is_begin_type(&stmts) {
-                    return true;
-                }
-            }
-        }
-    }
     if let Some(else_clause) = case_node.else_clause() {
         if let Some(stmts) = else_clause.statements() {
             if stmts_is_begin_type(&stmts) {
@@ -877,17 +881,12 @@ fn has_begin_type_branches_case(case_node: &ruby_prism::CaseNode<'_>) -> bool {
     false
 }
 
-/// Check if any in branch or else branch of a case_match is begin_type?.
+/// Check if the `else` branch body of a case_match is begin_type?.
+///
+/// Like `case`, RuboCop passes raw `in` nodes to `allowed_single_line?`, so
+/// multi-statement `in` bodies still register offenses. Only a multi-statement
+/// `else` body suppresses the offense.
 fn has_begin_type_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> bool {
-    for condition in cm.conditions().iter() {
-        if let Some(in_node) = condition.as_in_node() {
-            if let Some(stmts) = in_node.statements() {
-                if stmts_is_begin_type(&stmts) {
-                    return true;
-                }
-            }
-        }
-    }
     if let Some(else_clause) = cm.else_clause() {
         if let Some(stmts) = else_clause.statements() {
             if stmts_is_begin_type(&stmts) {

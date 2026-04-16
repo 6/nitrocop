@@ -57,6 +57,16 @@ x = case foo
       2
     end
 
+# case/when with multi-statement branch
+x = case foo
+^ Style/ConditionalAssignment: Assign variables inside of conditionals.
+    when "a"
+      something
+      1
+    else
+      2
+    end
+
 # unless/else
 x = unless foo
 ^ Style/ConditionalAssignment: Assign variables inside of conditionals.
@@ -144,6 +154,16 @@ x = case foo
       2
     else
       3
+    end
+
+# case/in with multi-statement branch
+x = case foo
+^ Style/ConditionalAssignment: Assign variables inside of conditionals.
+    in "a"
+      something
+      1
+    else
+      2
     end
 
 # Shovel operator assignment to conditional
