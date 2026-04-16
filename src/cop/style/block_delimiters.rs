@@ -907,17 +907,12 @@ fn mark_chained_receiver_block(node: &ruby_prism::Node<'_>, chained_blocks: &mut
         if let Some(block_node) = call.block().and_then(|block| block.as_block_node()) {
             chained_blocks.insert(block_node.opening_loc().start_offset());
         }
-    } else if let Some(paren) = node.as_parentheses_node() {
-        if let Some(body) = paren.body() {
-            if let Some(stmts) = body.as_statements_node() {
-                if let Some(last) = stmts.body().last() {
-                    mark_chained_receiver_block(&last, chained_blocks);
-                }
-            } else {
-                mark_chained_receiver_block(&body, chained_blocks);
-            }
-        }
     }
+    // Note: do NOT recurse through ParenthesesNode here. RuboCop's
+    // braces_for_chaining style doesn't consider `(foo.map do...end).join`
+    // as a chained block — the parens break the chain. Only the semantic
+    // style needs parenthesized receiver detection, and that is handled
+    // by rv_used/rv_of_scope propagation, not the chained_blocks set.
 }
 
 /// Mark a node as being in return-value-of-scope position (for semantic style).
