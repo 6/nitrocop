@@ -82,6 +82,14 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// branch body can trigger the single-line skip. nitrocop was inspecting the
 /// branch bodies directly, which missed real offenses like `x = case foo; when
 /// "a"; something; 1; else; 2; end`.
+///
+/// Variant fix (2026-04-16): RuboCop flags `assign_inside_condition` for
+/// `unless` assignments even without an explicit `else` branch, and its
+/// ignored-node suppression only applies to non-`send` assignment callbacks.
+/// nitrocop was requiring `unless ... else ... end` and was suppressing nested
+/// `send`-based pseudo-assignments like `hash[key] = cond ? a : b` or
+/// `foo.bar == (cond ? a : b)` when they appeared inside a larger outer
+/// assignment, causing a large FN bucket in the corpus.
 pub struct ConditionalAssignment;
 
 impl Cop for ConditionalAssignment {
@@ -557,20 +565,29 @@ impl ConditionalAssignment {
             return;
         }
 
+        let apply_ignored_node_check = node.as_call_node().is_none();
+
         let loc = node.location();
         let node_start = loc.start_offset();
         let node_end = node_start + loc.as_slice().len();
 
         // Suppress assignments nested inside another assignment's source range
         // (mirrors RuboCop's part_of_ignored_node?).
-        let is_nested = IGNORED_ASSIGN_RANGES.with(|ranges| {
-            ranges
-                .borrow()
-                .iter()
-                .any(|&(s, e)| node_start > s && node_end <= e)
-        });
-        if is_nested {
-            return;
+        //
+        // RuboCop only consults `part_of_ignored_node?` from the non-`send`
+        // assignment callbacks. Plain `send`-based pseudo-assignments such as
+        // setters, `[]=`, `<<`, and comparisons still register offenses when
+        // nested inside a larger assignment.
+        if apply_ignored_node_check {
+            let is_nested = IGNORED_ASSIGN_RANGES.with(|ranges| {
+                ranges
+                    .borrow()
+                    .iter()
+                    .any(|&(s, e)| node_start > s && node_end <= e)
+            });
+            if is_nested {
+                return;
+            }
         }
 
         // Record this assignment's range unconditionally (mirrors RuboCop's
@@ -613,10 +630,6 @@ impl ConditionalAssignment {
                 }
             }
         } else if let Some(unless_node) = rhs.as_unless_node() {
-            // Must have else clause
-            if unless_node.else_clause().is_none() {
-                return;
-            }
             if single_line_only && has_begin_type_branches_unless(&unless_node) {
                 return;
             }
@@ -1302,5 +1315,33 @@ mod tests {
             ),
             assign_inside_condition_config(),
         );
+    }
+
+    #[test]
+    fn assign_inside_condition_flags_unless_without_else() {
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConditionalAssignment,
+            b"value = unless condition\n  1\nend\n",
+            assign_inside_condition_config(),
+        );
+
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].location.line, 1, "{diags:?}");
+        assert_eq!(diags[0].location.column, 0, "{diags:?}");
+        assert_eq!(diags[0].message, ASSIGN_TO_CONDITION_MSG, "{diags:?}");
+    }
+
+    #[test]
+    fn assign_inside_condition_flags_nested_send_assignment_inside_outer_assignment() {
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConditionalAssignment,
+            b"query_options = [:lookup, :language].inject({}) do |hash, key|\n  val = options[key]\n  hash[key] = val.respond_to?(:call) ? val.call(self) : val\nend\n",
+            assign_inside_condition_config(),
+        );
+
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].location.line, 3, "{diags:?}");
+        assert_eq!(diags[0].location.column, 2, "{diags:?}");
+        assert_eq!(diags[0].message, ASSIGN_TO_CONDITION_MSG, "{diags:?}");
     }
 }
