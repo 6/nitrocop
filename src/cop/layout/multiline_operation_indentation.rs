@@ -23,6 +23,11 @@ use crate::parse::source::SourceFile;
 /// is needed because RuboCop's `argument_in_method_call` (which requires
 /// AST parent traversal) accepts alignment in method-arg and nested-if
 /// contexts that we cannot detect from Prism without parent pointers.
+///
+/// Key fix (2026-04-16): the operator-call fallback above only matches
+/// RuboCop's `aligned` style. Under `EnforcedStyle=indented`, RuboCop
+/// requires `left_indent + width` for ordinary multiline operator calls,
+/// so same-column chains like the bottles examples must be offenses.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -80,9 +85,10 @@ impl Cop for MultilineOperationIndentation {
             }
 
             // Delegate to shared binary checker with accept_left_alignment=true.
-            // We can't replicate RuboCop's `argument_in_method_call` (requires
-            // AST parent traversal), so we accept same-column alignment for
-            // operator calls to avoid FP in method-arg and nested-if contexts.
+            // The same-column fallback is only used in aligned style. We keep
+            // the flag here because we still need that fallback for operator
+            // calls when matching RuboCop's aligned-style behavior in method-arg
+            // and nested-if contexts without parent pointers.
             let first_arg = &args[0];
             diagnostics
                 .extend(self.check_binary_node(source, &receiver, first_arg, config, style, true));
@@ -431,7 +437,7 @@ impl MultilineOperationIndentation {
             // continuations when the left operand is offset from the base indent
             // (genuine alignment, not just same-indent-level chains).
             right_col == expected_indent || right_col == left_col
-        } else if accept_left_alignment {
+        } else if accept_left_alignment && style == "aligned" {
             // For operator method calls (+, -, etc.) without AST parent info,
             // we can't detect RuboCop's `argument_in_method_call` context
             // (e.g. `raise Exception, "a" +\n"b"` or `+` inside if-as-operand).
@@ -470,6 +476,11 @@ mod tests {
     crate::cop_fixture_tests!(
         MultilineOperationIndentation,
         "cops/layout/multiline_operation_indentation"
+    );
+    crate::cop_variant_fixture_tests!(
+        MultilineOperationIndentation,
+        "cops/layout/multiline_operation_indentation",
+        indented
     );
 
     #[test]
