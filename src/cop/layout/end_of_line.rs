@@ -21,6 +21,15 @@ use crate::parse::source::SourceFile;
 /// existed, so it still reported missing carriage returns. The fix moves the
 /// implementation to `check_source()` and mirrors RuboCop's fatal-syntax gate.
 ///
+/// The `crlf` variant also exposed two false positives from JRuby's
+/// `test_euc_jp.rb` / `test_shift_jis.rb`: they start with a Vim
+/// `fileencoding=` modeline, but Ruby does not treat that as a magic encoding
+/// comment. RuboCop therefore parses the raw non-UTF-8 bytes as UTF-8, emits
+/// only `Lint/Syntax`, and never runs this cop. nitrocop previously still
+/// reported "Carriage return character missing." on line 1. The fix skips
+/// invalid UTF-8 files unless they have a real Ruby `coding`/`encoding`
+/// comment, while still checking ASCII-only Vim modelines normally.
+///
 /// @example EnforcedStyle: native (default)
 ///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
 ///   # enforced on Windows, and LF is enforced on other platforms.
@@ -187,6 +196,10 @@ fn rubocop_skips_end_of_line(
     parse_result: &ruby_prism::ParseResult<'_>,
     config: &CopConfig,
 ) -> bool {
+    if rubocop_skips_invalid_utf8_without_ruby_magic_encoding_comment(source) {
+        return true;
+    }
+
     let has_structural_errors = parse_result
         .errors()
         .any(|err| !is_semantic_parse_error(err.message()));
@@ -223,6 +236,15 @@ fn is_semantic_parse_error(message: &str) -> bool {
         || message.starts_with("Invalid return in class/module body")
 }
 
+fn rubocop_skips_invalid_utf8_without_ruby_magic_encoding_comment(source: &SourceFile) -> bool {
+    if std::str::from_utf8(source.as_bytes()).is_ok() {
+        return false;
+    }
+
+    let lines: Vec<&[u8]> = source.lines().collect();
+    !has_ruby_magic_encoding_comment(&lines)
+}
+
 fn rubocop_skips_non_utf8_regex_escape_file(source: &SourceFile) -> bool {
     let lines: Vec<&[u8]> = source.lines().collect();
     has_non_utf8_encoding_comment(&lines)
@@ -230,6 +252,32 @@ fn rubocop_skips_non_utf8_regex_escape_file(source: &SourceFile) -> bool {
             .iter()
             .copied()
             .any(line_contains_high_hex_escape_in_regex_literal)
+}
+
+fn has_ruby_magic_encoding_comment(lines: &[&[u8]]) -> bool {
+    let mut idx = 0;
+
+    if idx < lines.len() && starts_with_shebang(lines[idx]) {
+        idx += 1;
+    }
+
+    for line in lines.iter().skip(idx).take(2) {
+        let lower = normalized_ascii_string(line)
+            .trim_start()
+            .to_ascii_lowercase();
+        if lower.starts_with("# encoding:")
+            || lower.starts_with("# encoding=")
+            || lower.starts_with("# coding:")
+            || lower.starts_with("# coding=")
+        {
+            return true;
+        }
+        if lower.starts_with("# -*-") && (lower.contains("encoding") || lower.contains("coding")) {
+            return true;
+        }
+    }
+
+    false
 }
 
 fn has_non_utf8_encoding_comment(lines: &[&[u8]]) -> bool {
@@ -585,6 +633,28 @@ mod tests {
         assert!(
             diags.is_empty(),
             "TargetRubyVersion 4.0 should suppress Layout/EndOfLine on invalid retry files: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn crlf_style_skips_invalid_utf8_without_ruby_magic_encoding_comment() {
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_internal(
+            &EndOfLine,
+            b"# vim: set fileencoding=euc-jp\n# frozen_string_literal: false\n\nrequire \"test/unit\"\n\nclass T < Test::Unit::TestCase\n  def test_x\n    assert_match(/(\xA4\xA2)(a)\\1\\2/i, \"\xA4\xA2a\xA4\xA2A\")\n  end\nend\n",
+            config,
+            "test/mri/ruby/enc/test_euc_jp.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "invalid UTF-8 with only a vim fileencoding comment should be skipped like RuboCop: {:?}",
             diags
         );
     }
