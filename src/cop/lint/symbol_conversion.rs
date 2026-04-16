@@ -1,6 +1,6 @@
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{
-    CALL_NODE, HASH_NODE, HASH_PATTERN_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE,
+    CALL_NODE, HASH_NODE, HASH_PATTERN_NODE, KEYWORD_HASH_NODE, SYMBOL_NODE, UNDEF_NODE,
 };
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -273,8 +273,25 @@ use crate::parse::source::SourceFile;
 /// FN=2 (hash patterns): `case/in` hash patterns use `HashPatternNode`, which
 /// wasn't registered in `interested_node_types`. Fix: added `HASH_PATTERN_NODE`.
 ///
-/// FN=2 (binary encoding): `# encoding: binary` files where bare `:il_était`
-/// should be `:"il_\xC3\xA9tait"`. Not fixed — requires encoding-aware processing.
+/// ## Consistent variant fix (2026-04-16)
+///
+/// Variant divergence reported FP=2, FN=3 for `EnforcedStyle: consistent`.
+///
+/// FP=2: did_you_mean reserved-word lists use `%i(...)` with `undef` and
+/// `unless` on separate lines. The previous byte scan only recognized `%i[...]`
+/// and misclassified `%i(...)` elements as `undef` arguments. Fix: stop
+/// inferring `undef` from neighboring source text and handle `UndefNode`
+/// structurally instead.
+///
+/// FN=1: inline `begin undef setup_rdoc; rescue ... end` was missed because
+/// the same byte scan only treated `undef` as a statement after newline/`;`/`{`.
+/// `UndefNode` handling fixes this without broadening unrelated bare symbols.
+///
+/// FN=2: `# encoding: binary` files with bare non-ASCII symbols (for example
+/// `:il_était`) need byte-escaped corrections like `:"il_\xC3\xA9tait"` in
+/// consistent mode. Fix: when a bare symbol comes from a file declaring
+/// `binary` / `ascii-8bit`, build the correction from raw bytes instead of
+/// treating valid UTF-8 bytes as an unquoted identifier.
 pub struct SymbolConversion;
 
 /// Check if a character is a valid Ruby identifier start character.
@@ -457,6 +474,41 @@ fn symbol_correction(value: &[u8]) -> Option<String> {
     }
 }
 
+fn escape_double_quoted_symbol_bytes(value: &[u8]) -> String {
+    let mut escaped = String::with_capacity(value.len());
+
+    for (i, &b) in value.iter().enumerate() {
+        match b {
+            b'\\' => escaped.push_str("\\\\"),
+            b'"' => escaped.push_str("\\\""),
+            b'\n' => escaped.push_str("\\n"),
+            b'\r' => escaped.push_str("\\r"),
+            b'\t' => escaped.push_str("\\t"),
+            0x0C => escaped.push_str("\\f"),
+            0x07 => escaped.push_str("\\a"),
+            0x08 => escaped.push_str("\\b"),
+            0x0B => escaped.push_str("\\v"),
+            0x1B => escaped.push_str("\\e"),
+            b'#' if value
+                .get(i + 1)
+                .is_some_and(|next| matches!(next, b'{' | b'$' | b'@')) =>
+            {
+                escaped.push_str("\\#");
+            }
+            _ if b < 0x20 || b == 0x7F || b > 0x7F => {
+                escaped.push_str(&format!("\\x{b:02X}"));
+            }
+            _ => escaped.push(b as char),
+        }
+    }
+
+    escaped
+}
+
+fn byte_escaped_symbol_correction(value: &[u8]) -> String {
+    format!(":\"{}\"", escape_double_quoted_symbol_bytes(value))
+}
+
 fn hash_key_correction(value: &[u8]) -> Option<String> {
     if !value_starts_with_identifier(value) {
         return None;
@@ -506,109 +558,90 @@ fn value_starts_with_identifier(value: &[u8]) -> bool {
         .is_some_and(|&b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// Check if `undef` at a given position is actually a keyword (at statement start),
-/// not just the text "undef" inside a `%i` array or similar context.
-/// Returns true if preceded (after skipping whitespace) by a statement boundary:
-/// newline, `;`, `{` (block opening), or start of file.
-fn is_undef_at_statement_start(src: &[u8], undef_start: usize) -> bool {
-    if undef_start == 0 {
-        return true;
-    }
-    let mut p = undef_start;
-    while p > 0 && matches!(src[p - 1], b' ' | b'\t') {
-        p -= 1;
-    }
-    if !(p == 0 || matches!(src[p - 1], b'\n' | b'\r' | b';' | b'{')) {
-        return false;
+fn parse_declared_source_encoding(line: &[u8]) -> Option<String> {
+    let line = String::from_utf8_lossy(line);
+    let trimmed = line.trim_start_matches([' ', '\t', '\u{feff}']);
+    if !trimmed.starts_with('#') {
+        return None;
     }
 
-    // Verify we're not inside a %i[...] or %I[...] array — the text "undef"
-    // as a %i element on a new line would pass the statement-start check above,
-    // but it's not a keyword. Scan backwards for an unmatched '['.
-    let mut depth: i32 = 0;
-    for i in (0..undef_start).rev() {
-        match src[i] {
-            b']' => depth += 1,
-            b'[' => {
-                depth -= 1;
-                if depth < 0 {
-                    // Found unmatched '['. Check for %i or %I prefix.
-                    if i >= 2 && (src[i - 1] == b'i' || src[i - 1] == b'I') && src[i - 2] == b'%' {
-                        return false;
-                    }
-                    break;
-                }
+    let lower = trimmed.to_ascii_lowercase();
+    let content = lower.strip_prefix('#')?.trim_start();
+
+    if let Some(emacs) = extract_emacs_magic_comment(content) {
+        for token in emacs.split(';') {
+            if let Some(encoding) = extract_encoding_value(token.trim()) {
+                return Some(encoding.to_string());
             }
-            _ => {}
         }
+        return None;
     }
 
-    true
+    extract_encoding_value(content).map(str::to_string)
 }
 
-/// Check if a symbol node is inside a `undef` statement.
-/// In `EnforcedStyle: consistent`, RuboCop's `properly_quoted?` doesn't
-/// short-circuit on quote-less sources, so bare symbols in `undef` are flagged
-/// (e.g., `undef is_a?` → "use `:is_a?` instead").
-///
-/// Handles both simple `undef foo` and comma-separated `undef foo, bar`.
-fn is_in_undef(source: &SourceFile, sym: &ruby_prism::SymbolNode<'_>) -> bool {
-    let start = sym.location().start_offset();
-    let src = source.as_bytes();
-    if start < 6 {
-        return false;
+fn extract_emacs_magic_comment(content: &str) -> Option<&str> {
+    let start = content.find("-*-")?;
+    let rest = content.get(start + 3..)?;
+    let end = rest.rfind("-*-")?;
+    (end > 0).then_some(rest[..end].trim())
+}
+
+fn extract_encoding_value(content: &str) -> Option<&str> {
+    for key in ["encoding", "coding"] {
+        if let Some(rest) = content.strip_prefix(key) {
+            let rest = rest.trim_start();
+            let value = rest.strip_prefix(':')?.trim_start();
+            return take_encoding_token(value);
+        }
     }
+    None
+}
 
-    let mut pos = start;
+fn take_encoding_token(value: &str) -> Option<&str> {
+    let end = value
+        .char_indices()
+        .find_map(|(idx, ch)| {
+            (!ch.is_ascii_alphanumeric() && ch != '-' && ch != '_').then_some(idx)
+        })
+        .unwrap_or(value.len());
+    (end > 0).then_some(&value[..end])
+}
 
-    // Skip whitespace (including newlines for multi-line undef continuations)
-    while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
-        pos -= 1;
-    }
-
-    // Direct `undef foo`
-    if pos >= 5 && &src[pos - 5..pos] == b"undef" {
-        let undef_start = pos - 5;
-        return (pos == 5 || !is_identifier_continue(src[pos - 6]))
-            && is_undef_at_statement_start(src, undef_start);
-    }
-
-    // `undef foo, bar` — skip back over comma and previous arguments
-    while pos > 0 && src[pos - 1] == b',' {
-        pos -= 1; // skip comma
-
-        // Skip whitespace (including newlines for multi-line undef)
-        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
-            pos -= 1;
+fn source_declares_binary_encoding(bytes: &[u8]) -> bool {
+    let mut max_lines = 2;
+    for (index, line) in bytes.split(|&b| b == b'\n').take(3).enumerate() {
+        if index == 0 && line.starts_with(b"#!") {
+            max_lines = 3;
+            continue;
+        }
+        if index >= max_lines {
+            break;
         }
 
-        // Skip a bare symbol backward: optional suffix (?/!/=), then identifier body
-        let start_pos = pos;
-        if pos > 0 && matches!(src[pos - 1], b'?' | b'!' | b'=') {
-            pos -= 1;
-        }
-        while pos > 0 && is_identifier_continue(src[pos - 1]) {
-            pos -= 1;
-        }
-
-        if pos == start_pos {
-            return false;
-        }
-
-        // Skip whitespace (including newlines for multi-line undef)
-        while pos > 0 && matches!(src[pos - 1], b' ' | b'\t' | b'\n' | b'\r') {
-            pos -= 1;
-        }
-
-        // Check for `undef`
-        if pos >= 5 && &src[pos - 5..pos] == b"undef" {
-            let undef_start = pos - 5;
-            return (pos == 5 || !is_identifier_continue(src[pos - 6]))
-                && is_undef_at_statement_start(src, undef_start);
-        }
+        let Some(encoding) = parse_declared_source_encoding(line) else {
+            continue;
+        };
+        let normalized = encoding.to_ascii_lowercase().replace('_', "-");
+        return normalized == "binary" || normalized.starts_with("ascii-8bit");
     }
 
     false
+}
+
+fn symbol_correction_for_source(
+    source: &SourceFile,
+    sym_source: &[u8],
+    value: &[u8],
+) -> Option<String> {
+    if !source_contains_quote_chars(sym_source)
+        && value.iter().any(|&b| b >= 0x80)
+        && source_declares_binary_encoding(source.as_bytes())
+    {
+        return Some(byte_escaped_symbol_correction(value));
+    }
+
+    symbol_correction(value)
 }
 
 /// Check if a symbol node is an argument to the `alias` keyword.
@@ -738,6 +771,7 @@ impl Cop for SymbolConversion {
             HASH_PATTERN_NODE,
             KEYWORD_HASH_NODE,
             SYMBOL_NODE,
+            UNDEF_NODE,
         ]
     }
 
@@ -764,6 +798,10 @@ impl Cop for SymbolConversion {
             }
             if let Some(hash_pattern) = node.as_hash_pattern_node() {
                 self.check_hash_consistent(source, hash_pattern.elements(), diagnostics);
+                return;
+            }
+            if let Some(undef_node) = node.as_undef_node() {
+                self.check_undef_node(source, &undef_node, diagnostics);
                 return;
             }
         }
@@ -855,10 +893,6 @@ impl SymbolConversion {
         match opening {
             Some(b":\"" | b":'") => {}
             _ if is_percent_s => {}
-            // In consistent mode, bare symbols in `undef` should be checked.
-            // RuboCop's `properly_quoted?` doesn't short-circuit for quote-less
-            // sources, so `undef is_a?` fires ("use `:is_a?` instead").
-            _ if !is_strict && opening.is_none() && is_in_undef(source, sym) => {}
             // In consistent mode, bare symbols with `:` prefix are also checked
             // because `properly_quoted?` doesn't short-circuit. Source `:~@`
             // (value `~`, correction `:~`) → mismatch → offense.
@@ -887,7 +921,7 @@ impl SymbolConversion {
             return;
         }
 
-        let correction = match symbol_correction(value) {
+        let correction = match symbol_correction_for_source(source, src, value) {
             Some(c) => c,
             None => return,
         };
@@ -904,6 +938,42 @@ impl SymbolConversion {
             column,
             format!("Unnecessary symbol conversion; use `{correction}` instead."),
         ));
+    }
+
+    /// Check `undef` arguments for consistent-style bare symbol mismatches.
+    fn check_undef_node(
+        &self,
+        source: &SourceFile,
+        undef_node: &ruby_prism::UndefNode<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        for name in undef_node.names().iter() {
+            let Some(sym) = name.as_symbol_node() else {
+                continue;
+            };
+
+            let src = sym.location().as_slice();
+            if src.contains(&b'\n') {
+                continue;
+            }
+
+            let Some(correction) = symbol_correction_for_source(source, src, sym.unescaped())
+            else {
+                continue;
+            };
+            if properly_quoted_source(src, &correction, false) {
+                continue;
+            }
+
+            let loc = sym.location();
+            let (line, column) = source.offset_to_line_col(loc.start_offset());
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                format!("Unnecessary symbol conversion; use `{correction}` instead."),
+            ));
+        }
     }
 
     /// Check hash keys for consistent quoting (EnforcedStyle: consistent).
@@ -1639,6 +1709,30 @@ mod tests {
                 "../../../tests/fixtures/cops/lint/symbol_conversion/consistent_no_offense.rb"
             ),
             consistent_config(),
+        );
+    }
+
+    #[test]
+    fn consistent_style_binary_bare_symbols() {
+        let cop = SymbolConversion;
+        let source = b"# encoding: binary\np :il_\xC3\xA9tait.to_s.bytes\nputs :il_\xC3\xA9tait.encoding.name\n";
+        let diags = crate::testutil::run_cop_full_with_config(&cop, source, consistent_config());
+
+        assert_eq!(diags.len(), 2, "Expected 2 offenses but got {:?}", diags);
+        assert!(
+            diags
+                .iter()
+                .all(|diag| diag.message.contains(r#"`:"il_\xC3\xA9tait"`"#)),
+            "Expected byte-escaped binary correction, got {:?}",
+            diags.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            diags[0].location.line, 2,
+            "First offense should be on line 2"
+        );
+        assert_eq!(
+            diags[1].location.line, 3,
+            "Second offense should be on line 3"
         );
     }
 

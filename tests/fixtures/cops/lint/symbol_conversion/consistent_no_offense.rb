@@ -30,6 +30,38 @@ alias foo bar
   undef unless until
 ]
 
+# FP fix: `%i(` arrays should not be mistaken for `undef` statements either.
+# did_you_mean reserved-word lists use paren delimiters, not `[]`.
+RB_RESERVED_WORDS = %i(
+  super
+  then
+  true
+  undef
+  unless
+  until
+  when
+  while
+  yield
+)
+
+RB_RESERVED_WORDS_WITH_PSEUDOVARS = %i(
+  retry
+  return
+  self
+  super
+  then
+  true
+  undef
+  unless
+  until
+  when
+  while
+  yield
+  __LINE__
+  __FILE__
+  __ENCODING__
+)
+
 # FP fix: bare symbol values (not hash keys) should not be checked
 # in consistent mode. RuboCop's on_sym skips non-hash-key symbols.
 test_gvar(gvar: :$-0)
