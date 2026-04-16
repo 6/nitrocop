@@ -1,6 +1,6 @@
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
-    HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
+    FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
     PINNED_EXPRESSION_NODE, SUPER_NODE, YIELD_NODE,
 };
 use crate::cop::{Cop, CopConfig};
@@ -126,6 +126,22 @@ use crate::parse::source::SourceFile;
 /// treats adjacent/spaced `))` as collapsible when the last inner child is
 /// itself a paren-carrying node. That matches RuboCop's token-based behavior
 /// without weakening ordinary string/literal cases.
+///
+/// ## Corpus investigation (2026-04-16, follow-up)
+///
+/// Two variant mismatches remained:
+///
+/// 1. Prism parses `Point(*, 1, *a)` pattern parens as `FindPatternNode`, not
+///    `ArrayPatternNode`, so both `space` and `compact` missed those offenses.
+/// 2. RuboCop tokenizes multiline plain quoted strings like
+///    `select("...\n...")` as a single `tSTRING` token. The opening `(` still
+///    checks against that token, but the closing `)` is ignored because the
+///    token started on a previous line. Percent strings like `%(\n...\n)` still
+///    expose a same-line `tSTRING_END`, so their closing side remains checked.
+///
+/// Fix: add `FindPatternNode` paren extraction, and skip close-side
+/// missing-space checks only when the final inner node is a multiline plain
+/// quoted `StringNode` whose closing quote is immediately before the outer `)`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -147,6 +163,7 @@ impl Cop for SpaceInsideParens {
             CALL_NODE,
             DEF_NODE,
             DEFINED_NODE,
+            FIND_PATTERN_NODE,
             HASH_PATTERN_NODE,
             MULTI_TARGET_NODE,
             MULTI_WRITE_NODE,
@@ -225,6 +242,7 @@ impl Cop for SpaceInsideParens {
                     source,
                     diagnostics,
                     &mut corrections,
+                    node,
                     bytes,
                     close_side,
                     close_start,
@@ -328,6 +346,14 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
     if let Some(hash_pattern) = node.as_hash_pattern_node() {
         let open = hash_pattern.opening_loc()?;
         let close = hash_pattern.closing_loc()?;
+        if open.as_slice() == b"(" && close.as_slice() == b")" {
+            return Some((open.start_offset(), open.end_offset(), close.start_offset()));
+        }
+    }
+
+    if let Some(find_pattern) = node.as_find_pattern_node() {
+        let open = find_pattern.opening_loc()?;
+        let close = find_pattern.closing_loc()?;
         if open.as_slice() == b"(" && close.as_slice() == b")" {
             return Some((open.start_offset(), open.end_offset(), close.start_offset()));
         }
@@ -709,6 +735,7 @@ fn check_missing_close_space(
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
     corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node: &ruby_prism::Node<'_>,
     bytes: &[u8],
     close_side: Option<usize>,
     close_start: usize,
@@ -717,6 +744,9 @@ fn check_missing_close_space(
     let Some(prev_code) = close_side else {
         return;
     };
+    if ignores_close_side_for_multiline_plain_string(node, prev_code) {
+        return;
+    }
     if allow_consecutive_right_parens && bytes.get(prev_code) == Some(&b')') {
         return;
     }
@@ -747,6 +777,9 @@ fn check_compact_close_space(
     let Some(prev_code) = close_side else {
         return;
     };
+    if ignores_close_side_for_multiline_plain_string(node, prev_code) {
+        return;
+    }
 
     if bytes.get(prev_code) == Some(&b')')
         && compact_allows_consecutive_close_paren(node, bytes, prev_code)
@@ -786,14 +819,38 @@ fn compact_allows_consecutive_close_paren(
     bytes: &[u8],
     prev_code: usize,
 ) -> bool {
-    let Some(last_inner) = last_compact_inner_node(node) else {
+    let Some(last_inner) = last_inner_node(node) else {
         return false;
     };
 
     paren_offsets(&last_inner, bytes).is_some_and(|(_, _, inner_close)| inner_close == prev_code)
 }
 
-fn last_compact_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+fn ignores_close_side_for_multiline_plain_string(
+    node: &ruby_prism::Node<'_>,
+    prev_code: usize,
+) -> bool {
+    let Some(last_inner) = last_inner_node(node) else {
+        return false;
+    };
+    let Some(string) = last_inner.as_string_node() else {
+        return false;
+    };
+
+    let Some(opening) = string.opening_loc() else {
+        return false;
+    };
+    let Some(closing) = string.closing_loc() else {
+        return false;
+    };
+    if !matches!(opening.as_slice(), b"\"" | b"'") || closing.as_slice() != opening.as_slice() {
+        return false;
+    }
+
+    string.location().as_slice().contains(&b'\n') && closing.start_offset() == prev_code
+}
+
+fn last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
     if let Some(paren) = node.as_parentheses_node() {
         let body = paren.body()?;
         if let Some(stmts) = body.as_statements_node() {
@@ -890,7 +947,8 @@ mod tests {
     crate::cop_variant_fixture_tests!(
         SpaceInsideParens,
         "cops/layout/space_inside_parens",
-        compact
+        compact,
+        space
     );
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
 
@@ -930,6 +988,54 @@ mod tests {
         };
         let src = b"x = ( 1 + 2 )\n";
         assert_cop_no_offenses_full_with_config(&SpaceInsideParens, src, config);
+    }
+
+    #[test]
+    fn space_style_ignores_close_side_for_multiline_plain_string() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("space".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"select(\"DISTINCT ON(LOWER(miq_reports.name), miq_report_results.miq_report_id) LOWER(miq_reports.name), \\\n      miq_report_results.miq_report_id\")\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "space style should only flag the opening side"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+        assert!(diags[0].message.contains("No space"));
+    }
+
+    #[test]
+    fn compact_style_ignores_close_side_for_multiline_plain_string() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"select(\"DISTINCT ON(LOWER(miq_reports.name), miq_report_results.miq_report_id) LOWER(miq_reports.name), \\\n      miq_report_results.miq_report_id\")\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "compact style should only flag the opening side for multiline strings"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+        assert!(diags[0].message.contains("No space"));
     }
 
     #[test]

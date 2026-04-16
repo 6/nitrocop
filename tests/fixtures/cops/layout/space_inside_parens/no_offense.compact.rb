@@ -7,3 +7,8 @@ warning( %(
 ) )
 
 uri_parse( to_absolute( url, page.url )).scheme == "https"
+
+case p
+in Point( *, 1, *a )
+  a
+end
