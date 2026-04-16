@@ -194,6 +194,153 @@ def test_fp_noise_is_not_written_into_no_offense():
         assert "Pre-populated from corpus" not in content
 
 
+TASK_WITH_VARIANT_EXAMPLES = """
+# Fix Style/BlockDelimiters — variant divergence: 100 FP, 50 FN
+
+## Variant FP/FN Examples
+
+### Style: `semantic`
+
+**False Positives** (100 total — nitrocop flags these but RuboCop does not with `semantic`):
+
+- `AlchemyCMS__alchemy_cms: app/controllers/foo.rb:73`
+  Message: Prefer `{...}` over `do...end` for functional blocks.
+  ```ruby
+  items.map do |x|
+    x.name
+  end
+  ```
+
+- `Arachni__arachni: lib/arachni/browser.rb:872`
+  Message: Prefer `{...}` over `do...end` for functional blocks.
+  ```ruby
+  results.select do |r|
+    r.valid?
+  end
+  ```
+
+**False Negatives** (50 total — RuboCop flags these but nitrocop misses with `semantic`):
+
+- `SomeRepo: file.rb:10`
+  Message: Prefer `do...end` over `{...}` for procedural blocks.
+  ```ruby
+  items.each { |x| puts x }
+  ```
+
+### Style: `always_braces`
+
+**False Positives** (3 total — nitrocop flags these but RuboCop does not with `always_braces`):
+
+- `OtherRepo: app/models/foo.rb:5`
+  Message: Prefer `{...}` over `do...end` for blocks.
+  ```ruby
+  foo.bar do
+    baz
+  end
+  ```
+"""
+
+TASK_WITH_MULTI_PARAM_VARIANT = """
+# Fix Layout/HashAlignment — variant divergence
+
+## Variant FP/FN Examples
+
+### Style: `separator, separator, always_ignore`
+
+**False Positives** (5 total):
+
+- `Repo: file.rb:10`
+  ```ruby
+  { a: 1, b: 2 }
+  ```
+"""
+
+
+def test_variant_fp_creates_no_offense_fixture():
+    """Variant FP examples create no_offense.<variant>.rb with config directive."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        make_fixtures(tmp)
+        task = tmp / "task.md"
+        task.write_text(TASK_WITH_VARIANT_EXAMPLES)
+        result = prepopulate_fixtures.prepopulate(task, "Style/BlockDelimiters", tmp)
+        assert result["variant_files"] >= 1
+
+        # Check semantic no_offense fixture was created
+        semantic_no = tmp / "no_offense.semantic.rb"
+        assert semantic_no.exists(), "no_offense.semantic.rb should be created"
+        content = semantic_no.read_text()
+        assert content.startswith("# nitrocop-config: EnforcedStyle: semantic")
+        assert "items.map do |x|" in content
+
+        # Check always_braces no_offense fixture
+        braces_no = tmp / "no_offense.always_braces.rb"
+        assert braces_no.exists(), "no_offense.always_braces.rb should be created"
+        content = braces_no.read_text()
+        assert content.startswith("# nitrocop-config: EnforcedStyle: always_braces")
+        assert "foo.bar do" in content
+
+
+def test_variant_fn_creates_offense_fixture():
+    """Variant FN examples create offense.<variant>.rb with config directive."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        make_fixtures(tmp)
+        task = tmp / "task.md"
+        task.write_text(TASK_WITH_VARIANT_EXAMPLES)
+        prepopulate_fixtures.prepopulate(task, "Style/BlockDelimiters", tmp)
+
+        # Check semantic offense fixture
+        semantic_off = tmp / "offense.semantic.rb"
+        assert semantic_off.exists(), "offense.semantic.rb should be created"
+        content = semantic_off.read_text()
+        assert content.startswith("# nitrocop-config: EnforcedStyle: semantic")
+        assert "items.each { |x| puts x }" in content
+        assert "TODO" in content  # should note annotations needed
+
+
+def test_variant_multi_param_skipped():
+    """Multi-param variant labels (with commas) are skipped."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        make_fixtures(tmp)
+        task = tmp / "task.md"
+        task.write_text(TASK_WITH_MULTI_PARAM_VARIANT)
+        result = prepopulate_fixtures.prepopulate(task, "Layout/HashAlignment", tmp)
+        assert result["variant_files"] == 0
+        # No fixture files created for multi-param variants
+        rb_files = list(tmp.glob("*.separator*.rb"))
+        assert len(rb_files) == 0
+
+
+def test_variant_fixtures_not_overwritten():
+    """Pre-existing variant fixtures are not overwritten."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        make_fixtures(tmp)
+        existing = tmp / "no_offense.semantic.rb"
+        existing.write_text("# nitrocop-config: EnforcedStyle: semantic\n# existing content\n")
+        task = tmp / "task.md"
+        task.write_text(TASK_WITH_VARIANT_EXAMPLES)
+        prepopulate_fixtures.prepopulate(task, "Style/BlockDelimiters", tmp)
+        content = existing.read_text()
+        assert "existing content" in content
+        assert "items.map" not in content
+
+
+def test_variant_no_examples_no_files():
+    """Task without variant examples creates no variant files."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        make_fixtures(tmp)
+        task = tmp / "task.md"
+        task.write_text(TASK_WITH_FN)  # default FN only, no variants
+        result = prepopulate_fixtures.prepopulate(task, "Style/Foo", tmp)
+        assert result["variant_files"] == 0
+        variant_files = [f for f in tmp.iterdir() if "semantic" in f.name or "comma" in f.name]
+        assert len(variant_files) == 0
+
+
 if __name__ == "__main__":
     test_fp_stays_in_task_context()
     test_fn_appended_to_offense()
@@ -201,4 +348,9 @@ if __name__ == "__main__":
     test_mixed_fp_and_fn()
     test_empty_task()
     test_fp_noise_is_not_written_into_no_offense()
+    test_variant_fp_creates_no_offense_fixture()
+    test_variant_fn_creates_offense_fixture()
+    test_variant_multi_param_skipped()
+    test_variant_fixtures_not_overwritten()
+    test_variant_no_examples_no_files()
     print("All tests passed.")

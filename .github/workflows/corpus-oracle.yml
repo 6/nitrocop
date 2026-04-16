@@ -442,6 +442,25 @@ jobs:
               --repo-sha "$REPO_SHA" \
               --timeout 900 || true
 
+            # Extract source context for variant offenses (same as default
+            # pipeline). This enables variant examples to include source
+            # snippets for fixture prepopulation and agent investigation.
+            for VC_BATCH_DIR in results/variant-nitrocop-variant_batch_*; do
+              [ -d "$VC_BATCH_DIR" ] || continue
+              VC_BATCH_NAME=$(basename "$VC_BATCH_DIR" | sed 's/variant-nitrocop-//')
+              VC_RC_JSON="results/variant-rubocop-${VC_BATCH_NAME}/${REPO_ID}.json"
+              VC_NC_JSON="${VC_BATCH_DIR}/${REPO_ID}.json"
+              if [ -f "$VC_NC_JSON" ] || [ -f "$VC_RC_JSON" ]; then
+                python3 bench/corpus/extract_context.py \
+                  --nitrocop-json "$VC_NC_JSON" \
+                  --rubocop-json "$VC_RC_JSON" \
+                  --repo-dir "$DEST" \
+                  --output "results/variant-context-${VC_BATCH_NAME}/${REPO_ID}.json" \
+                  --context-lines 7 \
+                  2>/dev/null || true
+              fi
+            done
+
             # Free disk space between repos
             rm -rf "$DEST"
 
@@ -690,6 +709,12 @@ jobs:
               echo "No rubocop results for $BATCH_NAME"
               continue
             fi
+            # Include source context for variant examples (extracted per-repo
+            # before deletion, same as the default pipeline).
+            VC_CTX_DIR=""
+            if [ -d "all-results/results/variant-context-${BATCH_NAME}" ]; then
+              VC_CTX_DIR="--context-dir all-results/results/variant-context-${BATCH_NAME}"
+            fi
             echo "Diffing style-variant batch: $BATCH_NAME"
             python3 bench/corpus/diff_results.py \
               --nitrocop-dir "$NC_DIR" \
@@ -697,7 +722,8 @@ jobs:
               --manifest bench/corpus/manifest.jsonl \
               --output-json "style-variant-${BATCH_NAME}.json" \
               --output-md /dev/null \
-              ${COP_LIST:+--cop-list "$COP_LIST"} &
+              ${COP_LIST:+--cop-list "$COP_LIST"} \
+              $VC_CTX_DIR &
             PIDS+=($!)
           done
           for pid in "${PIDS[@]}"; do
