@@ -17,3 +17,14 @@ execute <<-SQL
 	SELECT * FROM users
   SQL
 ^ Layout/IndentationStyle: Space detected in indentation.
+
+# The outer closing delimiter should still be flagged after nested heredocs
+# inside interpolation, even though the inner delimiter is suppressed.
+msg = <<~OUTER
+  #{
+    helper(<<~INNER)
+      payload
+    INNER
+  }
+  OUTER
+^ Layout/IndentationStyle: Space detected in indentation.

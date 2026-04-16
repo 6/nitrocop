@@ -23,8 +23,9 @@ pub struct CodeMap {
     xstring_ranges: Vec<(usize, usize)>,
     /// Sorted (but NOT merged) heredoc ranges for boundary detection.
     /// When adjacent heredoc ranges merge (stacked heredocs), the merged range
-    /// loses internal boundaries. This field preserves per-heredoc boundaries
-    /// for `heredoc_range_end()` to detect closing delimiters accurately.
+    /// loses internal boundaries. Nested heredocs can also overlap, so callers
+    /// that need closing-delimiter behavior must inspect all raw ranges that
+    /// still cover the current line.
     raw_heredoc_ranges: Vec<(usize, usize)>,
     /// Sorted, non-overlapping (start, end) byte ranges of `#{}` interpolation
     /// content inside heredocs. These regions are marked as non-code by the main
@@ -158,24 +159,38 @@ impl CodeMap {
         Self::in_ranges(&self.xstring_ranges, offset)
     }
 
-    /// Returns the end offset of the heredoc range containing `offset`, or None
-    /// if the offset is not inside a heredoc range.
-    /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
-    /// heredocs, where adjacent ranges would otherwise merge and lose internal
-    /// boundaries.
-    pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
-        self.raw_heredoc_ranges
-            .binary_search_by(|&(start, end)| {
-                if offset < start {
-                    std::cmp::Ordering::Greater
-                } else if offset >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .map(|idx| self.raw_heredoc_ranges[idx].1)
+    /// Returns true when `line_start` is the closing-delimiter line for at
+    /// least one heredoc and there is no enclosing heredoc that still covers
+    /// the line after `next_line_start`.
+    ///
+    /// This matches RuboCop's behavior for nested heredocs: an inner closing
+    /// delimiter inside an outer heredoc interpolation stays suppressed because
+    /// its indentation is still covered by the outer heredoc body, while the
+    /// outer closing delimiter remains checkable.
+    pub fn is_outermost_heredoc_closing_line(
+        &self,
+        line_start: usize,
+        next_line_start: usize,
+    ) -> bool {
+        let upper = self
+            .raw_heredoc_ranges
+            .partition_point(|&(start, _)| start <= line_start);
+        let mut closes_heredoc = false;
+        let mut inside_continuing_heredoc = false;
+
+        for &(_, end) in &self.raw_heredoc_ranges[..upper] {
+            if line_start >= end {
+                continue;
+            }
+
+            if next_line_start >= end {
+                closes_heredoc = true;
+            } else {
+                inside_continuing_heredoc = true;
+            }
+        }
+
+        closes_heredoc && !inside_continuing_heredoc
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation

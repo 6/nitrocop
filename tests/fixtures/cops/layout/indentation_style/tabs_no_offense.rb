@@ -19,3 +19,13 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Space-indented inner nested heredoc closing delimiters remain inside the
+# outer heredoc body, so RuboCop does not flag them under EnforcedStyle: tabs.
+msg = <<~OUTER
+  #{
+    helper(<<~INNER)
+      payload
+    INNER
+  }
+OUTER
