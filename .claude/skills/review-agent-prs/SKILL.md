@@ -40,10 +40,12 @@ gh pr list --repo 6/nitrocop --label type:cop-fix,validation-failed --state open
 Before reviewing code, fetch the PR comments to check actual corpus impact:
 
 ```bash
-gh pr view <number> --repo 6/nitrocop --json comments --jq '.comments[] | select(.author.login == "github-actions") | .body' | head -40
+gh pr view <number> --repo 6/nitrocop --json comments --jq '.comments[] | select(.author.login == "github-actions") | .body'
 ```
 
-The CI workflow posts cop-check results with FP/FN deltas. Look for the table with `FP Δ` and `FN Δ` columns. If the PR has **zero net FP/FN change** (all deltas are 0), add the `needs-investigation` label and skip it — the code change may need further corpus investigation. Do not trust doc comment claims like "resolves ~N FPs" without verifying against the actual CI comment data.
+Never truncate the CI comment output (no `head`, no `tail`). Variant-specific rows (e.g. `Cop/Name (variant)`) are emitted *after* the default-variant rows, so any truncation can hide the rows that contain the actual FP/FN impact and lead to incorrectly labeling a high-impact PR as `needs-investigation`.
+
+The CI workflow posts cop-check results with FP/FN deltas. Look for the table with `FP Δ` and `FN Δ` columns, and make sure you've read through any variant rows at the bottom before judging impact. If the PR has **zero net FP/FN change** (all deltas are 0 across both default and variant rows), add the `needs-investigation` label and skip it — the code change may need further corpus investigation. Do not trust doc comment claims like "resolves ~N FPs" without verifying against the actual CI comment data.
 
 ```bash
 gh pr edit <number> --repo 6/nitrocop --add-label needs-investigation
