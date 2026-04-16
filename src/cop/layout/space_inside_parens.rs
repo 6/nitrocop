@@ -6,6 +6,7 @@ use crate::cop::shared::node_type::{
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// ## Corpus investigation (2026-03-20)
 ///
@@ -122,6 +123,16 @@ use crate::parse::source::SourceFile;
 ///    characters and incorrectly flagged the close side. Fix: ignore the
 ///    close-side missing-space check only when `)` immediately follows the end
 ///    of a continued multiline string literal.
+/// 3. **`compact` only exempts actual paren tokens.** RuboCop's
+///    consecutive-paren exception is token-based, so `%(...))` still requires
+///    a space before the outer `)` because the inner `)` is `tSTRING_END`, not
+///    `tRPAREN`. The previous byte check treated any adjacent `)` as a nested
+///    right paren and missed those offenses. Fix: in `compact` style, only
+///    suppress the missing-space check when the adjacent `(` / `)` byte belongs
+///    to another tracked paren pair in the current subtree. The same token-pair
+///    rule also means `compact` removes a single space between actual
+///    consecutive parens (`f( x( 3 ) )`), but does not apply that special case
+///    to non-paren delimiters that happen to use `(` or `)` (like `%(...))`).
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -204,6 +215,7 @@ impl Cop for SpaceInsideParens {
 
         let ignore_open_side = ignores_open_side(node, bytes, open_start);
         let ignore_missing_close_side = ignores_missing_close_side(bytes, close_side, close_start);
+        let compact_adjacent_parens = compact_adjacent_parens(node, bytes, open_side, close_side);
 
         match style {
             "space" => {
@@ -233,27 +245,49 @@ impl Cop for SpaceInsideParens {
             }
             "compact" => {
                 if !ignore_open_side {
-                    check_missing_open_space(
-                        self,
-                        source,
-                        diagnostics,
-                        &mut corrections,
-                        bytes,
-                        open_side,
-                        true,
-                    );
+                    if compact_adjacent_parens.left {
+                        check_compact_consecutive_open_space(
+                            self,
+                            source,
+                            diagnostics,
+                            &mut corrections,
+                            open_end,
+                            open_side,
+                        );
+                    } else {
+                        check_missing_open_space(
+                            self,
+                            source,
+                            diagnostics,
+                            &mut corrections,
+                            bytes,
+                            open_side,
+                            false,
+                        );
+                    }
                 }
                 if !ignore_missing_close_side {
-                    check_missing_close_space(
-                        self,
-                        source,
-                        diagnostics,
-                        &mut corrections,
-                        bytes,
-                        close_side,
-                        close_start,
-                        true,
-                    );
+                    if compact_adjacent_parens.right {
+                        check_compact_consecutive_close_space(
+                            self,
+                            source,
+                            diagnostics,
+                            &mut corrections,
+                            close_start,
+                            close_side,
+                        );
+                    } else {
+                        check_missing_close_space(
+                            self,
+                            source,
+                            diagnostics,
+                            &mut corrections,
+                            bytes,
+                            close_side,
+                            close_start,
+                            false,
+                        );
+                    }
                 }
             }
             _ => {
@@ -472,6 +506,81 @@ fn previous_line_ends_with_backslash(bytes: &[u8], newline_offset: usize) -> boo
     idx > line_start && bytes[idx - 1] == b'\\'
 }
 
+#[derive(Clone, Copy, Default)]
+struct CompactAdjacentParens {
+    left: bool,
+    right: bool,
+}
+
+fn compact_adjacent_parens(
+    node: &ruby_prism::Node<'_>,
+    bytes: &[u8],
+    open_side: NextSameLineItem,
+    close_side: Option<usize>,
+) -> CompactAdjacentParens {
+    let open_target = match open_side {
+        NextSameLineItem::Code(code_start) if bytes.get(code_start) == Some(&b'(') => {
+            Some(code_start)
+        }
+        _ => None,
+    };
+    let close_target = match close_side {
+        Some(prev_code) if bytes.get(prev_code) == Some(&b')') => Some(prev_code),
+        _ => None,
+    };
+
+    if open_target.is_none() && close_target.is_none() {
+        return CompactAdjacentParens::default();
+    }
+
+    let mut finder = CompactAdjacentParenFinder {
+        bytes,
+        open_target,
+        close_target,
+        found: CompactAdjacentParens::default(),
+    };
+    finder.visit(node);
+    finder.found
+}
+
+struct CompactAdjacentParenFinder<'a> {
+    bytes: &'a [u8],
+    open_target: Option<usize>,
+    close_target: Option<usize>,
+    found: CompactAdjacentParens,
+}
+
+impl<'pr> ruby_prism::Visit<'pr> for CompactAdjacentParenFinder<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.record(node);
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.record(node);
+    }
+}
+
+impl CompactAdjacentParenFinder<'_> {
+    fn record(&mut self, node: ruby_prism::Node<'_>) {
+        if self.found.left == self.open_target.is_some()
+            && self.found.right == self.close_target.is_some()
+        {
+            return;
+        }
+
+        let Some((open_start, _, close_start)) = paren_offsets(&node, self.bytes) else {
+            return;
+        };
+
+        if Some(open_start) == self.open_target {
+            self.found.left = true;
+        }
+        if Some(close_start) == self.close_target {
+            self.found.right = true;
+        }
+    }
+}
+
 /// Detects when `(` is used as a hash value in label syntax, e.g. `key: (expr)`.
 ///
 /// In Ruby 4.0 parsing mode, RuboCop's tokenizer assigns a different token type
@@ -686,6 +795,32 @@ fn check_extraneous_open_space(
     }
 }
 
+fn check_compact_consecutive_open_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    open_end: usize,
+    open_side: NextSameLineItem,
+) {
+    let NextSameLineItem::Code(code_start) = open_side else {
+        return;
+    };
+    if code_start != open_end + 1 || source.as_bytes().get(open_end) != Some(&b' ') {
+        return;
+    }
+
+    push_remove_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        open_end,
+        code_start,
+        MSG,
+    );
+}
+
 fn check_extraneous_close_space(
     cop: &SpaceInsideParens,
     source: &SourceFile,
@@ -709,6 +844,32 @@ fn check_extraneous_close_space(
             MSG,
         );
     }
+}
+
+fn check_compact_consecutive_close_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    close_start: usize,
+    close_side: Option<usize>,
+) {
+    let Some(prev_code) = close_side else {
+        return;
+    };
+    if prev_code + 2 != close_start || source.as_bytes().get(prev_code + 1) != Some(&b' ') {
+        return;
+    }
+
+    push_remove_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        prev_code + 1,
+        close_start,
+        MSG,
+    );
 }
 
 fn check_missing_open_space(
@@ -828,7 +989,12 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
-    crate::cop_variant_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens", space);
+    crate::cop_variant_fixture_tests!(
+        SpaceInsideParens,
+        "cops/layout/space_inside_parens",
+        space,
+        compact
+    );
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
 
     #[test]
@@ -913,5 +1079,68 @@ mod tests {
         );
         assert_eq!(diags[0].location.column, 15);
         assert!(diags[0].message.contains("No space"));
+    }
+
+    #[test]
+    fn compact_style_percent_literal_end_still_requires_closing_space() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"warning(%(\n  foo\n))\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            2,
+            "compact style should still require spaces around percent literals"
+        );
+        assert_eq!(diags[1].location.line, 3);
+        assert_eq!(diags[1].location.column, 1);
+        assert!(diags[1].message.contains("No space"));
+    }
+
+    #[test]
+    fn compact_style_multiline_string_continuation_ignores_closing_side() {
+        use crate::testutil::assert_cop_no_offenses_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"select( \"hello\\\n world\")\n";
+        assert_cop_no_offenses_full_with_config(&SpaceInsideParens, src, config);
+    }
+
+    #[test]
+    fn compact_style_flags_space_between_consecutive_right_parens() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"f( x( 3 ) )\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "compact style should remove a single space between consecutive right parens"
+        );
+        assert_eq!(diags[0].location.column, 9);
+        assert!(diags[0].message.contains("Space inside parentheses"));
     }
 }
