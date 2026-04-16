@@ -179,6 +179,12 @@ impl Cop for MultilineMethodCallIndentation {
     }
 }
 
+enum MsgStyle {
+    Aligned,
+    Indented,
+    ReceiverRelative,
+}
+
 struct ChainVisitor<'a> {
     cop: &'a MultilineMethodCallIndentation,
     source: &'a SourceFile,
@@ -246,10 +252,15 @@ impl ChainVisitor<'_> {
             return;
         }
 
-        // Track whether to use aligned or indented message format
-        let (expected, use_aligned_msg) = match self.style {
-            "indented" | "indented_relative_to_receiver" => {
-                (self.expected_indented(call_node, &receiver), false)
+        // Compute expected column and message style based on EnforcedStyle
+        let (expected, msg_style) = match self.style {
+            "indented" => (
+                self.expected_indented(call_node, &receiver),
+                MsgStyle::Indented,
+            ),
+            "indented_relative_to_receiver" => {
+                let col = self.expected_relative_to_receiver(call_node, &receiver);
+                (col, MsgStyle::ReceiverRelative)
             }
             _ => {
                 // "aligned" (default)
@@ -260,21 +271,26 @@ impl ChainVisitor<'_> {
                     rhs_col,
                     is_trailing_dot,
                 ) {
-                    Some(col) => (col, true),
+                    Some(col) => (col, MsgStyle::Aligned),
                     None => {
                         // No alignment base found — fall back to indented behavior,
                         // matching RuboCop's `indentation(lhs) + correct_indentation(node)`
-                        (self.expected_indented(call_node, &receiver), false)
+                        (
+                            self.expected_indented(call_node, &receiver),
+                            MsgStyle::Indented,
+                        )
                     }
                 }
             }
         };
 
         if rhs_col != expected {
-            let msg = if use_aligned_msg {
-                self.aligned_message(call_node, &receiver, is_trailing_dot)
-            } else {
-                self.indented_message(call_node, &receiver, rhs_col)
+            let msg = match msg_style {
+                MsgStyle::Aligned => self.aligned_message(call_node, &receiver, is_trailing_dot),
+                MsgStyle::ReceiverRelative => {
+                    self.receiver_relative_message(call_node, &receiver, is_trailing_dot)
+                }
+                MsgStyle::Indented => self.indented_message(call_node, &receiver, rhs_col),
             };
             self.diagnostics
                 .push(self.cop.diagnostic(self.source, rhs_line, rhs_col, msg));
@@ -292,6 +308,32 @@ impl ChainVisitor<'_> {
         let base_indent = indentation_of(base_line_bytes);
         let kw_extra = keyword_extra_indent(self.source, call_node, self.width);
         base_indent + self.width + kw_extra
+    }
+
+    /// RuboCop's `receiver_alignment_base` + `extra_indentation` for
+    /// `indented_relative_to_receiver` style.
+    ///
+    /// Returns: expected column = base_col + effective_width.
+    ///
+    /// The base is determined by `find_hash_method_base_col` (for hash/paren
+    /// receivers) or `find_chain_root_col` (the chain root receiver).
+    /// No keyword extra indent — `@base` is always set for this style.
+    ///
+    /// Width is adjusted for splat (`*`) and kwsplat (`**`) — RuboCop's
+    /// `extra_indentation` subtracts the operator length.
+    fn expected_relative_to_receiver(
+        &self,
+        _call_node: &ruby_prism::CallNode<'_>,
+        receiver: &ruby_prism::Node<'_>,
+    ) -> usize {
+        let splat_adj = splat_operator_length(self.source, receiver);
+        let effective_width = self.width.saturating_sub(splat_adj);
+
+        if let Some(base_col) = find_hash_method_base_col(self.source, receiver) {
+            base_col + effective_width
+        } else {
+            find_chain_root_col(self.source, receiver) + effective_width
+        }
     }
 
     fn expected_aligned(
@@ -449,6 +491,34 @@ impl ChainVisitor<'_> {
             "Use {} (not {}) spaces for indentation of a chained method call.",
             self.width,
             rhs_col.saturating_sub(chain_indent)
+        )
+    }
+
+    /// Message for `indented_relative_to_receiver` style.
+    /// Format: "Indent `.method` N spaces more than `base_source` on line L."
+    fn receiver_relative_message(
+        &self,
+        call_node: &ruby_prism::CallNode<'_>,
+        receiver: &ruby_prism::Node<'_>,
+        is_trailing_dot: bool,
+    ) -> String {
+        let selector_str = if is_trailing_dot {
+            // For trailing dot, the selector (method name) is the RHS
+            let name = call_node.name().as_slice();
+            std::str::from_utf8(name).unwrap_or("?").to_string()
+        } else if call_node.message_loc().is_some() {
+            let name = call_node.name().as_slice();
+            format!(".{}", std::str::from_utf8(name).unwrap_or("?"))
+        } else {
+            // Implicit call (proc call) — `a\n  .(args)`
+            ".(".to_string()
+        };
+
+        let (base_name, base_line) = find_receiver_relative_base_description(self.source, receiver);
+
+        format!(
+            "Indent `{selector_str}` {} spaces more than `{base_name}` on line {base_line}.",
+            self.width
         )
     }
 }
@@ -1062,6 +1132,126 @@ fn find_chain_root_offset(node: &ruby_prism::Node<'_>) -> usize {
     node.location().start_offset()
 }
 
+/// Detect if the chain root is preceded by a splat (`*`) or kwsplat (`**`)
+/// operator on the same line. Returns the operator length (0, 1, or 2).
+///
+/// RuboCop's `extra_indentation` for `indented_relative_to_receiver` subtracts
+/// the operator length from the configured indentation width.
+fn splat_operator_length(source: &SourceFile, receiver: &ruby_prism::Node<'_>) -> usize {
+    let root_offset = find_chain_root_offset(receiver);
+    if root_offset == 0 {
+        return 0;
+    }
+    let bytes = source.as_bytes();
+    if bytes[root_offset - 1] == b'*' {
+        if root_offset >= 2 && bytes[root_offset - 2] == b'*' {
+            return 2; // **expr
+        }
+        return 1; // *expr
+    }
+    0
+}
+
+/// RuboCop's `find_hash_method_base_in_receiver_chain` for
+/// `indented_relative_to_receiver` style.
+///
+/// Walks the receiver chain downward. For each call node, checks if its
+/// receiver is:
+/// 1. A hash literal (`HashNode`) → return that call's dot column
+/// 2. A parenthesized expression (`ParenthesesNode`) where the dot is on
+///    the same line as the closing paren → return that call's dot column
+///
+/// This handles patterns like:
+/// ```ruby
+/// { a: 1, b: 2 }.keys     # base = `.keys` dot
+///                  .first  # indented relative to `.keys`
+///
+/// (date_columns + cols).uniq    # base = `.uniq` dot
+///                        .each  # indented relative to `.uniq`
+/// ```
+fn find_hash_method_base_col(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Option<usize> {
+    let call = node.as_call_node()?;
+    let recv = call.receiver()?;
+
+    // Check if receiver is a hash literal (HashNode or KeywordHashNode —
+    // RuboCop's `hash_type?` matches both)
+    if recv.as_hash_node().is_some() || recv.as_keyword_hash_node().is_some() {
+        if let Some(dot_loc) = call.call_operator_loc() {
+            let (_, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+            return Some(dot_col);
+        }
+    }
+    // Check if receiver is a parenthesized expression with dot on
+    // the same line as the closing paren
+    if recv.as_parentheses_node().is_some() {
+        let (recv_end_line, _) = source.offset_to_line_col(recv.location().end_offset());
+        if let Some(dot_loc) = call.call_operator_loc() {
+            let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+            if dot_line == recv_end_line {
+                return Some(dot_col);
+            }
+        }
+    }
+
+    // Recurse into receiver chain
+    find_hash_method_base_col(source, &recv)
+}
+
+/// Build base description for `indented_relative_to_receiver` messages.
+///
+/// Returns (base_source_text, base_line) matching RuboCop's `base_source`
+/// which is `@base.source[/[^\n]*/]` — the first line of the base range.
+///
+/// For hash/paren chains, the base is the dot+selector (e.g., `.keys`).
+/// For normal chains, the base is the chain root (e.g., `Thing`).
+fn find_receiver_relative_base_description(
+    source: &SourceFile,
+    receiver: &ruby_prism::Node<'_>,
+) -> (String, usize) {
+    // Check for hash/paren method base first
+    if let Some((desc, line)) = find_hash_method_base_description(source, receiver) {
+        return (desc, line);
+    }
+
+    // Normal chain: base is the chain root receiver
+    find_chain_root_description(source, receiver)
+}
+
+/// Build description for hash/paren method base.
+/// Walks receiver chain looking for hash/paren receivers (same logic as
+/// `find_hash_method_base_col`), returns the dot+selector text.
+fn find_hash_method_base_description(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+) -> Option<(String, usize)> {
+    let call = node.as_call_node()?;
+    let recv = call.receiver()?;
+
+    let is_hash = recv.as_hash_node().is_some() || recv.as_keyword_hash_node().is_some();
+    let is_paren_same_line = if recv.as_parentheses_node().is_some() {
+        if let Some(dot_loc) = call.call_operator_loc() {
+            let (recv_end_line, _) = source.offset_to_line_col(recv.location().end_offset());
+            let (dot_line, _) = source.offset_to_line_col(dot_loc.start_offset());
+            dot_line == recv_end_line
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if is_hash || is_paren_same_line {
+        let name = std::str::from_utf8(call.name().as_slice()).unwrap_or("?");
+        if let Some(dot_loc) = call.call_operator_loc() {
+            let (line, _) = source.offset_to_line_col(dot_loc.start_offset());
+            return Some((format!(".{name}"), line));
+        }
+    }
+
+    // Recurse into receiver chain
+    find_hash_method_base_description(source, &recv)
+}
+
 /// Walk backwards from a given line to find the first line that does NOT
 /// start with a continuation dot.
 fn find_non_continuation_ancestor_line(source: &SourceFile, start_line: usize) -> usize {
@@ -1212,6 +1402,11 @@ mod tests {
     crate::cop_fixture_tests!(
         MultilineMethodCallIndentation,
         "cops/layout/multiline_method_call_indentation"
+    );
+    crate::cop_variant_fixture_tests!(
+        MultilineMethodCallIndentation,
+        "cops/layout/multiline_method_call_indentation",
+        indented_relative_to_receiver
     );
 
     #[test]
