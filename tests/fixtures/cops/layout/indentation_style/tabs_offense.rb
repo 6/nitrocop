@@ -17,3 +17,13 @@ execute <<-SQL
 	SELECT * FROM users
   SQL
 ^ Layout/IndentationStyle: Space detected in indentation.
+
+# Outer closer should still be flagged even when a nested closer in interpolation is ignored
+doc = <<~OUTER
+  #{
+    helper(<<~INNER)
+      body
+    INNER
+  }
+    OUTER
+^ Layout/IndentationStyle: Space detected in indentation.

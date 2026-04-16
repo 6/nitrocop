@@ -73,6 +73,20 @@ use ruby_prism::Visit;
 ///    range_end` check fails.
 ///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
 ///    switched `heredoc_range_end()` to use it.
+///
+/// ## Corpus investigation (2026-04-16, tabs variant: FP=19, FN=10)
+///
+/// Nested heredocs inside another heredoc/string exposed one more closing-
+/// delimiter edge case. `CodeMap::heredoc_range_end()` was doing a binary
+/// search over `raw_heredoc_ranges`, but those raw ranges can overlap when an
+/// inner heredoc appears inside outer heredoc interpolation. That made lookup
+/// non-deterministic: the cop could treat the inner closer as checkable (FP)
+/// while missing the outer closer that RuboCop actually flags (FN).
+///
+/// Fix: make `heredoc_range_end()` scan overlapping raw ranges and return the
+/// OUTERMOST containing heredoc end. That keeps nested inner closers skipped
+/// when their leading whitespace is still inside an outer heredoc body, while
+/// outer closing delimiters remain checkable.
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {

@@ -158,24 +158,29 @@ impl CodeMap {
         Self::in_ranges(&self.xstring_ranges, offset)
     }
 
-    /// Returns the end offset of the heredoc range containing `offset`, or None
-    /// if the offset is not inside a heredoc range.
-    /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for stacked
-    /// heredocs, where adjacent ranges would otherwise merge and lose internal
-    /// boundaries.
+    /// Returns the end offset of the OUTERMOST heredoc range containing
+    /// `offset`, or None if the offset is not inside a heredoc range.
+    ///
+    /// Uses raw (unmerged) ranges to preserve per-heredoc boundaries for
+    /// stacked heredocs, and scans overlapping raw ranges so nested heredocs
+    /// still resolve to the outermost boundary. Binary search is not valid here
+    /// because raw heredoc ranges can overlap.
     pub fn heredoc_range_end(&self, offset: usize) -> Option<usize> {
-        self.raw_heredoc_ranges
-            .binary_search_by(|&(start, end)| {
-                if offset < start {
-                    std::cmp::Ordering::Greater
-                } else if offset >= end {
-                    std::cmp::Ordering::Less
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-            .ok()
-            .map(|idx| self.raw_heredoc_ranges[idx].1)
+        let mut outermost_end: Option<usize> = None;
+
+        for &(start, end) in &self.raw_heredoc_ranges {
+            if start > offset {
+                break;
+            }
+            if offset < end {
+                outermost_end = Some(match outermost_end {
+                    Some(current) => current.max(end),
+                    None => end,
+                });
+            }
+        }
+
+        outermost_end
     }
 
     /// Returns true if the given byte offset is inside `#{}` interpolation

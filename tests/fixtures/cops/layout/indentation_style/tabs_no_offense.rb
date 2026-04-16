@@ -19,3 +19,12 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Nested heredoc closer inside outer heredoc interpolation should stay ignored
+doc = <<~OUTER
+  #{
+    helper(<<~INNER)
+      body
+    INNER
+  }
+OUTER
