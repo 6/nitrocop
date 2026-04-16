@@ -112,7 +112,7 @@ def test_issue_close_workflow_uses_github_token() -> None:
     content = ROOT.joinpath(".github", "workflows", "cop-issue-close.yml").read_text()
     assert "actions/create-github-app-token@v3" not in content
     assert "GH_TOKEN: ${{ github.token }}" in content
-    assert "gh issue comment" in content
+    assert "gh issue close" in content
 
 
 

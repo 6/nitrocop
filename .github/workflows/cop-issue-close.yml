@@ -30,17 +30,17 @@ jobs:
             echo "Found: cop=$COP issue=#$ISSUE"
           fi
 
-      - name: Update tracker issue
+      - name: Close tracker issue
         if: steps.extract.outputs.issue != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           ISSUE="${{ steps.extract.outputs.issue }}"
           COP="${{ steps.extract.outputs.cop }}"
-          # Don't close the issue here — the cop may still have variant divergence.
-          # issues-sync is the sole authority on issue state: it checks both default
-          # and variant divergence before closing.
-          gh issue comment "$ISSUE" \
+          # Close the issue so batch-dispatch won't re-dispatch this cop
+          # before the next oracle run. issues-sync will reopen it if
+          # divergence remains after the oracle refreshes.
+          gh issue close "$ISSUE" \
             --repo "${{ github.repository }}" \
-            --body "PR #${{ github.event.pull_request.number }} merged (\`${COP}\`). The next corpus oracle run will verify conformance and update this issue."
-          echo "Commented on issue #$ISSUE (close deferred to issues-sync)"
+            --comment "PR #${{ github.event.pull_request.number }} merged (\`${COP}\`). Closing until next oracle run verifies conformance."
+          echo "Closed issue #$ISSUE"
