@@ -32,8 +32,9 @@ use crate::parse::source::SourceFile;
 ///
 /// ## FP fix: pattern matching captures (2026-04-04)
 ///
-/// RuboCop does not flag variables captured in `case/in` pattern matching
-/// (e.g., `in [_, middle, *rest]`). The variable_force engine creates
+/// RuboCop does not flag variables captured in pattern matching
+/// (`case/in` or rightward `expr => pattern`, e.g. `in [_, middle, *rest]`
+/// or `[1, 2] => [first, *rest]`). The variable_force engine creates
 /// assignments for these captures, but they should never be reported as
 /// useless. Fixed by collecting all pattern match target offsets from the
 /// AST and skipping those offsets during offense emission.
@@ -490,6 +491,14 @@ impl<'pr> Visit<'pr> for PatternMatchTargetCollector {
                 self.visit(&stmt);
             }
         }
+        self.in_pattern = was_in_pattern;
+    }
+
+    fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
+        self.visit(&node.value());
+        let was_in_pattern = self.in_pattern;
+        self.in_pattern = true;
+        self.visit(&node.pattern());
         self.in_pattern = was_in_pattern;
     }
 
