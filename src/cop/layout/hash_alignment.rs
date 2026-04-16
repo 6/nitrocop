@@ -54,6 +54,15 @@ use ruby_prism::Visit;
 ///      Fixed by checking the Prism parent chain directly and only ignoring hashes
 ///      that are actually the last argument of a `CallNode`, `SuperNode`, or
 ///      `YieldNode`.
+///
+/// 5. **`ignore_explicit` with trailing `&block` (FN, 2026-04-16):** Prism keeps
+///    `&block` separate from `arguments()`. That made `is_last_argument_hash()`
+///    misclassify `call({ ... }, &block)` and `super({ ... }, &block)` as
+///    explicit last-argument hashes, so nitrocop skipped them under
+///    `ignore_explicit`. RuboCop's `node.last_argument` treats the block pass as
+///    trailing after the hash, so these hashes are still inspected. Fixed by
+///    requiring `CallNode` / `SuperNode` to have no trailing `block()` before a
+///    hash can be ignored as the last argument.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -247,9 +256,15 @@ fn is_last_argument_hash(
     };
 
     if let Some(call) = parent.as_call_node() {
+        if call.block().is_some() {
+            return false;
+        }
         return is_last_argument(call.arguments());
     }
     if let Some(super_node) = parent.as_super_node() {
+        if super_node.block().is_some() {
+            return false;
+        }
         return is_last_argument(super_node.arguments());
     }
     if let Some(yield_node) = parent.as_yield_node() {
