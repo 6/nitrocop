@@ -161,3 +161,27 @@ end
 # ternary with local variable assignment (FN case)
 opts[:response_timeout].nil? ? response_timeout = 0.9 : response_timeout = opts[:response_timeout].to_f
 ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if item.to_s == pagy.page.to_s
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if created_at.empty?
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if @article.persistent?
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if $colors_enabled
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if @options[:interline_align]
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if(event.respond_to?(:message))
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if(event.respond_to?(:message))
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+
+if state[:status] == :success
+^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
