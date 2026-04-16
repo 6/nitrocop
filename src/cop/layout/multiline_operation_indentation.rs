@@ -28,11 +28,19 @@ use crate::parse::source::SourceFile;
 /// RuboCop's `aligned` style. Under `EnforcedStyle=indented`, RuboCop
 /// requires `left_indent + width` for ordinary multiline operator calls,
 /// so same-column chains like the bottles examples must be offenses.
+///
+/// Key fix (2026-04-16): under `EnforcedStyle=indented`, RuboCop still
+/// accepts same-column continuations when the assignment RHS starts on the
+/// next line via a trailing `\` on the assignment line, and it still applies
+/// keyword-condition indentation to nested operator calls under `if`/`while`
+/// continuations (for example `if lhs &&\n     rhs >=\n       value`).
+/// We mirror both quirks here and include `===`, `=~`, and `!~` in the
+/// operator-method set so regex/case-equality conditions are checked too.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
-    b"+", b"-", b"*", b"/", b"%", b"**", b"==", b"!=", b"<", b">", b"<=", b">=", b"<=>", b"&",
-    b"|", b"^", b"<<", b">>",
+    b"+", b"-", b"*", b"/", b"%", b"**", b"==", b"===", b"!=", b"=~", b"!~", b"<", b">", b"<=",
+    b">=", b"<=>", b"&", b"|", b"^", b"<<", b">>",
 ];
 
 impl Cop for MultilineOperationIndentation {
@@ -233,7 +241,30 @@ fn has_assignment_before_col(line_bytes: &[u8], col: usize) -> bool {
 }
 
 fn line_ends_with_assignment_operator(line_bytes: &[u8]) -> bool {
-    last_significant_index(line_bytes).is_some_and(|idx| is_assignment_operator(line_bytes, idx))
+    let mut idx = match last_significant_index(line_bytes) {
+        Some(idx) => idx,
+        None => return false,
+    };
+
+    if line_bytes[idx] == b'\\' {
+        idx = match last_significant_index(&line_bytes[..idx]) {
+            Some(idx) => idx,
+            None => return false,
+        };
+    }
+
+    is_assignment_operator(line_bytes, idx)
+}
+
+fn line_ends_with_logical_operator(line_bytes: &[u8]) -> bool {
+    let Some(idx) = last_significant_index(line_bytes) else {
+        return false;
+    };
+    let trimmed = &line_bytes[..=idx];
+    trimmed.ends_with(b"&&")
+        || trimmed.ends_with(b"||")
+        || trimmed.ends_with(b" and")
+        || trimmed.ends_with(b" or")
 }
 
 fn modifier_keyword(before_expr: &[u8]) -> Option<&'static str> {
@@ -332,6 +363,14 @@ fn keyword_context_on_line(
         if last_significant_index(prev_line).is_some_and(|idx| prev_line[idx] == b'\\') {
             return extract(prev_line, prev_line.len());
         }
+
+        let line_indent = leading_whitespace_len_with_tabs(line_bytes);
+        let prev_indent = leading_whitespace_len_with_tabs(prev_line);
+        if prev_indent < line_indent && line_ends_with_logical_operator(prev_line) {
+            if let Some(ctx) = extract(prev_line, prev_line.len()) {
+                return Some(ctx);
+            }
+        }
     }
     None
 }
@@ -350,7 +389,13 @@ fn assignment_context(
 
     if left_line > 1 {
         let prev_line = source.lines().nth(left_line - 2).unwrap_or(b"");
-        if line_ends_with_assignment_operator(prev_line) {
+        // RuboCop only treats the expression as "assignment-aligned" when the
+        // operation itself begins the continued RHS line. Nested keyword/body
+        // expressions on that line (for example `value = \n  if a ||\n     b`)
+        // still use their own indentation rules.
+        if line_ends_with_assignment_operator(prev_line)
+            && left_col == leading_whitespace_len_with_tabs(left_line_bytes)
+        {
             return Some(AssignmentContext {
                 rhs_begins_line: true,
             });
