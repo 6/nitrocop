@@ -1898,13 +1898,16 @@ def main():
                                 for loc in dr.get("fn_locs", []):
                                     print(f"      FN: {loc}")
                     print()
-                    if variant_failed:
+                    if variant_failed and not args.allow_net_improvement:
                         print(f"FAIL: variant style regression detected for {args.cop}")
+                    elif variant_failed:
+                        print(f"NOTE: per-shard variant regression for {args.cop} "
+                              f"(aggregate gate will decide pass/fail)")
                 else:
                     print(f"  No variant overrides for {args.cop}")
                     print()
 
-        if variant_failed:
+        if variant_failed and not args.allow_net_improvement:
             sys.exit(1)
         sys.exit(0)
 
