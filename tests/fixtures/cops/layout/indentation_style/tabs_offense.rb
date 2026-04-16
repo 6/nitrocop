@@ -17,3 +17,16 @@ execute <<-SQL
 	SELECT * FROM users
   SQL
 ^ Layout/IndentationStyle: Space detected in indentation.
+
+# Space-indented outer closing delimiter should still be flagged when an inner
+# heredoc closing delimiter appears earlier inside the outer heredoc body
+def describe
+	x = <<~OUTER
+	  #{
+	    helper('text', <<~INNER)
+	      "filter": "selectorgadget",
+	    INNER
+	  }
+  OUTER
+^ Layout/IndentationStyle: Space detected in indentation.
+end

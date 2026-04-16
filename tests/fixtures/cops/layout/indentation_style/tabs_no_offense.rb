@@ -19,3 +19,15 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Space-indented inner closing delimiter inside an outer heredoc body should
+# not be flagged
+def describe
+	x = <<~OUTER
+	  #{
+	    helper('text', <<~INNER)
+	      "filter": "selectorgadget",
+	    INNER
+	  }
+OUTER
+end
