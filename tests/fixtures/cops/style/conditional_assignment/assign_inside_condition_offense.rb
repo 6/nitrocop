@@ -75,6 +75,12 @@ x = unless foo
       2
     end
 
+# unless without else
+value = unless condition
+^ Style/ConditionalAssignment: Assign variables inside of conditionals.
+          1
+        end
+
 # Ternary
 x = foo? ? 1 : 2
 ^ Style/ConditionalAssignment: Assign variables inside of conditionals.
@@ -193,3 +199,10 @@ language = if language.respond_to?(:map)
             else
               escape_language(language)
             end
+
+# Corpus FN: nested send assignment inside outer assignment should still be checked
+query_options = [:lookup, :language].inject({}) do |hash, key|
+  val = options[key]
+  hash[key] = val.respond_to?(:call) ? val.call(self) : val
+  ^ Style/ConditionalAssignment: Assign variables inside of conditionals.
+end
