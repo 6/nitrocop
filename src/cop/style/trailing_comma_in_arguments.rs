@@ -1,4 +1,7 @@
-use crate::cop::shared::node_type::{BLOCK_ARGUMENT_NODE, CALL_NODE};
+use crate::cop::shared::node_type::{
+    BLOCK_ARGUMENT_NODE, CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE,
+    INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -48,6 +51,27 @@ use super::trailing_comma;
 /// preserve the braced-hash `consistent_comma` carveout, fall back to
 /// `EnforcedStyle` when the multiline-specific key is absent, and implement the
 /// `diff_comma` newline predicate (including `\r\n`).
+///
+/// Investigation (2026-04-16)
+///
+/// `consistent_comma` variant: 99 FPs and 8 FNs.
+///
+/// FP root cause: `effective_element_locations` unconditionally expanded
+/// `KeywordHashNode` into individual assoc elements. When keyword args were
+/// all on a single line (e.g., `foo(\n  a: 1, b: 2, c: 3)`), RuboCop's
+/// `elements` treats the hash as a single element (it only expands multiline
+/// braceless hashes). With one element, `allowed_multiline_argument?` exempts
+/// the call from being considered multiline. Nitrocop expanded to 3 elements,
+/// defeating the exemption. Fix: make `effective_element_locations` only
+/// expand `KeywordHashNode` when it is multiline (contains a newline).
+///
+/// FN root cause: Prism parses `a[b] ||= c`, `a[b] += c`, and `a[b] &&= c`
+/// as `IndexOrWriteNode` / `IndexOperatorWriteNode` / `IndexAndWriteNode`
+/// instead of `CallNode`. RuboCop decomposes these into a `send` node for
+/// `[]`, so its `on_send` handler sees them. The cop only handled `CallNode`.
+/// Fix: add `INDEX_OR_WRITE_NODE`, `INDEX_OPERATOR_WRITE_NODE`, and
+/// `INDEX_AND_WRITE_NODE` to `interested_node_types` and extract arguments /
+/// closing bracket from these nodes.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -56,7 +80,13 @@ impl Cop for TrailingCommaInArguments {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_ARGUMENT_NODE, CALL_NODE]
+        &[
+            BLOCK_ARGUMENT_NODE,
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -68,11 +98,22 @@ impl Cop for TrailingCommaInArguments {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call_node = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
+        if let Some(call_node) = node.as_call_node() {
+            self.check_call_node(source, &call_node, config, diagnostics);
+        } else {
+            self.check_index_write_node(source, node, config, diagnostics);
+        }
+    }
+}
 
+impl TrailingCommaInArguments {
+    fn check_call_node(
+        &self,
+        source: &SourceFile,
+        call_node: &ruby_prism::CallNode<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
         let has_closing_token = call_node.closing_loc().is_some();
         let (closing_start, node_end_offset) = match call_node.closing_loc() {
             Some(loc) => {
@@ -143,7 +184,7 @@ impl Cop for TrailingCommaInArguments {
         let call_is_multiline = close_line > call_start_line;
 
         // Expand KeywordHashNode to count individual keyword args.
-        let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+        let elem_locs = trailing_comma::effective_element_locations(bytes, arg_list.iter());
         let effective_args = elem_locs.len();
 
         let is_multiline = call_is_multiline
@@ -159,12 +200,142 @@ impl Cop for TrailingCommaInArguments {
                 is_multiline
                     && !method_name_and_arguments_on_same_line(
                         source,
-                        &call_node,
+                        call_node,
                         &last_arg,
                         call_start_line,
                         close_line,
                         last_end,
                     )
+            }
+            "diff_comma" => {
+                is_multiline && last_item_precedes_newline(bytes, last_end, closing_start)
+            }
+            _ => false,
+        };
+
+        if has_comma && !should_have_comma && last_end < closing_start {
+            if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
+                bytes,
+                last_end,
+                closing_start,
+                has_heredoc,
+            ) {
+                let (line, column) = source.offset_to_line_col(abs_offset);
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Avoid comma after the last parameter of a method call{}.",
+                        extra_avoid_comma_info(style)
+                    ),
+                ));
+            }
+        } else if !has_comma && should_have_comma {
+            let (line, column) = source.offset_to_line_col(last_end);
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Put a comma after the last parameter of a multiline method call.".to_string(),
+            ));
+        }
+    }
+
+    /// Handle `a[b] ||= c`, `a[b] += c`, `a[b] &&= c` — Prism parses these as
+    /// IndexOrWriteNode / IndexOperatorWriteNode / IndexAndWriteNode instead of
+    /// CallNode. RuboCop sees them as regular `[]` send nodes.
+    fn check_index_write_node(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        config: &CopConfig,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        // Extract arguments and closing bracket from whichever index write variant
+        let (arguments, closing_loc, node_start_offset) =
+            if let Some(n) = node.as_index_or_write_node() {
+                (n.arguments(), n.closing_loc(), n.location().start_offset())
+            } else if let Some(n) = node.as_index_operator_write_node() {
+                (n.arguments(), n.closing_loc(), n.location().start_offset())
+            } else if let Some(n) = node.as_index_and_write_node() {
+                (n.arguments(), n.closing_loc(), n.location().start_offset())
+            } else {
+                return;
+            };
+
+        let arguments = match arguments {
+            Some(args) => args,
+            None => return,
+        };
+
+        let arg_list = arguments.arguments();
+        let last_arg = match arg_list.last() {
+            Some(a) => a,
+            None => return,
+        };
+
+        let closing_start = closing_loc.start_offset();
+        let node_end_offset = closing_start;
+        let last_end = last_arg.location().end_offset();
+        let bytes = source.as_bytes();
+        let has_heredoc = arg_list
+            .iter()
+            .any(|arg| trailing_comma::is_heredoc_node(&arg));
+
+        if closing_start > bytes.len() || node_end_offset > bytes.len() {
+            return;
+        }
+
+        let has_comma = if last_end < closing_start {
+            let search_range = &bytes[last_end..closing_start];
+            if has_heredoc {
+                is_only_horizontal_whitespace_and_comma(search_range)
+            } else {
+                trailing_comma::is_only_whitespace_and_comma(search_range)
+            }
+        } else {
+            false
+        };
+
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
+
+        let close_line = source.offset_to_line_col(node_end_offset).0;
+        let call_start_line = source.offset_to_line_col(node_start_offset).0;
+        let call_is_multiline = close_line > call_start_line;
+
+        let elem_locs = trailing_comma::effective_element_locations(bytes, arg_list.iter());
+        let effective_args = elem_locs.len();
+
+        // Index write nodes always have brackets
+        let is_multiline = call_is_multiline
+            && !(effective_args == 1
+                && !crate::cop::shared::util::begins_its_line(source, node_end_offset));
+
+        let should_have_comma = match style {
+            "comma" => {
+                is_multiline
+                    && trailing_comma::no_elements_on_same_line(source, &elem_locs, node_end_offset)
+            }
+            "consistent_comma" => {
+                // For index write nodes, there is no method selector — RuboCop
+                // falls back to node.loc.line. The method_name line is the line
+                // where the receiver (and `[`) starts.
+                if !is_multiline {
+                    false
+                } else {
+                    let last_arg_end_line = source.offset_to_line_col(last_end).0;
+                    // If close line differs from last arg end line, always require comma
+                    if close_line != last_arg_end_line {
+                        true
+                    } else {
+                        // Method line = call start line (receiver start, no selector)
+                        call_start_line != last_arg_end_line
+                    }
+                }
             }
             "diff_comma" => {
                 is_multiline && last_item_precedes_newline(bytes, last_end, closing_start)
@@ -485,13 +656,16 @@ mod tests {
     }
 
     #[test]
-    fn comma_style_mixed_args_keyword_sharing_line_no_offense() {
-        // Positional arg + keyword args where keywords share a line
+    fn comma_style_mixed_args_keyword_sharing_line_offense() {
+        // Positional arg + single-line keyword hash: the hash is one element,
+        // each element is on its own line → comma style requires trailing comma.
+        // (RuboCop does not expand single-line keyword hashes in `elements`.)
         let source = b"foo(\n  1,\n  a: 2, b: 3\n)\n";
         let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
-        assert!(
-            diags.is_empty(),
-            "comma style should not flag when keyword args share a line (mixed args)"
+        assert_eq!(
+            diags.len(),
+            1,
+            "comma style should flag when single-line keyword hash is on its own line"
         );
     }
 
@@ -547,6 +721,28 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.diff_comma.rb"
             ),
             alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/offense.consistent_comma.rb"
+            ),
+            consistent_comma_config(),
+        );
+    }
+
+    #[test]
+    fn no_offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.consistent_comma.rb"
+            ),
+            consistent_comma_config(),
         );
     }
 }

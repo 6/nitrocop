@@ -205,16 +205,30 @@ pub fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: 
 }
 
 /// Collect element (start_offset, end_offset) pairs from an iterator of nodes.
-/// Expands any KeywordHashNode into its individual assoc elements, matching
-/// RuboCop's behavior where keyword args are treated as separate elements.
+/// Expands any multiline KeywordHashNode into its individual assoc elements,
+/// matching RuboCop's `elements` method which only expands braceless hashes
+/// when `argument.multiline?`. A single-line keyword hash is kept as one
+/// element so that `allowed_multiline_argument?` can treat it as a single arg.
 pub fn effective_element_locations<'a>(
+    source_bytes: &[u8],
     elements: impl Iterator<Item = ruby_prism::Node<'a>>,
 ) -> Vec<(usize, usize)> {
     let mut locations = Vec::new();
     for elem in elements {
         if let Some(kw_hash) = elem.as_keyword_hash_node() {
-            for child in kw_hash.elements().iter() {
-                let loc = child.location();
+            // Only expand if the keyword hash is multiline (contains a newline
+            // between its start and end offsets). This matches RuboCop's
+            // `argument.multiline?` check in the `elements` method.
+            let loc = kw_hash.location();
+            let is_multiline = source_bytes
+                .get(loc.start_offset()..loc.end_offset())
+                .is_some_and(|range| range.contains(&b'\n'));
+            if is_multiline {
+                for child in kw_hash.elements().iter() {
+                    let child_loc = child.location();
+                    locations.push((child_loc.start_offset(), child_loc.end_offset()));
+                }
+            } else {
                 locations.push((loc.start_offset(), loc.end_offset()));
             }
         } else {
