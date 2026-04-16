@@ -23,6 +23,13 @@ use crate::parse::source::SourceFile;
 /// is needed because RuboCop's `argument_in_method_call` (which requires
 /// AST parent traversal) accepts alignment in method-arg and nested-if
 /// contexts that we cannot detect from Prism without parent pointers.
+///
+/// Key fix (2026-04-16): `EnforcedStyle: indented` needs two extra guards to
+/// stay RuboCop-compatible. First, the same-column fallback for operator calls
+/// must stay aligned-style-only, otherwise bottle-style string concatenations
+/// are missed. Second, assignment context needs to treat `cmd = \` as an
+/// assignment whose RHS begins on the next line so aligned continuations are
+/// not misreported as ordinary indented expressions.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -227,7 +234,20 @@ fn has_assignment_before_col(line_bytes: &[u8], col: usize) -> bool {
 }
 
 fn line_ends_with_assignment_operator(line_bytes: &[u8]) -> bool {
-    last_significant_index(line_bytes).is_some_and(|idx| is_assignment_operator(line_bytes, idx))
+    last_significant_index(line_bytes).is_some_and(|idx| {
+        if is_assignment_operator(line_bytes, idx) {
+            return true;
+        }
+
+        if line_bytes[idx] != b'\\' {
+            return false;
+        }
+
+        line_bytes[..idx]
+            .iter()
+            .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+            .is_some_and(|prev_idx| is_assignment_operator(line_bytes, prev_idx))
+    })
 }
 
 fn modifier_keyword(before_expr: &[u8]) -> Option<&'static str> {
@@ -431,11 +451,12 @@ impl MultilineOperationIndentation {
             // continuations when the left operand is offset from the base indent
             // (genuine alignment, not just same-indent-level chains).
             right_col == expected_indent || right_col == left_col
-        } else if accept_left_alignment {
+        } else if accept_left_alignment && style == "aligned" {
             // For operator method calls (+, -, etc.) without AST parent info,
             // we can't detect RuboCop's `argument_in_method_call` context
             // (e.g. `raise Exception, "a" +\n"b"` or `+` inside if-as-operand).
-            // Accept same-column alignment as a safe fallback to avoid FP.
+            // Accept same-column alignment as a safe fallback only in aligned
+            // style; RuboCop still requires normal indentation in indented style.
             right_col == expected_indent || right_col == left_col
         } else {
             right_col == expected_indent
@@ -471,6 +492,111 @@ mod tests {
         MultilineOperationIndentation,
         "cops/layout/multiline_operation_indentation"
     );
+
+    fn indented_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::from("indented"),
+        );
+        config
+    }
+
+    #[test]
+    fn indented_style_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/multiline_operation_indentation/offense.indented.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: indented\n")
+            .expect("fixture should start with indented config directive");
+
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MultilineOperationIndentation,
+            source.as_bytes(),
+            indented_config(),
+        );
+    }
+
+    #[test]
+    fn indented_style_no_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/multiline_operation_indentation/no_offense.indented.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: indented\n")
+            .expect("fixture should start with indented config directive");
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &MultilineOperationIndentation,
+            source.as_bytes(),
+            indented_config(),
+        );
+    }
+
+    #[test]
+    fn indented_style_flags_plain_same_column_chain() {
+        let src = b"def lyrics\n  \"hello\" +\n  \"world\" +\n  \"foo\"\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &MultilineOperationIndentation,
+            src,
+            indented_config(),
+        );
+
+        if diags.len() != 2 {
+            panic!(
+                "expected plain same-column chain to be flagged twice, got: {:?}",
+                diags
+                    .iter()
+                    .map(|d| format!("L{}:C{} {}", d.location.line, d.location.column, d.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut lines: Vec<_> = diags.iter().map(|d| d.location.line).collect();
+        lines.sort_unstable();
+        if lines != vec![3, 4] {
+            panic!(
+                "unexpected plain-chain offense lines: {:?}",
+                diags
+                    .iter()
+                    .map(|d| format!("L{}:C{} {}", d.location.line, d.location.column, d.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn indented_style_flags_bottle_chain_directly() {
+        let src = b"def lyrics\n  \"#{bottle_number} of beer on the wall, \".capitalize +\n  \"#{bottle_number} of beer.\\n\" +\n  \"#{bottle_number.action}, \" +\n  \"#{bottle_number.successor} of beer on the wall.\\n\"\nend\n";
+        let diags = crate::testutil::run_cop_full_with_config(
+            &MultilineOperationIndentation,
+            src,
+            indented_config(),
+        );
+
+        if diags.len() != 3 {
+            panic!(
+                "expected interpolated bottle chain to be flagged three times, got: {:?}",
+                diags
+                    .iter()
+                    .map(|d| format!("L{}:C{} {}", d.location.line, d.location.column, d.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut lines: Vec<_> = diags.iter().map(|d| d.location.line).collect();
+        lines.sort_unstable();
+        if lines != vec![3, 4, 5] {
+            panic!(
+                "unexpected bottle-chain offense lines: {:?}",
+                diags
+                    .iter()
+                    .map(|d| format!("L{}:C{} {}", d.location.line, d.location.column, d.message))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 
     #[test]
     fn single_line_operation_ignored() {
