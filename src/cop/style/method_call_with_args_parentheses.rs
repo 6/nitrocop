@@ -228,6 +228,24 @@ use crate::parse::source::SourceFile;
 ///    was leaking the outer `Call` parent into the block body, so inner calls
 ///    like `Class.new(TestInteraction) do ... end` were incorrectly treated as
 ///    chained arguments and skipped.
+///
+/// ## Variant fix (2026-04-16, omit follow-up)
+///
+/// Remaining omit-style false positives came from Parser `block`/`super`
+/// parents that Prism does not model directly:
+///
+/// 1. Calls directly inside a block body, or the send wrapped by that block
+///    itself, are allowed when the surrounding block expression is nested
+///    under another call-like node. This matches RuboCop for
+///    `expect { foo(1) }.to raise_error(...)`,
+///    `self.result = run_callbacks(:execute) do ... end`, and chained
+///    enumerator blocks such as `map { File.expand_path(...) }.find { ... }`.
+///
+/// 2. Calls used as explicit `super(...)` arguments are ordinary
+///    call-as-argument cases in Parser AST. Prism needs an explicit
+///    `SuperNode` visitor so nested calls like
+///    `super(errors.local_attribute(attribute))` inherit the same omit-style
+///    allowance as send/yield arguments.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -306,6 +324,8 @@ enum ParentKind {
     TernaryPredicate,
     LogicalOp,
     Call,
+    CallAssignedRhs,
+    Super,
     OptArg,
     KwOptArg,
     ClassSingleLine,
@@ -372,6 +392,7 @@ impl Cop for MethodCallWithArgsParentheses {
             scope_stack: vec![],
             scope_parent_baseline: vec![0],
             parent_stack: vec![],
+            block_parent_is_call_like: vec![],
             in_interpolation: false,
             in_endless_def: false,
             non_last_expression_depth: 0,
@@ -400,6 +421,9 @@ struct ParenVisitor<'a> {
     /// a parent_stack entry belongs to the CURRENT scope or an outer one.
     scope_parent_baseline: Vec<usize>,
     parent_stack: Vec<ParentKind>,
+    /// Tracks whether the current Parser-style `block` parent belongs to a
+    /// call-like node (`send`, `super`, or `yield`) for omit-parentheses checks.
+    block_parent_is_call_like: Vec<bool>,
     in_interpolation: bool,
     in_endless_def: bool,
     non_last_expression_depth: usize,
@@ -418,6 +442,17 @@ impl ParenVisitor<'_> {
 
     fn immediate_parent(&self) -> Option<ParentKind> {
         self.parent_stack.last().copied()
+    }
+
+    fn current_parent_is_call_like(&self) -> bool {
+        self.immediate_parent().is_some_and(is_call_like_parent)
+    }
+
+    fn in_call_like_block_parent(&self) -> bool {
+        self.block_parent_is_call_like
+            .last()
+            .copied()
+            .unwrap_or(false)
     }
 
     fn in_non_last_expression(&self) -> bool {
@@ -501,6 +536,34 @@ impl ParenVisitor<'_> {
             MacroScope::NotMacroScope
         } else {
             self.wrapper_child_scope()
+        }
+    }
+
+    fn visit_parser_block_body<'pr>(
+        &mut self,
+        node: &ruby_prism::BlockNode<'pr>,
+        child_scope: MacroScope,
+    ) {
+        let parent_is_call_like = self.current_parent_is_call_like();
+        let leaked_parent = if parent_is_call_like {
+            self.parent_stack.pop()
+        } else {
+            None
+        };
+
+        self.block_parent_is_call_like.push(parent_is_call_like);
+        self.push_macro_scope(child_scope);
+        if let Some(params) = node.parameters() {
+            self.visit(&params);
+        }
+        if let Some(body) = node.body() {
+            self.visit(&body);
+        }
+        self.pop_scope();
+        self.block_parent_is_call_like.pop();
+
+        if let Some(parent) = leaked_parent {
+            self.parent_stack.push(parent);
         }
     }
 
@@ -769,12 +832,22 @@ impl ParenVisitor<'_> {
         false
     }
 
-    fn call_in_argument_with_block(&self, _call: &ruby_prism::CallNode<'_>) -> bool {
-        false
+    fn call_in_argument_with_block(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        if call
+            .block()
+            .is_some_and(|block| block.as_block_node().is_some())
+        {
+            self.current_parent_is_call_like()
+        } else {
+            self.in_call_like_block_parent()
+        }
     }
 
     fn call_as_argument_or_chain(&self) -> bool {
-        matches!(self.immediate_parent(), Some(ParentKind::Call))
+        matches!(
+            self.immediate_parent(),
+            Some(ParentKind::Call | ParentKind::Super)
+        )
     }
 
     fn call_has_block_pass(&self, call: &ruby_prism::CallNode<'_>) -> bool {
@@ -888,7 +961,7 @@ impl ParenVisitor<'_> {
         if self.parent_stack.len() >= 2 {
             let parent = self.parent_stack[self.parent_stack.len() - 1];
             let grandparent = self.parent_stack[self.parent_stack.len() - 2];
-            if parent == ParentKind::Assignment
+            if matches!(parent, ParentKind::Assignment | ParentKind::CallAssignedRhs)
                 && matches!(
                     grandparent,
                     ParentKind::Conditional
@@ -1147,11 +1220,22 @@ fn call_child_parent_kind(
 ) -> ParentKind {
     if let Some(equal_loc) = call.equal_loc() {
         if child_start_offset > equal_loc.start_offset() {
-            return ParentKind::Assignment;
+            return if default_parent == ParentKind::Call {
+                ParentKind::CallAssignedRhs
+            } else {
+                ParentKind::Assignment
+            };
         }
     }
 
     default_parent
+}
+
+fn is_call_like_parent(kind: ParentKind) -> bool {
+    matches!(
+        kind,
+        ParentKind::Call | ParentKind::CallAssignedRhs | ParentKind::Super
+    )
 }
 
 /// Recursively check if a node or its descendants are ambiguous in omit_parentheses style.
@@ -1331,29 +1415,13 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         if let Some(block) = node.block() {
             if let Some(block_node) = block.as_block_node() {
                 if is_class_constructor {
-                    self.visit_block_node(&block_node);
+                    self.visit_parser_block_body(&block_node, self.wrapper_child_scope());
                 } else {
                     // In Parser AST, the block node inherits the enclosing
                     // expression's parent, not the send's parent. That means
                     // ordinary call-attached blocks only keep macro scope when
                     // the whole block expression is itself in macro scope.
-                    let child_scope = self.call_block_child_scope();
-                    let leaked_parent = if self.immediate_parent() == Some(ParentKind::Call) {
-                        self.parent_stack.pop()
-                    } else {
-                        None
-                    };
-                    self.push_macro_scope(child_scope);
-                    if let Some(params) = block_node.parameters() {
-                        self.visit(&params);
-                    }
-                    if let Some(body) = block_node.body() {
-                        self.visit(&body);
-                    }
-                    self.pop_scope();
-                    if let Some(parent) = leaked_parent {
-                        self.parent_stack.push(parent);
-                    }
+                    self.visit_parser_block_body(&block_node, self.call_block_child_scope());
                 }
             } else {
                 // BlockArgumentNode (&block) — this IS a call argument
@@ -1438,25 +1506,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // (`expect do ... end.to ...`), the surrounding `Call` would
         // otherwise leak into the body and make inner calls look like chained
         // arguments.
-        let leaked_parent = if self.immediate_parent() == Some(ParentKind::Call) {
-            self.parent_stack.pop()
-        } else {
-            None
-        };
-
-        let child_scope = self.wrapper_child_scope();
-        self.push_macro_scope(child_scope);
-        if let Some(params) = node.parameters() {
-            self.visit(&params);
-        }
-        if let Some(body) = node.body() {
-            self.visit(&body);
-        }
-        self.pop_scope();
-
-        if let Some(parent) = leaked_parent {
-            self.parent_stack.push(parent);
-        }
+        self.visit_parser_block_body(node, self.wrapper_child_scope());
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
@@ -1492,6 +1542,26 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                 self.visit(&arg);
             }
             self.parent_stack.pop();
+        }
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.parent_stack.push(ParentKind::Super);
+                self.visit(&arg);
+                self.parent_stack.pop();
+            }
+        }
+
+        if let Some(block) = node.block() {
+            if let Some(block_node) = block.as_block_node() {
+                self.visit_parser_block_body(&block_node, self.call_block_child_scope());
+            } else {
+                self.parent_stack.push(ParentKind::Super);
+                self.visit(&block);
+                self.parent_stack.pop();
+            }
         }
     }
 
