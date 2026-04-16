@@ -94,8 +94,8 @@ def test_claude_oauth_normal():
     assert "CLAUDE_CODE_OAUTH_TOKEN" in config["setup_cmd"]
     assert "ANTHROPIC_API_KEY" not in config["setup_cmd"]
     assert "claude.ai/install.sh" not in config["setup_cmd"]
-    assert config["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
-    assert config["reasoning_effort"] == "medium"
+    assert config["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-7"
+    assert config["reasoning_effort"] == "high"
     assert "CLAUDE_CODE_OAUTH_TOKEN" in config["secrets"]
 
 
@@ -103,9 +103,9 @@ def test_claude_oauth_hard():
     config = resolve_backend.resolve("claude-oauth-hard")
     assert config["cli"] == "claude-action"
     assert config["action"] is True
-    assert config["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-6"
-    assert config["reasoning_effort"] == "high"
-    assert "Opus 4.6" in config["model_label"]
+    assert config["env"]["ANTHROPIC_MODEL"] == "claude-opus-4-7"
+    assert config["reasoning_effort"] == "xhigh"
+    assert "Opus 4.7" in config["model_label"]
 
 
 def test_choose_claude_oauth():
