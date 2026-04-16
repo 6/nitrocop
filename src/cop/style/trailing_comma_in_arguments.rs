@@ -1,4 +1,7 @@
-use crate::cop::shared::node_type::{BLOCK_ARGUMENT_NODE, CALL_NODE};
+use crate::cop::shared::node_type::{
+    BLOCK_ARGUMENT_NODE, CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE,
+    INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -48,6 +51,15 @@ use super::trailing_comma;
 /// preserve the braced-hash `consistent_comma` carveout, fall back to
 /// `EnforcedStyle` when the multiline-specific key is absent, and implement the
 /// `diff_comma` newline predicate (including `\r\n`).
+///
+/// Investigation (2026-04-16)
+///
+/// Root cause of the remaining `diff_comma` FNs: Prism does not represent
+/// `foo[bar] ||= value`, `foo[bar] &&= value`, or `foo[bar] += value` as
+/// `CallNode`s. They are `IndexOrWriteNode`, `IndexAndWriteNode`, and
+/// `IndexOperatorWriteNode`, so the cop never inspected their bracketed
+/// arguments. Fix: subscribe to those Prism-only index-write nodes and apply
+/// the same `diff_comma` trailing-comma check against their `[]` argument list.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -56,7 +68,13 @@ impl Cop for TrailingCommaInArguments {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_ARGUMENT_NODE, CALL_NODE]
+        &[
+            BLOCK_ARGUMENT_NODE,
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -68,6 +86,15 @@ impl Cop for TrailingCommaInArguments {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        let style = {
+            let alias_style = config.get_str("EnforcedStyle", "no_comma");
+            config.get_str("EnforcedStyleForMultiline", alias_style)
+        };
+
+        if style == "diff_comma" && self.check_diff_comma_index_write(source, node, diagnostics) {
+            return;
+        }
+
         let call_node = match node.as_call_node() {
             Some(c) => c,
             None => return,
@@ -128,11 +155,6 @@ impl Cop for TrailingCommaInArguments {
             }
         } else {
             false
-        };
-
-        let style = {
-            let alias_style = config.get_str("EnforcedStyle", "no_comma");
-            config.get_str("EnforcedStyleForMultiline", alias_style)
         };
 
         // Determine if the call is multiline and whether a trailing comma should be present
@@ -199,6 +221,111 @@ impl Cop for TrailingCommaInArguments {
                 "Put a comma after the last parameter of a multiline method call.".to_string(),
             ));
         }
+    }
+}
+
+impl TrailingCommaInArguments {
+    fn check_diff_comma_index_write(
+        &self,
+        source: &SourceFile,
+        node: &ruby_prism::Node<'_>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> bool {
+        let (arguments, closing_start, call_start_offset) =
+            if let Some(index) = node.as_index_and_write_node() {
+                (
+                    index.arguments(),
+                    index.closing_loc().start_offset(),
+                    index.location().start_offset(),
+                )
+            } else if let Some(index) = node.as_index_operator_write_node() {
+                (
+                    index.arguments(),
+                    index.closing_loc().start_offset(),
+                    index.location().start_offset(),
+                )
+            } else if let Some(index) = node.as_index_or_write_node() {
+                (
+                    index.arguments(),
+                    index.closing_loc().start_offset(),
+                    index.location().start_offset(),
+                )
+            } else {
+                return false;
+            };
+
+        let arguments = match arguments {
+            Some(args) => args,
+            None => return true,
+        };
+
+        let arg_list = arguments.arguments();
+        let last_arg = match arg_list.last() {
+            Some(arg) => arg,
+            None => return true,
+        };
+
+        let last_end = last_arg.location().end_offset();
+        let bytes = source.as_bytes();
+        if closing_start > bytes.len() {
+            return true;
+        }
+
+        let has_heredoc = arg_list
+            .iter()
+            .any(|arg| trailing_comma::is_heredoc_node(&arg));
+        let has_comma = if last_end < closing_start {
+            let search_range = &bytes[last_end..closing_start];
+            if has_heredoc {
+                is_only_horizontal_whitespace_and_comma(search_range)
+            } else {
+                trailing_comma::is_only_whitespace_and_comma(search_range)
+            }
+        } else {
+            false
+        };
+
+        let close_line = source.offset_to_line_col(closing_start).0;
+        let call_start_line = source.offset_to_line_col(call_start_offset).0;
+        let call_is_multiline = close_line > call_start_line;
+
+        let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+        let effective_args = elem_locs.len();
+        let is_multiline = call_is_multiline
+            && !(effective_args == 1
+                && !crate::cop::shared::util::begins_its_line(source, closing_start));
+        let should_have_comma =
+            is_multiline && last_item_precedes_newline(bytes, last_end, closing_start);
+
+        if has_comma && !should_have_comma && last_end < closing_start {
+            if let Some(abs_offset) = trailing_comma::find_trailing_comma_offset(
+                bytes,
+                last_end,
+                closing_start,
+                has_heredoc,
+            ) {
+                let (line, column) = source.offset_to_line_col(abs_offset);
+                diagnostics.push(self.diagnostic(
+                    source,
+                    line,
+                    column,
+                    format!(
+                        "Avoid comma after the last parameter of a method call{}.",
+                        extra_avoid_comma_info("diff_comma")
+                    ),
+                ));
+            }
+        } else if !has_comma && should_have_comma {
+            let (line, column) = source.offset_to_line_col(last_end);
+            diagnostics.push(self.diagnostic(
+                source,
+                line,
+                column,
+                "Put a comma after the last parameter of a multiline method call.".to_string(),
+            ));
+        }
+
+        true
     }
 }
 

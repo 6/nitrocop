@@ -4,3 +4,13 @@ some_method(
   b
    ^ Style/TrailingCommaInArguments: Put a comma after the last parameter of a multiline method call.
 )
+
+response_headers[
+  placeholder
+             ^ Style/TrailingCommaInArguments: Put a comma after the last parameter of a multiline method call.
+] ||= "value"
+
+values[
+  0
+   ^ Style/TrailingCommaInArguments: Put a comma after the last parameter of a multiline method call.
+] += 1
