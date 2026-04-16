@@ -16,3 +16,19 @@ if sinks.find do |sink|
    end
   process
 end
+
+def selected_ids(items)
+  return items.map { |item|
+    item.id
+  }
+end
+
+def log_error
+  do_work
+rescue => e
+  logger.debug { e.message }
+end
+
+assert_equal(*args.map { |str|
+  str.tr("\n", "")
+})

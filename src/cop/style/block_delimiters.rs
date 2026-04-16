@@ -26,22 +26,23 @@ use std::collections::HashSet;
 /// - `semantic`: detects return-value usage via parent context (assignment, chaining,
 ///   argument position, last-in-scope) to distinguish functional vs procedural blocks
 ///
-/// ## Fix (2026-04-16): match semantic parent contexts more narrowly
+/// ## Fix (2026-04-16): restore semantic wrapper contexts RuboCop sees in Parser AST
 ///
-/// Semantic style must mirror RuboCop's distinction between `return_value_used?`
-/// and `return_value_of_scope?` on the block node's *immediate* parent:
+/// The remaining semantic mismatches came from Prism wrappers around the block's
+/// call expression:
 ///
-/// - blocks in condition predicates (`if`/`unless`/`while`/`until`/`case`) are
-///   `rv_of_scope`, not `rv_used`
-/// - blocks used as hash pair values are `rv_of_scope`, so `do...end` remains
-///   allowed there even when the outer hash is assigned or passed as an argument
-/// - blocks passed as the last `super(...)` argument are `rv_of_scope`
-/// - single-statement rescue/ensure bodies do **not** get implicit "last statement
-///   of scope" marking; RuboCop treats their parent as `:rescue`/`:ensure`, not `:begin`
+/// - `return map { ... }` was missed because `ReturnNode` did not forward
+///   "last child of scope" to its final argument
+/// - `assert_equal(*args.map { ... })` was missed because `SplatNode` did not
+///   mark its wrapped expression as `rv_of_scope`
+/// - `(items.map do ... end).join(",")` was missed because parenthesized
+///   receivers were not forwarded into `rv_used` / chained detection
+/// - rescue/ensure bodies with exactly one statement were treated as ordinary
+///   visits, so their tail expression never got `rv_of_scope`
 ///
-/// The prior implementation propagated `rv_used` recursively through hashes/arrays
-/// and condition predicates, which turned many procedural `do...end` blocks into
-/// false "functional" offenses under `EnforcedStyle: semantic`.
+/// RuboCop treats all of those wrappers as part of the semantic-parent check for
+/// `return_value_used?` / `return_value_of_scope?`, so nitrocop now propagates
+/// through those wrappers before classifying the block as functional/procedural.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -401,27 +402,9 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         }
 
         // Pre-mark context for chaining and return-value detection.
-        // If this call's receiver is a CallNode with a block, that block is chained
-        // and the receiver call's return value is used.
         if let Some(receiver) = node.receiver() {
-            if let Some(recv_call) = receiver.as_call_node() {
-                self.rv_used_calls.insert(call_node_key(&recv_call));
-                if let Some(block) = recv_call.block() {
-                    if let Some(block_node) = block.as_block_node() {
-                        self.chained_blocks
-                            .insert(block_node.opening_loc().start_offset());
-                    }
-                }
-            }
-            // SuperNode as receiver of a chain
-            if let Some(super_node) = receiver.as_super_node() {
-                self.rv_used_calls
-                    .insert(super_node.keyword_loc().start_offset());
-            }
-            if let Some(fwd_super) = receiver.as_forwarding_super_node() {
-                self.rv_used_calls
-                    .insert(fwd_super.location().start_offset());
-            }
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+            mark_chained_receiver_block(&receiver, &mut self.chained_blocks);
         }
 
         // Arguments to this call have their return values used.
@@ -537,6 +520,13 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             mark_rv_of_scope_on_node(&value, &mut self.rv_of_scope_calls);
         }
         ruby_prism::visit_assoc_splat_node(self, node);
+    }
+
+    fn visit_splat_node(&mut self, node: &ruby_prism::SplatNode<'_>) {
+        if let Some(expression) = node.expression() {
+            mark_rv_of_scope_on_node(&expression, &mut self.rv_of_scope_calls);
+        }
+        ruby_prism::visit_splat_node(self, node);
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'_>) {
@@ -843,9 +833,8 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 
         if let Some(stmts) = node.statements() {
             if stmts.body().len() == 1 {
-                // Parser keeps a single rescue body statement directly under
-                // `:rescue`, so it is NOT implicitly rv_of_scope.
                 for child in stmts.body().iter() {
+                    mark_rv_of_scope_on_node(&child, &mut self.rv_of_scope_calls);
                     self.visit(&child);
                 }
             } else {
@@ -862,23 +851,13 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         if let Some(stmts) = node.statements() {
             if stmts.body().len() == 1 {
                 for child in stmts.body().iter() {
+                    mark_rv_of_scope_on_node(&child, &mut self.rv_of_scope_calls);
                     self.visit(&child);
                 }
             } else {
                 self.visit_statements_node(&stmts);
             }
         }
-    }
-
-    fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'_>) {
-        // Propagate rv_used through parentheses: if the ParenthesesNode is
-        // in an rv_used position, its contents also have rv_used.
-        // RuboCop's `return_value_used?` recurses through begin_type? (parens).
-        // We handle this by marking the parens' body content if the parens
-        // themselves are marked rv_used.
-        // Note: we can't easily check if parens are in rv_used here, so we
-        // just propagate rv_of_scope from parent context to the child.
-        ruby_prism::visit_parentheses_node(self, node);
     }
 
     fn visit_range_node(&mut self, node: &ruby_prism::RangeNode<'_>) {
@@ -923,6 +902,24 @@ fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize
     }
 }
 
+fn mark_chained_receiver_block(node: &ruby_prism::Node<'_>, chained_blocks: &mut HashSet<usize>) {
+    if let Some(call) = node.as_call_node() {
+        if let Some(block_node) = call.block().and_then(|block| block.as_block_node()) {
+            chained_blocks.insert(block_node.opening_loc().start_offset());
+        }
+    } else if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                if let Some(last) = stmts.body().last() {
+                    mark_chained_receiver_block(&last, chained_blocks);
+                }
+            } else {
+                mark_chained_receiver_block(&body, chained_blocks);
+            }
+        }
+    }
+}
+
 /// Mark a node as being in return-value-of-scope position (for semantic style).
 fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashSet<usize>) {
     if let Some(call) = node.as_call_node() {
@@ -931,6 +928,26 @@ fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashS
         rv_of_scope.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_of_scope.insert(fwd_super.location().start_offset());
+    } else if let Some(ret) = node.as_return_node() {
+        if let Some(args) = ret.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, rv_of_scope);
+            }
+        }
+    } else if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            if let Some(stmts) = body.as_statements_node() {
+                if let Some(last) = stmts.body().last() {
+                    mark_rv_of_scope_on_node(&last, rv_of_scope);
+                }
+            } else {
+                mark_rv_of_scope_on_node(&body, rv_of_scope);
+            }
+        }
+    } else if let Some(splat) = node.as_splat_node() {
+        if let Some(expression) = splat.expression() {
+            mark_rv_of_scope_on_node(&expression, rv_of_scope);
+        }
     } else if let Some(hash) = node.as_hash_node() {
         // Recursively mark calls in hash values
         for element in hash.elements().iter() {

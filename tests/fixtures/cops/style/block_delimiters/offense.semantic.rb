@@ -6,3 +6,8 @@ def matches?(value)
 rescue NoMethodError
   false
 end
+
+(queries.map do |query|
+             ^^ Style/BlockDelimiters: Prefer `{...}` over `do...end` for functional blocks.
+  query.strip
+end).join(",")
