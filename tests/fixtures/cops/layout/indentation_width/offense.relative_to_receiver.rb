@@ -9,3 +9,11 @@ module Wrapper
                end
   end
 end
+
+# Mixed leading spaces and tabs still count by raw width under tabs style.
+class Test
+  def foo
+ 		bar
+^^^ Layout/IndentationWidth: Use 1 (not 1) tabs for indentation.
+  end
+end

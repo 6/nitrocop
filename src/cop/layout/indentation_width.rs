@@ -141,7 +141,7 @@ use crate::parse::source::SourceFile;
 /// 2026-04-16 (variant batch 1 under the `relative_to_receiver` task label):
 /// - Fixed tabs-style indentation width checks. The previous port skipped
 ///   tab-indented lines or compared raw columns, but RuboCop's
-///   `Layout/IndentationWidth` uses visual tab-expanded columns when
+///   `Layout/IndentationWidth` uses leading-whitespace display width when
 ///   `Layout/IndentationStyle: tabs` is active. This now matches both the
 ///   large FN cluster on visually over-indented space-only lines and the FP
 ///   cluster where a tab-indented base line made raw columns look too wide.
@@ -154,6 +154,18 @@ use crate::parse::source::SourceFile;
 ///   that still have some leading whitespace. RuboCop 1.84.2 drops these
 ///   offenses because `offending_range` raises; nitrocop now suppresses only
 ///   that narrow shape instead of all negative-indentation tabs-style cases.
+///
+/// 2026-04-16 (variant batch 2):
+/// - Fixed `indented_internal_methods` section splitting to match
+///   rubocop-ast's `special_modifier?`. Only bare `private` and `protected`
+///   divide sections; bare `public` and `module_function` do not. This removes
+///   false positives on module/class/block bodies that start with or contain
+///   `module_function`.
+/// - Fixed tabs-style mixed-indentation math. RuboCop's
+///   `column_offset_between` counts leading indentation as
+///   `spaces + tabs * Width`, not tab-stop expansion, so lines like
+///   `" \t\tbar"` are still offenses even though tab-stop expansion lands on
+///   the configured width.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -176,6 +188,15 @@ fn is_any_access_modifier_call(node: &ruby_prism::Node<'_>) -> bool {
     } else {
         false
     }
+}
+
+/// Check if a node is a bare special modifier call (`private` or `protected`).
+/// Matches rubocop-ast's `special_modifier?`.
+fn is_special_modifier_call(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_call_node().is_some_and(|call| {
+        access_modifier_predicates::is_bare_access_modifier(&call)
+            && access_modifier_predicates::is_special_modifier_name(call.name().as_slice())
+    })
 }
 
 /// Adjust a column for UTF-8 BOM on line 1. Prism counts the 3-byte BOM as 1 column,
@@ -335,9 +356,9 @@ fn line_uses_tab_indentation(source: &SourceFile, offset: usize) -> bool {
     false
 }
 
-/// Compute the visual display column at `offset`, expanding tabs using `tab_width`.
-/// RuboCop uses visual columns for Layout/IndentationWidth when the tabs style is
-/// active and either the base or body line uses tab indentation.
+/// Compute RuboCop's tabs-style indentation width at `offset`.
+/// For leading indentation, RuboCop counts each tab as exactly `tab_width`
+/// columns and each space as 1 column; it does not expand tabs to tab stops.
 fn visual_column_at(source: &SourceFile, offset: usize, tab_width: usize) -> usize {
     let bytes = source.as_bytes();
     let mut pos = line_start_offset(source, offset);
@@ -350,9 +371,7 @@ fn visual_column_at(source: &SourceFile, offset: usize, tab_width: usize) -> usi
 
     while pos < offset {
         match bytes[pos] {
-            b'\t' => {
-                width = ((width / tab_width) + 1) * tab_width;
-            }
+            b'\t' => width += tab_width,
             _ => width += 1,
         }
         pos += 1;
@@ -603,7 +622,7 @@ impl IndentationWidth {
 
             let mut previous_modifier: Option<&ruby_prism::Node<'_>> = None;
             for member in &members {
-                if is_access_modifier_call(member) {
+                if is_special_modifier_call(member) {
                     previous_modifier = Some(member);
                     continue;
                 }
@@ -696,7 +715,7 @@ impl IndentationWidth {
 
         let mut previous_modifier: Option<&ruby_prism::Node<'_>> = None;
         for member in &members {
-            if is_access_modifier_call(member) {
+            if is_special_modifier_call(member) {
                 previous_modifier = Some(member);
                 continue;
             }
