@@ -7,3 +7,10 @@ foo(arg)
 
 let!(:project) { FactoryBot.create(:project, inactive:, main_language: language) }
                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+
+# Multi-statement block bodies attached to method calls still flag parentheses.
+items.map do |item|
+  prepare item
+  format(item)
+        ^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+end

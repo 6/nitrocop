@@ -211,6 +211,19 @@ use crate::parse::source::SourceFile;
 ///    exempt. RuboCop only keeps parentheses when the call is in a
 ///    conditional-style parent or is not the last expression. Added explicit
 ///    non-last-expression tracking and narrowed the exemption to those cases.
+///
+/// ## Variant fix (2026-04-16)
+///
+/// FP root cause: omit-style ambiguity checks only scanned call arguments.
+/// RuboCop's `node.descendants.any?` also sees ambiguous receiver descendants,
+/// so calls like `(lhs || rhs).join(", ")` and `[*only].include?(k)` keep
+/// their outer parentheses. Fixed by including the receiver in
+/// `has_ambiguous_content_in_descendants()`. A follow-up in the same area:
+/// hash-value-omission calls inside single-expression block bodies must not
+/// inherit unrelated outer "non-last statement" context. Model non-last
+/// siblings as direct-parent markers and give single-expression block bodies
+/// their own wrapper parent so RuboCop's `right_sibling`-style check stays
+/// local to the immediate expression list.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -282,9 +295,11 @@ enum ParentKind {
     Array,
     Pair,
     Range,
+    BlockBody,
     Splat,
     KwSplat,
     BlockPass,
+    NonLastExpression,
     TernaryBranch,
     TernaryPredicate,
     LogicalOp,
@@ -357,7 +372,6 @@ impl Cop for MethodCallWithArgsParentheses {
             parent_stack: vec![],
             in_interpolation: false,
             in_endless_def: false,
-            non_last_expression_depth: 0,
         };
         visitor.visit(&parse_result.node());
         diagnostics.extend(visitor.diagnostics);
@@ -385,7 +399,6 @@ struct ParenVisitor<'a> {
     parent_stack: Vec<ParentKind>,
     in_interpolation: bool,
     in_endless_def: bool,
-    non_last_expression_depth: usize,
 }
 
 impl ParenVisitor<'_> {
@@ -404,7 +417,10 @@ impl ParenVisitor<'_> {
     }
 
     fn in_non_last_expression(&self) -> bool {
-        self.non_last_expression_depth > 0
+        matches!(self.immediate_parent(), Some(ParentKind::NonLastExpression))
+            || (self.immediate_parent() == Some(ParentKind::Assignment)
+                && self.parent_stack.len() >= 2
+                && self.parent_stack[self.parent_stack.len() - 2] == ParentKind::NonLastExpression)
     }
 
     fn is_macro_scope(&self) -> bool {
@@ -422,7 +438,9 @@ impl ParenVisitor<'_> {
         self.parent_stack[baseline..].iter().any(|kind| {
             !matches!(
                 kind,
-                ParentKind::TernaryBranch
+                ParentKind::BlockBody
+                    | ParentKind::NonLastExpression
+                    | ParentKind::TernaryBranch
                     | ParentKind::ClassConstructor
                     | ParentKind::Grouped
                     | ParentKind::ConditionalBody
@@ -447,7 +465,7 @@ impl ParenVisitor<'_> {
         for (index, stmt) in body.iter().enumerate() {
             let is_not_last = index + 1 < body.len();
             if is_not_last {
-                self.non_last_expression_depth += 1;
+                self.parent_stack.push(ParentKind::NonLastExpression);
             }
 
             if can_inherit_direct_parent {
@@ -459,9 +477,37 @@ impl ParenVisitor<'_> {
             }
 
             if is_not_last {
-                self.non_last_expression_depth -= 1;
+                self.parent_stack.pop();
             }
         }
+    }
+
+    fn visit_direct_body_with_parent<'pr>(
+        &mut self,
+        body: &ruby_prism::Node<'pr>,
+        parent_kind: ParentKind,
+    ) {
+        if let Some(stmts) = body.as_statements_node() {
+            let stmts_body = stmts.body();
+            if stmts_body.len() == 1
+                && stmts_body
+                    .iter()
+                    .next()
+                    .is_some_and(|stmt| stmt.as_begin_node().is_none())
+            {
+                self.parent_stack.push(parent_kind);
+                self.visit(&stmts_body.iter().next().unwrap());
+                self.parent_stack.pop();
+                return;
+            }
+        } else if body.as_begin_node().is_none() {
+            self.parent_stack.push(parent_kind);
+            self.visit(body);
+            self.parent_stack.pop();
+            return;
+        }
+
+        self.visit(body);
     }
 
     /// Derive child scope for wrapper nodes (begin, block, if branches).
@@ -599,13 +645,13 @@ impl ParenVisitor<'_> {
             return;
         }
 
-        // legitimate_call_with_parentheses? — many sub-checks
-        if self.legitimate_call_with_parentheses(call) {
+        // require_parentheses_for_hash_value_omission?
+        if self.require_parentheses_for_hash_value_omission(call) {
             return;
         }
 
-        // require_parentheses_for_hash_value_omission?
-        if self.require_parentheses_for_hash_value_omission(call) {
+        // legitimate_call_with_parentheses? — many sub-checks
+        if self.legitimate_call_with_parentheses(call) {
             return;
         }
 
@@ -831,6 +877,13 @@ impl ParenVisitor<'_> {
                 }
             }
         }
+
+        if let Some(recv) = call.receiver() {
+            if is_ambiguous_descendant(&recv, self.source) {
+                return true;
+            }
+        }
+
         false
     }
 
@@ -1264,11 +1317,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         for (index, stmt) in body.iter().enumerate() {
             let is_not_last = index + 1 < body.len();
             if is_not_last {
-                self.non_last_expression_depth += 1;
+                self.parent_stack.push(ParentKind::NonLastExpression);
             }
             self.visit(&stmt);
             if is_not_last {
-                self.non_last_expression_depth -= 1;
+                self.parent_stack.pop();
             }
         }
     }
@@ -1320,7 +1373,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                         self.visit(&params);
                     }
                     if let Some(body) = block_node.body() {
-                        self.visit(&body);
+                        self.visit_direct_body_with_parent(&body, ParentKind::BlockBody);
                     }
                     self.pop_scope();
                 }
@@ -1408,7 +1461,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.visit(&params);
         }
         if let Some(body) = node.body() {
-            self.visit(&body);
+            self.visit_direct_body_with_parent(&body, ParentKind::BlockBody);
         }
         self.pop_scope();
     }
@@ -1427,7 +1480,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         let child_scope = self.call_block_child_scope();
         self.push_macro_scope(child_scope);
         if let Some(body) = node.body() {
-            self.visit(&body);
+            self.visit_direct_body_with_parent(&body, ParentKind::BlockBody);
         }
         self.pop_scope();
     }
