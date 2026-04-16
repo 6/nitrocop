@@ -30,3 +30,9 @@ def describe
   OUTER
 ^ Layout/IndentationStyle: Space detected in indentation.
 end
+
+# A nested standalone enable directive comment is still checked
+def directive_example
+  #   # rubocop:enable all
+^ Layout/IndentationStyle: Space detected in indentation.
+end

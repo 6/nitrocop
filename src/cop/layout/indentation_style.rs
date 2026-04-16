@@ -1,8 +1,11 @@
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::codemap::CodeMap;
+use crate::parse::directives::normalize_directive_cop_name;
 use crate::parse::source::SourceFile;
+use regex::Regex;
 use ruby_prism::Visit;
+use std::sync::LazyLock;
 
 /// ## Corpus investigation
 ///
@@ -118,7 +121,20 @@ use ruby_prism::Visit;
 /// This matches RuboCop for nested, squiggly, and stacked heredocs without changing
 /// `CodeMap` or `heredoc_range_end()` semantics, and keeps default-style behavior
 /// untouched.
+///
+/// Follow-up (same variant): two remaining mismatches were outside the heredoc-body
+/// range math itself:
+/// - Prism reports `data_loc` even when a file starts with `__END__`, but RuboCop
+///   still checks indentation after a top-level leading `__END__`. Only skip the
+///   data section when some non-whitespace content precedes it.
+/// - YARD/example comment lines like `#   # rubocop:disable all` suppress that line
+///   in RuboCop even though nitrocop's general directive parser intentionally ignores
+///   them as block directives. For `tabs`, suppress that single line locally before
+///   reporting an indentation offense.
 pub struct IndentationStyle;
+
+static NESTED_COMMENT_DIRECTIVE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#\s*(?:rubocop|nitrocop)\s*:\s*(disable|todo)\s+(.+)").unwrap());
 
 impl Cop for IndentationStyle {
     fn name(&self) -> &'static str {
@@ -147,6 +163,11 @@ impl Cop for IndentationStyle {
         };
         let rubocop_string_ranges = if style == "tabs" {
             rubocop_string_literal_ranges(source.as_bytes(), parse_result)
+        } else {
+            Vec::new()
+        };
+        let tabs_nested_directive_lines = if style == "tabs" {
+            tabs_nested_directive_comment_lines(source)
         } else {
             Vec::new()
         };
@@ -248,6 +269,10 @@ impl Cop for IndentationStyle {
                 // "tabs" — flag spaces in indentation
                 let indent = &line[..indent_end];
                 if let Some(space_col) = indent.iter().position(|&b| b == b' ') {
+                    if tabs_nested_directive_lines.contains(&line_num) {
+                        continue;
+                    }
+
                     // Match RuboCop's /\A\s* +/ skip semantics: suppress only when
                     // the full matched indentation range is contained in a :str/:dstr
                     // range (including outer heredoc bodies), not merely when a single
@@ -399,9 +424,17 @@ fn rubocop_string_literal_ranges(
     };
     collector.visit(&parse_result.node());
     if let Some(data_loc) = parse_result.data_loc() {
-        collector
-            .ranges
-            .push((data_loc.start_offset(), data_loc.end_offset()));
+        // RuboCop only treats __END__ as a skipped data section when some
+        // non-whitespace content precedes it. A file that starts with __END__
+        // is still checked line-by-line under EnforcedStyle: tabs.
+        if source[..data_loc.start_offset()]
+            .iter()
+            .any(|b| !b.is_ascii_whitespace())
+        {
+            collector
+                .ranges
+                .push((data_loc.start_offset(), data_loc.end_offset()));
+        }
     }
     collector.ranges.sort_unstable();
     collector.ranges
@@ -422,6 +455,49 @@ fn line_start(source: &[u8], offset: usize) -> usize {
         .iter()
         .rposition(|&b| b == b'\n')
         .map_or(0, |pos| pos + 1)
+}
+
+fn tabs_nested_directive_comment_lines(source: &SourceFile) -> Vec<usize> {
+    let mut lines = Vec::new();
+
+    for (i, line) in source.lines().enumerate() {
+        if nested_tabs_directive_comment_applies(line) {
+            lines.push(i + 1);
+        }
+    }
+
+    lines
+}
+
+fn nested_tabs_directive_comment_applies(line: &[u8]) -> bool {
+    let indent_end = line
+        .iter()
+        .take_while(|&&b| b == b' ' || b == b'\t')
+        .count();
+    if indent_end >= line.len() || line[indent_end] != b'#' {
+        return false;
+    }
+
+    let Ok(comment) = std::str::from_utf8(&line[indent_end..]) else {
+        return false;
+    };
+    let Some(caps) = NESTED_COMMENT_DIRECTIVE_RE.captures(&comment[1..]) else {
+        return false;
+    };
+
+    let cop_list_raw = caps.get(2).map_or("", |m| m.as_str());
+    let cop_list = cop_list_raw.split("--").next().unwrap_or(cop_list_raw);
+    cop_list.split(',').any(|cop| {
+        matches!(
+            normalize_directive_cop_name(cop.trim()).as_str(),
+            "all"
+                | "Layout"
+                | "Layout/IndentationStyle"
+                | "IndentationStyle"
+                | "Layout/Tab"
+                | "Tab"
+        )
+    })
 }
 
 /// Check if a line is a heredoc closing delimiter.
@@ -574,6 +650,58 @@ mod tests {
         assert!(
             closing_line_flagged,
             "Should flag spaces in heredoc closing delimiter: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_nested_disable_comment_line_not_flagged() {
+        let source = b"def foo\n  #   # rubocop:disable all\nend\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            !flagged_lines.contains(&2),
+            "nested disable comment line should not be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_nested_enable_comment_line_flagged() {
+        let source = b"def foo\n  #   # rubocop:enable all\nend\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            flagged_lines.contains(&2),
+            "nested enable comment line should still be flagged: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_leading_end_marker_still_checked() {
+        let source = b"__END__\n  data\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            flagged_lines.contains(&2),
+            "leading __END__ should not suppress indentation checks: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn tabs_variant_data_section_after_nonblank_content_skipped() {
+        let source = b"# comment\n__END__\n  data\n";
+        let diags =
+            crate::testutil::run_cop_full_with_config(&IndentationStyle, source, tabs_config());
+        let flagged_lines: Vec<usize> = diags.iter().map(|d| d.location.line).collect();
+        assert!(
+            !flagged_lines.contains(&3),
+            "__END__ after nonblank content should still suppress data section: {:?}",
             diags
         );
     }

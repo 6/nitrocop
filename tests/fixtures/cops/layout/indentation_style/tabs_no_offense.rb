@@ -31,3 +31,8 @@ def describe
 	  }
 OUTER
 end
+
+# A nested standalone disable directive comment suppresses only that line
+def directive_example
+  #   # rubocop:disable all
+end
