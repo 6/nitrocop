@@ -211,6 +211,23 @@ use crate::parse::source::SourceFile;
 ///    exempt. RuboCop only keeps parentheses when the call is in a
 ///    conditional-style parent or is not the last expression. Added explicit
 ///    non-last-expression tracking and narrowed the exemption to those cases.
+///
+/// ## Variant fix (2026-04-16)
+///
+/// `omit_parentheses` still diverged in two Parser-vs-Prism contexts:
+///
+/// 1. RuboCop's ambiguous-descendant check scans the whole send node, not just
+///    its direct arguments. Parenthesized calls whose RECEIVER chain contains a
+///    logical operator or a block (for example
+///    `(ignored_organisations || []).join(", ")` and
+///    `%w[1 2 3].map { ... }.join("-")`) must keep parentheses.
+///
+/// 2. When a chained call takes a block expression as its receiver
+///    (`expect do ... end.to ...`), Parser gives expressions inside that block
+///    a direct `block` parent, not the outer chained `send`. Prism traversal
+///    was leaking the outer `Call` parent into the block body, so inner calls
+///    like `Class.new(TestInteraction) do ... end` were incorrectly treated as
+///    chained arguments and skipped.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -824,6 +841,12 @@ impl ParenVisitor<'_> {
 
     /// Check for forwarded args, ambiguous literals, logical operators, and blocks in descendants
     fn has_ambiguous_content_in_descendants(&self, call: &ruby_prism::CallNode<'_>) -> bool {
+        if let Some(recv) = call.receiver() {
+            if is_ambiguous_descendant(&recv, self.source) {
+                return true;
+            }
+        }
+
         if let Some(args) = call.arguments() {
             for arg in args.arguments().iter() {
                 if is_ambiguous_descendant(&arg, self.source) {
@@ -1315,6 +1338,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     // ordinary call-attached blocks only keep macro scope when
                     // the whole block expression is itself in macro scope.
                     let child_scope = self.call_block_child_scope();
+                    let leaked_parent = if self.immediate_parent() == Some(ParentKind::Call) {
+                        self.parent_stack.pop()
+                    } else {
+                        None
+                    };
                     self.push_macro_scope(child_scope);
                     if let Some(params) = block_node.parameters() {
                         self.visit(&params);
@@ -1323,6 +1351,9 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                         self.visit(&body);
                     }
                     self.pop_scope();
+                    if let Some(parent) = leaked_parent {
+                        self.parent_stack.push(parent);
+                    }
                 }
             } else {
                 // BlockArgumentNode (&block) — this IS a call argument
@@ -1402,6 +1433,17 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        // Parser gives expressions inside a `block` node the block itself as
+        // the direct parent.  When Prism walks a chained receiver block
+        // (`expect do ... end.to ...`), the surrounding `Call` would
+        // otherwise leak into the body and make inner calls look like chained
+        // arguments.
+        let leaked_parent = if self.immediate_parent() == Some(ParentKind::Call) {
+            self.parent_stack.pop()
+        } else {
+            None
+        };
+
         let child_scope = self.wrapper_child_scope();
         self.push_macro_scope(child_scope);
         if let Some(params) = node.parameters() {
@@ -1411,6 +1453,10 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.visit(&body);
         }
         self.pop_scope();
+
+        if let Some(parent) = leaked_parent {
+            self.parent_stack.push(parent);
+        }
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
@@ -2140,6 +2186,11 @@ mod tests {
     crate::cop_fixture_tests!(
         MethodCallWithArgsParentheses,
         "cops/style/method_call_with_args_parentheses"
+    );
+    crate::cop_variant_fixture_tests!(
+        MethodCallWithArgsParentheses,
+        "cops/style/method_call_with_args_parentheses",
+        omit_parentheses
     );
 
     fn omit_parentheses_config() -> CopConfig {
