@@ -297,6 +297,27 @@ use crate::parse::source::SourceFile;
 ///   `.method` on the next line is still a chained receiver in RuboCop, so the
 ///   parens are not a method argument. The chained-receiver scan now skips Ruby
 ///   line comments between `)` and the next chain token.
+///
+/// ## Investigation findings (2026-04-16)
+///
+/// ### FP root causes fixed:
+/// - **Conditional predicates that start a rescue body statement:** RuboCop accepts
+///   `if (foo.bar)` and `if ((a && b) || c)` when that conditional is the direct
+///   statement at the start of a `rescue` clause body. nitrocop was only exempting
+///   parens that literally began the rescue-body line, so it still reported the
+///   predicate parens. The rescue-body exemption now also recognizes direct
+///   conditional predicates in rescue bodies.
+///
+/// ### FN root causes fixed:
+/// - **One-line rescue inside rescue-body statements:** `(disconnect rescue nil) if cond`
+///   inside a `rescue` clause was incorrectly swallowed by the broad rescue-body
+///   exemption even though RuboCop still reports the parenthesized one-line rescue.
+///   Rescue-body exemptions now skip direct rescue expressions, not rescue modifiers.
+/// - **Bracket calls with parenthesized receivers:** `((expr)['key']) || ''` and
+///   `!!((state ||= {})[key])` were missed because the `[]` send was forced through the
+///   singular-parent check when its receiver was parenthesized. RuboCop still treats
+///   these bracket sends like redundant method-call parens, so parenthesized `[]`
+///   receivers now bypass that check while preserving the existing `self[]` exemption.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -608,7 +629,7 @@ impl RedundantParensVisitor<'_> {
         // checks parent or grandparent is a resbody node. In Prism, the rescue clause
         // is a RescueNode whose body is a StatementsNode — so the paren can be a child
         // (parent = StatementsNode under RescueBody) or grandchild.
-        if self.has_rescue_body_ancestor(node) {
+        if self.is_allowed_rescue_body_parens(node, inner) {
             return;
         }
 
@@ -859,12 +880,27 @@ impl RedundantParensVisitor<'_> {
     }
 
     /// RuboCop's `rescue?` matcher: `'{^resbody ^^resbody}'`.
-    /// Returns true if the paren is inside a rescue clause body (up to 2 levels deep).
-    /// Only suppresses parens whose offset is within the rescue body (statements),
-    /// not parens in the exception list (`rescue *(Err)`). RuboCop only keeps
-    /// rescue-body parens when the parenthesized expression itself starts the
-    /// rescue-body statement; nested parens like `var = (a || b)` still report.
-    fn has_rescue_body_ancestor(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+    /// Returns true when the parens are in one of the rescue-body positions that
+    /// RuboCop accepts:
+    /// - the parenthesized expression itself starts the rescue-body statement
+    /// - or the parens are the exact predicate of a direct `if`/`unless`/`while`/`until`
+    ///   statement that starts the rescue-body line
+    ///
+    /// Inline rescue expressions like `(disconnect rescue nil) if cond` are still
+    /// offenses even when they appear in rescue bodies, so they are excluded here.
+    fn is_allowed_rescue_body_parens(
+        &self,
+        node: &ruby_prism::ParenthesesNode<'_>,
+        inner: &ruby_prism::Node<'_>,
+    ) -> bool {
+        if inner.as_rescue_modifier_node().is_some() {
+            return false;
+        }
+
+        self.is_direct_rescue_body_expression(node) || self.is_direct_rescue_body_predicate(node)
+    }
+
+    fn is_direct_rescue_body_expression(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
         let paren_offset = node.location().start_offset();
         if !begins_its_line(self.source, paren_offset) {
             return false;
@@ -889,6 +925,54 @@ impl RedundantParensVisitor<'_> {
         {
             return true;
         }
+        false
+    }
+
+    fn is_direct_rescue_body_predicate(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
+        let start = node.location().start_offset();
+        let end = node.location().end_offset();
+        let mut conditional_index = None;
+
+        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
+            let info = &self.parent_stack[i];
+            match info.kind {
+                ParentKind::Other => continue,
+                ParentKind::If | ParentKind::While | ParentKind::Until | ParentKind::Case => {
+                    if !info
+                        .conditional_predicate_range
+                        .is_some_and(|(pred_start, pred_end)| {
+                            start == pred_start && end == pred_end
+                        })
+                    {
+                        return false;
+                    }
+                    if !begins_its_line(self.source, info.node_start_offset) {
+                        return false;
+                    }
+                    conditional_index = Some(i);
+                    break;
+                }
+                _ => return false,
+            }
+        }
+
+        let Some(conditional_index) = conditional_index else {
+            return false;
+        };
+
+        for i in (0..conditional_index).rev() {
+            let info = &self.parent_stack[i];
+            match info.kind {
+                ParentKind::Other => continue,
+                ParentKind::RescueBody => {
+                    return info
+                        .rescue_body_start_offset
+                        .is_some_and(|off| info.node_start_offset <= start && start >= off);
+                }
+                _ => return false,
+            }
+        }
+
         false
     }
 
@@ -1468,14 +1552,28 @@ fn check_method_call<'a>(
         .block()
         .is_some_and(|b| b.as_block_argument_node().is_some());
     let call_has_parens = call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(");
-    // RuboCop's `square_brackets?` matcher only treats `[]` calls as square brackets
-    // when the receiver is one of: send, str, array, hash, const, or variable.
-    // Notably, `self` is NOT in the list — `(self[0, n]).to_s` keeps its parens.
+    // RuboCop's `square_brackets?` matcher exempts many `[]` sends from the
+    // singular-parent check. Prism exposes some of those receivers through an
+    // extra ParenthesesNode, such as `((expr)['key'])` and `((state ||= {})[key])`.
+    // Keep the existing `self[]` exemption narrow: `(self[0, n]).to_s` still stays
+    // accepted, but parenthesized non-self receivers are treated like redundant
+    // bracket-call parens.
     let is_square_brackets = call.name().as_slice() == b"[]"
         && call.call_operator_loc().is_none()
-        && call
-            .receiver()
-            .is_some_and(|r| is_square_brackets_receiver(&r));
+        && call.receiver().is_some_and(|r| {
+            is_square_brackets_receiver(&r)
+                || (r.as_parentheses_node().is_some()
+                    && !r
+                        .as_parentheses_node()
+                        .and_then(|paren| paren.body())
+                        .is_some_and(|body| {
+                            body.as_self_node().is_some()
+                                || body
+                                    .as_statements_node()
+                                    .and_then(|stmts| stmts.body().iter().next())
+                                    .is_some_and(|stmt| stmt.as_self_node().is_some())
+                        }))
+        });
 
     // RuboCop does not fall back to "a method call" for comparisons used as the
     // direct return value of a method or block body, but it still does for nested
