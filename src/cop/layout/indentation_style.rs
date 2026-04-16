@@ -73,6 +73,26 @@ use ruby_prism::Visit;
 ///    range_end` check fails.
 ///    Fix: added `raw_heredoc_ranges` (sorted but unmerged) to CodeMap and
 ///    switched `heredoc_range_end()` to use it.
+///
+/// ## Variant `tabs`: remaining 19 FP / 10 FN (DO NOT touch `heredoc_range_end` or
+/// `raw_heredoc_ranges` to fix these — three separate agent attempts at this have
+/// all produced +20,000+ FP regressions by inverting the skip-zone logic)
+///
+/// Closed PRs with identical catastrophic regression pattern:
+/// - #2141 (Apr 16): +20,758 FP from `.max(end)` expanding skip zone
+/// - #2159 (Apr 16): same +20,758 FP via "outermost heredoc" loop change
+/// - #2183 (Apr 16): same +20,758 FP via different heredoc range tweak
+///
+/// What DOES NOT work: changing `heredoc_range_end()` from binary-search to any
+/// kind of "outermost enclosing" lookup. The lookups consistently invert, so
+/// nested-heredoc closing delimiters inside outer heredoc bodies get flagged
+/// AND legitimate indent lines get suppressed across the entire heredoc span.
+///
+/// What a correct fix probably requires: a separate per-line "inside-heredoc-body"
+/// check that walks the nesting chain from innermost to outermost without altering
+/// `raw_heredoc_ranges` semantics. Verify with RuboCop on files like
+/// `thoughtbot__shoulda-matchers__f147e7b:lib/shoulda/matchers/rails_shim.rb:160-164`
+/// (nested heredoc interpolation) before touching `codemap.rs`.
 pub struct IndentationStyle;
 
 impl Cop for IndentationStyle {
