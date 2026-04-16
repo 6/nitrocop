@@ -33,6 +33,21 @@ use std::collections::HashSet;
 /// argument (e.g., `foo(a: items.map { ... })`) had its inner calls not marked as
 /// having return values used, causing false positives in semantic style where functional
 /// blocks with braces were incorrectly flagged as procedural.
+///
+/// ## Fix (2026-04-16): `always_braces` false positives in ignored lambda args
+///
+/// Two variant-scoped false positives came from blocks nested inside lambda literals that
+/// were already being ignored because the lambda itself appeared in a non-parenthesized
+/// argument position. The old suppression walk only descended through a few node shapes,
+/// so it missed blocks hidden inside hash literals and heredoc/interpolation bodies in the
+/// ignored lambda. The lambda-body suppression now uses a recursive Prism visitor so every
+/// nested block is ignored in that context, while ordinary lambda bodies are still checked.
+///
+/// A third `always_braces` false positive came from `windows-1252` corpus files containing
+/// high-byte `\xHH` regex escapes. RuboCop emits only `Lint/Syntax` for those files and
+/// never runs `Style/BlockDelimiters`, but Prism parses them successfully. For this variant
+/// we now skip files with a non-UTF-8 encoding comment plus parser-fatal high-byte regex
+/// escapes, matching RuboCop's parser bailout.
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -50,6 +65,11 @@ impl Cop for BlockDelimiters {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
+        if enforced_style == "always_braces"
+            && rubocop_skips_non_utf8_regex_escape_file_for_always_braces(source)
+        {
+            return;
+        }
         let procedural_methods = config
             .get_string_array("ProceduralMethods")
             .unwrap_or_else(|| vec!["tap".to_string()]);
@@ -1012,89 +1032,240 @@ fn collect_ignored_blocks(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usi
         if let Some(body) = lambda.body() {
             collect_ignored_blocks_from_body(&body, ignored);
         }
+        return;
+    }
+}
+
+struct IgnoredBodyBlockCollector<'a> {
+    ignored: &'a mut HashSet<usize>,
+}
+
+impl<'a, 'pr> Visit<'pr> for IgnoredBodyBlockCollector<'a> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if let Some(block_node) = node.block().and_then(|block| block.as_block_node()) {
+            self.ignored.insert(block_node.opening_loc().start_offset());
+        }
+        ruby_prism::visit_call_node(self, node);
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        if let Some(block_node) = node.block().and_then(|block| block.as_block_node()) {
+            self.ignored.insert(block_node.opening_loc().start_offset());
+        }
+        ruby_prism::visit_super_node(self, node);
+    }
+
+    fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
+        if let Some(block_node) = node.block() {
+            self.ignored.insert(block_node.opening_loc().start_offset());
+        }
+        ruby_prism::visit_forwarding_super_node(self, node);
     }
 }
 
 /// Recursively find all blocks inside a node body and mark them as ignored.
 /// Used for lambda bodies where we need to suppress all nested blocks.
 fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut HashSet<usize>) {
-    if let Some(call) = node.as_call_node() {
-        if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-                ignored.insert(block_node.opening_loc().start_offset());
+    let mut collector = IgnoredBodyBlockCollector { ignored };
+    collector.visit(node);
+}
+
+fn rubocop_skips_non_utf8_regex_escape_file_for_always_braces(source: &SourceFile) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    has_non_utf8_encoding_comment(&lines)
+        && lines
+            .iter()
+            .copied()
+            .any(line_contains_high_hex_escape_in_regex_literal)
+}
+
+fn has_non_utf8_encoding_comment(lines: &[&[u8]]) -> bool {
+    let start = if lines.first().is_some_and(|line| line.starts_with(b"#!")) {
+        1
+    } else {
+        0
+    };
+
+    for idx in start..usize::min(start + 3, lines.len()) {
+        let line = lines[idx];
+        if !is_comment_line(line) {
+            continue;
+        }
+
+        let lower: Vec<u8> = line.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+        let Some(keyword_idx) =
+            find_subsequence(&lower, b"encoding").or_else(|| find_subsequence(&lower, b"coding"))
+        else {
+            continue;
+        };
+        let after_keyword = &lower[keyword_idx..];
+        let value = after_keyword
+            .split(|byte| *byte == b':' || *byte == b'=')
+            .nth(1)
+            .map(|rhs| {
+                let start = rhs
+                    .iter()
+                    .position(|byte| !byte.is_ascii_whitespace())
+                    .unwrap_or(rhs.len());
+                &rhs[start..]
+            })
+            .unwrap_or_default();
+        let enc_name = &value[..value
+            .iter()
+            .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'-' && *byte != b'_')
+            .unwrap_or(value.len())];
+
+        return !enc_name.is_empty()
+            && !(enc_name == b"utf"
+                || enc_name == b"utf8"
+                || enc_name.starts_with(b"utf-8")
+                || enc_name.starts_with(b"utf_8")
+                || enc_name == b"binary"
+                || enc_name.starts_with(b"ascii-8bit")
+                || enc_name.starts_with(b"ascii_8bit")
+                || enc_name == b"us-ascii"
+                || enc_name == b"ascii");
+    }
+
+    false
+}
+
+fn is_comment_line(line: &[u8]) -> bool {
+    line.iter()
+        .skip_while(|byte| byte.is_ascii_whitespace())
+        .next()
+        == Some(&b'#')
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn line_contains_high_hex_escape_in_regex_literal(line: &[u8]) -> bool {
+    let mut start = 0;
+
+    while start < line.len() {
+        let Some(open_idx) = line[start..].iter().position(|&byte| byte == b'/') else {
+            return false;
+        };
+        let slash_idx = start + open_idx;
+        if !looks_like_regex_open(line, slash_idx) {
+            start = slash_idx + 1;
+            continue;
+        }
+
+        let body_start = slash_idx + 1;
+        let mut idx = body_start;
+        let mut escaped = false;
+
+        while idx < line.len() {
+            let byte = line[idx];
+
+            if escaped {
+                escaped = false;
+                idx += 1;
+                continue;
             }
-        }
-        if let Some(receiver) = call.receiver() {
-            collect_ignored_blocks_from_body(&receiver, ignored);
-        }
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                collect_ignored_blocks_from_body(&arg, ignored);
+
+            if byte == b'\\' {
+                escaped = true;
+                idx += 1;
+                continue;
             }
-        }
-        if let Some(block) = call.block() {
-            if let Some(block_node) = block.as_block_node() {
-                if let Some(body) = block_node.body() {
-                    collect_ignored_blocks_from_body(&body, ignored);
+
+            if byte == b'/' {
+                if contains_non_utf8_hex_escape(&line[body_start..idx]) {
+                    return true;
                 }
+                start = idx + 1;
+                break;
+            }
+
+            idx += 1;
+        }
+
+        if idx >= line.len() {
+            return false;
+        }
+    }
+
+    false
+}
+
+fn looks_like_regex_open(line: &[u8], slash_idx: usize) -> bool {
+    let prev = line[..slash_idx]
+        .iter()
+        .rfind(|&&byte| !byte.is_ascii_whitespace())
+        .copied();
+
+    !matches!(
+        prev,
+        Some(
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b')'
+            | b']'
+            | b'}'
+            | b'"'
+            | b'\''
+            | b'/',
+        )
+    )
+}
+
+fn contains_non_utf8_hex_escape(body: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 < body.len() {
+        if body[i] == b'\\' && body[i + 1] == b'x' {
+            let (d1, d2) = (body[i + 2], body[i + 3]);
+            if d1.is_ascii_hexdigit() && d2.is_ascii_hexdigit() {
+                let byte = hex_pair_to_byte(d1, d2);
+                if byte >= 0x80 {
+                    let mut bytes = vec![byte];
+                    let mut j = i + 4;
+                    while j + 3 < body.len()
+                        && body[j] == b'\\'
+                        && body[j + 1] == b'x'
+                        && body[j + 2].is_ascii_hexdigit()
+                        && body[j + 3].is_ascii_hexdigit()
+                    {
+                        let next = hex_pair_to_byte(body[j + 2], body[j + 3]);
+                        if next >= 0x80 {
+                            bytes.push(next);
+                            j += 4;
+                        } else {
+                            break;
+                        }
+                    }
+                    if std::str::from_utf8(&bytes).is_err() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+                i += 4;
+                continue;
             }
         }
-        return;
+        i += 1;
     }
+    false
+}
 
-    if let Some(stmts) = node.as_statements_node() {
-        for stmt in stmts.body().iter() {
-            collect_ignored_blocks_from_body(&stmt, ignored);
-        }
-        return;
-    }
+fn hex_pair_to_byte(h1: u8, h2: u8) -> u8 {
+    hex_digit_value(h1) * 16 + hex_digit_value(h2)
+}
 
-    // Assignment nodes — recurse into the value expression
-    // e.g., `result = items.find { |item| ... }` inside a lambda body
-    if let Some(write) = node.as_local_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_instance_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_class_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_global_variable_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_constant_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_local_variable_operator_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    if let Some(write) = node.as_instance_variable_operator_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-    // Multi-write: a, b = expr
-    if let Some(write) = node.as_multi_write_node() {
-        collect_ignored_blocks_from_body(&write.value(), ignored);
-        return;
-    }
-
-    // IfNode, UnlessNode, etc. — recurse into their bodies for completeness
-    if let Some(if_node) = node.as_if_node() {
-        if let Some(stmts) = if_node.statements() {
-            for stmt in stmts.body().iter() {
-                collect_ignored_blocks_from_body(&stmt, ignored);
-            }
-        }
-        if let Some(subsequent) = if_node.subsequent() {
-            collect_ignored_blocks_from_body(&subsequent, ignored);
-        }
+fn hex_digit_value(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        b'a'..=b'f' => c - b'a' + 10,
+        b'A'..=b'F' => c - b'A' + 10,
+        _ => 0,
     }
 }
 
@@ -1479,6 +1650,38 @@ mod tests {
         let config = config_with_style("always_braces");
         let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
         assert_eq!(diags.len(), 1, "got: {:?}", diags);
+    }
+
+    #[test]
+    fn always_braces_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &BlockDelimiters,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/block_delimiters/no_offense.always_braces.rb"
+            ),
+            config_with_style("always_braces"),
+        );
+    }
+
+    #[test]
+    fn always_braces_offense_nested_block_in_assigned_lambda() {
+        let source = b"handler = ->(resource) do\n  {\n    raw_value: resource.tap do |path|\n      path\n    end,\n  }\nend\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(
+            diags[0]
+                .message
+                .contains("Prefer `{...}` over `do...end` for blocks.")
+        );
+    }
+
+    #[test]
+    fn always_braces_no_offense_non_utf8_regex_escape_file() {
+        let source = b"# encoding:windows-1252\nassert_match(/^(\\xdf)\\1$/i, \"\\xdf\\xdf\")\n[0x8a, 0x8c, 0x8e, *0xc0..0xd6, *0xd8..0xde, 0x9f].zip([0x9a, 0x9c, 0x9e, *0xe0..0xf6, *0xf8..0xfe, 0xff]).each do |c1, c2|\n  c1 = c1.chr(\"windows-1252\")\n  c2 = c2.chr(\"windows-1252\")\nend\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
     }
 
     // =========== braces_for_chaining tests ===========
