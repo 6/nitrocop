@@ -48,6 +48,17 @@ use crate::parse::source::SourceFile;
 /// `code = X; code = Y; rescue; Result.new(code:); end`). Fixed by making the
 /// suppression name-aware: collect variable names read in rescue/ensure handlers
 /// and suppress body writes for those names, regardless of block capture.
+///
+/// ## FN fix: live branch contexts during traversal (2026-04-16)
+///
+/// VariableForce was only copying branch-context metadata into
+/// `VariableTable` at scope exit, after all references had already been
+/// resolved. During the actual walk, sibling-branch reads therefore looked
+/// compatible and incorrectly kept exclusive assignments alive, missing cases
+/// like `if cond; guid = foo; else; guid; end`. Fixed by keeping the
+/// `VariableTable` branch contexts in sync as branches are created, while
+/// treating predicate-assignment contexts as visible to their guarded bodies
+/// so patterns like `puts a if (a = 123)` still match RuboCop.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {

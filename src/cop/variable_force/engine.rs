@@ -34,6 +34,9 @@ pub struct BranchContext {
     pub parent_id: usize,
     /// Which child of the conditional this branch is (0=then, 1=else, etc.).
     pub child_index: usize,
+    /// Predicate-assignment contexts execute before the guarded branch and
+    /// must stay visible to reads in that branch.
+    pub predicate_context: bool,
 }
 
 /// The VariableForce engine. Walks the Prism AST and builds a complete
@@ -82,14 +85,19 @@ impl<'a> Engine<'a> {
     /// Push a new branch context for a child of a conditional node.
     /// `parent_id` identifies the conditional node (use its start offset),
     /// `child_index` identifies which child (0=then, 1=else, etc.).
-    fn push_branch(&mut self, parent_id: usize, child_index: usize) {
+    fn push_branch(&mut self, parent_id: usize, child_index: usize, predicate_context: bool) {
         let id = self.next_branch_id;
         self.next_branch_id += 1;
-        self.branch_contexts.push(BranchContext {
+        let context = BranchContext {
             id,
             parent_id,
             child_index,
-        });
+            predicate_context,
+        };
+        self.branch_contexts.push(context.clone());
+        // Keep the live VariableTable copy in sync so reference tracking can
+        // distinguish exclusive sibling branches during AST traversal.
+        self.table.branch_contexts.push(context);
         self.branch_stack.push(id);
     }
 
@@ -115,6 +123,9 @@ impl<'a> Engine<'a> {
         }
         let a_ctx = &self.branch_contexts[a_id];
         let b_ctx = &self.branch_contexts[b_id];
+        if a_ctx.predicate_context || b_ctx.predicate_context {
+            return false;
+        }
         a_ctx.parent_id == b_ctx.parent_id && a_ctx.child_index != b_ctx.child_index
     }
 
@@ -804,7 +815,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
+            self.push_branch(parent_id, 0, true);
         }
         self.visit(&node.predicate());
         if pred_has_write {
@@ -814,7 +825,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
         let body_child = if pred_has_write { 1 } else { 0 };
         self.branch_depth += 1;
-        self.push_branch(parent_id, body_child);
+        self.push_branch(parent_id, body_child, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
@@ -824,7 +835,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.branch_depth -= 1;
         if let Some(subsequent) = node.subsequent() {
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child + 1);
+            self.push_branch(parent_id, body_child + 1, false);
             self.visit(&subsequent);
             self.pop_branch();
             self.branch_depth -= 1;
@@ -837,7 +848,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
+            self.push_branch(parent_id, 0, true);
         }
         self.visit(&node.predicate());
         if pred_has_write {
@@ -854,7 +865,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let body_child = if pred_has_write { 1 } else { 0 };
         self.branch_depth += 1;
         if let Some(else_clause) = node.else_clause() {
-            self.push_branch(parent_id, body_child);
+            self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -862,7 +873,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
             self.pop_branch();
         }
-        self.push_branch(parent_id, body_child + 1);
+        self.push_branch(parent_id, body_child + 1, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
@@ -890,13 +901,13 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.branch_depth += 1;
         for (i, condition) in node.conditions().iter().enumerate() {
-            self.push_branch(parent_id, i);
+            self.push_branch(parent_id, i, false);
             self.visit(&condition);
             self.pop_branch();
         }
         if let Some(else_clause) = node.else_clause() {
             let else_idx = node.conditions().len();
-            self.push_branch(parent_id, else_idx);
+            self.push_branch(parent_id, else_idx, false);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -933,13 +944,13 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.branch_depth += 1;
         for (i, condition) in node.conditions().iter().enumerate() {
-            self.push_branch(parent_id, i);
+            self.push_branch(parent_id, i, false);
             self.visit(&condition);
             self.pop_branch();
         }
         if let Some(else_clause) = node.else_clause() {
             let else_idx = node.conditions().len();
-            self.push_branch(parent_id, else_idx);
+            self.push_branch(parent_id, else_idx, false);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -961,7 +972,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
             let body_child = if pred_has_write { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child);
+            self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -972,7 +983,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_branch(parent_id, 0, true);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -984,7 +995,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_branch(parent_id, 0, true);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -994,7 +1005,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             let body_child = if pred_has_write { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child);
+            self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1017,7 +1028,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
             let body_child = if pred_has_write { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child);
+            self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1028,7 +1039,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_branch(parent_id, 0, true);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -1040,7 +1051,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
             if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0);
+                self.push_branch(parent_id, 0, true);
             }
             self.visit(&node.predicate());
             if pred_has_write {
@@ -1050,7 +1061,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             let body_child = if pred_has_write { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child);
+            self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1121,7 +1132,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // Body statements
         if let Some(stmts) = node.statements() {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0);
+            self.push_branch(parent_id, 0, false);
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
             }
@@ -1132,7 +1143,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // Rescue clause(s)
         if let Some(rescue_clause) = node.rescue_clause() {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 1);
+            self.push_branch(parent_id, 1, false);
             self.visit_rescue_node(&rescue_clause);
             self.pop_branch();
             self.branch_depth -= 1;
@@ -1141,7 +1152,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // Else clause
         if let Some(else_clause) = node.else_clause() {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 2);
+            self.push_branch(parent_id, 2, false);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1890,6 +1901,35 @@ mod tests {
         assert_eq!(x.num_assignments, 2);
         // Both should be referenced (read after the if)
         assert!(x.assignments[0].referenced || x.assignments[1].referenced);
+    }
+
+    #[test]
+    fn test_sibling_branch_read_does_not_reference_exclusive_assignment() {
+        let scopes =
+            run_engine("def foo\n  x = 0\n  if cond\n    x = 1\n  else\n    x\n  end\nend\n");
+        let def_scope = &scopes[0];
+        let x = &def_scope.vars["x"];
+        assert_eq!(x.num_assignments, 2);
+        assert!(
+            x.assignments[0].referenced,
+            "the pre-branch assignment should feed the else-branch read"
+        );
+        assert!(
+            !x.assignments[1].referenced,
+            "the then-branch assignment must stay dead across the exclusive else read"
+        );
+    }
+
+    #[test]
+    fn test_predicate_assignment_reaches_guarded_body() {
+        let scopes = run_engine("def foo\n  a = nil\n  puts a if (a = 123)\nend\n");
+        let def_scope = &scopes[0];
+        let a = &def_scope.vars["a"];
+        assert_eq!(a.num_assignments, 2);
+        assert!(
+            a.assignments[1].referenced,
+            "the predicate assignment should stay live for the guarded body"
+        );
     }
 
     #[test]
