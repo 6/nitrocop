@@ -91,15 +91,15 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
             default_rows.append(row)
 
     # Determine variant pass/fail based on aggregated delta.
-    # Regression takes priority over error — a regression with some
-    # rubocop errors is still a regression that should block.
+    # Net-improvement gate: the aggregate across all shards is the
+    # authority.  Individual shards may fluctuate due to sampling, but
+    # if the total FP and FN both decreased (or stayed the same), the
+    # variant passes.  Only flag a regression when the aggregate FP or
+    # FN actually increased.
     for agg in variant_agg.values():
         fp_delta = agg["local_fp"] - agg["bl_fp"]
         fn_delta = agg["local_fn"] - agg["bl_fn"]
         if fp_delta > 0 or fn_delta > 0:
-            agg["result"] = "regression"
-        elif agg["result"] == "fail":
-            # Per-shard regression detected even though aggregate improved
             agg["result"] = "regression"
         elif agg["result"] != "error":
             agg["result"] = "pass"

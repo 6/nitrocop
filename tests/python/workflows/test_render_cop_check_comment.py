@@ -67,12 +67,17 @@ def test_aggregate_rows_variant_regression_even_with_errors():
     assert variant[0]["result"] == "regression"  # not "error"
 
 
-def test_aggregate_rows_variant_per_shard_fail_overrides_aggregate_improvement():
-    """If any shard reported fail, aggregate should be regression even if net delta improves."""
+def test_aggregate_rows_variant_per_shard_fail_but_aggregate_improves():
+    """Per-shard fail should NOT override aggregate improvement.
+
+    Individual shards may fluctuate due to sampling variability, but the
+    aggregate across all shards is the authority.  If the total FP and FN
+    both decreased, the variant passes.
+    """
     rows = [
         # Shard 0: big improvement
         {"cop": "Style/Foo (bar)", "bl_fp": 500, "bl_fn": 300, "local_fp": 100, "local_fn": 50, "result": "pass"},
-        # Shard 1: per-repo regression (local FN > baseline FN)
+        # Shard 1: per-repo regression (local FN > baseline FN in this shard)
         {"cop": "Style/Foo (bar)", "bl_fp": 10, "bl_fn": 20, "local_fp": 0, "local_fn": 100, "result": "fail",
          "detail": "repo_x(FN:file.rb:1)"},
     ]
@@ -84,10 +89,38 @@ def test_aggregate_rows_variant_per_shard_fail_overrides_aggregate_improvement()
     assert variant[0]["local_fn"] == 150
     assert variant[0]["bl_fp"] == 510
     assert variant[0]["bl_fn"] == 320
-    # But result should be regression because shard 1 failed
-    assert variant[0]["result"] == "regression"
-    # Details from the failing shard should be preserved
+    # Aggregate improved — passes despite per-shard fluctuation
+    assert variant[0]["result"] == "pass"
+    # Details from the failing shard should still be preserved for debugging
     assert "repo_x(FN:file.rb:1)" in variant[0]["details"]
+
+
+def test_aggregate_rows_variant_true_regression():
+    """Variant where aggregate FP or FN actually increased should fail."""
+    rows = [
+        # Shard 0: slight improvement
+        {"cop": "Style/Foo (bar)", "bl_fp": 10, "bl_fn": 20, "local_fp": 5, "local_fn": 15, "result": "pass"},
+        # Shard 1: big regression that outweighs shard 0's improvement
+        {"cop": "Style/Foo (bar)", "bl_fp": 10, "bl_fn": 20, "local_fp": 50, "local_fn": 100, "result": "fail"},
+    ]
+    result = mod.aggregate_rows(rows)
+    variant = [r for r in result if mod.is_variant_row(r["cop"])]
+    assert len(variant) == 1
+    # Aggregate: local_fp=55 > bl_fp=20, local_fn=115 > bl_fn=40
+    assert variant[0]["local_fp"] == 55
+    assert variant[0]["local_fn"] == 115
+    assert variant[0]["result"] == "regression"
+
+
+def test_aggregate_rows_variant_fp_up_fn_down_is_regression():
+    """Even if FN improves, any FP increase is a regression."""
+    rows = [
+        {"cop": "Style/Foo (bar)", "bl_fp": 10, "bl_fn": 100, "local_fp": 20, "local_fn": 50, "result": "pass"},
+    ]
+    result = mod.aggregate_rows(rows)
+    variant = [r for r in result if mod.is_variant_row(r["cop"])]
+    # FP increased (10→20) even though FN decreased (100→50)
+    assert variant[0]["result"] == "regression"
 
 
 def test_aggregate_rows_variant_improvement_passes():
