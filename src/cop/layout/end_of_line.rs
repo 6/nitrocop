@@ -21,6 +21,13 @@ use crate::parse::source::SourceFile;
 /// existed, so it still reported missing carriage returns. The fix moves the
 /// implementation to `check_source()` and mirrors RuboCop's fatal-syntax gate.
 ///
+/// RuboCop also rejects raw non-UTF-8 bytes unless Ruby sees a real non-UTF-8
+/// magic comment such as `# encoding: shift_jis`. Vim modelines like
+/// `# vim: set fileencoding=shift_jis` are not enough: RuboCop emits only
+/// `Lint/Syntax: Invalid byte sequence in utf-8.` and never runs this cop.
+/// nitrocop previously treated those files as ordinary LF source and reported
+/// `Carriage return character missing.` under `EnforcedStyle: crlf`.
+///
 /// @example EnforcedStyle: native (default)
 ///   # The `native` style means that CR+LF (Carriage Return + Line Feed) is
 ///   # enforced on Windows, and LF is enforced on other platforms.
@@ -198,6 +205,10 @@ fn rubocop_skips_end_of_line(
         return true;
     }
 
+    if rubocop_skips_invalid_utf8_without_non_utf8_encoding_comment(source) {
+        return true;
+    }
+
     target_ruby_version(config) >= 3.4
         && parse_result.errors().any(|err| {
             let message = err.message();
@@ -230,6 +241,11 @@ fn rubocop_skips_non_utf8_regex_escape_file(source: &SourceFile) -> bool {
             .iter()
             .copied()
             .any(line_contains_high_hex_escape_in_regex_literal)
+}
+
+fn rubocop_skips_invalid_utf8_without_non_utf8_encoding_comment(source: &SourceFile) -> bool {
+    let lines: Vec<&[u8]> = source.lines().collect();
+    std::str::from_utf8(source.as_bytes()).is_err() && !has_non_utf8_encoding_comment(&lines)
 }
 
 fn has_non_utf8_encoding_comment(lines: &[&[u8]]) -> bool {
@@ -449,6 +465,16 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    fn crlf_config() -> CopConfig {
+        CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("crlf".into()),
+            )]),
+            ..CopConfig::default()
+        }
+    }
+
     fn run_with_config(source: &[u8], config: CopConfig) -> Vec<Diagnostic> {
         crate::testutil::run_cop_full_with_config(&EndOfLine, source, config)
     }
@@ -501,15 +527,7 @@ mod tests {
 
     #[test]
     fn crlf_style_accepts_crlf() {
-        use std::collections::HashMap;
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("crlf".into()),
-            )]),
-            ..CopConfig::default()
-        };
-        let diags = run_with_config(b"x = 1\r\ny = 2\r\n", config);
+        let diags = run_with_config(b"x = 1\r\ny = 2\r\n", crlf_config());
         assert!(
             diags.is_empty(),
             "crlf style should accept CRLF line endings"
@@ -530,17 +548,9 @@ mod tests {
     #[test]
     fn autocorrect_insert_cr_crlf_style() {
         // Only 1 correction (first LF-only line) since cop breaks after first offense
-        use std::collections::HashMap;
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("crlf".into()),
-            )]),
-            ..CopConfig::default()
-        };
         let input = b"x = 1\ny = 2\n";
         let (_diags, corrections) =
-            crate::testutil::run_cop_autocorrect_with_config(&EndOfLine, input, config);
+            crate::testutil::run_cop_autocorrect_with_config(&EndOfLine, input, crlf_config());
         assert_eq!(corrections.len(), 1);
         let cs = crate::correction::CorrectionSet::from_vec(corrections);
         let corrected = cs.apply(input);
@@ -549,15 +559,63 @@ mod tests {
 
     #[test]
     fn crlf_style_flags_lf() {
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".into(),
-                serde_yml::Value::String("crlf".into()),
-            )]),
-            ..CopConfig::default()
-        };
-        let diags = run_with_config(b"x = 1\ny = 2\n", config);
+        let diags = run_with_config(b"x = 1\ny = 2\n", crlf_config());
         assert_eq!(diags.len(), 1, "crlf style should flag first LF-only line");
+        assert_eq!(diags[0].message, "Carriage return character missing.");
+    }
+
+    #[test]
+    fn crlf_style_skips_invalid_utf8_vim_fileencoding_euc_jp_file() {
+        let diags = run_with_config(
+            b"# vim: set fileencoding=euc-jp\n\
+              # frozen_string_literal: false\n\
+              \n\
+              require \"test/unit\"\n\
+              \n\
+              class TestEUC_JP < Test::Unit::TestCase\n\
+                def test_mbc_case_fold\n\
+                  assert_match(/(\xa3\xe1)(a)\\1\\2/i, \"\xa3\xe1a\xa3\xe1A\")\n\
+                end\n\
+              end\n",
+            crlf_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "invalid UTF-8 with a vim fileencoding modeline should not run Layout/EndOfLine: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn crlf_style_skips_invalid_utf8_vim_fileencoding_shift_jis_file() {
+        let diags = run_with_config(
+            b"# vim: set fileencoding=shift_jis\n\
+              # frozen_string_literal: false\n\
+              \n\
+              require \"test/unit\"\n\
+              \n\
+              class TestShiftJIS < Test::Unit::TestCase\n\
+                def test_mbc_case_fold\n\
+                  assert_match(/(\x82\x81)(a)\\1\\2/i, \"\x82\x81a\x82\x81A\")\n\
+                end\n\
+              end\n",
+            crlf_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "invalid UTF-8 with a vim fileencoding modeline should not run Layout/EndOfLine: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn crlf_style_still_flags_ascii_vim_fileencoding_modeline() {
+        let diags = run_with_config(
+            b"# vim: set fileencoding=euc-jp\nputs \"ok\"\n",
+            crlf_config(),
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].location.line, 1);
         assert_eq!(diags[0].message, "Carriage return character missing.");
     }
 
