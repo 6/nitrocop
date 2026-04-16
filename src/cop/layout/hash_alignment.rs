@@ -54,6 +54,13 @@ use ruby_prism::Visit;
 ///      Fixed by checking the Prism parent chain directly and only ignoring hashes
 ///      that are actually the last argument of a `CallNode`, `SuperNode`, or
 ///      `YieldNode`.
+///
+/// 5. **Explicit hash before `&block` (FN, 2026-04-16):** Prism stores block passes
+///    separately from `arguments`, so `foo({a: 1}, &block)` and `super({a: 1}, &block)`
+///    were incorrectly treated as explicit last-argument hashes and skipped under
+///    `ignore_explicit`. RuboCop's `last_argument` includes the trailing block pass,
+///    so the hash is still checked. Fixed by refusing to treat a hash as the last
+///    argument when a call/super node has a separate block-pass child.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -247,9 +254,15 @@ fn is_last_argument_hash(
     };
 
     if let Some(call) = parent.as_call_node() {
+        if call.block().is_some() {
+            return false;
+        }
         return is_last_argument(call.arguments());
     }
     if let Some(super_node) = parent.as_super_node() {
+        if super_node.block().is_some() {
+            return false;
+        }
         return is_last_argument(super_node.arguments());
     }
     if let Some(yield_node) = parent.as_yield_node() {
