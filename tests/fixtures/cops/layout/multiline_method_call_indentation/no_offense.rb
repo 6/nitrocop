@@ -110,6 +110,12 @@ expect { custom_formatter_class('NonExistentClass') }
 a
   .b[c] = 0
 
+# RHS of []= assignment: trailing-dot continuation aligns with chain root,
+# not the block-bearing receiver dot
+foo[bar] =
+  baz.map { |x| [x, qux[x]&.first] }.
+  sort_by { |x, _| x.id }.to_h
+
 # Method call chain starting with implicit receiver
 def slugs(type, path_prefix)
   expanded_links_item(type)

@@ -147,6 +147,26 @@ use crate::parse::source::SourceFile;
 ///
 /// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
 /// -1,324 FP resolved, -190 FN resolved.
+///
+/// ## Corpus fix (2026-04-16)
+///
+/// For the `EnforcedStyle: indented` variant, nitrocop was suppressing
+/// multiline chain checks inside `[]`/`[]=` calls because the visitor treated
+/// any `opening_loc` as "parenthesized arguments." Prism uses `opening_loc`
+/// for square brackets too, but RuboCop's `inside_arg_list_parentheses?`
+/// only skips real `(` argument lists. This caused FNs like:
+///
+/// ```ruby
+/// @payloads[platform] = [ ';%s', "\";%s#", "';%s#" ].
+///     map { |var| var % payload } | [payload]
+/// ```
+///
+/// The fix narrows `in_paren_args` tracking to actual `(` argument lists,
+/// so chains inside `foo[...]` and `foo[...] = ...` are checked normally
+/// while `foo(bar\n  .baz)` remains skipped. The default `aligned` style
+/// still needs one exception here: trailing-dot continuations on the RHS of
+/// `[]=` should align with the chain root, not with a block-bearing receiver's
+/// inline dot.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -314,8 +334,10 @@ impl ChainVisitor<'_> {
 
         // Try block chain continuation — when receiver is a call with a
         // single-line block, align with the block-bearing call's dot.
-        if let Some(col) = find_block_chain_alignment(self.source, call_node, rhs_line) {
-            return Some(col);
+        if !is_trailing_dot {
+            if let Some(col) = find_block_chain_alignment(self.source, call_node, rhs_line) {
+                return Some(col);
+            }
         }
 
         // When the CURRENT node has a block (do..end or { }), check if the
@@ -850,8 +872,10 @@ impl Visit<'_> for ChainVisitor<'_> {
             self.visit(&recv);
         }
 
-        // Visit arguments: if call has parens, mark as in_paren_args
-        let has_parens = node.opening_loc().is_some();
+        // RuboCop only treats real `(` arg lists as parenthesized here.
+        // `[]`/`[]=` use `opening_loc` too, but square brackets do not trigger
+        // `inside_arg_list_parentheses?`.
+        let has_parens = call_has_parenthesized_args(node);
         if let Some(args) = node.arguments() {
             if has_parens {
                 let saved_paren = self.in_paren_args;
@@ -890,6 +914,10 @@ impl Visit<'_> for ChainVisitor<'_> {
         self.visit(&node.value());
         self.in_hash_value = saved_hash;
     }
+}
+
+fn call_has_parenthesized_args(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(")
 }
 
 /// Block chain alignment ONLY (no continuation dot search). Used for hash
@@ -1207,12 +1235,38 @@ fn extract_call_source(call: ruby_prism::CallNode<'_>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cop::CopConfig;
     use crate::testutil::run_cop_full;
 
     crate::cop_fixture_tests!(
         MultilineMethodCallIndentation,
         "cops/layout/multiline_method_call_indentation"
     );
+
+    fn indented_config() -> CopConfig {
+        let mut config = CopConfig::default();
+        config.options.insert(
+            "EnforcedStyle".to_string(),
+            serde_yml::Value::String("indented".into()),
+        );
+        config
+    }
+
+    #[test]
+    fn indented_style_offense_fixture() {
+        let fixture = include_bytes!(
+            "../../../tests/fixtures/cops/layout/multiline_method_call_indentation/indented_offense.rb"
+        );
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: indented\n")
+            .expect("fixture should start with indented config directive");
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &MultilineMethodCallIndentation,
+            source.as_bytes(),
+            indented_config(),
+        );
+    }
 
     #[test]
     fn same_line_chain_ignored() {
