@@ -92,6 +92,35 @@ def get_closed_cop_issue_cops(department: str) -> set[str]:
     return cops
 
 
+def get_recently_merged_cops() -> set[str]:
+    """Return cop names that have a merged type:cop-fix PR in the last 24h.
+
+    Prevents re-dispatching a cop immediately after merge — the next oracle
+    run will refresh divergence data and re-open the issue if needed.
+    """
+    r = subprocess.run(
+        ["gh", "pr", "list", "--state", "merged",
+         "--search", "[bot] Fix in:title merged:>=" + _yesterday_iso(),
+         "--limit", "200",
+         "--json", "title", "--jq", ".[].title"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        return set()
+    cops = set()
+    for line in r.stdout.strip().splitlines():
+        cop = _extract_cop_from_pr_title(line)
+        if cop:
+            cops.add(cop)
+    return cops
+
+
+def _yesterday_iso() -> str:
+    """Return ISO date string for 24 hours ago."""
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%d")
+
+
 def main() -> int:
     department = os.environ["INPUT_DEPARTMENT"]
     count = int(os.environ.get("INPUT_COUNT", "5"))
@@ -109,6 +138,12 @@ def main() -> int:
     if closed_issue_cops:
         print(f"Skipping {len(closed_issue_cops)} cops with closed issues: {', '.join(sorted(closed_issue_cops))}")
         skip_cops |= closed_issue_cops
+
+    # ── Skip cops with recently merged PRs (last 24h) ────────────────
+    recently_merged = get_recently_merged_cops()
+    if recently_merged:
+        print(f"Skipping {len(recently_merged)} cops with recently merged PRs: {', '.join(sorted(recently_merged))}")
+        skip_cops |= recently_merged
 
     # ── Skip synth-only cops (no corpus data to validate against) ─────
     synth_only_cops: set[str] = set()
