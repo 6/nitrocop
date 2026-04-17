@@ -24,14 +24,12 @@ use crate::parse::source::SourceFile;
 ///   (`any_descendant?(node, :any_block, &:multiline?)`). Nitrocop now matches this
 ///   by tracking multiline vs single-line blocks separately.
 /// - RuboCop's `other_cop_takes_precedence?` is conditional on
-///   `Layout/SingleLineBlockChain` being enabled. Nitrocop always checks for
-///   single-line blocks in chains (slightly over-conservative, causing FNs).
+///   `Layout/SingleLineBlockChain` being enabled. Nitrocop now mirrors that by
+///   using an injected `SingleLineBlockChainEnabled` flag from config.
 ///
 /// ## Remaining gaps (FNs)
 /// - No walk-up through `AndNode`/`OrNode` (binary operators) — standalone multiline
 ///   `&&`/`||` expressions without assignment are not checked.
-/// - `contains_single_line_block` always fires (not conditional on SingleLineBlockChain
-///   being enabled), causing FNs for single-line block patterns.
 /// - No walk-up through convertible blocks (`method { ... }.chain`) — the block is not
 ///   merged with its send_node for length calculation.
 ///
@@ -245,6 +243,14 @@ use crate::parse::source::SourceFile;
 ///   RuboCop judges those larger expressions as a whole, so nitrocop must not
 ///   emit extra inner reports for long operator chains or superclass headers.
 ///
+/// ## Fixes applied (2026-04-17)
+/// - **SingleLineBlockChain gating**: `configured_to_not_be_inspected()` now
+///   only defers to `Layout/SingleLineBlockChain` when that cop is actually
+///   enabled in the resolved config. Previously the precedence check was always
+///   active, so repos that disabled `Layout/SingleLineBlockChain` still had
+///   multiline chains like `e.select { ... }\n  .join` suppressed here, causing
+///   false negatives relative to RuboCop.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -269,6 +275,7 @@ impl Cop for RedundantLineBreak {
     ) {
         let inspect_blocks = config.get_bool("InspectBlocks", false);
         let max_line_length = config.get_usize("MaxLineLength", 120);
+        let single_line_block_chain_enabled = config.get_bool("SingleLineBlockChainEnabled", true);
 
         // Collect comment line numbers (1-indexed) for the comment_within check.
         let comment_lines: HashSet<usize> = parse_result
@@ -316,6 +323,7 @@ impl Cop for RedundantLineBreak {
             unsafe_ranges: &unsafe_ranges,
             block_ranges: &block_ranges,
             single_line_block_ranges: &single_line_block_ranges,
+            single_line_block_chain_enabled,
             ast_diagnostics: Vec::new(),
             reported_starts: HashSet::new(),
             reported_ranges: Vec::new(),
@@ -682,6 +690,7 @@ struct RedundantLineBreakVisitor<'a, 'pr> {
     unsafe_ranges: &'a [(usize, usize)],
     block_ranges: &'a [(usize, usize, bool)],
     single_line_block_ranges: &'a [(usize, usize)],
+    single_line_block_chain_enabled: bool,
     ast_diagnostics: Vec<Diagnostic>,
     reported_starts: HashSet<usize>,
     /// Byte ranges of nodes already reported, to skip descendant checks.
@@ -795,9 +804,9 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
 
     fn configured_to_not_be_inspected(&self, start_offset: usize, end_offset: usize) -> bool {
         // Layout/SingleLineBlockChain takes precedence for single-line blocks in chains
-        // TODO: This should be conditional on Layout/SingleLineBlockChain being enabled,
-        // matching RuboCop's single_line_block_chain_enabled? check.
-        if self.contains_single_line_block(start_offset, end_offset) {
+        if self.single_line_block_chain_enabled
+            && self.contains_single_line_block(start_offset, end_offset)
+        {
             return true;
         }
         // When InspectBlocks is false (default), skip expressions containing
@@ -1766,5 +1775,41 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].location.line, 1);
         assert_eq!(diagnostics[0].location.column, 1);
+    }
+
+    #[test]
+    fn reports_single_line_block_chains_when_single_line_block_chain_is_disabled() {
+        let source = b"e.select { |i| i.cond? }\n  .join\n";
+        let config = CopConfig {
+            options: HashMap::from([(
+                "SingleLineBlockChainEnabled".to_string(),
+                serde_yml::Value::Bool(false),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, config);
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 1);
+        assert_eq!(diagnostics[0].location.column, 0);
+    }
+
+    #[test]
+    fn skips_single_line_block_chains_when_single_line_block_chain_is_enabled() {
+        let source = b"e.select { |i| i.cond? }\n  .join\n";
+        let config = CopConfig {
+            options: HashMap::from([(
+                "SingleLineBlockChainEnabled".to_string(),
+                serde_yml::Value::Bool(true),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, config);
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 }

@@ -1,9 +1,16 @@
 use crate::cop::shared::node_type::CALL_NODE;
-use crate::cop::shared::util::keyword_arg_value;
+use crate::cop::shared::util::{keyword_arg_pair_start_offset, keyword_arg_value};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
+/// Rails/AddColumnIndex: flags `add_column` calls that pass an `index:` keyword.
+///
+/// RuboCop reports this offense on the `index:` pair itself, not at the start of
+/// the `add_column` call. Nitrocop was previously reporting multiline calls on the
+/// first line, which produced FP/FN location swaps in corpus repos such as
+/// Coursemology, Conjur, and Pupilfirst. RuboCop also includes all `db/**/*.rb`
+/// files for this cop, so `db/old_migrations/...` must stay in scope too.
 pub struct AddColumnIndex;
 
 impl Cop for AddColumnIndex {
@@ -16,7 +23,7 @@ impl Cop for AddColumnIndex {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        &["db/migrate/**/*.rb"]
+        &["db/**/*.rb"]
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
@@ -46,8 +53,9 @@ impl Cop for AddColumnIndex {
             return;
         }
 
-        let loc = node.location();
-        let (line, column) = source.offset_to_line_col(loc.start_offset());
+        let offset = keyword_arg_pair_start_offset(&call, b"index")
+            .unwrap_or_else(|| node.location().start_offset());
+        let (line, column) = source.offset_to_line_col(offset);
         diagnostics.push(self.diagnostic(
             source,
             line,
@@ -61,4 +69,9 @@ impl Cop for AddColumnIndex {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(AddColumnIndex, "cops/rails/add_column_index");
+
+    #[test]
+    fn default_include_matches_rubocop() {
+        assert_eq!(AddColumnIndex.default_include(), &["db/**/*.rb"]);
+    }
 }

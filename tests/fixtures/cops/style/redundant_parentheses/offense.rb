@@ -398,3 +398,14 @@ rescue Errno::EFBIG
   raise if (retried)
            ^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
 end
+
+if next_line.empty?
+  (
+  ^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+    indent1 = 1
+    indent2 = 2
+    indent = indent2 || indent1
+    cursor_line = ' ' * indent + cursor_line
+  )
+  process_auto_indent 1, add_newline: true
+end
