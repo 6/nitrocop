@@ -560,6 +560,10 @@ jobs:
         with:
           verbose: ${{ inputs.verbose_disk }}
 
+      - name: Disk after free-disk-space
+        if: always()
+        run: df -h /
+
       - name: Download all results
         uses: actions/download-artifact@v8
         id: download-results
@@ -569,6 +573,10 @@ jobs:
           merge-multiple: true
         continue-on-error: true
 
+      - name: Disk after download
+        if: always()
+        run: df -h /
+
       - name: Retry download on failure
         if: steps.download-results.outcome == 'failure'
         uses: actions/download-artifact@v8
@@ -576,6 +584,10 @@ jobs:
           pattern: corpus-results-*
           path: all-results/
           merge-multiple: true
+
+      - name: Disk after retry download
+        if: always()
+        run: df -h /
 
       - name: Download synthetic results
         uses: actions/download-artifact@v8
@@ -592,6 +604,12 @@ jobs:
             --manifest bench/corpus/manifest.jsonl \
             --source all-results/results/rubocop \
             --dest rubocop-cache
+
+      - name: Disk after consolidate baseline cache
+        if: always()
+        run: |
+          df -h /
+          du -sh rubocop-cache 2>/dev/null || true
 
       - name: Compute rubocop cache key
         id: rubocop-cache-key
@@ -611,12 +629,17 @@ jobs:
 
       - name: Save consolidated rubocop cache
         uses: actions/cache/save@v5
+        continue-on-error: true  # non-fatal if disk is tight; tarring transiently doubles cache footprint
         with:
           path: rubocop-cache/
           # Keyed by config hash + run_id so each successful run creates a fresh
           # consolidated cache. Batch jobs restore via restore-keys prefix match,
           # so they always get the most recent full cache regardless of batch size.
           key: rubocop-all-${{ steps.rubocop-cache-key.outputs.hash }}-${{ github.run_id }}
+
+      - name: Disk after save baseline cache
+        if: always()
+        run: df -h /
 
       - name: Consolidate variant rubocop cache
         run: |
@@ -625,12 +648,22 @@ jobs:
             --source all-results/results \
             --dest variant-rubocop-cache
 
+      - name: Disk after consolidate variant cache
+        if: always()
+        run: |
+          df -h /
+          du -sh variant-rubocop-cache 2>/dev/null || true
+
       - name: Save consolidated variant rubocop cache
         uses: actions/cache/save@v5
         continue-on-error: true  # non-fatal if disk is tight
         with:
           path: variant-rubocop-cache/
           key: variant-rubocop-all-${{ steps.rubocop-cache-key.outputs.hash }}-${{ github.run_id }}
+
+      - name: Disk after save variant cache
+        if: always()
+        run: df -h /
 
       - name: Diff and generate report
         run: |
