@@ -55,6 +55,16 @@ use crate::parse::source::SourceFile;
 /// Fix: updated `symbol_to_status_code` to use `:unprocessable_content` (matching Rack::Utils)
 /// and `status_code_to_symbol` to return `:unprocessable_content` for code 422.
 /// This ensures nitrocop matches RuboCop's behavior for the `numeric` EnforcedStyle.
+///
+/// **Variant divergence fix (numeric style, 2026-04-17):** Rack 3.1 renamed HTTP 413 from
+/// `:payload_too_large` / `"Payload Too Large"` to `:content_too_large` / `"Content Too Large"`.
+/// RuboCop follows `Rack::Utils`, so `:content_too_large` must be flagged under numeric style,
+/// while the legacy `:payload_too_large` alias is no longer recognized and must be ignored.
+/// Nitrocop still hard-coded the old 413 alias in both the symbol map and Rack-style string
+/// validation, causing numeric FNs for `head/assert_response/render :content_too_large` and
+/// the opposite false behavior for `:payload_too_large`. Fix: switch the 413 symbol and Rack
+/// reason phrase to Rack 3.1's `content_too_large` naming so both symbolic and numeric styles
+/// match RuboCop.
 pub struct HttpStatus;
 
 fn status_code_to_symbol(code: i64) -> Option<&'static str> {
@@ -94,7 +104,7 @@ fn status_code_to_symbol(code: i64) -> Option<&'static str> {
         410 => Some(":gone"),
         411 => Some(":length_required"),
         412 => Some(":precondition_failed"),
-        413 => Some(":payload_too_large"),
+        413 => Some(":content_too_large"),
         414 => Some(":uri_too_long"),
         415 => Some(":unsupported_media_type"),
         416 => Some(":range_not_satisfiable"),
@@ -161,7 +171,7 @@ fn symbol_to_status_code(sym: &[u8]) -> Option<i64> {
         b"gone" => Some(410),
         b"length_required" => Some(411),
         b"precondition_failed" => Some(412),
-        b"payload_too_large" => Some(413),
+        b"content_too_large" => Some(413),
         b"uri_too_long" => Some(414),
         b"unsupported_media_type" => Some(415),
         b"range_not_satisfiable" => Some(416),
@@ -232,7 +242,7 @@ fn status_code_to_rack_reason(code: i64) -> Option<&'static str> {
         410 => Some("Gone"),
         411 => Some("Length Required"),
         412 => Some("Precondition Failed"),
-        413 => Some("Payload Too Large"),
+        413 => Some("Content Too Large"),
         414 => Some("URI Too Long"),
         415 => Some("Unsupported Media Type"),
         416 => Some("Range Not Satisfiable"),
@@ -441,6 +451,7 @@ impl Cop for HttpStatus {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(HttpStatus, "cops/rails/http_status");
+    crate::cop_variant_fixture_tests!(HttpStatus, "cops/rails/http_status", numeric);
 
     #[test]
     fn numeric_style_flags_symbolic_status() {
@@ -497,5 +508,27 @@ mod tests {
         };
         let source = b"render :foo, status: :error\n";
         assert_cop_no_offenses_full_with_config(&HttpStatus, source, config);
+    }
+
+    #[test]
+    fn symbolic_style_prefers_content_too_large_for_413() {
+        use crate::testutil::run_cop_full;
+
+        let source = b"render status: 413\n";
+        let diags = run_cop_full(&HttpStatus, source);
+        assert!(!diags.is_empty(), "symbolic style should flag numeric 413");
+        assert!(
+            diags[0].message.contains(":content_too_large"),
+            "message should mention :content_too_large: {}",
+            diags[0].message
+        );
+    }
+
+    #[test]
+    fn symbolic_style_ignores_legacy_payload_too_large_string() {
+        use crate::testutil::assert_cop_no_offenses_full;
+
+        let source = b"render plain: \"hello\", status: \"413 Payload Too Large\"\n";
+        assert_cop_no_offenses_full(&HttpStatus, source);
     }
 }
