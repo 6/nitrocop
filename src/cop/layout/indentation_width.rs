@@ -1024,12 +1024,12 @@ impl IndentationWidth {
         &self,
         source: &SourceFile,
         keyword_offset: usize,
-        base_offset: usize,
-        base_col: usize,
+        base: (usize, usize),
         alt_base: Option<(usize, usize)>,
         stmts: Option<ruby_prism::StatementsNode<'_>>,
         options: IndentationOptions,
     ) -> Vec<Diagnostic> {
+        let (base_offset, base_col) = base;
         let stmts = match stmts {
             Some(s) => s,
             None => return Vec::new(),
@@ -1127,8 +1127,7 @@ impl IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_offset,
-                kw_col,
+                (kw_offset, kw_col),
                 None,
                 rescue_node.statements(),
                 options,
@@ -1143,8 +1142,7 @@ impl IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_offset,
-                kw_col,
+                (kw_offset, kw_col),
                 None,
                 else_clause.statements(),
                 options,
@@ -1158,8 +1156,7 @@ impl IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_offset,
-                kw_col,
+                (kw_offset, kw_col),
                 None,
                 ensure_node.statements(),
                 options,
@@ -1182,8 +1179,7 @@ impl IndentationWidth {
         diagnostics.extend(self.check_statements_indentation(
             source,
             kw_offset,
-            kw_offset,
-            kw_col,
+            (kw_offset, kw_col),
             None,
             else_node.statements(),
             options,
@@ -1297,8 +1293,7 @@ impl Cop for IndentationWidth {
                 diagnostics.extend(self.check_statements_indentation(
                     source,
                     kw_offset,
-                    end_offset.unwrap_or(kw_offset),
-                    base_col,
+                    (end_offset.unwrap_or(kw_offset), base_col),
                     None,
                     begin_node.statements(),
                     options,
@@ -1410,8 +1405,7 @@ impl Cop for IndentationWidth {
                     diagnostics.extend(self.check_statements_indentation(
                         source,
                         kw_offset,
-                        base_offset,
-                        base_col,
+                        (base_offset, base_col),
                         None,
                         begin_node.statements(),
                         options,
@@ -1447,8 +1441,7 @@ impl Cop for IndentationWidth {
                 diagnostics.extend(self.check_statements_indentation(
                     source,
                     kw_offset,
-                    base_offset,
-                    base_col,
+                    (base_offset, base_col),
                     None,
                     if_node.statements(),
                     options,
@@ -1476,8 +1469,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                base_offset,
-                base_col,
+                (base_offset, base_col),
                 None,
                 unless_node.statements(),
                 options,
@@ -1496,8 +1488,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_offset,
-                kw_col,
+                (kw_offset, kw_col),
                 None,
                 for_node.statements(),
                 options,
@@ -1576,8 +1567,7 @@ impl Cop for IndentationWidth {
                             diagnostics.extend(self.check_statements_indentation(
                                 source,
                                 opening_offset,
-                                base_offset,
-                                base_col,
+                                (base_offset, base_col),
                                 None,
                                 begin_node.statements(),
                                 options,
@@ -1638,8 +1628,7 @@ impl Cop for IndentationWidth {
                     diagnostics.extend(self.check_statements_indentation(
                         source,
                         opening_offset,
-                        closing_offset,
-                        closing_col,
+                        (closing_offset, closing_col),
                         None,
                         begin_node.statements(),
                         options,
@@ -1686,8 +1675,7 @@ impl Cop for IndentationWidth {
                             diagnostics.extend(self.check_statements_indentation(
                                 source,
                                 opening_offset,
-                                closing_offset,
-                                closing_col,
+                                (closing_offset, closing_col),
                                 None,
                                 begin_node.statements(),
                                 options,
@@ -1734,8 +1722,7 @@ impl Cop for IndentationWidth {
                         diagnostics.extend(self.check_statements_indentation(
                             source,
                             opening_offset,
-                            closing_offset,
-                            closing_col,
+                            (closing_offset, closing_col),
                             None,
                             begin_node.statements(),
                             options,
@@ -1780,8 +1767,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_offset,
-                kw_col,
+                (kw_offset, kw_col),
                 None,
                 when_node.statements(),
                 options,
@@ -1813,8 +1799,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_offset,
-                kw_col,
+                (kw_offset, kw_col),
                 None,
                 in_node.statements(),
                 options,
@@ -1833,8 +1818,7 @@ impl Cop for IndentationWidth {
                         diagnostics.extend(self.check_statements_indentation(
                             source,
                             kw_offset,
-                            kw_offset,
-                            kw_col,
+                            (kw_offset, kw_col),
                             None,
                             else_clause.statements(),
                             options,
@@ -1856,8 +1840,7 @@ impl Cop for IndentationWidth {
                         diagnostics.extend(self.check_statements_indentation(
                             source,
                             kw_offset,
-                            kw_offset,
-                            kw_col,
+                            (kw_offset, kw_col),
                             None,
                             else_clause.statements(),
                             options,
@@ -1881,8 +1864,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                base_offset,
-                base_col,
+                (base_offset, base_col),
                 None,
                 while_node.statements(),
                 options,
@@ -1903,8 +1885,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                base_offset,
-                base_col,
+                (base_offset, base_col),
                 None,
                 until_node.statements(),
                 options,
