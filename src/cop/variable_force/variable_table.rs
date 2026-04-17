@@ -79,19 +79,20 @@ impl VariableTable {
     /// `in_branch` is forced to true (block may not execute).
     pub fn assign_to_variable(&mut self, name: &[u8], mut assignment: Assignment) {
         let current_index = self.current_scope_index();
+        let contexts = self.branch_contexts.clone();
         // Check if variable exists in accessible scopes
         if let Some(var) = self.find_variable_mut(name) {
             if var.scope_index != current_index {
                 var.captured_by_block = true;
                 assignment.in_branch = true;
             }
-            var.assign(assignment);
+            var.assign(assignment, &contexts);
         } else {
             // New variable — declare in current scope
             let offset = assignment.node_offset;
             self.declare_variable(name.to_vec(), offset, DeclarationKind::Assignment);
             if let Some(var) = self.current_scope_mut().variables.get_mut(name) {
-                var.assign(assignment);
+                var.assign(assignment, &contexts);
             }
         }
     }

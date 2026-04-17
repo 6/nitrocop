@@ -255,9 +255,82 @@ def rescue_chain_read_in_else(flag)
       ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `score`.
     rescue OtherError
       score = 99
+      ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `score`.
     end
   else
     puts score
+  end
+end
+
+# Earlier rescue clauses in the same chain are separate sibling branches.
+def multi_rescue_self_reference(sock_obj)
+  begin
+    work
+  rescue Errno::ECONNRESET
+    sock_obj = disconnect(sock_obj) unless sock_obj.nil?
+    ^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `sock_obj`.
+  rescue StandardError
+    sock_obj = disconnect(sock_obj) unless sock_obj.nil?
+    ^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `sock_obj`.
+  end
+end
+
+# Outer rescue branches must not leak into nested proc-local variable scopes.
+def proc_locals_inside_begin(chat)
+  begin
+    checker = proc {
+      test_request = nil
+      ^^^^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `test_request`.
+      test_response = nil
+      ^^^^^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `test_response`.
+
+      ref_request = chat.copyRequest
+      request, ref_response = doRequest(ref_request, :default => true)
+      ^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `request`.
+
+      test_request = chat.copyRequest
+
+      test_request.setMethod 'POST'
+      test_request.removeHeader 'Connection'
+      test_request.setHeader 'Content-Type', 'application/x-www-form-urlencoded'
+      test_request.setHeader 'Transfer-Encoding', 'chunked'
+
+      smuggle = "GET /fourOfour.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"
+      body = "0\r\n" + smuggle
+
+      test_request.setHeader 'Content-Length', "#{body.length}"
+      test_request.setBody body
+
+      te_index = test_request.index { |h| h =~ /Transfer\-Encoding/ }
+      cl_index = test_request.index { |h| h =~ /Content\-Length/ }
+
+      if te_index < cl_index
+        dummy = test_request[te_index]
+        test_request[te_index] = test_request[cl_index]
+        test_request[cl_index] = dummy
+      end
+
+      test_request, test_response = doRequest(
+        test_request,
+        :no_connection_close => true,
+        :update_contentlength => false
+      )
+
+      if test_response.status_code != ref_response.status_code then
+        addFinding(
+          test_request,
+          test_response,
+          :check_pattern => "#{body}",
+          :proof_pattern => "#{test_response.status_code}",
+          :chat => chat,
+          :title => '[ HRS ]'
+        )
+      end
+      [test_request, test_response]
+    }
+    yield checker
+  rescue => bang
+    puts bang
   end
 end
 

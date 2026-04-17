@@ -18,17 +18,27 @@ use crate::parse::source::SourceFile;
 /// the variable lifetime analysis; this wrapper only filters known
 /// RuboCop-compatible false positives.
 ///
-/// ## FP fix: chained `rescue` clauses (2026-04-03)
+/// ## Rescue-clause branch parity (2026-04-17)
 ///
-/// VariableForce currently models all clauses in a `begin ... rescue ...
-/// rescue ... end` chain as one branch. That makes assignments in earlier
-/// rescue clauses look overwritten by later rescue-clause assignments even
-/// though the clauses are mutually exclusive. RuboCop keeps those writes live
-/// until a real overwrite or read outside the sibling rescue set.
+/// Earlier VariableForce builds visited an entire `begin ... rescue ...
+/// rescue ... end` chain under one branch context. That let a later rescue
+/// clause's self-reference or write keep an earlier rescue-clause assignment
+/// alive, missing offenses like repeated
+/// `sock_obj = disconnect(sock_obj) unless sock_obj.nil?`.
 ///
-/// Fixed here by suppressing only the pending offenses whose later "overwrite"
-/// comes exclusively from sibling rescue clauses in the same rescue chain, and
-/// whose value is later read before any real overwrite on the same path.
+/// The engine now models exception handlers like RuboCop: the `begin` body is
+/// an incomplete branch that may jump into sibling rescue/else paths, while
+/// each rescue clause and the `else` body get their own sibling branch. This
+/// wrapper still keeps a narrow multi-rescue fallback for parity when a later
+/// read outside the rescue chain legitimately uses one of those clause values.
+///
+/// ## Nested block-scope branch boundaries (2026-04-17)
+///
+/// Branch ancestry must stop at the variable's own scope. Without that, outer
+/// `begin/rescue` branch metadata leaked into proc-local variables and kept
+/// dead initializers like `test_request = nil` alive inside nested `proc`
+/// bodies. VariableForce now trims branch paths to the declaring scope before
+/// comparing assignments and references.
 ///
 /// ## FP fix: pattern matching captures (2026-04-04)
 ///
@@ -168,6 +178,7 @@ struct AssignmentCandidate {
     node_offset: usize,
     branch_id: Option<usize>,
     engine_used: bool,
+    value_range: Option<(usize, usize)>,
     assignment_states: Vec<AssignmentState>,
     reference_states: Vec<ReferenceState>,
 }
@@ -221,6 +232,7 @@ impl variable_force::VariableForceConsumer for PendingOffenseCollector {
                     node_offset: assignment.node_offset,
                     branch_id: assignment.branch_id,
                     engine_used: assignment.used(variable.captured_by_block),
+                    value_range: assignment.value_range,
                     assignment_states: assignment_states.clone(),
                     reference_states: reference_states.clone(),
                 });
@@ -382,10 +394,15 @@ fn should_suppress_multi_rescue_false_positive(
         .filter(|reference| {
             reference.offset > offense.node_offset && reference.offset < next_real_assignment
         })
+        .filter(|reference| !offset_in_value_range(reference.offset, offense.value_range))
         .any(|reference| {
             !is_sibling_multi_rescue_reference(context, reference.offset, contexts)
                 && reference_can_consume_rescue_value(*reference, offense.branch_id)
         })
+}
+
+fn offset_in_value_range(offset: usize, range: Option<(usize, usize)>) -> bool {
+    range.is_some_and(|(start, end)| start <= offset && offset < end)
 }
 
 fn is_sibling_multi_rescue_assignment(

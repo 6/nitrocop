@@ -29,6 +29,9 @@ pub struct RegisteredConsumer<'a> {
 pub struct BranchContext {
     /// Unique ID for this branch context.
     pub id: usize,
+    /// Scope index active when the branch was entered. Variables declared in a
+    /// nested scope must ignore outer-scope branch contexts.
+    pub scope_index: usize,
     /// ID of the parent conditional node (e.g., the IfNode). Used to
     /// determine if two branches belong to the same conditional.
     pub parent_id: usize,
@@ -37,6 +40,13 @@ pub struct BranchContext {
     /// Predicate-assignment contexts execute before the guarded branch and
     /// must stay visible to reads in that branch.
     pub predicate_context: bool,
+    /// Exception-handler main bodies (`begin` under rescue/ensure) can exit
+    /// into sibling branches, so their writes are not exclusive with later
+    /// rescue/else/ensure reads.
+    pub may_jump_to_other_branch: bool,
+    /// Exception-handler main bodies may terminate before later writes run, so
+    /// references must keep walking past them instead of consuming the branch.
+    pub may_run_incompletely: bool,
 }
 
 /// The VariableForce engine. Walks the Prism AST and builds a complete
@@ -86,13 +96,27 @@ impl<'a> Engine<'a> {
     /// `parent_id` identifies the conditional node (use its start offset),
     /// `child_index` identifies which child (0=then, 1=else, etc.).
     fn push_branch(&mut self, parent_id: usize, child_index: usize, predicate_context: bool) {
+        self.push_branch_with_flags(parent_id, child_index, predicate_context, false, false);
+    }
+
+    fn push_branch_with_flags(
+        &mut self,
+        parent_id: usize,
+        child_index: usize,
+        predicate_context: bool,
+        may_jump_to_other_branch: bool,
+        may_run_incompletely: bool,
+    ) {
         let id = self.next_branch_id;
         self.next_branch_id += 1;
         let context = BranchContext {
             id,
+            scope_index: self.table.current_scope_index(),
             parent_id,
             child_index,
             predicate_context,
+            may_jump_to_other_branch,
+            may_run_incompletely,
         };
         self.branch_contexts.push(context.clone());
         // Keep the live VariableTable copy in sync so reference tracking can
@@ -109,6 +133,10 @@ impl<'a> Engine<'a> {
     /// The current branch ID, if inside a branch.
     fn current_branch_id(&self) -> Option<usize> {
         self.branch_stack.last().copied()
+    }
+
+    fn current_branch_path(&self) -> Vec<usize> {
+        self.branch_stack.clone()
     }
 
     /// Check if two branch IDs are mutually exclusive (belong to the same
@@ -477,6 +505,7 @@ impl<'a> Engine<'a> {
             let mut assignment = Assignment::new(offset, AssignmentKind::For);
             assignment.in_branch = self.branch_depth > 0;
             assignment.branch_id = self.current_branch_id();
+            assignment.branch_path = self.current_branch_path();
             self.table.assign_to_variable(&name, assignment);
         }
     }
@@ -514,6 +543,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         assign.rhs_references_var = rhs_refs_var;
         assign.in_branch = self.branch_depth > 0;
         assign.branch_id = self.current_branch_id();
+        assign.branch_path = self.current_branch_path();
         let val = node.value();
         assign.value_range = Some((val.location().start_offset(), val.location().end_offset()));
         self.table.assign_to_variable(&name, assign);
@@ -525,6 +555,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut reference = Reference::new(node.location().start_offset(), scope_index);
         reference.sequence = seq;
         reference.branch_id = self.current_branch_id();
+        reference.branch_path = self.current_branch_path();
         self.table
             .reference_variable(node.name().as_slice(), reference);
     }
@@ -543,6 +574,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut r = Reference::new(offset, si);
         r.sequence = seq;
         r.branch_id = self.current_branch_id();
+        r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
         self.visit(&node.value());
         let seq = self.next_sequence();
@@ -551,6 +583,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.rhs_references_var = true; // operator-writes always read the var
         a.in_branch = self.branch_depth > 0;
         a.branch_id = self.current_branch_id();
+        a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
     }
 
@@ -568,6 +601,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut r = Reference::new(offset, si);
         r.sequence = seq;
         r.branch_id = self.current_branch_id();
+        r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
         self.visit(&node.value());
         let seq = self.next_sequence();
@@ -576,6 +610,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.rhs_references_var = true;
         a.in_branch = self.branch_depth > 0;
         a.branch_id = self.current_branch_id();
+        a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
     }
 
@@ -593,6 +628,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut r = Reference::new(offset, si);
         r.sequence = seq;
         r.branch_id = self.current_branch_id();
+        r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
         self.visit(&node.value());
         let seq = self.next_sequence();
@@ -601,6 +637,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.rhs_references_var = true;
         a.in_branch = self.branch_depth > 0;
         a.branch_id = self.current_branch_id();
+        a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
     }
 
@@ -669,6 +706,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
         let in_branch = self.branch_depth > 0;
         let branch_id = self.current_branch_id();
+        let branch_path = self.current_branch_path();
         let seq = self.next_sequence();
 
         for target in node.lefts().iter() {
@@ -685,6 +723,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 let mut a = Assignment::new(offset, AssignmentKind::Multiple);
                 a.in_branch = in_branch;
                 a.branch_id = branch_id;
+                a.branch_path = branch_path.clone();
                 a.sequence = seq;
                 a.rhs_references_var = rhs_refs_var;
                 self.table.assign_to_variable(&name, a);
@@ -712,6 +751,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                         let mut a = Assignment::new(offset, AssignmentKind::Rest);
                         a.in_branch = in_branch;
                         a.branch_id = branch_id;
+                        a.branch_path = branch_path.clone();
                         a.sequence = seq;
                         a.rhs_references_var = rhs_refs_var;
                         self.table.assign_to_variable(&name, a);
@@ -735,6 +775,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 let mut a = Assignment::new(offset, AssignmentKind::Multiple);
                 a.in_branch = in_branch;
                 a.branch_id = branch_id;
+                a.branch_path = branch_path.clone();
                 a.sequence = seq;
                 a.rhs_references_var = rhs_refs_var;
                 self.table.assign_to_variable(&name, a);
@@ -917,6 +958,26 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 self.visit(&stmt);
             }
         }
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+        let parent_id = node.location().start_offset();
+        self.visit(&node.left());
+        self.branch_depth += 1;
+        self.push_branch(parent_id, 1, false);
+        self.visit(&node.right());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        let parent_id = node.location().start_offset();
+        self.visit(&node.left());
+        self.branch_depth += 1;
+        self.push_branch(parent_id, 1, false);
+        self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
     }
@@ -1121,7 +1182,8 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
-        // Branch context is managed by the caller (visit_begin_node).
+        // Branch context is managed by the caller (`visit_begin_node`), which
+        // visits each rescue clause under its own sibling branch context.
         // Visit children manually instead of delegating to the default visitor
         // so we can handle the exception capture variable explicitly.
 
@@ -1143,6 +1205,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 a.sequence = seq;
                 a.in_branch = self.branch_depth > 0;
                 a.branch_id = self.current_branch_id();
+                a.branch_path = self.current_branch_path();
                 self.table.assign_to_variable(&name, a);
             }
         }
@@ -1154,11 +1217,6 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         }
 
-        // Chained rescue clauses
-        if let Some(subsequent) = node.subsequent() {
-            self.visit_rescue_node(&subsequent);
-        }
-
         // If any rescue clause contains a `retry`, treat the entire rescue
         // as a loop — the retry causes the begin body to re-execute.
         if rescue_contains_retry(node) {
@@ -1168,44 +1226,65 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        // `begin ... rescue ... else ... end` behaves like RuboCop's rescue
+        // branch model:
+        // - the main body may jump into a rescue clause or stop before later
+        //   writes, so it is not exclusive with sibling rescue/else reads
+        // - each rescue clause is its own exclusive sibling branch
+        // - the else clause is its own sibling branch
+        if let Some(first_rescue) = node.rescue_clause() {
+            let parent_id = node.location().start_offset();
 
-        // Decompose begin/rescue/else/ensure into separate branches:
-        // - body (child 0) and rescue (child 1) are exclusive branches
-        // - else (child 2) is also exclusive with rescue
-        // - ensure is NOT branched (always executes)
-
-        // Body statements
-        if let Some(stmts) = node.statements() {
-            self.branch_depth += 1;
-            self.push_branch(parent_id, 0, false);
-            for stmt in stmts.body().iter() {
-                self.visit(&stmt);
+            if let Some(stmts) = node.statements() {
+                self.branch_depth += 1;
+                self.push_branch_with_flags(parent_id, 0, false, true, true);
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+                self.pop_branch();
+                self.branch_depth -= 1;
             }
-            self.pop_branch();
-            self.branch_depth -= 1;
-        }
 
-        // Rescue clause(s)
-        if let Some(rescue_clause) = node.rescue_clause() {
-            self.branch_depth += 1;
-            self.push_branch(parent_id, 1, false);
-            self.visit_rescue_node(&rescue_clause);
-            self.pop_branch();
-            self.branch_depth -= 1;
-        }
+            // Each rescue clause is its own exclusive sibling branch.
+            let mut clause_index = 1;
+            let mut current = Some(first_rescue);
+            while let Some(rescue_clause) = current {
+                let next = rescue_clause.subsequent();
+                self.branch_depth += 1;
+                self.push_branch(parent_id, clause_index, false);
+                self.visit_rescue_node(&rescue_clause);
+                self.pop_branch();
+                self.branch_depth -= 1;
+                clause_index += 1;
+                current = next;
+            }
 
-        // Else clause
-        if let Some(else_clause) = node.else_clause() {
-            self.branch_depth += 1;
-            self.push_branch(parent_id, 2, false);
-            if let Some(stmts) = else_clause.statements() {
+            if let Some(else_clause) = node.else_clause() {
+                self.branch_depth += 1;
+                self.push_branch(parent_id, clause_index, false);
+                if let Some(stmts) = else_clause.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.visit(&stmt);
+                    }
+                }
+                self.pop_branch();
+                self.branch_depth -= 1;
+            }
+        } else if let Some(stmts) = node.statements() {
+            if node.ensure_clause().is_some() {
+                let parent_id = node.location().start_offset();
+                self.branch_depth += 1;
+                self.push_branch_with_flags(parent_id, 0, false, true, true);
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+                self.pop_branch();
+                self.branch_depth -= 1;
+            } else {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
             }
-            self.pop_branch();
-            self.branch_depth -= 1;
         }
 
         // Ensure clause — NOT branched (always executes)
@@ -1241,6 +1320,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
         let in_branch = self.branch_depth > 0;
         let branch_id = self.current_branch_id();
+        let branch_path = self.current_branch_path();
         let seq = self.next_sequence();
 
         for target in node.targets().iter() {
@@ -1256,6 +1336,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 let mut a = Assignment::new(regex_offset, AssignmentKind::RegexpCapture);
                 a.in_branch = in_branch;
                 a.branch_id = branch_id;
+                a.branch_path = branch_path.clone();
                 a.sequence = seq;
                 self.table.assign_to_variable(&name, a);
             }
@@ -1278,10 +1359,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
         let offset = node.location().start_offset();
         let si = self.table.current_scope_index();
+        let branch_id = self.current_branch_id();
+        let branch_path = self.current_branch_path();
         // Bare `super` forwards the enclosing method's arguments, not block params.
         // Only mark method-scope arguments as implicitly referenced.
         for var in self.table.enclosing_method_arguments_mut() {
-            var.reference(Reference::implicit(offset, si));
+            let mut reference = Reference::implicit(offset, si);
+            reference.branch_id = branch_id;
+            reference.branch_path = branch_path.clone();
+            var.reference(reference);
         }
         // Visit the block child so that `super do |x| ... end` declares
         // block params and visits the block body.
@@ -1304,8 +1390,13 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         {
             let offset = node.location().start_offset();
             let si = self.table.current_scope_index();
+            let branch_id = self.current_branch_id();
+            let branch_path = self.current_branch_path();
             for var in self.table.accessible_variables_mut() {
-                var.reference(Reference::implicit(offset, si));
+                let mut reference = Reference::implicit(offset, si);
+                reference.branch_id = branch_id;
+                reference.branch_path = branch_path.clone();
+                var.reference(reference);
             }
         }
         if let Some(recv) = node.receiver() {
@@ -1381,6 +1472,7 @@ fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism
         a.sequence = seq;
         a.in_branch = engine.branch_depth > 0;
         a.branch_id = engine.current_branch_id();
+        a.branch_path = engine.current_branch_path();
         engine.table.assign_to_variable(&name, a);
     }
 }
@@ -2163,6 +2255,46 @@ mod tests {
         assert!(def_scope.vars.contains_key("e2"), "e2 should be tracked");
         assert!(def_scope.vars["e1"].num_references > 0);
         assert!(def_scope.vars["e2"].num_references > 0);
+    }
+
+    #[test]
+    fn test_multi_rescue_self_reference_keeps_clauses_exclusive() {
+        let scopes = run_engine(
+            "def foo(sock_obj)\n  begin\n    work\n  rescue Errno::ECONNRESET\n    sock_obj = disconnect(sock_obj) unless sock_obj.nil?\n  rescue StandardError\n    sock_obj = disconnect(sock_obj) unless sock_obj.nil?\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let sock_obj = &def_scope.vars["sock_obj"];
+
+        assert_eq!(sock_obj.num_assignments, 2);
+        assert_ne!(
+            sock_obj.assignments[0].branch_id, sock_obj.assignments[1].branch_id,
+            "each rescue clause should get its own sibling branch"
+        );
+        assert!(
+            !sock_obj.assignments[0].referenced,
+            "the later rescue clause must not keep the earlier clause alive"
+        );
+        assert!(
+            !sock_obj.assignments[1].referenced,
+            "the final rescue-clause write is also useless here"
+        );
+    }
+
+    #[test]
+    fn test_nested_rescue_reraise_keeps_inner_capture_live() {
+        let scopes = run_engine(
+            "def foo\n  begin\n    begin\n      raise \"Error 1\"\n    rescue => e1\n      raise \"Error 2\"\n    end\n  rescue => e2\n    e2.cause == e1\n    raise e2\n  rescue => e\n    e.cause == e1\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+
+        assert!(
+            def_scope.vars["e1"].assignments[0].referenced,
+            "outer rescue reads should keep the inner rescue capture live"
+        );
+        assert!(
+            def_scope.vars["e2"].assignments[0].referenced,
+            "re-raising the outer rescue capture should keep it live"
+        );
     }
 
     // ── Pattern match variable tests ──────────────────────────────────

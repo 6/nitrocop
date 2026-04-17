@@ -33,6 +33,10 @@ pub struct Assignment {
     /// Used together with `BranchContext` in the engine to determine whether
     /// two assignments/references are in mutually exclusive branches.
     pub branch_id: Option<usize>,
+    /// Full stack of active branch-context IDs from outermost to innermost.
+    /// Needed to preserve exclusivity when assignments are nested inside
+    /// additional branches, e.g. a modifier `if` inside a rescue clause.
+    pub branch_path: Vec<usize>,
     /// Byte offset range of the RHS value node (`start..end`). For
     /// `x = Model.create(name: 'Joe')`, this covers `Model.create(name: 'Joe')`.
     /// For block-wrapped assignments like `x = Model.create { ... }`, this
@@ -54,6 +58,7 @@ impl Assignment {
             sequence: 0,
             in_branch: false,
             branch_id: None,
+            branch_path: Vec::new(),
             value_range: None,
         }
     }
