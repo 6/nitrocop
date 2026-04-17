@@ -142,6 +142,15 @@ use crate::parse::source::SourceFile;
 /// Fix: add `FindPatternNode` paren extraction, and skip close-side
 /// missing-space checks only when the final inner node is a multiline plain
 /// quoted `StringNode` whose closing quote is immediately before the outer `)`.
+///
+/// ## Corpus investigation (2026-04-17)
+///
+/// `compact` still over-reported when consecutive parens were separated by
+/// anything other than a single ASCII space, for example `outer(  ( x ))` or
+/// `outer( inner( x )  )`. RuboCop only removes a single literal `' '` between
+/// consecutive paren tokens; wider whitespace runs are ignored entirely.
+/// Tightening the compact collapse path to that exact byte match fixes those
+/// variant FPs without weakening the legitimate single-space detections.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -701,6 +710,10 @@ fn check_compact_open_space(
             return;
         }
 
+        if !is_single_ascii_space(bytes, open_end, code_start) {
+            return;
+        }
+
         push_remove_offense(
             cop,
             source,
@@ -788,6 +801,10 @@ fn check_compact_close_space(
             return;
         }
 
+        if !is_single_ascii_space(bytes, prev_code + 1, close_start) {
+            return;
+        }
+
         push_remove_offense(
             cop,
             source,
@@ -824,6 +841,10 @@ fn compact_allows_consecutive_close_paren(
     };
 
     paren_offsets(&last_inner, bytes).is_some_and(|(_, _, inner_close)| inner_close == prev_code)
+}
+
+fn is_single_ascii_space(bytes: &[u8], start: usize, end: usize) -> bool {
+    end == start + 1 && bytes.get(start) == Some(&b' ')
 }
 
 fn ignores_close_side_for_multiline_plain_string(

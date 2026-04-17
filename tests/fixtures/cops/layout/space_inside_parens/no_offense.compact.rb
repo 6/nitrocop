@@ -12,3 +12,6 @@ case p
 in Point( *, 1, *a )
   a
 end
+
+outer(  ( x ))
+outer( inner( x )  )
