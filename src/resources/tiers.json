@@ -410,7 +410,6 @@
     "RSpec/IteratedExpectation": "stable",
     "RSpec/LeadingSubject": "stable",
     "RSpec/LeakyConstantDeclaration": "stable",
-    "RSpec/LeakyLocalVariable": "stable",
     "RSpec/LetBeforeExamples": "stable",
     "RSpec/LetSetup": "stable",
     "RSpec/MatchArray": "stable",
