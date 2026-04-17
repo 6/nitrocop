@@ -61,3 +61,21 @@ def wrapper(base)
     end
   end
 end
+
+# Constant assignment breaks RuboCop's macro-scope chain for arbitrary DSL
+# blocks, so `private` here is not an indented_internal_methods divider.
+module Authentication
+  Authenticate = CommandClass.new(inputs: %i[a]) do
+    def call
+      body
+    rescue => e
+      raise e
+    end
+
+    private
+
+    def authenticator
+      body
+    end
+  end
+end

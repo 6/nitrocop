@@ -41,3 +41,10 @@ module Outer
 		end
 	end
 end
+
+# Sole access modifiers with args are still checked when the class body is not
+# wrapped in a begin/statements node.
+class ::Class
+    public :include
+^^^^ Layout/IndentationWidth: Use 1 (not 2) tabs for indentation.
+end
