@@ -63,6 +63,15 @@ use ruby_prism::Visit;
 ///    that hash because the trailing `&block` is the actual last argument. Fixed by
 ///    treating a trailing `BlockArgumentNode` as disqualifying the hash from "last
 ///    argument hash" handling.
+///
+/// 6. **Multiline value alignment in `separator` / `table` styles (FN, 2026-04-17):**
+///    the cop discarded `value_col` whenever a hash value started on the next line
+///    (`"key" =>\n  value`). That matched `key` style, which ignores newline values,
+///    but diverged from RuboCop for `separator` and `table`, where `Pair#value.loc.column`
+///    is still aligned even across lines. This specifically missed first-pair offenses in
+///    table style and multiline-proc/hash variants in the corpus. Fixed by keeping the
+///    value column for non-omitted values and only suppressing newline value spacing in
+///    `key` style.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -142,7 +151,7 @@ struct PairInfo {
     sep_col: Option<usize>,
     /// Separator end column (column after last char of separator).
     sep_end_col: Option<usize>,
-    /// Value start column, if value exists and is on the same line.
+    /// Value start column, if the pair has an explicit value.
     value_col: Option<usize>,
     /// Whether the value is on a new line relative to the key.
     #[allow(dead_code)]
@@ -201,7 +210,7 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
             key_end_col,
             sep_col,
             sep_end_col,
-            value_col: if !value_on_new_line && !is_value_omission {
+            value_col: if !is_value_omission {
                 Some(value_col_v)
             } else {
                 None
@@ -388,18 +397,22 @@ fn has_bad_key_spacing(pair: &PairInfo) -> bool {
             }
         }
         // Value should be 1 space after separator end
-        if let (Some(sec), Some(vc)) = (pair.sep_end_col, pair.value_col) {
-            let expected_value_col = sec + 1;
-            if vc != expected_value_col {
-                return true;
+        if !pair.value_on_new_line {
+            if let (Some(sec), Some(vc)) = (pair.sep_end_col, pair.value_col) {
+                let expected_value_col = sec + 1;
+                if vc != expected_value_col {
+                    return true;
+                }
             }
         }
     } else {
         // Colon style: value should be 1 space after key end (which includes the colon)
-        if let Some(vc) = pair.value_col {
-            let expected_value_col = pair.key_end_col + 1;
-            if vc != expected_value_col {
-                return true;
+        if !pair.value_on_new_line {
+            if let Some(vc) = pair.value_col {
+                let expected_value_col = pair.key_end_col + 1;
+                if vc != expected_value_col {
+                    return true;
+                }
             }
         }
     }
