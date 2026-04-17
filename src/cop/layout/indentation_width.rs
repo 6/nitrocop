@@ -1,3 +1,4 @@
+use crate::cop::layout::access_modifier_indentation::is_block_in_macro_scope;
 use crate::cop::shared::access_modifier_predicates;
 use crate::cop::shared::node_type::{
     BEGIN_NODE, BLOCK_NODE, CALL_NODE, CASE_MATCH_NODE, CASE_NODE, CLASS_NODE, DEF_NODE, FOR_NODE,
@@ -188,6 +189,27 @@ use ruby_prism::Visit;
 ///   previous port reused the keyword/opening offset for tabs math, which
 ///   missed offenses in blocks like `create_table ... do` when the body line
 ///   used tabs or mixed indentation.
+/// - Fixed batch-1 variant divergence in two narrow cases:
+///   1. `indented_internal_methods` does not apply to `class_eval`/`class_exec`
+///      style blocks nested inside a method body. RuboCop skips the extra
+///      internal-method member walk there, so `private` sections inside those
+///      dynamic-eval blocks must not trigger false positives.
+///   2. Tabs-style `private def` / adjacent-def bodies use RuboCop's raw column
+///      delta instead of the visual tab-width delta. That means a body indented
+///      by one literal tab under `private def` still reports as "0 tabs" in
+///      batch 1, and nitrocop must mirror that quirk to avoid false negatives.
+/// - Fixed two remaining `relative_to_receiver` variant divergences:
+///   1. RuboCop's access-modifier handling is macro-scope aware inside blocks.
+///      Arbitrary DSL blocks wrapped by non-transparent parents such as constant
+///      assignment (`FOO = Builder.new do ... end`) do not treat bare `private`
+///      as an `indented_internal_methods` divider, so nitrocop now reuses the
+///      shared macro-scope checker before running the block member walk.
+///   2. Parser exposes a sole class/module body member directly, while Prism
+///      wraps it in a `StatementsNode`. RuboCop therefore still checks
+///      `class C; public :m; end` directly even with
+///      `Layout/AccessModifierIndentation: outdent`; nitrocop now treats
+///      one-child `StatementsNode` bodies as direct members to preserve that
+///      quirk and catch under-indented lone access-modifier calls.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -631,6 +653,7 @@ struct MemberStyles<'a> {
 struct IndentationOptions {
     width: usize,
     tabs_style: bool,
+    raw_tabs_columns: bool,
 }
 
 impl IndentationWidth {
@@ -671,6 +694,7 @@ impl IndentationWidth {
         options: IndentationOptions,
     ) -> isize {
         if options.tabs_style
+            && !options.raw_tabs_columns
             && (line_uses_tab_indentation(source, base_offset)
                 || line_uses_tab_indentation(source, target_offset))
         {
@@ -776,20 +800,38 @@ impl IndentationWidth {
         let implicit_begin = body
             .as_begin_node()
             .filter(|begin_node| begin_node.begin_keyword_loc().is_none());
-        let members = if let Some(ref begin_node) = implicit_begin {
-            begin_node
-                .statements()
-                .map(|stmts| stmts.body().iter().collect())
-                .unwrap_or_default()
+        let (direct_member, wrapped_members) = if let Some(stmts) = body.as_statements_node() {
+            let members: Vec<_> = stmts.body().iter().collect();
+            if members.len() == 1 {
+                (members.into_iter().next(), None)
+            } else {
+                (None, Some(members))
+            }
+        } else if let Some(begin_node) = body.as_begin_node() {
+            (
+                None,
+                Some(
+                    begin_node
+                        .statements()
+                        .map(|stmts| stmts.body().iter().collect())
+                        .unwrap_or_default(),
+                ),
+            )
         } else {
-            body_members(body)
+            (Some(body), None)
         };
-        if members.is_empty() {
+        let first: &ruby_prism::Node<'_> = if let Some(ref members) = wrapped_members {
+            match members.first() {
+                Some(first) => first,
+                None => return Vec::new(),
+            }
+        } else if let Some(ref direct_member) = direct_member {
+            direct_member
+        } else {
             return Vec::new();
-        }
+        };
 
         let (base_line, _) = source.offset_to_line_col(base_offset);
-        let first = &members[0];
         let (first_line, _) = source.offset_to_line_col(first.location().start_offset());
         if first_line == base_line {
             return Vec::new();
@@ -798,74 +840,119 @@ impl IndentationWidth {
         let mut diagnostics = Vec::new();
 
         if styles.consistency == "indented_internal_methods" {
-            if is_any_access_modifier_call(first) {
-                if styles.access_modifier != "outdent" {
-                    if let Some(diagnostic) = self.check_member_indentation(
-                        source,
-                        base_offset,
-                        base_col,
-                        first,
-                        options,
-                        None,
-                    ) {
-                        diagnostics.push(diagnostic);
+            if let Some(ref members) = wrapped_members {
+                if is_any_access_modifier_call(first) {
+                    if styles.access_modifier != "outdent" {
+                        if let Some(diagnostic) = self.check_member_indentation(
+                            source,
+                            base_offset,
+                            base_col,
+                            first,
+                            options,
+                            None,
+                        ) {
+                            diagnostics.push(diagnostic);
+                        }
+                    }
+                } else if let Some(diagnostic) = self.check_member_indentation(
+                    source,
+                    base_offset,
+                    base_col,
+                    first,
+                    options,
+                    None,
+                ) {
+                    diagnostics.push(diagnostic);
+                }
+
+                let mut previous_modifier: Option<&ruby_prism::Node<'_>> = None;
+                for member in members {
+                    if is_special_modifier_call(member) {
+                        previous_modifier = Some(member);
+                        continue;
+                    }
+
+                    if let Some(modifier) = previous_modifier.take() {
+                        let modifier_loc = modifier.location();
+                        let (_, modifier_col) =
+                            source.offset_to_line_col(modifier_loc.start_offset());
+                        if let Some(diagnostic) = self.check_member_indentation(
+                            source,
+                            modifier_loc.start_offset(),
+                            modifier_col,
+                            member,
+                            options,
+                            Some("indented_internal_methods"),
+                        ) {
+                            diagnostics.push(diagnostic);
+                        }
                     }
                 }
-            } else if let Some(diagnostic) =
-                self.check_member_indentation(source, base_offset, base_col, first, options, None)
-            {
-                diagnostics.push(diagnostic);
+            } else if let Some(ref direct_member) = direct_member {
+                if let Some(diagnostic) = self.check_member_indentation(
+                    source,
+                    base_offset,
+                    base_col,
+                    direct_member,
+                    options,
+                    None,
+                ) {
+                    diagnostics.push(diagnostic);
+                }
             }
 
-            let mut previous_modifier: Option<&ruby_prism::Node<'_>> = None;
-            for member in &members {
-                if is_special_modifier_call(member) {
-                    previous_modifier = Some(member);
-                    continue;
-                }
-
-                if let Some(modifier) = previous_modifier.take() {
-                    let modifier_loc = modifier.location();
-                    let (_, modifier_col) = source.offset_to_line_col(modifier_loc.start_offset());
-                    if let Some(diagnostic) = self.check_member_indentation(
-                        source,
-                        modifier_loc.start_offset(),
-                        modifier_col,
-                        member,
-                        options,
-                        Some("indented_internal_methods"),
-                    ) {
-                        diagnostics.push(diagnostic);
-                    }
-                }
+            if let Some(begin_node) = implicit_begin {
+                self.check_begin_clauses(source, &begin_node, options, &mut diagnostics);
             }
 
             return diagnostics;
         }
 
-        // RuboCop's `select_check_member` checks the first member specially.
-        // If the first member is ANY access modifier (bare or with args), it is
-        // checked here (unless `outdent` style) and skipped in the loop below.
-        // Non-access-modifier first members are handled by the loop.
-        if is_any_access_modifier_call(first) && styles.access_modifier != "outdent" {
-            if let Some(diagnostic) =
-                self.check_member_indentation(source, base_offset, base_col, first, options, None)
-            {
-                diagnostics.push(diagnostic);
-            }
-        }
-
-        // RuboCop's `check_members_for_normal_style` iterates all children and
-        // skips access modifiers (bare, with symbol args, or with def).
-        // Access modifier indentation is handled by Layout/AccessModifierIndentation.
-        for member in &members {
-            if is_any_access_modifier_call(member) {
-                continue;
+        // RuboCop's `select_check_member` only unwraps class/module bodies when
+        // the body itself is a wrapper node (`begin`/statements). A sole direct
+        // member like `class C; public :m; end` is checked as-is, even with
+        // `Layout/AccessModifierIndentation: outdent`.
+        if let Some(ref members) = wrapped_members {
+            if is_any_access_modifier_call(first) && styles.access_modifier != "outdent" {
+                if let Some(diagnostic) = self.check_member_indentation(
+                    source,
+                    base_offset,
+                    base_col,
+                    first,
+                    options,
+                    None,
+                ) {
+                    diagnostics.push(diagnostic);
+                }
             }
 
-            if let Some(diagnostic) =
-                self.check_member_indentation(source, base_offset, base_col, member, options, None)
-            {
+            // RuboCop's `check_members_for_normal_style` iterates all wrapped
+            // children and skips access modifiers (bare, with args, or with def).
+            for member in members {
+                if is_any_access_modifier_call(member) {
+                    continue;
+                }
+
+                if let Some(diagnostic) = self.check_member_indentation(
+                    source,
+                    base_offset,
+                    base_col,
+                    member,
+                    options,
+                    None,
+                ) {
+                    diagnostics.push(diagnostic);
+                }
+            }
+        } else if let Some(ref direct_member) = direct_member {
+            if let Some(diagnostic) = self.check_member_indentation(
+                source,
+                base_offset,
+                base_col,
+                direct_member,
+                options,
+                None,
+            ) {
                 diagnostics.push(diagnostic);
             }
         }
@@ -1235,6 +1322,7 @@ impl Cop for IndentationWidth {
         let options = IndentationOptions {
             width,
             tabs_style: indentation_style == "tabs",
+            raw_tabs_columns: false,
         };
         let allowed_patterns = config
             .get_string_array("AllowedPatterns")
@@ -1376,6 +1464,15 @@ impl Cop for IndentationWidth {
 
         if let Some(def_node) = node.as_def_node() {
             let kw_offset = def_node.def_keyword_loc().start_offset();
+            let modifier_offset = if align_style == "keyword" {
+                None
+            } else {
+                def_modifier_base_offset(source, kw_offset)
+            };
+            let def_options = IndentationOptions {
+                raw_tabs_columns: options.tabs_style && modifier_offset.is_some(),
+                ..options
+            };
             let (base_offset, base_col) = if align_style == "keyword" {
                 // EnforcedStyleAlignWith: keyword — indent relative to `def` keyword column
                 (kw_offset, source.offset_to_line_col(kw_offset).1)
@@ -1388,7 +1485,7 @@ impl Cop for IndentationWidth {
                 // matches on_send using leftmost_modifier_of). For non-modifier
                 // contexts like `x = def foo` or `(def bar`, use the def
                 // keyword column to match RuboCop's on_def behavior.
-                if let Some(modifier_offset) = def_modifier_base_offset(source, kw_offset) {
+                if let Some(modifier_offset) = modifier_offset {
                     (
                         modifier_offset,
                         source.offset_to_line_col(modifier_offset).1,
@@ -1408,10 +1505,10 @@ impl Cop for IndentationWidth {
                         (base_offset, base_col),
                         None,
                         begin_node.statements(),
-                        options,
+                        def_options,
                     ));
                     // Check rescue/ensure/else clauses.
-                    self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                    self.check_begin_clauses(source, &begin_node, def_options, diagnostics);
                 } else {
                     // Regular def body (StatementsNode).
                     diagnostics.extend(self.check_body_indentation(
@@ -1420,7 +1517,7 @@ impl Cop for IndentationWidth {
                         base_offset,
                         base_col,
                         Some(body),
-                        options,
+                        def_options,
                     ));
                 }
             }
@@ -1586,6 +1683,11 @@ impl Cop for IndentationWidth {
                         }
                     }
                     if consistency_style == "indented_internal_methods"
+                        && is_block_in_macro_scope(
+                            _parse_result,
+                            block.location().start_offset(),
+                            block.location().end_offset(),
+                        )
                         && body_contains_access_modifier(block.body())
                     {
                         diagnostics.extend(self.check_block_internal_method_members(

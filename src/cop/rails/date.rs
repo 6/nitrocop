@@ -1,9 +1,19 @@
 use crate::cop::shared::constant_predicates;
-use crate::cop::shared::node_type::CALL_NODE;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
+/// ## Variant style divergence (2026-04-17)
+///
+/// Variant oracle reported FN=2 for `EnforcedStyle=strict` (0 FP).
+///
+/// FN=2: strict mode still missed chained calls rooted at bare `Date` constants, such as
+/// `Date.new(...).yesterday` and `Date.new(...).tomorrow`. RuboCop checks the root send whose
+/// receiver is bare `Date`, then walks send ancestors and reports the strict `Date.<method>`
+/// message on that root selector (`new` here), not on the trailing day method. Fixed by
+/// reproducing that root-call ancestor walk only in strict mode so flexible mode stays unchanged.
+///
 /// ## Variant style divergence (2026-04-08)
 ///
 /// Variant oracle reported FN=1,426 for `EnforcedStyle=strict` (0 FP).
@@ -47,72 +57,75 @@ impl Cop for Date {
         Severity::Convention
     }
 
-    fn interested_node_types(&self) -> &'static [u8] {
-        &[CALL_NODE]
-    }
-
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        _code_map: &crate::parse::codemap::CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let style = config.get_str("EnforcedStyle", "flexible");
-        let allow_to_time = config.get_bool("AllowToTime", true);
-
-        let call = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
+        let mut visitor = DateVisitor {
+            cop: self,
+            source,
+            diagnostics: Vec::new(),
+            strict: config.get_str("EnforcedStyle", "flexible") == "strict",
+            allow_to_time: config.get_bool("AllowToTime", true),
+            ancestors: Vec::new(),
         };
+        visitor.visit(&parse_result.node());
+        diagnostics.extend(visitor.diagnostics);
+    }
+}
 
+struct DateVisitor<'a, 'pr> {
+    cop: &'a Date,
+    source: &'a SourceFile,
+    diagnostics: Vec<Diagnostic>,
+    strict: bool,
+    allow_to_time: bool,
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+}
+
+impl<'pr> DateVisitor<'_, 'pr> {
+    fn add_call_offense(&mut self, call: &ruby_prism::CallNode<'pr>, message: String) {
+        let Some(msg_loc) = call.message_loc() else {
+            return;
+        };
+        let (line, column) = self.source.offset_to_line_col(msg_loc.start_offset());
+        self.diagnostics
+            .push(self.cop.diagnostic(self.source, line, column, message));
+    }
+
+    fn check_call(&mut self, call: &ruby_prism::CallNode<'pr>) {
         let method = call.name().as_slice();
 
         // `to_time_in_current_zone` is always deprecated, regardless of EnforcedStyle.
         // RuboCop requires a receiver (`node.receiver && ...`), so implicit-self calls
         // like bare `to_time_in_current_zone` inside ActiveSupport are not flagged.
         if method == b"to_time_in_current_zone" && call.receiver().is_some() {
-            let msg_loc = match call.message_loc() {
-                Some(loc) => loc,
-                None => return,
-            };
-            let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
+            self.add_call_offense(
+                call,
                 "`to_time_in_current_zone` is deprecated. Use `in_time_zone` instead.".to_string(),
-            ));
+            );
             return;
         }
 
         // In strict mode, also flag `to_time` (requires explicit receiver, same as RuboCop)
-        if method == b"to_time" && call.receiver().is_some() && !allow_to_time && style == "strict"
-        {
-            let msg_loc = match call.message_loc() {
-                Some(loc) => loc,
-                None => return,
-            };
-            let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
-            diagnostics.push(self.diagnostic(
-                source,
-                line,
-                column,
-                "Do not use `to_time` in strict mode.".to_string(),
-            ));
+        if self.strict && method == b"to_time" && call.receiver().is_some() && !self.allow_to_time {
+            self.add_call_offense(call, "Do not use `to_time` in strict mode.".to_string());
+            return;
         }
 
-        // In flexible mode, only `Date.today` is flagged.
-        // In strict mode, `Date.today`, `Date.yesterday`, `Date.tomorrow`, and `Date.current`
-        // are all flagged.
-        let is_bad_date_method = match method {
-            b"today" => true,
-            b"yesterday" | b"tomorrow" | b"current" => style == "strict",
-            _ => false,
-        };
-        if !is_bad_date_method {
+        if self.strict {
+            if let Some(message) = strict_date_chain_message(call, &self.ancestors) {
+                self.add_call_offense(call, message);
+            }
+            return;
+        }
+
+        if method != b"today" {
             return;
         }
 
@@ -126,28 +139,80 @@ impl Cop for Date {
             return;
         }
 
-        let msg_loc = match call.message_loc() {
-            Some(loc) => loc,
-            None => return,
-        };
-        let (line, column) = source.offset_to_line_col(msg_loc.start_offset());
+        self.add_call_offense(
+            call,
+            "Use `Date.current` instead of `Date.today`.".to_string(),
+        );
+    }
+}
 
-        // `method` is `&[u8]` - convert to &str for message formatting
-        let method_str = std::str::from_utf8(method).unwrap_or("");
-        // In strict mode, `Date.current` is flagged with a different message
-        // ("Use Time.zone.today instead") while the others use their own method name.
-        let msg = if style == "strict" && method == b"current" {
-            "Do not use `Date.current` without zone. Use `Time.zone.today` instead.".to_string()
-        } else if style == "strict" {
-            format!(
-                "Do not use `Date.{}` without zone. Use `Time.zone.{}` instead.",
-                method_str, method_str
-            )
-        } else {
-            "Use `Date.current` instead of `Date.today`.".to_string()
-        };
+impl<'pr> Visit<'pr> for DateVisitor<'_, 'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
 
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.check_call(node);
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+fn strict_date_chain_message(
+    call: &ruby_prism::CallNode<'_>,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> Option<String> {
+    let recv = call.receiver()?;
+    // RuboCop roots this logic at the send whose receiver is bare `Date` / `::Date`.
+    if !constant_predicates::is_simple_constant(&recv, b"Date") {
+        return None;
+    }
+
+    let bad_methods = strict_bad_day_chain(call, ancestors);
+    if bad_methods.is_empty() {
+        return None;
+    }
+
+    let method_name = bad_methods.join(".");
+    let day = if method_name == "current" {
+        "today".to_string()
+    } else {
+        method_name.clone()
+    };
+
+    Some(format!(
+        "Do not use `Date.{}` without zone. Use `Time.zone.{}` instead.",
+        method_name, day
+    ))
+}
+
+fn strict_bad_day_chain(
+    call: &ruby_prism::CallNode<'_>,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> Vec<String> {
+    let mut bad_methods = Vec::new();
+    push_bad_day_method(&mut bad_methods, call.name().as_slice());
+
+    for ancestor in ancestors.iter().rev().skip(1) {
+        if let Some(parent_call) = ancestor.as_call_node() {
+            push_bad_day_method(&mut bad_methods, parent_call.name().as_slice());
+        }
+    }
+
+    bad_methods
+}
+
+fn push_bad_day_method(bad_methods: &mut Vec<String>, method: &[u8]) {
+    match method {
+        b"today" | b"current" | b"yesterday" | b"tomorrow" => {
+            bad_methods.push(String::from_utf8_lossy(method).into_owned());
+        }
+        _ => {}
     }
 }
 

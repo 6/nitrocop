@@ -332,6 +332,21 @@ rescue StandardError => e
     handle
   end
 end
+# Single-statement rescue bodies also keep parens in the direct call's arguments.
+def transliterate(key, throw: false, raise: false, locale: nil, replacement: nil, **options)
+  config.backend.transliterate(locale, key, replacement)
+rescue I18n::ArgumentError => exception
+  handle_exception((throw && :throw || raise && :raise), exception, locale, key, options)
+end
+def add_path
+  begin
+    param_value = params.fetch(p[:name].to_s).to_s
+  rescue KeyError
+    raise ArgumentError, ("`#{p[:name]}`" \
+      'parameter key present, but not defined within example group' \
+      '(i. e `it` or `let` block)')
+  end
+end
 # Bracket chaining — (expr)[key] is chained like (expr).method
 (n.next_element || n.parent)['id'] ||= n['name']
 # self[] receiver — RuboCop's square_brackets? doesn't include self

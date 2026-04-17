@@ -20,3 +20,17 @@ create_table :template_auth_lookup, {:id => false} do |t|
 end
 
 create_table :logs, &:timestamps
+
+JazzModel::Base.connection.tap do |c|
+  c.create_table :keys do |t|
+    t.string :name
+  end
+end
+
+database.create_table :todos do
+  primary_key :id
+  String :title
+  String :content
+end
+
+ConfigurableSetting.create_table

@@ -176,6 +176,15 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 ///
 /// Fix: parse full RuboCop directive headers instead of raw `# rubocop:` substrings, and
 /// only treat `#{` as a documentation boundary while visiting embedded interpolation bodies.
+///
+/// **Investigation (2026-04-17, receiver wrappers):** 1 remaining FN came from defs used as
+/// call receivers, e.g. `# [TEMP] To be removed; def test_ids_reserved; end<1`.
+/// RuboCop does not associate the preceding comment with the inner `def` because the method is
+/// wrapped by the outer send expression, but nitrocop's raw line scan still counted it as
+/// documentation.
+///
+/// Fix: treat receiver-wrapped defs like other comment-stealing wrappers by incrementing
+/// `wrapped_comment_depth` while visiting the receiver subtree.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -324,6 +333,11 @@ fn inline_non_public_call(call: &ruby_prism::CallNode<'_>, arg: &ruby_prism::Nod
     call.receiver().is_none()
         && matches!(call.name().as_slice(), b"private" | b"protected")
         && arg.as_def_node().is_some()
+}
+
+fn receiver_wrapped_def(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.receiver()
+        .is_some_and(|receiver| receiver.as_def_node().is_some())
 }
 
 fn single_hash_comment_text(comment: &str) -> Option<&str> {
@@ -815,7 +829,13 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if let Some(receiver) = node.receiver() {
+            if receiver_wrapped_def(node) {
+                self.wrapped_comment_depth += 1;
+            }
             self.visit(&receiver);
+            if receiver_wrapped_def(node) {
+                self.wrapped_comment_depth -= 1;
+            }
         }
 
         if let Some(args) = node.arguments() {
