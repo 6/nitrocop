@@ -56,3 +56,46 @@ class RemoveNullConstraintOnTagging < ActiveRecord::Migration
     change_column :taggings, :entry_id, :integer, null: true
   end
 end
+
+class RemoveTripPositionsIntermediate < ActiveRecord::Migration[7.1]
+  def change
+    safety_assured do
+      drop_table :trip_positions_intermediate
+    end
+  end
+end
+
+class TitleToName < ActiveRecord::Migration[6.0]
+  def change
+    %i[descriptions images statuses taggings tags].each do |table|
+      drop_table table
+    end
+  end
+end
+
+class RemoveScavengerHuntTables < ActiveRecord::Migration[6.0]
+  def change
+    %i[answers clues games hints locations players survey_answers survey_questions].each do |table|
+      drop_table "scavenger_hunt_#{table}"
+    end
+  end
+end
+
+class Fix61 < ActiveRecord::Migration[6.0]
+  def change
+    [
+      :emox_emotion_folders,
+      :emox_finals,
+      :emox_judges,
+      :emox_lineages,
+      :emox_ox_marks,
+      :emox_rules,
+      :emox_seasons,
+      :emox_skills,
+      :emox_source_abouts,
+      :transient_aggregates,
+    ].each do |e|
+      drop_table e, if_exists: true
+    end
+  end
+end

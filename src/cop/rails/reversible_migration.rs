@@ -8,12 +8,12 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// Matches RuboCop's current migration gating and nested traversal.
+/// Matches RuboCop's current migration gating and AST-shape quirks.
 ///
-/// The main corpus drift came from treating unversioned `ActiveRecord::Migration`
-/// classes as migrations, which RuboCop skips, plus stopping `change_table`
-/// analysis at immediate statements and missing nested receiverful `change(...)`
-/// calls like `time.change(usec: 0)`.
+/// RuboCop only exempts `drop_table` when the send node's immediate parent is a
+/// single-statement block body, so multi-statement `each`/`safety_assured`
+/// blocks still register. It also keeps traversing nested defs/classes/modules
+/// lexically inside `change`, so nested `def change` bodies still count.
 pub struct ReversibleMigration;
 
 /// Methods that are always irreversible in a `change` method.
@@ -52,16 +52,43 @@ struct IrreversibleFinder {
     inside_reversible: bool,
     inside_up_only: bool,
     inside_change_table: bool,
+    direct_block_body_call_offsets: Vec<usize>,
 }
 
 impl<'pr> Visit<'pr> for IrreversibleFinder {
-    // Skip nested def/class/module
-    fn visit_def_node(&mut self, _node: &ruby_prism::DefNode<'pr>) {}
-    fn visit_class_node(&mut self, _node: &ruby_prism::ClassNode<'pr>) {}
-    fn visit_module_node(&mut self, _node: &ruby_prism::ModuleNode<'pr>) {}
+    fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+        if let Some(parameters) = node.parameters() {
+            self.visit(&parameters);
+        }
+
+        let Some(body) = node.body() else {
+            return;
+        };
+
+        let direct_body_call_offset = body
+            .as_statements_node()
+            .filter(|statements| statements.body().len() == 1)
+            .and_then(|statements| statements.body().first())
+            .and_then(|statement| statement.as_call_node())
+            .map(|call| call.location().start_offset());
+
+        if let Some(offset) = direct_body_call_offset {
+            self.direct_block_body_call_offsets.push(offset);
+        }
+
+        self.visit(&body);
+
+        if direct_body_call_offset.is_some() {
+            self.direct_block_body_call_offsets.pop();
+        }
+    }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         let name = node.name().as_slice();
+        let immediate_parent_is_block = self
+            .direct_block_body_call_offsets
+            .last()
+            .is_some_and(|offset| *offset == node.location().start_offset());
 
         // Check for `reversible` block
         if name == b"reversible" && node.receiver().is_none() && node.block().is_some() {
@@ -142,7 +169,10 @@ impl<'pr> Visit<'pr> for IrreversibleFinder {
 
         // Check conditionally irreversible methods
         for &(method, condition) in CONDITIONALLY_IRREVERSIBLE {
-            if name == method && node.receiver().is_none() && !is_condition_met(node, condition) {
+            if name == method
+                && node.receiver().is_none()
+                && !is_condition_met(node, condition, immediate_parent_is_block)
+            {
                 let method_str = std::str::from_utf8(name).unwrap_or("method");
                 let desc = condition_desc(condition);
                 self.offenses.push((
@@ -158,9 +188,18 @@ impl<'pr> Visit<'pr> for IrreversibleFinder {
     }
 }
 
-fn is_condition_met(call: &ruby_prism::CallNode<'_>, condition: IrreversibleCondition) -> bool {
+fn is_condition_met(
+    call: &ruby_prism::CallNode<'_>,
+    condition: IrreversibleCondition,
+    immediate_parent_is_block: bool,
+) -> bool {
     match condition {
         IrreversibleCondition::NeedsBlock => {
+            // RuboCop treats a drop_table send as reversible when the send node is
+            // itself the direct body of a block (single-statement block body).
+            if immediate_parent_is_block {
+                return true;
+            }
             // Must have a block or a & argument
             if call.block().is_some() {
                 return true;
@@ -422,6 +461,7 @@ impl Cop for ReversibleMigration {
                             inside_reversible: false,
                             inside_up_only: false,
                             inside_change_table: false,
+                            direct_block_body_call_offsets: Vec::new(),
                         };
                         finder.visit(&def_body);
 
