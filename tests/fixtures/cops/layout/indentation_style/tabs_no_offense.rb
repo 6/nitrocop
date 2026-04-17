@@ -19,3 +19,20 @@ MSG
 # Spaces inside regular string should NOT be flagged
 x = "hello
   world"
+
+# Space-indented inner closing delimiter inside an outer heredoc body should
+# not be flagged
+def describe
+	x = <<~OUTER
+	  #{
+	    helper('text', <<~INNER)
+	      "filter": "selectorgadget",
+	    INNER
+	  }
+OUTER
+end
+
+# A nested standalone disable directive comment suppresses only that line
+def directive_example
+  #   # rubocop:disable all
+end

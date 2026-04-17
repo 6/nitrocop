@@ -101,7 +101,7 @@ def claude_backend(strength: str, effort: str, display_label: str, model_label: 
     return {
         "family": "claude",
         "strength": strength,
-        "model": "claude-opus-4-6",
+        "model": "claude-opus-4-7",
         "reasoning_effort": effort,
         "display_label": display_label,
         "model_label": model_label,
@@ -116,14 +116,14 @@ def claude_backend(strength: str, effort: str, display_label: str, model_label: 
         "log_pattern": "~/.claude/projects/**/*.jsonl",
         "run_cmd": (
             f'claude -p --dangerously-skip-permissions '
-            f'--model claude-opus-4-6 --effort {effort} '
+            f'--model claude-opus-4-7 --effort {effort} '
             f'--output-format json '
             f'"$(cat "$FINAL_TASK_FILE")" '
             f'> "$AGENT_RESULT_FILE" '
             f'2> >(tee "$AGENT_LOG_FILE" >&2) || true'
         ),
         "env": {
-            "ANTHROPIC_MODEL": "claude-opus-4-6",
+            "ANTHROPIC_MODEL": "claude-opus-4-7",
             "API_TIMEOUT_MS": "300000",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         },
@@ -133,15 +133,15 @@ def claude_backend(strength: str, effort: str, display_label: str, model_label: 
     }
 
 
-CLAUDE_NORMAL_BACKEND = claude_backend("normal", "medium", "claude / normal", "Claude Opus 4.6 (medium)")
-CLAUDE_HARD_BACKEND = claude_backend("hard", "high", "claude / hard", "Claude Opus 4.6 (high)")
+CLAUDE_NORMAL_BACKEND = claude_backend("normal", "high", "claude / normal", "Claude Opus 4.7 (high)")
+CLAUDE_HARD_BACKEND = claude_backend("hard", "xhigh", "claude / hard", "Claude Opus 4.7 (xhigh)")
 
 
 def claude_oauth_backend(strength: str, effort: str, display_label: str, model_label: str) -> dict:
     return {
         "family": "claude-oauth",
         "strength": strength,
-        "model": "claude-opus-4-6",
+        "model": "claude-opus-4-7",
         "reasoning_effort": effort,
         "display_label": display_label,
         "model_label": model_label,
@@ -156,7 +156,7 @@ def claude_oauth_backend(strength: str, effort: str, display_label: str, model_l
         "log_pattern": "~/.claude/projects/**/*.jsonl",
         "run_cmd": "",
         "env": {
-            "ANTHROPIC_MODEL": "claude-opus-4-6",
+            "ANTHROPIC_MODEL": "claude-opus-4-7",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
         },
         "secrets": {
@@ -169,10 +169,10 @@ CODEX_54_HIGH_BACKEND = codex_backend("gpt-5.4", "high", "normal")
 CODEX_54_XHIGH_BACKEND = codex_backend("gpt-5.4", "xhigh", "hard")
 
 CLAUDE_OAUTH_NORMAL_BACKEND = claude_oauth_backend(
-    "normal", "medium", "claude-oauth / normal", "Claude Opus 4.6 (OAuth, medium)",
+    "normal", "high", "claude-oauth / normal", "Claude Opus 4.7 (OAuth, high)",
 )
 CLAUDE_OAUTH_HARD_BACKEND = claude_oauth_backend(
-    "hard", "high", "claude-oauth / hard", "Claude Opus 4.6 (OAuth, high)",
+    "hard", "xhigh", "claude-oauth / hard", "Claude Opus 4.7 (OAuth, xhigh)",
 )
 
 

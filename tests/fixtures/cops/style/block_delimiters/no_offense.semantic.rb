@@ -32,3 +32,5 @@ end
 assert_equal(*args.map { |str|
   str.tr("\n", "")
 })
+
+yield records.filter_map { |record| record.instance_variable_get(records_variable_name) }
