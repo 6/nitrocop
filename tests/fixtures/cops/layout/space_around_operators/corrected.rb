@@ -131,3 +131,35 @@ Reline.output = @output = File.open(temp_stdout.path, 'w+')
 SetUIDBit = ReadBit = 4
 SetGIDBit = WriteBit = 2
 StickyBit = ExecBit  = 1
+
+# Extra space before => in varied hash value contexts
+MORE_HASH_ROCKETS = {
+  'environ' => proc do |response|
+    response
+  end,
+  :watermark => [:watermark, :text],
+  :user => User.first || User.create!,
+}
+
+# Keyword operator: extra leading space before `or`
+def fetch_modifier(key)
+  MODIFIERS[key.to_sym] or raise ArgumentError.new("Unknown modifier key: #{key}")
+end
+
+# Keyword operator: extra leading space before `and` in modifier return
+def redirect_back
+  redirect_to :action => :show, :controller => :choices,
+    :question_id => params[:question_id], :id => params[:id] and return
+end
+
+# Keyword operator: extra leading space before `and` in a continued condition
+if justNameCharacters(params["signature"]["firstnames"]) and
+    justNameCharacters(params["signature"]["lastname"]) and
+    municipalities.include?(params["signature"]["occupancy_county"]) and
+    params["signature"]["vow"] == "1"
+end
+
+if justNameCharacters(params["first_names"]) and
+    justNameCharacters(params["last_name"]) and
+    municipalities.include?(params["occupancy_county"])
+end
