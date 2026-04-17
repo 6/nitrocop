@@ -593,6 +593,20 @@ jobs:
         if: always()
         run: df -h /
 
+      # Wipe partial extracts from the failed first attempt before retrying.
+      # Without this, the retry re-downloads to the same path and stacks ~50 GB
+      # of orphaned extracts on top — the cause of the 2026-04-17 ENOSPC.
+      - name: Clear partial extracts before retry
+        if: steps.download-results.outcome == 'failure'
+        run: |
+          echo "::warning::Download all results FAILED on first attempt — clearing partial extracts and retrying. See https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} for context."
+          echo "=== Disk before clear ==="
+          df -h /
+          du -sh all-results/ 2>/dev/null || echo "all-results/ missing"
+          rm -rf all-results/
+          echo "=== Disk after clear ==="
+          df -h /
+
       - name: Retry download on failure
         if: steps.download-results.outcome == 'failure'
         uses: actions/download-artifact@v8
