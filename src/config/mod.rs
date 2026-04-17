@@ -2381,6 +2381,19 @@ impl ResolvedConfig {
                     .insert("LineLengthEnabled".to_string(), Value::Bool(enabled));
             }
         }
+        if name == "Layout/RedundantLineBreak"
+            && !config.options.contains_key("SingleLineBlockChainEnabled")
+        {
+            let enabled = self
+                .cop_configs
+                .get("Layout/SingleLineBlockChain")
+                .map(|cc| !matches!(cc.enabled, crate::cop::EnabledState::False))
+                .unwrap_or(true);
+            config.options.insert(
+                "SingleLineBlockChainEnabled".to_string(),
+                Value::Bool(enabled),
+            );
+        }
         // Inject ActiveSupportExtensionsEnabled from AllCops for cops that need it
         if name == "Lint/DuplicateMethods"
             || name == "Style/ArrayIntersect"
