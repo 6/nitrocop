@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use ruby_prism::Visit;
 
 use crate::cop::shared::node_type::{
@@ -17,7 +19,10 @@ use crate::parse::source::SourceFile;
 ///   default config runs this cop on all `db/**/*.rb` files, including
 ///   `db/schema.rb`.
 /// - the built-in Active Storage excludes still need to apply for out-of-tree
-///   corpus runs, without reintroducing generic scan-root `Exclude` matching.
+///   corpus runs, including the generated
+///   `*_create_active_storage_variant_records.active_storage.rb` migration that
+///   still leaks through nitrocop's precompiled filter matcher on absolute
+///   corpus paths.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
@@ -107,6 +112,19 @@ fn has_timestamps_block_pass(call: &ruby_prism::CallNode<'_>) -> bool {
         .is_some_and(|sym| sym.unescaped() == b"timestamps")
 }
 
+fn is_default_excluded_active_storage_migration(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let matches_generated_name = file_name
+        .ends_with("_create_active_storage_tables.active_storage.rb")
+        || file_name.ends_with("_create_active_storage_variant_records.active_storage.rb");
+    matches_generated_name
+        && path
+            .components()
+            .any(|component| component.as_os_str() == "db")
+}
+
 impl Cop for CreateTableWithTimestamps {
     fn name(&self) -> &'static str {
         "Rails/CreateTableWithTimestamps"
@@ -148,6 +166,10 @@ impl Cop for CreateTableWithTimestamps {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
+        if is_default_excluded_active_storage_migration(&source.path) {
+            return;
+        }
+
         // Start from CallNode `create_table`, then access its block
         let call = match node.as_call_node() {
             Some(c) => c,
@@ -452,6 +474,84 @@ mod tests {
                 .iter()
                 .any(|p| p == "db/migrate/002_create_active_storage_tables.active_storage.rb"),
             "active storage migration should be excluded, got {:?} (single-file: {:?}, discovered: {:?})",
+            paths,
+            single_file_paths,
+            discovered_files
+        );
+        assert_eq!(
+            paths.len(),
+            2,
+            "expected exactly 2 offenses, got {:?}",
+            paths
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn generated_active_storage_variant_records_migration_is_suppressed_out_of_tree() {
+        let dir = temp_dir("nitrocop_test_ctwt_variant_records_exclude");
+        let repo = dir.join("repo");
+        let config_dir = dir.join("config");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&config_dir).unwrap();
+
+        let config_path = write_file(
+            &config_dir,
+            "baseline.yml",
+            b"Rails/CreateTableWithTimestamps:\n  Enabled: true\n",
+        );
+        write_file(
+            &repo,
+            "db/schema.rb",
+            b"ActiveRecord::Schema[7.0].define(version: 1) do\n  create_table \"widgets\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+        );
+        write_file(
+            &repo,
+            "db/migrate/001_create_users.rb",
+            b"class CreateUsers < ActiveRecord::Migration[7.0]\n  def change\n    create_table :users do |t|\n      t.string :name\n    end\n  end\nend\n",
+        );
+        write_file(
+            &repo,
+            "db/migrate/002_create_active_storage_variant_records.active_storage.rb",
+            b"class CreateActiveStorageVariantRecords < ActiveRecord::Migration[7.0]\n  def change\n    create_table :active_storage_variant_records do |t|\n      t.string :variation_digest, null: false\n    end\n  end\nend\n",
+        );
+
+        let active_storage_path =
+            repo.join("db/migrate/002_create_active_storage_variant_records.active_storage.rb");
+        let (_active_storage_matches, single_file_result, result, discovered_files) =
+            repo_filter_matches(&repo, &config_path, &active_storage_path);
+        let single_file_paths = relative_diagnostic_paths(&single_file_result, &repo);
+        let paths = relative_diagnostic_paths(&result, &repo);
+
+        assert!(
+            !single_file_paths
+                .iter()
+                .any(|p| p
+                    == "db/migrate/002_create_active_storage_variant_records.active_storage.rb"),
+            "variant records migration should be suppressed in single-file mode, got {:?} (discovered: {:?})",
+            single_file_paths,
+            discovered_files
+        );
+        assert!(
+            paths.iter().any(|p| p == "db/schema.rb"),
+            "expected db/schema.rb offense, got {:?} (single-file: {:?}, discovered: {:?})",
+            paths,
+            single_file_paths,
+            discovered_files
+        );
+        assert!(
+            paths.iter().any(|p| p == "db/migrate/001_create_users.rb"),
+            "expected db/migrate offense, got {:?}",
+            paths
+        );
+        assert!(
+            !paths
+                .iter()
+                .any(|p| p
+                    == "db/migrate/002_create_active_storage_variant_records.active_storage.rb"),
+            "variant records migration should be suppressed, got {:?} (single-file: {:?}, discovered: {:?})",
             paths,
             single_file_paths,
             discovered_files
