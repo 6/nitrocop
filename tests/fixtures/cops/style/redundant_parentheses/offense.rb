@@ -361,3 +361,40 @@ ensure
   (cache.close rescue nil) if cache
   ^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
 end
+
+if ((GitlabCli::Config[:display_results_in_pager] && !options['nopager']) || options['pager'])
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a logical expression.
+
+confirmed = true
+if (confirmed)
+   ^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a variable.
+
+assert_equal (+ 1.second), 1.second
+             ^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+# Multi-statement rescue bodies still flag direct expressions and predicates
+begin
+  work
+rescue StandardError => e
+  text = nil
+  (foo.bar).to_s
+  ^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+end
+
+begin
+  work
+rescue StandardError => e
+  text = nil
+  if ((a && b) || c)
+     ^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a logical expression.
+    handle
+  end
+end
+
+begin
+  work
+rescue Errno::EFBIG
+  text = nil
+  raise if (retried)
+           ^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+end

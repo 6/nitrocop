@@ -309,6 +309,13 @@ use crate::parse::source::SourceFile;
 ///   conditional predicates in rescue bodies.
 ///
 /// ### FN root causes fixed:
+/// - **Single-statement rescue bodies only:** RuboCop's `rescue?` matcher only
+///   keeps parens when the rescue body is a single statement, because
+///   multi-statement rescue bodies get an extra `begin` wrapper in Parser AST.
+///   nitrocop was exempting any direct-looking rescue-body predicate/expression,
+///   which hid real offenses like `text = nil; if (...)` and
+///   `text = nil; (foo.bar).to_s` inside multi-statement rescue clauses. The
+///   rescue-body exemption now requires a single-statement rescue body.
 /// - **One-line rescue inside rescue-body statements:** `(disconnect rescue nil) if cond`
 ///   inside a `rescue` clause was incorrectly swallowed by the broad rescue-body
 ///   exemption even though RuboCop still reports the parenthesized one-line rescue.
@@ -318,6 +325,23 @@ use crate::parse::source::SourceFile;
 ///   singular-parent check when its receiver was parenthesized. RuboCop still treats
 ///   these bracket sends like redundant method-call parens, so parenthesized `[]`
 ///   receivers now bypass that check while preserving the existing `self[]` exemption.
+///
+/// ## Investigation findings (2026-04-17)
+///
+/// ### FP root causes fixed:
+/// - **Negated explicit-receiver block calls:** `(!dirs.any? { ... })` is accepted
+///   by RuboCop like other explicit-receiver command/block calls. The unary `!`
+///   path now exempts unparenthesized explicit-receiver calls when their arguments
+///   arrive via a block instead of `arguments()`.
+/// - **Spaced unary `+/-` as chained receivers:** `(+ 'str').frozen?` keeps its
+///   parens even though `(+ 1.second)` in a method argument is still redundant.
+///   Spaced unary `+/-` now reuses the normal unary receiver/chaining checks.
+///
+/// ### FN root causes fixed:
+/// - **Spaced unary `+/-` operands in expression contexts:** `(+ 1.second)` /
+///   `(- 1.second)` are treated by RuboCop like parenthesized operands, not like
+///   the no-space `+(1.foo)` / `-(1.foo)` precedence exemption. The unary path now
+///   distinguishes those forms without re-flagging chained receivers.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -455,6 +479,10 @@ struct ParentInfo {
     /// Parens in the exception list (`rescue *(Err)`) are NOT exempt — only
     /// parens inside the body are.
     rescue_body_start_offset: Option<usize>,
+    /// RuboCop's `rescue?` matcher only sees through rescue bodies that stay
+    /// single-statement in Parser AST. Multi-statement rescue bodies get an
+    /// extra `begin` wrapper, so their nested parens should still be reported.
+    rescue_body_single_statement: bool,
     /// For conditional parents, the source range of the predicate expression.
     /// Used to distinguish parens in the condition from parens in the body.
     conditional_predicate_range: Option<(usize, usize)>,
@@ -910,6 +938,7 @@ impl RedundantParensVisitor<'_> {
         let len = self.parent_stack.len();
         if len >= 2
             && matches!(self.parent_stack[len - 2].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 2].rescue_body_single_statement
             && self.parent_stack[len - 2]
                 .rescue_body_start_offset
                 .is_some_and(|off| paren_offset >= off)
@@ -919,6 +948,7 @@ impl RedundantParensVisitor<'_> {
         // Grandparent check: paren inside StatementsNode inside RescueBody
         if len >= 3
             && matches!(self.parent_stack[len - 3].kind, ParentKind::RescueBody)
+            && self.parent_stack[len - 3].rescue_body_single_statement
             && self.parent_stack[len - 3]
                 .rescue_body_start_offset
                 .is_some_and(|off| paren_offset >= off)
@@ -965,9 +995,10 @@ impl RedundantParensVisitor<'_> {
             match info.kind {
                 ParentKind::Other => continue,
                 ParentKind::RescueBody => {
-                    return info
-                        .rescue_body_start_offset
-                        .is_some_and(|off| info.node_start_offset <= start && start >= off);
+                    return info.rescue_body_single_statement
+                        && info
+                            .rescue_body_start_offset
+                            .is_some_and(|off| info.node_start_offset <= start && start >= off);
                 }
                 _ => return false,
             }
@@ -1404,6 +1435,7 @@ impl RedundantParensVisitor<'_> {
             statements_child_count: 0,
             rescue_expression_start_offset: None,
             rescue_body_start_offset: None,
+            rescue_body_single_statement: false,
             conditional_predicate_range: None,
             is_post_condition_loop: false,
         });
@@ -1628,6 +1660,23 @@ fn check_unary<'a>(
     let call = inner.as_call_node()?;
     let name = call.name().as_slice();
 
+    if is_spaced_unary_plus_minus_call(content, &call) {
+        if let Some(recv) = call.receiver() {
+            if let Some(msg) = classify_simple(&recv) {
+                return Some(msg);
+            }
+
+            if recv.as_call_node().is_some()
+                || recv.as_super_node().is_some()
+                || recv.as_forwarding_super_node().is_some()
+                || recv.as_yield_node().is_some()
+                || recv.as_defined_node().is_some()
+            {
+                return Some("a method call");
+            }
+        }
+    }
+
     // prefix_not: !expr — don't flag (!x) as unary if no arguments
     // But DO flag it as "a unary operation" per RuboCop
     if name == b"!" {
@@ -1635,7 +1684,9 @@ fn check_unary<'a>(
         // (!x arg) — only flag when it's the sole expression (no parent boolean)
         if let Some(recv) = call.receiver() {
             if let Some(inner_call) = recv.as_call_node() {
-                if inner_call.arguments().is_some() && inner_call.opening_loc().is_none() {
+                let has_unparenthesized_args_or_block = inner_call.opening_loc().is_none()
+                    && (inner_call.arguments().is_some() || inner_call.block().is_some());
+                if has_unparenthesized_args_or_block {
                     // RuboCop accepts `(!selected.include? item)` when the command-style
                     // predicate call is rooted at an explicit receiver instead of an implicit
                     // bare method call.
@@ -1737,6 +1788,24 @@ fn is_unary_operation(call: &ruby_prism::CallNode<'_>) -> bool {
     }
     // Must have a receiver and no arguments (unary prefix)
     call.receiver().is_some() && call.arguments().is_none() && call.opening_loc().is_none()
+}
+
+fn is_spaced_unary_plus_minus_call(content: &[u8], call: &ruby_prism::CallNode<'_>) -> bool {
+    if !matches!(call.name().as_slice(), b"-@" | b"+@") {
+        return false;
+    }
+
+    let Some(message_loc) = call.message_loc() else {
+        return false;
+    };
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    let between = &content[message_loc.end_offset()..receiver.location().start_offset()];
+    between
+        .iter()
+        .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 fn call_chain_rooted_at_explicit_receiver(call: &ruby_prism::CallNode<'_>) -> bool {
@@ -2388,6 +2457,9 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             // Store the body start offset so has_rescue_body_ancestor() can
             // distinguish exception-list parens from body parens.
             top.rescue_body_start_offset = node.statements().map(|s| s.location().start_offset());
+            top.rescue_body_single_statement = node
+                .statements()
+                .is_some_and(|statements| statements.body().len() == 1);
         }
         ruby_prism::visit_rescue_node(self, node);
     }
