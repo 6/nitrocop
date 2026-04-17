@@ -133,6 +133,17 @@ end.join
 e.select { |i| i.cond? }
  .join
 
+# Stabby lambda argument on a dotted call — Layout/SingleLineBlockChain takes precedence.
+assoc.has_many :connections, -> { order 'connections.position ASC' },
+               inverse_of: :affiliate
+
+# Outer call containing a dotted call with a stabby lambda argument — RuboCop
+# still defers because the descendant lambda's containing send has a dot.
+assert_equal(
+  '<div class="blue and green"></div>',
+  Papercraft.html(-> { div class: 'blue and green' })
+)
+
 # Backslash continuation where the expression continues across comma-terminated
 # lines. RuboCop measures the full attr_reader call, not just the first symbol.
 class PhaseTwoLongAttrReader
