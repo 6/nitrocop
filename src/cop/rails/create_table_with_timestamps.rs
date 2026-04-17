@@ -9,10 +9,10 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::parse::source::SourceFile;
 
-/// Flags `create_table` calls that omit timestamp columns.
+/// Flags bare `create_table` calls that omit timestamp columns.
 ///
-/// Corpus investigation (2026-04-17) found three gaps relative to RuboCop:
-/// - `create_table` without a block was skipped entirely.
+/// Corpus investigation (2026-04-17) found several RuboCop-compatibility gaps:
+/// - bare `create_table` without a block was skipped entirely.
 /// - non-`timestamps` block-pass forms like `create_table :users, &:columns`
 ///   were also skipped.
 /// - the built-in scope only covered `db/migrate/**/*.rb`, but RuboCop's
@@ -23,6 +23,10 @@ use crate::parse::source::SourceFile;
 ///   `*_create_active_storage_variant_records.active_storage.rb` migration that
 ///   still leaks through nitrocop's precompiled filter matcher on absolute
 ///   corpus paths.
+/// - explicit-receiver forms like `connection.create_table`, schema DSLs such
+///   as `database.create_table`, and wrapper helpers like
+///   `ConfigurableSetting.create_table` are false positives; RuboCop only
+///   matches the nil-receiver `create_table` send.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
@@ -176,7 +180,7 @@ impl Cop for CreateTableWithTimestamps {
             None => return,
         };
 
-        if call.name().as_slice() != b"create_table" {
+        if call.receiver().is_some() || call.name().as_slice() != b"create_table" {
             return;
         }
 
