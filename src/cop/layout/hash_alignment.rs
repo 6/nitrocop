@@ -80,6 +80,14 @@ use ruby_prism::Visit;
 ///    also checks the first pair in single-pair hashes under `table` style, while the cop
 ///    returned early unless there were at least two pairs. Fixed by parsing the bundled
 ///    alias in the cop and letting `check_table_style` inspect single-pair hashes.
+///
+/// 8. **Table-style alignment must use char width, not byte width (2026-04-17):** The
+///    key length fed into `check_table_style`'s `max_key_len`/expected-column math was
+///    `key_end - key_start` in bytes, while column positions are UTF-8 codepoint counts.
+///    Hashes with multi-byte keys (emoji, CJK) therefore mis-computed the expected
+///    separator/value columns and produced FPs whenever RuboCop would have accepted the
+///    alignment. Fixed by counting non-continuation bytes (UTF-8 codepoint count) for
+///    `key_char_len` so it composes with column math.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -195,8 +203,9 @@ struct PairInfo {
     value_on_new_line: bool,
     /// Whether this is a value omission pair (e.g., `a:` with no value).
     is_value_omission: bool,
-    /// Key source length (for table alignment calculation).
-    key_source_len: usize,
+    /// Key character width (for table alignment calculation). Must be counted in
+    /// UTF-8 codepoints, not bytes, since it is added to character columns.
+    key_char_len: usize,
     /// Separator source length (for table alignment calculation).
     sep_source_len: usize,
 }
@@ -213,7 +222,12 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
         let (line, col) = source.offset_to_line_col(elem_start);
         let begins_line = crate::cop::shared::util::begins_its_line(source, elem_start);
         let (_, key_end_col) = source.offset_to_line_col(key_end);
-        let key_source_len = key_end - key_start;
+        // Count characters (UTF-8 codepoints), not bytes, so this matches the
+        // character-based column math used to derive expected alignment positions.
+        let key_char_len = source.content[key_start..key_end]
+            .iter()
+            .filter(|&&b| (b & 0xC0) != 0x80)
+            .count();
 
         let (is_rocket, sep_col, sep_end_col, sep_source_len) =
             if let Some(op_loc) = assoc.operator_loc() {
@@ -254,7 +268,7 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
             },
             value_on_new_line,
             is_value_omission,
-            key_source_len,
+            key_char_len,
             sep_source_len,
         })
     } else if elem.as_assoc_splat_node().is_some() {
@@ -276,7 +290,7 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
             value_col: None,
             value_on_new_line: false,
             is_value_omission: false,
-            key_source_len: 0,
+            key_char_len: 0,
             sep_source_len: 0,
         })
     } else {
@@ -570,7 +584,7 @@ fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffens
     // Calculate max key width and expected positions
     let max_key_len = non_kwsplat
         .iter()
-        .map(|p| p.key_source_len)
+        .map(|p| p.key_char_len)
         .max()
         .unwrap_or(0);
 
@@ -1217,6 +1231,17 @@ mod tests {
             &HashAlignment,
             include_bytes!(
                 "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_inline_first_pair_offense.rb"
+            ),
+            variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn table_multibyte_key_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/table_multibyte_key_no_offense.rb"
             ),
             variant_config("table", "table", "ignore_implicit"),
         );
