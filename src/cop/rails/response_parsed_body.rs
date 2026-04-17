@@ -6,12 +6,12 @@ use crate::parse::source::SourceFile;
 
 /// Rails/ResponseParsedBody
 ///
-/// FN fix: RuboCop's ResponseParsedBody cop does NOT use `requires_gem
-/// 'railties'` — it only checks `minimum_target_rails_version 5.0` via the
-/// `TargetRailsVersion` config setting. We use `target_rails_version()`
-/// directly (not `rails_version_at_least()`) because the latter also
-/// requires `railties` in `Gemfile.lock`, which the corpus lockfile does
-/// not have (it only bundles linter gems, not Rails itself).
+/// FP fix: `minimum_target_rails_version 5.0` in rubocop-rails 2.34 is backed
+/// by `requires_gem 'railties', '>= 5.0'`, so old Rails repos must stay
+/// exempt even when the shared corpus config forces `TargetRailsVersion: 7.0`.
+/// The corpus FP bucket was mostly controller specs in Rails 3.x/4.x apps
+/// (for example `8bitpal/hackful` on Rails 3.1) where our previous
+/// `target_rails_version()` gate ignored the real locked `railties` version.
 ///
 /// Corpus note: this cop is Include-gated (`spec/controllers/**/*.rb`,
 /// `spec/requests/**/*.rb`, etc.). These patterns come from the
@@ -52,9 +52,13 @@ impl Cop for ResponseParsedBody {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
-        // Use target_rails_version() directly — RuboCop's cop does NOT use
-        // `requires_gem 'railties'`, only `minimum_target_rails_version 5.0`.
-        if !config.target_rails_version().is_some_and(|v| v >= 5.0) {
+        // rubocop-rails 2.34 implements this via `requires_gem 'railties'`,
+        // so prefer the locked railties version when available instead of a
+        // forced TargetRailsVersion from external corpus configs.
+        let rails_version = config
+            .railties_version()
+            .or_else(|| config.target_rails_version());
+        if !rails_version.is_some_and(|v| v >= 5.0) {
             return;
         }
 
@@ -166,6 +170,14 @@ mod tests {
             "TargetRailsVersion".to_string(),
             serde_yml::Value::Number(serde_yml::value::Number::from(5.0)),
         );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(5.0)),
+        );
         let config = crate::cop::CopConfig {
             options,
             ..crate::cop::CopConfig::default()
@@ -180,6 +192,14 @@ mod tests {
             "TargetRailsVersion".to_string(),
             serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
         );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
+        );
         let config = crate::cop::CopConfig {
             options,
             ..crate::cop::CopConfig::default()
@@ -187,5 +207,34 @@ mod tests {
         let diags =
             crate::testutil::run_cop_full_with_config(&ResponseParsedBody, &parsed.source, config);
         assert_eq!(diags.len(), 2, "Nokogiri should fire at Rails 7.1");
+    }
+
+    #[test]
+    fn skips_old_locked_rails_even_when_target_rails_version_is_forced_high() {
+        let source = b"json = JSON.parse(response.body)\n";
+        let parsed = crate::testutil::parse_fixture(source);
+        let mut options = std::collections::HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(3.1)),
+        );
+        let config = crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        };
+        let diags =
+            crate::testutil::run_cop_full_with_config(&ResponseParsedBody, &parsed.source, config);
+        assert!(
+            diags.is_empty(),
+            "Rails < 5.0 should stay exempt even when TargetRailsVersion is forced high"
+        );
     }
 }
