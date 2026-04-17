@@ -362,8 +362,6 @@ impl CopFilterSet {
         let excluded = filter.is_excluded(path)
             || rel_path.is_some_and(|rel| filter.is_excluded(rel))
             || rel_to_base.is_some_and(|rel| filter.is_excluded(rel))
-            || (included_on_rel_to_scan_root
-                && rel_to_scan_root.is_some_and(|rel| filter.is_excluded(rel)))
             || stripped.is_some_and(|s| filter.is_excluded(s));
         if excluded {
             return false;

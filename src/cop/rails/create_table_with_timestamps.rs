@@ -16,6 +16,8 @@ use crate::parse::source::SourceFile;
 /// - the built-in scope only covered `db/migrate/**/*.rb`, but RuboCop's
 ///   default config runs this cop on all `db/**/*.rb` files, including
 ///   `db/schema.rb`.
+/// - the built-in Active Storage excludes still need to apply for out-of-tree
+///   corpus runs, without reintroducing generic scan-root `Exclude` matching.
 pub struct CreateTableWithTimestamps;
 
 /// Walk a node tree looking for `timestamps` or `datetime :created_at/:updated_at`.
@@ -120,8 +122,8 @@ impl Cop for CreateTableWithTimestamps {
 
     fn default_exclude(&self) -> &'static [&'static str] {
         &[
-            "db/**/*_create_active_storage_tables.active_storage.rb",
-            "db/**/*_create_active_storage_variant_records.active_storage.rb",
+            "**/db/**/*_create_active_storage_tables.active_storage.rb",
+            "**/db/**/*_create_active_storage_variant_records.active_storage.rb",
         ]
     }
 
@@ -392,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn external_config_excludes_active_storage_files_via_repo_root() {
+    fn default_exclude_still_filters_active_storage_files_for_external_repos() {
         let dir = temp_dir("nitrocop_test_ctwt_active_storage_exclude");
         let repo = dir.join("repo");
         let config_dir = dir.join("config");
@@ -403,7 +405,7 @@ mod tests {
         let config_path = write_file(
             &config_dir,
             "baseline.yml",
-            b"Rails/CreateTableWithTimestamps:\n  Enabled: true\n  Include:\n    - db/**/*.rb\n  Exclude:\n    - db/**/*_create_active_storage_tables.active_storage.rb\n    - db/**/*_create_active_storage_variant_records.active_storage.rb\n",
+            b"Rails/CreateTableWithTimestamps:\n  Enabled: true\n",
         );
         write_file(
             &repo,
