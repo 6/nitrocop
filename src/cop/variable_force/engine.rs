@@ -1072,9 +1072,11 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
     fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
         // `expr => pattern` creates local variables that remain visible in the
-        // surrounding scope. Declare them before visiting descendants so later
-        // reads in the same method can resolve them through VariableTable.
-        declare_and_assign_pattern_targets(self, &node.pattern());
+        // surrounding scope. RuboCop's `process_pattern_match_variable` only
+        // declares these — it does not record an assignment — so cops that
+        // iterate `variable.assignments` (e.g. RSpec/LeakyLocalVariable) stay
+        // quiet on pattern-match-only bindings. Match that behavior.
+        declare_pattern_targets(self, &node.pattern());
         ruby_prism::visit_match_required_node(self, node);
     }
 
@@ -1485,7 +1487,7 @@ fn predicate_has_lvar_write(node: &ruby_prism::Node<'_>) -> bool {
 /// can find the variable before the pattern target node is visited. Without the
 /// generic `visit_local_variable_target_node` handler, this function must also
 /// create assignments (not just declarations) for pattern match variables.
-fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+fn collect_pattern_targets(node: &ruby_prism::Node<'_>) -> Vec<(Vec<u8>, usize)> {
     struct TargetCollector {
         targets: Vec<(Vec<u8>, usize)>,
     }
@@ -1507,7 +1509,11 @@ fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism
         targets: Vec::new(),
     };
     collector.visit(node);
-    for (name, offset) in collector.targets {
+    collector.targets
+}
+
+fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+    for (name, offset) in collect_pattern_targets(node) {
         if !engine.table.variable_exists(&name) {
             engine.declare_variable(name.clone(), offset, DeclarationKind::PatternMatch);
         }
@@ -1519,6 +1525,14 @@ fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism
         a.branch_id = engine.current_branch_id();
         a.branch_path = engine.current_branch_path();
         engine.table.assign_to_variable(&name, a);
+    }
+}
+
+fn declare_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+    for (name, offset) in collect_pattern_targets(node) {
+        if !engine.table.variable_exists(&name) {
+            engine.declare_variable(name.clone(), offset, DeclarationKind::PatternMatch);
+        }
     }
 }
 
