@@ -16,10 +16,6 @@ on:
       repo_filter:
         description: "Run only this repo ID (e.g. 'multi_json__multi_json__c5fa9fc'), or 'all'"
         default: "all"
-      verbose_disk:
-        description: "Log disk usage in free-disk-space and during batch processing"
-        type: boolean
-        default: false
       source_run_id:
         description: "Recovery: skip oracle-repo/run-synthetic and re-collect from this existing run's artifacts"
         type: string
@@ -88,8 +84,6 @@ jobs:
           submodules: true
 
       - uses: ./.github/actions/free-disk-space
-        with:
-          verbose: ${{ inputs.verbose_disk }}
 
       - name: Download nitrocop binary
         uses: actions/download-artifact@v8
@@ -471,10 +465,7 @@ jobs:
 
             # Free disk space between repos
             rm -rf "$DEST"
-
-            if [ "${{ inputs.verbose_disk }}" = "true" ]; then
-              df -h / | tail -1
-            fi
+            df -h / | tail -1
 
             echo "::endgroup::"
           done < <(jq -c '.[]' batch_repos.json)
@@ -571,12 +562,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/free-disk-space
-        with:
-          verbose: ${{ inputs.verbose_disk }}
-
-      - name: Disk after free-disk-space
-        if: always()
-        run: df -h /
 
       - name: Download all results
         uses: actions/download-artifact@v8
@@ -973,8 +958,6 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/free-disk-space
-        with:
-          verbose: ${{ inputs.verbose_disk }}
 
       - name: Download corpus results
         uses: actions/download-artifact@v8
