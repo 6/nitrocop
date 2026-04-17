@@ -94,6 +94,17 @@ result = foo \
 x = a \
     || b
 
+# Operator at start of line with no indentation is also accepted
+a = 1 + 1 \
++ 1
+"a"
+-
+"b"
+%
+?\C-a
+%
+?\M-a
+
 # Compound assignments with proper spacing
 x += 1
 y -= 2
@@ -258,6 +269,10 @@ loop do
   data, inetAddr  = @ClientSocket.recvfrom_nonblock(READ_SIZE)
   break
 end
+
+# Extra spaces after an operator are accepted when the line ends there
+foo +            
+  bar
 
 # Standalone nested assignment is accepted when there is no later assignment group
 SetUIDBit = ReadBit  = 4

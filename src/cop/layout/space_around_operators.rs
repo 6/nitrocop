@@ -227,6 +227,21 @@ use ruby_prism::Visit;
 /// (`tag    = ...`, `ems1      = ...`) and against same-line chained writes
 /// (`Reline.input  = @input  = ...`, `SetUIDBit = ReadBit  = 4`). RuboCop
 /// only considers the first assignment token on each neighbor line here.
+///
+/// ## Corpus fix (2026-04-17)
+///
+/// RuboCop treats newline edges specially:
+/// - operators at the beginning of a line are accepted (`"a"\n-\n"b"`,
+///   zero-indent continuation `+ 1`, and syntax-tree fixtures where `%` starts
+///   the line),
+/// - extra spaces after an operator are accepted when the operator is the last
+///   token on the line (`foo +            \n  bar`).
+///
+/// nitrocop's AST path and text scanner were still enforcing normal spacing at
+/// those boundaries, which produced false positives in repos like syntax_tree,
+/// add_to_calendar, and lamernews. Match RuboCop by treating line-start
+/// operators as already having valid leading space and by ignoring trailing
+/// padding that is followed only by a newline.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -446,7 +461,8 @@ impl Cop for SpaceAroundOperators {
                     }
 
                     let op_str = std::str::from_utf8(two).unwrap_or("??");
-                    let space_before = i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t');
+                    let space_before = is_operator_at_line_start(bytes, i)
+                        || (i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t'));
                     let space_after =
                         i + 2 < len && (bytes[i + 2] == b' ' || bytes[i + 2] == b'\t');
                     let newline_after =
@@ -577,7 +593,8 @@ impl Cop for SpaceAroundOperators {
                     continue;
                 }
 
-                let space_before = i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t');
+                let space_before = is_operator_at_line_start(bytes, i)
+                    || (i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t'));
                 let space_after = i + 1 < len && (bytes[i + 1] == b' ' || bytes[i + 1] == b'\t');
                 let newline_after = i + 1 >= len || bytes[i + 1] == b'\n' || bytes[i + 1] == b'\r';
                 if !space_before || (!space_after && !newline_after) {
@@ -689,7 +706,9 @@ fn check_text_scanner_extra_space(
         while p < bytes.len() && bytes[p] == b' ' {
             p += 1;
         }
-        if p < bytes.len() && bytes[p] == b'#' {
+        if p >= bytes.len() || bytes[p] == b'\n' || bytes[p] == b'\r' {
+            multi_after = false;
+        } else if p < bytes.len() && bytes[p] == b'#' {
             multi_after = false;
         } else {
             // Check RHS alignment for trailing space.  RuboCop's
@@ -787,6 +806,29 @@ fn has_excessive_leading_space(bytes: &[u8], op_start: usize) -> bool {
 fn has_excessive_trailing_space(bytes: &[u8], op_end: usize) -> bool {
     let ws_end = whitespace_run_end(bytes, op_end);
     ws_end.saturating_sub(op_end) >= 2 && bytes[ws_end - 2] == b' ' && bytes[ws_end - 1] == b' '
+}
+
+fn line_start_offset(bytes: &[u8], offset: usize) -> usize {
+    let mut start = offset;
+    while start > 0 && bytes[start - 1] != b'\n' {
+        start -= 1;
+    }
+    start
+}
+
+fn is_operator_at_line_start(bytes: &[u8], offset: usize) -> bool {
+    let line_start = line_start_offset(bytes, offset);
+    bytes[line_start..offset]
+        .iter()
+        .all(|&b| b == b' ' || b == b'\t')
+}
+
+fn followed_only_by_space_then_newline(bytes: &[u8], offset: usize) -> bool {
+    let mut pos = offset;
+    while pos < bytes.len() && bytes[pos] == b' ' {
+        pos += 1;
+    }
+    pos >= bytes.len() || bytes[pos] == b'\n' || bytes[pos] == b'\r'
 }
 
 /// Count UTF-8 codepoints from the start of `line` up to `byte_col` bytes.
@@ -1419,7 +1461,8 @@ impl OperatorChecker<'_> {
             }
         }
 
-        let has_space_before = start > 0 && (bytes[start - 1] == b' ' || bytes[start - 1] == b'\t');
+        let has_space_before = is_operator_at_line_start(bytes, start)
+            || (start > 0 && (bytes[start - 1] == b' ' || bytes[start - 1] == b'\t'));
         let has_space_after = end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t');
         let newline_after = end >= bytes.len() || bytes[end] == b'\n' || bytes[end] == b'\r';
 
@@ -1530,7 +1573,9 @@ impl OperatorChecker<'_> {
             while p < bytes.len() && bytes[p] == b' ' {
                 p += 1;
             }
-            if p < bytes.len() && bytes[p] == b'#' {
+            if followed_only_by_space_then_newline(bytes, end) {
+                multi_space_after = false;
+            } else if p < bytes.len() && bytes[p] == b'#' {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
