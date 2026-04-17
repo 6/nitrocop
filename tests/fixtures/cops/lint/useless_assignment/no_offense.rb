@@ -495,6 +495,18 @@ def pattern_match_hash
   end
 end
 
+# Rightward pattern matching captures are not flagged either
+def rightward_pattern_match_array
+  [1, 2, 3] => [first, *rest]
+end
+
+# Rightward hash-pattern capture without later reads still matches RuboCop
+def rightward_pattern_match_hash
+  case
+  when true
+  end => { foo: }
+end
+
 # Multiple rescue clauses are mutually exclusive. A later read after the
 # rescue chain uses whichever branch assigned the value.
 def rescue_chain_value
