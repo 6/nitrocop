@@ -202,6 +202,13 @@ __skip__ = def documented_but_stolen(**kwargs)
   42
 end
 
+# Comment above belongs to the outer send, not the receiver def
+# [TEMP] To be removed
+def test_ids_reserved
+^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
+  42
+end<1
+
 # Comment above belongs to the singleton class, not the inner def
 class << some_obj; def singleton_stolen; end; end
                    ^^^^^^^^^^^^^^^^^^^^^^^^^ Style/DocumentationMethod: Missing method documentation comment.
@@ -308,6 +315,9 @@ def helper.append_javascript_pack_tag(name, **options)
 ^ Style/DocumentationMethod: Missing method documentation comment.
 
 def cocoapods_generate_specs_cp_repos_dir
+^ Style/DocumentationMethod: Missing method documentation comment.
+
+def test_ids_reserved
 ^ Style/DocumentationMethod: Missing method documentation comment.
 
 def test_ids_reserved
