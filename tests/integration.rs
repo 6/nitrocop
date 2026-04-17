@@ -5507,6 +5507,43 @@ fn ignore_disable_comments_skips_redundant_disable_check() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn inline_disable_comment_persists_to_eof_until_enable() {
+    let dir = temp_dir("inline_disable_to_eof");
+    fs::create_dir_all(dir.join("db/migrate")).unwrap();
+    fs::write(
+        dir.join("db/migrate/20250101010101_query_flags.rb"),
+        "# frozen_string_literal: true\n\
+class QueryFlags < ActiveRecord::Migration[7.0]\n\
+  def change\n\
+    create_table :queries do |t|\n\
+      t.boolean :starred, default: false # rubocop:disable Rails/ThreeStateBooleanColumn\n\
+      t.boolean :include_subprojects, null: false, default: nil\n\
+    end\n\
+  end\n\
+end\n",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args([
+            "--preview",
+            "--only",
+            "Rails/ThreeStateBooleanColumn",
+            "--no-cache",
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute nitrocop");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Rails/ThreeStateBooleanColumn"),
+        "Inline disable should suppress later offenses until enable/EOF: {stdout}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 // ---------- --force-default-config CLI tests ----------
 
 #[test]

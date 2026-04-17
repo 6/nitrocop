@@ -33,3 +33,20 @@ class UpdateUsers < ActiveRecord::Migration[7.0]
     change_column_null :users, :verified, false
   end
 end
+
+class AddFeaturesToIndividualPlans < ActiveRecord::Migration[4.2]
+  def change
+    with_options default: true, null: false do |table|
+      table.add_column :individual_plans, :includes_exercises, :boolean
+    end
+  end
+end
+
+class CreateFeatures < ActiveRecord::Migration
+  def self.up
+    create_table :features do |t|
+      t.boolean :published, :default => false, null: false
+      t.boolean :published_at, :datetime, :default => nil
+    end
+  end
+end

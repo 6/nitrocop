@@ -329,44 +329,27 @@ impl DisabledRanges {
                         let cop = normalize_directive_cop_name(cop);
                         let key = registry_info.qualify(cop.as_str());
                         let key = key.as_str();
-                        if is_inline {
-                            let range = (line, line);
+                        // RuboCop keeps inline disables open until a matching
+                        // enable or EOF, just like standalone disables.
+                        // Only inline enables are treated as no-ops.
+                        if let Some((prev_start, _prev_col, prev_idx)) = open_disables.remove(key) {
+                            let range = (prev_start, line);
                             ranges.entry(key.to_string()).or_default().push(range);
-                            directives.push(DisableDirective {
-                                cop_name: cop.to_string(),
-                                key: key.to_string(),
-                                line,
-                                column: col,
-                                is_inline: true,
-                                range,
-                                used: false,
-                            });
-                        } else {
-                            // Close any existing open disable for the same cop
-                            // before opening a new one. This handles duplicate
-                            // `# rubocop:disable Cop` without an intervening
-                            // `# rubocop:enable Cop`.
-                            if let Some((prev_start, _prev_col, prev_idx)) =
-                                open_disables.remove(key)
-                            {
-                                let range = (prev_start, line);
-                                ranges.entry(key.to_string()).or_default().push(range);
-                                if prev_idx < directives.len() {
-                                    directives[prev_idx].range = range;
-                                }
+                            if prev_idx < directives.len() {
+                                directives[prev_idx].range = range;
                             }
-                            let directive_idx = directives.len();
-                            directives.push(DisableDirective {
-                                cop_name: cop.to_string(),
-                                key: key.to_string(),
-                                line,
-                                column: col,
-                                is_inline: false,
-                                range: (line, usize::MAX), // placeholder, updated on enable/EOF
-                                used: false,
-                            });
-                            open_disables.insert(key.to_string(), (line, col, directive_idx));
                         }
+                        let directive_idx = directives.len();
+                        directives.push(DisableDirective {
+                            cop_name: cop.to_string(),
+                            key: key.to_string(),
+                            line,
+                            column: col,
+                            is_inline,
+                            range: (line, usize::MAX), // placeholder, updated on enable/EOF
+                            used: false,
+                        });
+                        open_disables.insert(key.to_string(), (line, col, directive_idx));
                     }
                 }
                 "enable" => {
