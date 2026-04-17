@@ -345,7 +345,7 @@ if the prompt/examples require local corpus source context.
 
    <one-line description of what was wrong>
 
-   Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+   Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
    ```
    Stage only files for this cop fix. Do not include unrelated modified files.
 

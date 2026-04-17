@@ -6,3 +6,7 @@ foo(
 
 bar("hello", "world")
 baz()
+
+some_method(
+  a: 1, b: 2,
+)

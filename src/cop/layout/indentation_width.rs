@@ -5,10 +5,10 @@ use crate::cop::shared::node_type::{
     SINGLETON_CLASS_NODE, STATEMENTS_NODE, SUPER_NODE, UNLESS_NODE, UNTIL_NODE, WHEN_NODE,
     WHILE_NODE,
 };
-use crate::cop::shared::util::assignment_context_base_col;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
+use ruby_prism::Visit;
 
 /// Layout/IndentationWidth checks that each body is indented by the configured
 /// number of spaces (default 2) relative to its parent keyword/block.
@@ -166,6 +166,16 @@ use crate::parse::source::SourceFile;
 ///   `spaces + tabs * Width`, not tab-stop expansion, so lines like
 ///   `" \t\tbar"` are still offenses even though tab-stop expansion lands on
 ///   the configured width.
+///
+/// 2026-04-16 (variant batch 3):
+/// - Fixed `EndAlignmentStyle: variable` handling for multiline `if`/`unless`/
+///   `while`/`until` bodies used as assignment RHS values or as the last
+///   argument to a same-line method/operator call. RuboCop gets this from
+///   `CheckAssignment`, which matches only an ancestor whose extracted RHS is
+///   the conditional itself after peeling grouping wrappers and call chains.
+///   The previous line-scan heuristic over-matched nested expressions like
+///   `content = label || if ... end` (FP) and missed real send-argument cases
+///   like `process(if ... end)` or `model == if ... end` (FN).
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -378,6 +388,252 @@ fn visual_column_at(source: &SourceFile, offset: usize, tab_width: usize) -> usi
     }
 
     width
+}
+
+fn first_part_of_call_chain(mut node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
+    while let Some(call) = node.as_call_node() {
+        let Some(receiver) = call.receiver() else {
+            break;
+        };
+        node = receiver;
+    }
+    node
+}
+
+fn unwrap_grouping(mut node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
+    loop {
+        if let Some(parentheses) = node.as_parentheses_node() {
+            let Some(body) = parentheses.body() else {
+                break;
+            };
+            let Some(stmts) = body.as_statements_node() else {
+                break;
+            };
+            let body = stmts.body();
+            if body.len() != 1 {
+                break;
+            }
+            let Some(single) = body.iter().next() else {
+                break;
+            };
+            node = single;
+            continue;
+        }
+
+        if let Some(stmts) = node.as_statements_node() {
+            let body = stmts.body();
+            if body.len() != 1 {
+                break;
+            }
+            let Some(single) = body.iter().next() else {
+                break;
+            };
+            node = single;
+            continue;
+        }
+
+        if let Some(begin_node) = node.as_begin_node() {
+            if begin_node.begin_keyword_loc().is_some()
+                || begin_node.rescue_clause().is_some()
+                || begin_node.else_clause().is_some()
+                || begin_node.ensure_clause().is_some()
+            {
+                break;
+            }
+
+            let Some(stmts) = begin_node.statements() else {
+                break;
+            };
+            let body = stmts.body();
+            if body.len() != 1 {
+                break;
+            }
+            let Some(single) = body.iter().next() else {
+                break;
+            };
+            node = single;
+            continue;
+        }
+
+        break;
+    }
+
+    node
+}
+
+fn extracted_rhs<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(call) = node.as_call_node() {
+        return call.arguments()?.arguments().last();
+    }
+    if let Some(asgn) = node.as_local_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_local_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_local_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_local_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_instance_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_class_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_global_variable_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_constant_path_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_multi_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_call_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_call_and_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_call_operator_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_index_or_write_node() {
+        return Some(asgn.value());
+    }
+    if let Some(asgn) = node.as_index_and_write_node() {
+        return Some(asgn.value());
+    }
+    node.as_index_operator_write_node().map(|asgn| asgn.value())
+}
+
+#[derive(Clone, Copy)]
+struct AncestorContext {
+    start_offset: usize,
+    rhs_span: Option<(usize, usize)>,
+}
+
+struct AncestorFinder {
+    target_span: (usize, usize),
+    stack: Vec<AncestorContext>,
+    found: Option<Vec<AncestorContext>>,
+}
+
+impl<'pr> Visit<'pr> for AncestorFinder {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let node_span = (node.location().start_offset(), node.location().end_offset());
+        if self.found.is_none() && node_span == self.target_span {
+            self.found = Some(self.stack.clone());
+        }
+
+        let rhs_span = extracted_rhs(&node).map(|rhs| {
+            let rhs = unwrap_grouping(first_part_of_call_chain(rhs));
+            (rhs.location().start_offset(), rhs.location().end_offset())
+        });
+
+        self.stack.push(AncestorContext {
+            start_offset: node.location().start_offset(),
+            rhs_span,
+        });
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.stack.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        let node_span = (node.location().start_offset(), node.location().end_offset());
+        if self.found.is_none() && node_span == self.target_span {
+            self.found = Some(self.stack.clone());
+        }
+    }
+}
+
+fn ancestors_for_node(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    node: &ruby_prism::Node<'_>,
+) -> Vec<AncestorContext> {
+    let mut finder = AncestorFinder {
+        target_span: (node.location().start_offset(), node.location().end_offset()),
+        stack: Vec::new(),
+        found: None,
+    };
+    finder.visit(&parse_result.node());
+    finder.found.unwrap_or_default()
+}
+
+fn variable_style_base_offset(
+    source: &SourceFile,
+    parse_result: &ruby_prism::ParseResult<'_>,
+    node: &ruby_prism::Node<'_>,
+    kw_offset: usize,
+) -> Option<usize> {
+    let ancestors = ancestors_for_node(parse_result, node);
+    let target_span = (node.location().start_offset(), node.location().end_offset());
+    let (kw_line, _) = source.offset_to_line_col(kw_offset);
+
+    for parent in ancestors.iter().rev() {
+        if parent.rhs_span == Some(target_span) {
+            let (parent_line, _) = source.offset_to_line_col(parent.start_offset);
+            if parent_line == kw_line {
+                return Some(parent.start_offset);
+            }
+            return None;
+        }
+    }
+
+    None
 }
 
 /// Check if the `end` keyword is the first non-whitespace character on its line.
@@ -1226,21 +1482,13 @@ impl Cop for IndentationWidth {
         if let Some(if_node) = node.as_if_node() {
             if let Some(kw_loc) = if_node.if_keyword_loc() {
                 let kw_offset = kw_loc.start_offset();
-                let (_, kw_col) = source.offset_to_line_col(kw_offset);
-
-                // When `if` is the RHS of an assignment (e.g., `x = if cond`) and
-                // Layout/EndAlignment.EnforcedStyleAlignWith is "variable", body
-                // indentation is relative to the assignment variable, not `if`.
-                let end_style = config.get_str("EndAlignmentStyle", "keyword");
-                let base_col = if end_style == "variable" {
-                    if let Some(var_col) = assignment_context_base_col(source, kw_offset) {
-                        var_col
-                    } else {
-                        kw_col
-                    }
+                let base_offset = if config.get_str("EndAlignmentStyle", "keyword") == "variable" {
+                    variable_style_base_offset(source, _parse_result, node, kw_offset)
+                        .unwrap_or(kw_offset)
                 } else {
-                    kw_col
+                    kw_offset
                 };
+                let (_, base_col) = source.offset_to_line_col(base_offset);
 
                 diagnostics.extend(self.check_statements_indentation(
                     source,
@@ -1263,11 +1511,17 @@ impl Cop for IndentationWidth {
 
         if let Some(unless_node) = node.as_unless_node() {
             let kw_offset = unless_node.keyword_loc().start_offset();
-            let (_, kw_col) = source.offset_to_line_col(kw_offset);
+            let base_offset = if config.get_str("EndAlignmentStyle", "keyword") == "variable" {
+                variable_style_base_offset(source, _parse_result, node, kw_offset)
+                    .unwrap_or(kw_offset)
+            } else {
+                kw_offset
+            };
+            let (_, base_col) = source.offset_to_line_col(base_offset);
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
-                kw_col,
+                base_col,
                 None,
                 unless_node.statements(),
                 options,
@@ -1646,18 +1900,13 @@ impl Cop for IndentationWidth {
 
         if let Some(while_node) = node.as_while_node() {
             let kw_offset = while_node.keyword_loc().start_offset();
-            let (_, kw_col) = source.offset_to_line_col(kw_offset);
-
-            let end_style = config.get_str("EndAlignmentStyle", "keyword");
-            let base_col = if end_style == "variable" {
-                if let Some(var_col) = assignment_context_base_col(source, kw_offset) {
-                    var_col
-                } else {
-                    kw_col
-                }
+            let base_offset = if config.get_str("EndAlignmentStyle", "keyword") == "variable" {
+                variable_style_base_offset(source, _parse_result, node, kw_offset)
+                    .unwrap_or(kw_offset)
             } else {
-                kw_col
+                kw_offset
             };
+            let (_, base_col) = source.offset_to_line_col(base_offset);
 
             diagnostics.extend(self.check_statements_indentation(
                 source,
@@ -1672,18 +1921,13 @@ impl Cop for IndentationWidth {
 
         if let Some(until_node) = node.as_until_node() {
             let kw_offset = until_node.keyword_loc().start_offset();
-            let (_, kw_col) = source.offset_to_line_col(kw_offset);
-
-            let end_style = config.get_str("EndAlignmentStyle", "keyword");
-            let base_col = if end_style == "variable" {
-                if let Some(var_col) = assignment_context_base_col(source, kw_offset) {
-                    var_col
-                } else {
-                    kw_col
-                }
+            let base_offset = if config.get_str("EndAlignmentStyle", "keyword") == "variable" {
+                variable_style_base_offset(source, _parse_result, node, kw_offset)
+                    .unwrap_or(kw_offset)
             } else {
-                kw_col
+                kw_offset
             };
+            let (_, base_col) = source.offset_to_line_col(base_offset);
 
             diagnostics.extend(self.check_statements_indentation(
                 source,

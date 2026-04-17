@@ -165,6 +165,9 @@ fn is_exclusive(
     }
     let a_ctx = &branch_contexts[a_id];
     let b_ctx = &branch_contexts[b_id];
+    if a_ctx.predicate_context || b_ctx.predicate_context {
+        return false;
+    }
     a_ctx.parent_id == b_ctx.parent_id && a_ctx.child_index != b_ctx.child_index
 }
 

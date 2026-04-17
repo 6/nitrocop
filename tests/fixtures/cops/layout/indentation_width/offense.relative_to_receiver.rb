@@ -17,3 +17,11 @@ class Test
 ^^^ Layout/IndentationWidth: Use 1 (not 1) tabs for indentation.
   end
 end
+
+# Multiline conditionals used as the last call argument align from the call.
+process(if ready?
+          primary_value
+^^^^^^^^^^ Layout/IndentationWidth: Use 1 (not 5) tabs for indentation.
+        else
+          fallback_value
+        end)

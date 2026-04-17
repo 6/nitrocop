@@ -205,16 +205,33 @@ pub fn last_item_precedes_newline(bytes: &[u8], last_end: usize, closing_start: 
 }
 
 /// Collect element (start_offset, end_offset) pairs from an iterator of nodes.
-/// Expands any KeywordHashNode into its individual assoc elements, matching
-/// RuboCop's behavior where keyword args are treated as separate elements.
+/// Expands only multiline braceless hashes into their assoc elements, matching
+/// RuboCop's `elements(node)` behavior for method arguments.
 pub fn effective_element_locations<'a>(
+    source: &SourceFile,
     elements: impl Iterator<Item = ruby_prism::Node<'a>>,
 ) -> Vec<(usize, usize)> {
     let mut locations = Vec::new();
     for elem in elements {
         if let Some(kw_hash) = elem.as_keyword_hash_node() {
-            for child in kw_hash.elements().iter() {
-                let loc = child.location();
+            if spans_multiple_lines(source, kw_hash.location()) {
+                for child in kw_hash.elements().iter() {
+                    let loc = child.location();
+                    locations.push((loc.start_offset(), loc.end_offset()));
+                }
+            } else {
+                let loc = elem.location();
+                locations.push((loc.start_offset(), loc.end_offset()));
+            }
+        } else if let Some(hash) = elem.as_hash_node() {
+            let is_braced = hash.opening_loc().as_slice() == b"{";
+            if !is_braced && spans_multiple_lines(source, hash.location()) {
+                for child in hash.elements().iter() {
+                    let loc = child.location();
+                    locations.push((loc.start_offset(), loc.end_offset()));
+                }
+            } else {
+                let loc = elem.location();
                 locations.push((loc.start_offset(), loc.end_offset()));
             }
         } else {
@@ -223,6 +240,12 @@ pub fn effective_element_locations<'a>(
         }
     }
     locations
+}
+
+fn spans_multiple_lines(source: &SourceFile, loc: ruby_prism::Location<'_>) -> bool {
+    let start_line = source.offset_to_line_col(loc.start_offset()).0;
+    let end_line = source.offset_to_line_col(loc.end_offset()).0;
+    start_line != end_line
 }
 
 /// Check if a byte range contains only whitespace and exactly one comma.

@@ -43,6 +43,19 @@ use std::collections::HashSet;
 /// RuboCop treats all of those wrappers as part of the semantic-parent check for
 /// `return_value_used?` / `return_value_of_scope?`, so nitrocop now propagates
 /// through those wrappers before classifying the block as functional/procedural.
+///
+/// ## Fix (2026-04-16): match RuboCop's ignored lambda bodies and `yield` wrapper
+///
+/// Two remaining variant mismatches came from Prism-only wrapper shapes:
+///
+/// - `yield records.filter_map { ... }` is functional in RuboCop because the
+///   block expression is the last child of a `yield`, so braces are allowed
+/// - `register_placeholder :path, -> do { raw_value: foo.tap do ... end } end`
+///   and interpolated-string lambda bodies stay ignored in RuboCop, but our
+///   lambda-body walker stopped before `HashNode` / interpolation wrappers
+/// - `queue << -> do logger.info { ... } end` must NOT use that ignore path:
+///   RuboCop treats a lambda passed as the sole operator argument like a block
+///   argument and still checks nested blocks inside it
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -385,12 +398,11 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         let is_single_arg_operator = is_operator_method(method_name)
             && node.arguments().is_some_and(|args| {
                 args.arguments().len() == 1
-                    && args.arguments().iter().next().is_some_and(|arg| {
-                        arg.as_call_node()
-                            .and_then(|c| c.block())
-                            .and_then(|b| b.as_block_node())
-                            .is_some_and(|block| is_explicit_block(block))
-                    })
+                    && args
+                        .arguments()
+                        .iter()
+                        .next()
+                        .is_some_and(|arg| single_argument_operator_block_arg(&arg))
             });
 
         if !is_parenthesized && !is_assignment && !is_single_arg_operator {
@@ -481,6 +493,17 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             }
         }
         ruby_prism::visit_forwarding_super_node(self, node);
+    }
+
+    fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'_>) {
+        // In Parser AST, a block passed to `yield` is a direct child of the
+        // yield node, so `parent.children.last == node` makes it functional.
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_yield_node(self, node);
     }
 
     // --- Context tracking for semantic & braces_for_chaining styles ---
@@ -988,6 +1011,17 @@ fn is_explicit_block(block: ruby_prism::BlockNode<'_>) -> bool {
     }
 }
 
+fn single_argument_operator_block_arg(node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_lambda_node().is_some() {
+        return true;
+    }
+
+    node.as_call_node()
+        .and_then(|call| call.block())
+        .and_then(|block| block.as_block_node())
+        .is_some_and(is_explicit_block)
+}
+
 /// Check if a method name is a Ruby operator method.
 /// Matches RuboCop's `OPERATOR_METHODS` from `MethodIdentifierPredicates`.
 fn is_operator_method(name: &[u8]) -> bool {
@@ -1131,6 +1165,95 @@ fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut H
         return;
     }
 
+    if let Some(hash) = node.as_hash_node() {
+        for element in hash.elements().iter() {
+            collect_ignored_blocks_from_body(&element, ignored);
+        }
+        return;
+    }
+
+    if let Some(hash) = node.as_keyword_hash_node() {
+        for element in hash.elements().iter() {
+            collect_ignored_blocks_from_body(&element, ignored);
+        }
+        return;
+    }
+
+    if let Some(assoc) = node.as_assoc_node() {
+        collect_ignored_blocks_from_body(&assoc.key(), ignored);
+        collect_ignored_blocks_from_body(&assoc.value(), ignored);
+        return;
+    }
+
+    if let Some(splat) = node.as_assoc_splat_node() {
+        if let Some(value) = splat.value() {
+            collect_ignored_blocks_from_body(&value, ignored);
+        }
+        return;
+    }
+
+    if let Some(paren) = node.as_parentheses_node() {
+        if let Some(body) = paren.body() {
+            collect_ignored_blocks_from_body(&body, ignored);
+        }
+        return;
+    }
+
+    if let Some(array) = node.as_array_node() {
+        for element in array.elements().iter() {
+            collect_ignored_blocks_from_body(&element, ignored);
+        }
+        return;
+    }
+
+    if let Some(splat) = node.as_splat_node() {
+        if let Some(expression) = splat.expression() {
+            collect_ignored_blocks_from_body(&expression, ignored);
+        }
+        return;
+    }
+
+    if let Some(ret) = node.as_return_node() {
+        if let Some(args) = ret.arguments() {
+            for arg in args.arguments().iter() {
+                collect_ignored_blocks_from_body(&arg, ignored);
+            }
+        }
+        return;
+    }
+
+    if let Some(yield_node) = node.as_yield_node() {
+        if let Some(args) = yield_node.arguments() {
+            for arg in args.arguments().iter() {
+                collect_ignored_blocks_from_body(&arg, ignored);
+            }
+        }
+        return;
+    }
+
+    if let Some(lambda) = node.as_lambda_node() {
+        if let Some(body) = lambda.body() {
+            collect_ignored_blocks_from_body(&body, ignored);
+        }
+        return;
+    }
+
+    if let Some(interp) = node.as_interpolated_string_node() {
+        for part in interp.parts().iter() {
+            collect_ignored_blocks_from_body(&part, ignored);
+        }
+        return;
+    }
+
+    if let Some(embedded) = node.as_embedded_statements_node() {
+        if let Some(stmts) = embedded.statements() {
+            for stmt in stmts.body().iter() {
+                collect_ignored_blocks_from_body(&stmt, ignored);
+            }
+        }
+        return;
+    }
+
     // Assignment nodes — recurse into the value expression
     // e.g., `result = items.find { |item| ... }` inside a lambda body
     if let Some(write) = node.as_local_variable_write_node() {
@@ -1184,7 +1307,12 @@ fn collect_ignored_blocks_from_body(node: &ruby_prism::Node<'_>, ignored: &mut H
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters");
-    crate::cop_variant_fixture_tests!(BlockDelimiters, "cops/style/block_delimiters", semantic);
+    crate::cop_variant_fixture_tests!(
+        BlockDelimiters,
+        "cops/style/block_delimiters",
+        semantic,
+        always_braces,
+    );
 
     #[test]
     fn no_offense_proc_in_keyword_arg() {
