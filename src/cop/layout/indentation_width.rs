@@ -176,6 +176,18 @@ use ruby_prism::Visit;
 ///   The previous line-scan heuristic over-matched nested expressions like
 ///   `content = label || if ... end` (FP) and missed real send-argument cases
 ///   like `process(if ... end)` or `model == if ... end` (FN).
+///
+/// 2026-04-17:
+/// - Matched RuboCop's `CheckAssignment` behavior for parenthesized RHS values.
+///   The previous port unwrapped grouping nodes before comparing ancestor RHS
+///   spans, so `process((if ... end))` was treated like `process(if ... end)`
+///   and falsely aligned from the outer call.
+/// - Fixed tabs-style indentation width checks when the alignment base is not
+///   the keyword/opening token itself. RuboCop measures visual columns from the
+///   actual base location (`end`, `.` or variable-alignment source). The
+///   previous port reused the keyword/opening offset for tabs math, which
+///   missed offenses in blocks like `create_table ... do` when the body line
+///   used tabs or mixed indentation.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -222,36 +234,18 @@ fn bom_adjusted_col(source: &SourceFile, line: usize, col: usize) -> usize {
     col
 }
 
-/// Get the column of the first non-whitespace character on the line containing `offset`.
-/// This gives the "effective indentation level" of the line, used as the base for
-/// `start_of_line` alignment in def bodies (matching RuboCop's behavior of using the
-/// def keyword line's indentation, not the end keyword's position).
-fn line_start_column(source: &SourceFile, offset: usize) -> usize {
-    let bytes = source.as_bytes();
-    let mut line_start = offset;
-    while line_start > 0 && bytes[line_start - 1] != b'\n' {
-        line_start -= 1;
-    }
-    let mut first_non_ws = line_start;
-    while first_non_ws < bytes.len()
-        && (bytes[first_non_ws] == b' ' || bytes[first_non_ws] == b'\t')
-    {
-        first_non_ws += 1;
-    }
-    first_non_ws - line_start
-}
-
 /// Check if the `def` keyword at `kw_offset` is preceded by a modifier identifier
 /// (e.g., `private def foo`, `helper_method \` on the previous line). Returns
-/// `Some(base_col)` with the correct base column for indentation when a modifier is
-/// found, or `None` for non-modifier contexts like `x = def foo` or `(def bar`.
+/// `Some(base_offset)` with the correct base offset for indentation when a modifier
+/// is found, or `None` for non-modifier contexts like `x = def foo` or `(def bar`.
 ///
 /// Handles two cases:
-/// 1. Same-line modifier: `private def foo` — returns line_start_column of the def line.
+/// 1. Same-line modifier: `private def foo` — returns the offset of `private`.
 /// 2. Backslash continuation: `helper_method \` / `  def foo` — returns
-///    line_start_column of the previous (modifier) line, matching RuboCop's
+///    the offset of the first non-whitespace char on the previous (modifier) line,
+///    matching RuboCop's
 ///    `on_send` + `leftmost_modifier_of` behavior.
-fn def_modifier_base_col(source: &SourceFile, kw_offset: usize) -> Option<usize> {
+fn def_modifier_base_offset(source: &SourceFile, kw_offset: usize) -> Option<usize> {
     if kw_offset == 0 {
         return None;
     }
@@ -282,8 +276,16 @@ fn def_modifier_base_col(source: &SourceFile, kw_offset: usize) -> Option<usize>
                     p -= 1;
                 }
                 if p > 0 && bytes[p - 1] == b'\\' {
-                    // Previous line ends with backslash — use its start column
-                    return Some(line_start_column(source, p - 1));
+                    // Previous line ends with backslash — use the previous line's
+                    // first non-whitespace byte offset.
+                    let prev_line_start = line_start_offset(source, p - 1);
+                    let mut prev_first_non_ws = prev_line_start;
+                    while prev_first_non_ws < bytes.len()
+                        && (bytes[prev_first_non_ws] == b' ' || bytes[prev_first_non_ws] == b'\t')
+                    {
+                        prev_first_non_ws += 1;
+                    }
+                    return Some(prev_first_non_ws);
                 }
             }
         }
@@ -300,7 +302,7 @@ fn def_modifier_base_col(source: &SourceFile, kw_offset: usize) -> Option<usize>
     // Check if the character immediately before is alphanumeric/underscore
     let prev_byte = bytes[pos - 1];
     if prev_byte.is_ascii_alphanumeric() || prev_byte == b'_' {
-        Some(line_start_column(source, kw_offset))
+        Some(first_non_ws)
     } else {
         None
     }
@@ -397,67 +399,6 @@ fn first_part_of_call_chain(mut node: ruby_prism::Node<'_>) -> ruby_prism::Node<
         };
         node = receiver;
     }
-    node
-}
-
-fn unwrap_grouping(mut node: ruby_prism::Node<'_>) -> ruby_prism::Node<'_> {
-    loop {
-        if let Some(parentheses) = node.as_parentheses_node() {
-            let Some(body) = parentheses.body() else {
-                break;
-            };
-            let Some(stmts) = body.as_statements_node() else {
-                break;
-            };
-            let body = stmts.body();
-            if body.len() != 1 {
-                break;
-            }
-            let Some(single) = body.iter().next() else {
-                break;
-            };
-            node = single;
-            continue;
-        }
-
-        if let Some(stmts) = node.as_statements_node() {
-            let body = stmts.body();
-            if body.len() != 1 {
-                break;
-            }
-            let Some(single) = body.iter().next() else {
-                break;
-            };
-            node = single;
-            continue;
-        }
-
-        if let Some(begin_node) = node.as_begin_node() {
-            if begin_node.begin_keyword_loc().is_some()
-                || begin_node.rescue_clause().is_some()
-                || begin_node.else_clause().is_some()
-                || begin_node.ensure_clause().is_some()
-            {
-                break;
-            }
-
-            let Some(stmts) = begin_node.statements() else {
-                break;
-            };
-            let body = stmts.body();
-            if body.len() != 1 {
-                break;
-            }
-            let Some(single) = body.iter().next() else {
-                break;
-            };
-            node = single;
-            continue;
-        }
-
-        break;
-    }
-
     node
 }
 
@@ -578,7 +519,7 @@ impl<'pr> Visit<'pr> for AncestorFinder {
         }
 
         let rhs_span = extracted_rhs(&node).map(|rhs| {
-            let rhs = unwrap_grouping(first_part_of_call_chain(rhs));
+            let rhs = first_part_of_call_chain(rhs);
             (rhs.location().start_offset(), rhs.location().end_offset())
         });
 
@@ -1002,6 +943,7 @@ impl IndentationWidth {
         &self,
         source: &SourceFile,
         keyword_offset: usize,
+        base_offset: usize,
         base_col: usize,
         body: Option<ruby_prism::Node<'_>>,
         options: IndentationOptions,
@@ -1051,7 +993,7 @@ impl IndentationWidth {
 
         let actual_indent = self.actual_indentation(
             source,
-            keyword_offset,
+            base_offset,
             base_col,
             loc.start_offset(),
             child_col,
@@ -1082,8 +1024,9 @@ impl IndentationWidth {
         &self,
         source: &SourceFile,
         keyword_offset: usize,
+        base_offset: usize,
         base_col: usize,
-        alt_base_col: Option<usize>,
+        alt_base: Option<(usize, usize)>,
         stmts: Option<ruby_prism::StatementsNode<'_>>,
         options: IndentationOptions,
     ) -> Vec<Diagnostic> {
@@ -1101,7 +1044,8 @@ impl IndentationWidth {
 
         // BOM correction
         let base_col = bom_adjusted_col(source, kw_line, base_col);
-        let alt_base_col = alt_base_col.map(|c| bom_adjusted_col(source, kw_line, c));
+        let alt_base =
+            alt_base.map(|(offset, col)| (offset, bom_adjusted_col(source, kw_line, col)));
         // Only check the first child's indentation. Sibling consistency is
         // handled by Layout/IndentationConsistency.
         let first = &children[0];
@@ -1122,7 +1066,7 @@ impl IndentationWidth {
 
         let actual_indent = self.actual_indentation(
             source,
-            keyword_offset,
+            base_offset,
             base_col,
             loc.start_offset(),
             child_col,
@@ -1131,11 +1075,11 @@ impl IndentationWidth {
         if actual_indent != options.width as isize {
             // If there's an alternative base (e.g., end keyword column differs
             // from keyword column), also accept indentation relative to it.
-            if let Some(alt) = alt_base_col {
+            if let Some((alt_offset, alt_col)) = alt_base {
                 let alt_actual = self.actual_indentation(
                     source,
-                    keyword_offset,
-                    alt,
+                    alt_offset,
+                    alt_col,
                     loc.start_offset(),
                     child_col,
                     options,
@@ -1183,6 +1127,7 @@ impl IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                kw_offset,
                 kw_col,
                 None,
                 rescue_node.statements(),
@@ -1198,6 +1143,7 @@ impl IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                kw_offset,
                 kw_col,
                 None,
                 else_clause.statements(),
@@ -1211,6 +1157,7 @@ impl IndentationWidth {
             let (_, kw_col) = source.offset_to_line_col(kw_offset);
             diagnostics.extend(self.check_statements_indentation(
                 source,
+                kw_offset,
                 kw_offset,
                 kw_col,
                 None,
@@ -1234,6 +1181,7 @@ impl IndentationWidth {
         let (_, kw_col) = source.offset_to_line_col(kw_offset);
         diagnostics.extend(self.check_statements_indentation(
             source,
+            kw_offset,
             kw_offset,
             kw_col,
             None,
@@ -1349,6 +1297,7 @@ impl Cop for IndentationWidth {
                 diagnostics.extend(self.check_statements_indentation(
                     source,
                     kw_offset,
+                    end_offset.unwrap_or(kw_offset),
                     base_col,
                     None,
                     begin_node.statements(),
@@ -1432,9 +1381,9 @@ impl Cop for IndentationWidth {
 
         if let Some(def_node) = node.as_def_node() {
             let kw_offset = def_node.def_keyword_loc().start_offset();
-            let base_col = if align_style == "keyword" {
+            let (base_offset, base_col) = if align_style == "keyword" {
                 // EnforcedStyleAlignWith: keyword — indent relative to `def` keyword column
-                source.offset_to_line_col(kw_offset).1
+                (kw_offset, source.offset_to_line_col(kw_offset).1)
             } else {
                 // EnforcedStyleAlignWith: start_of_line (default).
                 // RuboCop's on_def always uses node.loc.keyword (def column).
@@ -1444,10 +1393,13 @@ impl Cop for IndentationWidth {
                 // matches on_send using leftmost_modifier_of). For non-modifier
                 // contexts like `x = def foo` or `(def bar`, use the def
                 // keyword column to match RuboCop's on_def behavior.
-                if let Some(modifier_col) = def_modifier_base_col(source, kw_offset) {
-                    modifier_col
+                if let Some(modifier_offset) = def_modifier_base_offset(source, kw_offset) {
+                    (
+                        modifier_offset,
+                        source.offset_to_line_col(modifier_offset).1,
+                    )
                 } else {
-                    source.offset_to_line_col(kw_offset).1
+                    (kw_offset, source.offset_to_line_col(kw_offset).1)
                 }
             };
 
@@ -1458,6 +1410,7 @@ impl Cop for IndentationWidth {
                     diagnostics.extend(self.check_statements_indentation(
                         source,
                         kw_offset,
+                        base_offset,
                         base_col,
                         None,
                         begin_node.statements(),
@@ -1470,6 +1423,7 @@ impl Cop for IndentationWidth {
                     diagnostics.extend(self.check_body_indentation(
                         source,
                         kw_offset,
+                        base_offset,
                         base_col,
                         Some(body),
                         options,
@@ -1493,6 +1447,7 @@ impl Cop for IndentationWidth {
                 diagnostics.extend(self.check_statements_indentation(
                     source,
                     kw_offset,
+                    base_offset,
                     base_col,
                     None,
                     if_node.statements(),
@@ -1521,6 +1476,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                base_offset,
                 base_col,
                 None,
                 unless_node.statements(),
@@ -1539,6 +1495,7 @@ impl Cop for IndentationWidth {
             let (_, kw_col) = source.offset_to_line_col(kw_offset);
             diagnostics.extend(self.check_statements_indentation(
                 source,
+                kw_offset,
                 kw_offset,
                 kw_col,
                 None,
@@ -1594,23 +1551,24 @@ impl Cop for IndentationWidth {
                     // relative to its receiver (multiline chain), use the dot column
                     // as the base (matching RuboCop's `block_body_indentation_base`).
                     // Otherwise, use the `end`/`}` keyword column.
-                    let base_col = if let Some(dot_loc) = call_node.call_operator_loc() {
-                        if let Some(receiver) = call_node.receiver() {
-                            let (recv_end_line, _) =
-                                source.offset_to_line_col(receiver.location().end_offset());
-                            let (dot_line, dot_col) =
-                                source.offset_to_line_col(dot_loc.start_offset());
-                            if dot_line > recv_end_line {
-                                dot_col
+                    let (base_offset, base_col) =
+                        if let Some(dot_loc) = call_node.call_operator_loc() {
+                            if let Some(receiver) = call_node.receiver() {
+                                let (recv_end_line, _) =
+                                    source.offset_to_line_col(receiver.location().end_offset());
+                                let (dot_line, dot_col) =
+                                    source.offset_to_line_col(dot_loc.start_offset());
+                                if dot_line > recv_end_line {
+                                    (dot_loc.start_offset(), dot_col)
+                                } else {
+                                    (closing_offset, closing_col)
+                                }
                             } else {
-                                closing_col
+                                (closing_offset, closing_col)
                             }
                         } else {
-                            closing_col
-                        }
-                    } else {
-                        closing_col
-                    };
+                            (closing_offset, closing_col)
+                        };
                     if let Some(body) = block.body() {
                         if let Some(begin_node) = body.as_begin_node() {
                             // Block with rescue/ensure — body is implicit BeginNode.
@@ -1618,6 +1576,7 @@ impl Cop for IndentationWidth {
                             diagnostics.extend(self.check_statements_indentation(
                                 source,
                                 opening_offset,
+                                base_offset,
                                 base_col,
                                 None,
                                 begin_node.statements(),
@@ -1629,6 +1588,7 @@ impl Cop for IndentationWidth {
                             diagnostics.extend(self.check_body_indentation(
                                 source,
                                 opening_offset,
+                                base_offset,
                                 base_col,
                                 Some(body),
                                 options,
@@ -1678,6 +1638,7 @@ impl Cop for IndentationWidth {
                     diagnostics.extend(self.check_statements_indentation(
                         source,
                         opening_offset,
+                        closing_offset,
                         closing_col,
                         None,
                         begin_node.statements(),
@@ -1688,6 +1649,7 @@ impl Cop for IndentationWidth {
                     diagnostics.extend(self.check_body_indentation(
                         source,
                         opening_offset,
+                        closing_offset,
                         closing_col,
                         Some(body),
                         options,
@@ -1724,6 +1686,7 @@ impl Cop for IndentationWidth {
                             diagnostics.extend(self.check_statements_indentation(
                                 source,
                                 opening_offset,
+                                closing_offset,
                                 closing_col,
                                 None,
                                 begin_node.statements(),
@@ -1734,6 +1697,7 @@ impl Cop for IndentationWidth {
                             diagnostics.extend(self.check_body_indentation(
                                 source,
                                 opening_offset,
+                                closing_offset,
                                 closing_col,
                                 Some(body),
                                 options,
@@ -1770,6 +1734,7 @@ impl Cop for IndentationWidth {
                         diagnostics.extend(self.check_statements_indentation(
                             source,
                             opening_offset,
+                            closing_offset,
                             closing_col,
                             None,
                             begin_node.statements(),
@@ -1780,6 +1745,7 @@ impl Cop for IndentationWidth {
                         diagnostics.extend(self.check_body_indentation(
                             source,
                             opening_offset,
+                            closing_offset,
                             closing_col,
                             Some(body),
                             options,
@@ -1814,6 +1780,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                kw_offset,
                 kw_col,
                 None,
                 when_node.statements(),
@@ -1846,6 +1813,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                kw_offset,
                 kw_col,
                 None,
                 in_node.statements(),
@@ -1864,6 +1832,7 @@ impl Cop for IndentationWidth {
                         let (_, kw_col) = source.offset_to_line_col(kw_offset);
                         diagnostics.extend(self.check_statements_indentation(
                             source,
+                            kw_offset,
                             kw_offset,
                             kw_col,
                             None,
@@ -1886,6 +1855,7 @@ impl Cop for IndentationWidth {
                         let (_, kw_col) = source.offset_to_line_col(kw_offset);
                         diagnostics.extend(self.check_statements_indentation(
                             source,
+                            kw_offset,
                             kw_offset,
                             kw_col,
                             None,
@@ -1911,6 +1881,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                base_offset,
                 base_col,
                 None,
                 while_node.statements(),
@@ -1932,6 +1903,7 @@ impl Cop for IndentationWidth {
             diagnostics.extend(self.check_statements_indentation(
                 source,
                 kw_offset,
+                base_offset,
                 base_col,
                 None,
                 until_node.statements(),
