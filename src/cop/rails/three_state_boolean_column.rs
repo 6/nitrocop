@@ -95,9 +95,13 @@ impl<'pr> Visit<'pr> for ThreeStateBooleanVisitor<'_, 'pr> {
         };
 
         if let Some(info) = boolean_info {
-            // Check if required options (default: non-nil AND null: false) are present
-            let has_default =
-                keyword_arg_value(node, b"default").is_some_and(|v| v.as_nil_node().is_none());
+            // RuboCop's `required_options?` pattern is
+            //   (hash <(pair (sym :default) !nil?) (pair (sym :null) false) ...>)
+            // The `!nil?` predicate runs on the AST node object (never Ruby-nil),
+            // so it matches any existing `default:` pair regardless of the literal
+            // value — including `default: nil`. Match that behavior: just check
+            // presence of the `default:` key.
+            let has_default = keyword_arg_value(node, b"default").is_some();
             let has_null_false =
                 keyword_arg_value(node, b"null").is_some_and(|v| v.as_false_node().is_some());
 

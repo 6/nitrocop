@@ -50,3 +50,14 @@ class CreateFeatures < ActiveRecord::Migration
     end
   end
 end
+
+# `default: nil` counts as having a default for this cop — matches RuboCop's
+# `(pair (sym :default) !nil?)` pattern, where `!nil?` applies to the AST node
+# object (never Ruby-nil), not the literal value.
+class CreateQueries < ActiveRecord::Migration[5.0]
+  def change
+    create_table :queries do |t|
+      t.boolean :include_subprojects, null: false, default: nil
+    end
+  end
+end
