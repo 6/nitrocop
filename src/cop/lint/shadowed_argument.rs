@@ -205,7 +205,7 @@ fn check_variable(
         }
 
         // This is a shadowing-style assignment (non-operator, doesn't use param on RHS).
-        if asgn.in_branch {
+        if asgn.shadowing_in_branch {
             // Inside a conditional — can't tell if it executes.
             // Mark location as unknown and continue looking.
             location_known = false;

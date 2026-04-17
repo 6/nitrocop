@@ -47,6 +47,10 @@ pub struct BranchContext {
     /// Exception-handler main bodies may terminate before later writes run, so
     /// references must keep walking past them instead of consuming the branch.
     pub may_run_incompletely: bool,
+    /// Short-circuit logical branches (`&&`, `||`, `and`, `or`) stay
+    /// reportable for ShadowedArgument even though VF must model them as
+    /// branches for assignment liveness.
+    pub short_circuit: bool,
 }
 
 /// The VariableForce engine. Walks the Prism AST and builds a complete
@@ -96,7 +100,14 @@ impl<'a> Engine<'a> {
     /// `parent_id` identifies the conditional node (use its start offset),
     /// `child_index` identifies which child (0=then, 1=else, etc.).
     fn push_branch(&mut self, parent_id: usize, child_index: usize, predicate_context: bool) {
-        self.push_branch_with_flags(parent_id, child_index, predicate_context, false, false);
+        self.push_branch_with_flags(
+            parent_id,
+            child_index,
+            predicate_context,
+            false,
+            false,
+            false,
+        );
     }
 
     fn push_branch_with_flags(
@@ -106,6 +117,7 @@ impl<'a> Engine<'a> {
         predicate_context: bool,
         may_jump_to_other_branch: bool,
         may_run_incompletely: bool,
+        short_circuit: bool,
     ) {
         let id = self.next_branch_id;
         self.next_branch_id += 1;
@@ -117,6 +129,7 @@ impl<'a> Engine<'a> {
             predicate_context,
             may_jump_to_other_branch,
             may_run_incompletely,
+            short_circuit,
         };
         self.branch_contexts.push(context.clone());
         // Keep the live VariableTable copy in sync so reference tracking can
@@ -137,6 +150,25 @@ impl<'a> Engine<'a> {
 
     fn current_branch_path(&self) -> Vec<usize> {
         self.branch_stack.clone()
+    }
+
+    fn current_shadowing_in_branch(&self) -> bool {
+        if self.branch_depth == 0 {
+            return false;
+        }
+
+        // Some conditional contexts (currently case/case-match predicates)
+        // increment branch_depth without pushing a branch context. They still
+        // count as conditional for ShadowedArgument.
+        if self.branch_depth > self.branch_stack.len() {
+            return true;
+        }
+
+        self.branch_stack.iter().any(|&id| {
+            self.branch_contexts
+                .get(id)
+                .is_some_and(|context| !context.short_circuit)
+        })
     }
 
     /// Check if two branch IDs are mutually exclusive (belong to the same
@@ -504,6 +536,7 @@ impl<'a> Engine<'a> {
 
             let mut assignment = Assignment::new(offset, AssignmentKind::For);
             assignment.in_branch = self.branch_depth > 0;
+            assignment.shadowing_in_branch = self.current_shadowing_in_branch();
             assignment.branch_id = self.current_branch_id();
             assignment.branch_path = self.current_branch_path();
             self.table.assign_to_variable(&name, assignment);
@@ -542,6 +575,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         assign.sequence = seq;
         assign.rhs_references_var = rhs_refs_var;
         assign.in_branch = self.branch_depth > 0;
+        assign.shadowing_in_branch = self.current_shadowing_in_branch();
         assign.branch_id = self.current_branch_id();
         assign.branch_path = self.current_branch_path();
         let val = node.value();
@@ -582,6 +616,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.sequence = seq;
         a.rhs_references_var = true; // operator-writes always read the var
         a.in_branch = self.branch_depth > 0;
+        a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
         a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
@@ -609,6 +644,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.sequence = seq;
         a.rhs_references_var = true;
         a.in_branch = self.branch_depth > 0;
+        a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
         a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
@@ -636,6 +672,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.sequence = seq;
         a.rhs_references_var = true;
         a.in_branch = self.branch_depth > 0;
+        a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
         a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
@@ -705,6 +742,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             .collect();
 
         let in_branch = self.branch_depth > 0;
+        let shadowing_in_branch = self.current_shadowing_in_branch();
         let branch_id = self.current_branch_id();
         let branch_path = self.current_branch_path();
         let seq = self.next_sequence();
@@ -722,6 +760,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                     .is_some_and(|(_, r)| *r);
                 let mut a = Assignment::new(offset, AssignmentKind::Multiple);
                 a.in_branch = in_branch;
+                a.shadowing_in_branch = shadowing_in_branch;
                 a.branch_id = branch_id;
                 a.branch_path = branch_path.clone();
                 a.sequence = seq;
@@ -750,6 +789,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                             .is_some_and(|(_, r)| *r);
                         let mut a = Assignment::new(offset, AssignmentKind::Rest);
                         a.in_branch = in_branch;
+                        a.shadowing_in_branch = shadowing_in_branch;
                         a.branch_id = branch_id;
                         a.branch_path = branch_path.clone();
                         a.sequence = seq;
@@ -774,6 +814,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                     .is_some_and(|(_, r)| *r);
                 let mut a = Assignment::new(offset, AssignmentKind::Multiple);
                 a.in_branch = in_branch;
+                a.shadowing_in_branch = shadowing_in_branch;
                 a.branch_id = branch_id;
                 a.branch_path = branch_path.clone();
                 a.sequence = seq;
@@ -966,7 +1007,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let parent_id = node.location().start_offset();
         self.visit(&node.left());
         self.branch_depth += 1;
-        self.push_branch(parent_id, 1, false);
+        self.push_branch_with_flags(parent_id, 1, false, false, false, true);
         self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
@@ -976,7 +1017,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let parent_id = node.location().start_offset();
         self.visit(&node.left());
         self.branch_depth += 1;
-        self.push_branch(parent_id, 1, false);
+        self.push_branch_with_flags(parent_id, 1, false, false, false, true);
         self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
@@ -1204,6 +1245,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 let mut a = Assignment::new(offset, AssignmentKind::ExceptionCapture);
                 a.sequence = seq;
                 a.in_branch = self.branch_depth > 0;
+                a.shadowing_in_branch = self.current_shadowing_in_branch();
                 a.branch_id = self.current_branch_id();
                 a.branch_path = self.current_branch_path();
                 self.table.assign_to_variable(&name, a);
@@ -1237,7 +1279,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             if let Some(stmts) = node.statements() {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, false, true, true);
+                self.push_branch_with_flags(parent_id, 0, false, true, true, false);
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
@@ -1274,7 +1316,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             if node.ensure_clause().is_some() {
                 let parent_id = node.location().start_offset();
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, false, true, true);
+                self.push_branch_with_flags(parent_id, 0, false, true, true, false);
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
@@ -1319,6 +1361,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         });
 
         let in_branch = self.branch_depth > 0;
+        let shadowing_in_branch = self.current_shadowing_in_branch();
         let branch_id = self.current_branch_id();
         let branch_path = self.current_branch_path();
         let seq = self.next_sequence();
@@ -1335,6 +1378,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 }
                 let mut a = Assignment::new(regex_offset, AssignmentKind::RegexpCapture);
                 a.in_branch = in_branch;
+                a.shadowing_in_branch = shadowing_in_branch;
                 a.branch_id = branch_id;
                 a.branch_path = branch_path.clone();
                 a.sequence = seq;
@@ -1471,6 +1515,7 @@ fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism
         let mut a = Assignment::new(offset, AssignmentKind::Simple);
         a.sequence = seq;
         a.in_branch = engine.branch_depth > 0;
+        a.shadowing_in_branch = engine.current_shadowing_in_branch();
         a.branch_id = engine.current_branch_id();
         a.branch_path = engine.current_branch_path();
         engine.table.assign_to_variable(&name, a);

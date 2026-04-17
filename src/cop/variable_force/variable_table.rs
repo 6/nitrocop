@@ -85,6 +85,7 @@ impl VariableTable {
             if var.scope_index != current_index {
                 var.captured_by_block = true;
                 assignment.in_branch = true;
+                assignment.shadowing_in_branch = true;
             }
             var.assign(assignment, &contexts);
         } else {
