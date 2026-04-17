@@ -242,6 +242,15 @@ use ruby_prism::Visit;
 /// add_to_calendar, and lamernews. Match RuboCop by treating line-start
 /// operators as already having valid leading space and by ignoring trailing
 /// padding that is followed only by a newline.
+///
+/// ## Corpus fix (2026-04-17, keyword logical operators)
+///
+/// Prism represents keyword logical operators (`and`, `or`) with the same
+/// `AndNode`/`OrNode` types as symbolic `&&`/`||`, but the visitor was
+/// explicitly skipping the keyword forms. RuboCop aliases `on_and`/`on_or`
+/// to `on_binary`, so those keyword operators should use the normal binary
+/// spacing rules, including extra-space checks in modifier-return and
+/// multiline-condition contexts.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -1768,20 +1777,12 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
 
     // === Logical operators (&&, ||) ===
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
-        let op_loc = node.operator_loc();
-        // Skip keyword form `and`
-        if op_loc.as_slice() != b"and" {
-            self.check_operator_spacing(&op_loc);
-        }
+        self.check_operator_spacing(&node.operator_loc());
         ruby_prism::visit_and_node(self, node);
     }
 
     fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
-        let op_loc = node.operator_loc();
-        // Skip keyword form `or`
-        if op_loc.as_slice() != b"or" {
-            self.check_operator_spacing(&op_loc);
-        }
+        self.check_operator_spacing(&node.operator_loc());
         ruby_prism::visit_or_node(self, node);
     }
 

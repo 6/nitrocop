@@ -155,6 +155,15 @@ x == 0 ? 1 : 2
 result = condition ? true_val : false_val
 nested = a ? (b ? c : d) : e
 
+# Keyword logical operators with proper spacing
+MODIFIERS[key.to_sym] or raise ArgumentError.new("Unknown modifier key: #{key}")
+
+if justNameCharacters(params["signature"]["firstnames"]) and
+   justNameCharacters(params["signature"]["lastname"]) and
+   municipalities.include?(params["signature"]["occupancy_county"]) and
+   params["signature"]["vow"] == "1"
+end
+
 # Rational literal (no_space style default for /)
 x = 2/3r
 

@@ -250,6 +250,13 @@ use crate::parse::source::SourceFile;
 ///   active, so repos that disabled `Layout/SingleLineBlockChain` still had
 ///   multiline chains like `e.select { ... }\n  .join` suppressed here, causing
 ///   false negatives relative to RuboCop.
+/// - **Stabby lambda precedence**: RuboCop's
+///   `other_cop_takes_precedence?` also considers single-line stabby lambdas
+///   (`-> { ... }`) whose containing send has a dot. Nitrocop only tracked
+///   `BlockNode`, so multiline dotted calls like
+///   `assoc.has_many ..., -> { ... }, ...` and outer wrappers like
+///   `assert_equal(..., obj.call(-> { ... }))` were incorrectly flagged even
+///   though `Layout/SingleLineBlockChain` should take precedence.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -596,7 +603,7 @@ impl<'pr> Visit<'pr> for BlockRangeCollector<'_> {
     }
 }
 
-/// Collects byte ranges of single-line block nodes whose parent (in Parser AST
+/// Collects byte ranges of single-line block/lambda nodes whose parent (in Parser AST
 /// terms) is a send with a dot.
 ///
 /// Matches RuboCop's `other_cop_takes_precedence?` which checks:
@@ -604,13 +611,15 @@ impl<'pr> Visit<'pr> for BlockRangeCollector<'_> {
 ///
 /// In Parser AST, `block_node.parent` is the CONTAINING node. For:
 ///   - `foo.map { ... }.compact` → block parent is `.compact` send (has dot) ✓
+///   - `assoc.has_many :x, -> { ... }, ...` → lambda block parent is `.has_many` send ✓
 ///   - `foo.bar(proc { ... })` → block parent is `.bar` send (has dot) ✓
 ///   - `x = foo.map { ... }` → block parent is assignment (no dot) ✗
 ///   - `bar(proc { ... })` → block parent is `bar` send (no dot) ✗
 ///
 /// In Prism, a block is always a child of its "owning" CallNode. The "containing"
 /// node in Parser AST terms is found by skipping the owning CallNode and any
-/// ArgumentsNode wrapper in the ancestor stack.
+/// ArgumentsNode wrapper in the ancestor stack. A `LambdaNode` is already the
+/// block wrapper, so only Prism-only argument wrappers are skipped.
 struct SingleLineBlockCollector<'a, 'pr> {
     ranges: Vec<(usize, usize)>,
     source: &'a SourceFile,
@@ -634,20 +643,37 @@ impl<'pr> Visit<'pr> for SingleLineBlockCollector<'_, 'pr> {
         let (end_line, _) = self
             .source
             .offset_to_line_col(loc.end_offset().saturating_sub(1));
-        if start_line == end_line && self.containing_call_has_dot() {
+        if start_line == end_line && self.containing_call_has_dot_for_block() {
             self.ranges.push((loc.start_offset(), loc.end_offset()));
         }
         ruby_prism::visit_block_node(self, node);
     }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let loc = node.location();
+        let (start_line, _) = self.source.offset_to_line_col(loc.start_offset());
+        let (end_line, _) = self
+            .source
+            .offset_to_line_col(loc.end_offset().saturating_sub(1));
+        if start_line == end_line && self.containing_call_has_dot_for_lambda() {
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
+        ruby_prism::visit_lambda_node(self, node);
+    }
 }
 
 impl SingleLineBlockCollector<'_, '_> {
+    fn call_has_dot(call: &ruby_prism::CallNode<'_>) -> bool {
+        call.call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b".")
+    }
+
     /// Check if the block's "parent" in Parser AST terms is a CallNode with a dot.
     ///
     /// Walk up ancestors, skipping the owning CallNode (immediate parent of the
     /// block in Prism) and any ArgumentsNode wrapper (Prism-only, no Parser
     /// equivalent). The next significant node is the "containing" context.
-    fn containing_call_has_dot(&self) -> bool {
+    fn containing_call_has_dot_for_block(&self) -> bool {
         let len = self.ancestors.len();
         // Need at least 2 ancestors: the BlockNode itself (pushed by
         // visit_branch_node_enter before visit_block_node runs) and
@@ -671,10 +697,29 @@ impl SingleLineBlockCollector<'_, '_> {
                 continue;
             }
             // Found the containing node. Check if it's a CallNode with a dot.
-            return ancestor.as_call_node().is_some_and(|c| {
-                c.call_operator_loc()
-                    .is_some_and(|loc| loc.as_slice() == b".")
-            });
+            return ancestor
+                .as_call_node()
+                .is_some_and(|call| Self::call_has_dot(&call));
+        }
+        false
+    }
+
+    /// Lambda nodes (`-> { ... }`) are already the block wrapper in Prism, so
+    /// there is no "owning" CallNode to skip. Only skip Prism-only arguments
+    /// wrappers, then check the containing node directly.
+    fn containing_call_has_dot_for_lambda(&self) -> bool {
+        let len = self.ancestors.len();
+        if len < 1 {
+            return false;
+        }
+        for i in (0..len - 1).rev() {
+            let ancestor = &self.ancestors[i];
+            if ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+            return ancestor
+                .as_call_node()
+                .is_some_and(|call| Self::call_has_dot(&call));
         }
         false
     }
@@ -1810,6 +1855,35 @@ mod tests {
         let diagnostics =
             crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, config);
 
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn stabby_lambda_arguments_respect_single_line_block_chain_config() {
+        let source = b"foo.bar :x,\n  -> { baz }\n";
+
+        let disabled = CopConfig {
+            options: HashMap::from([(
+                "SingleLineBlockChainEnabled".to_string(),
+                serde_yml::Value::Bool(false),
+            )]),
+            ..CopConfig::default()
+        };
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, disabled);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 1);
+        assert_eq!(diagnostics[0].location.column, 0);
+
+        let enabled = CopConfig {
+            options: HashMap::from([(
+                "SingleLineBlockChainEnabled".to_string(),
+                serde_yml::Value::Bool(true),
+            )]),
+            ..CopConfig::default()
+        };
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, enabled);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 }
