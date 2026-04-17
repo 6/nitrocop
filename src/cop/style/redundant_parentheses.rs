@@ -342,6 +342,24 @@ use crate::parse::source::SourceFile;
 ///   `(- 1.second)` are treated by RuboCop like parenthesized operands, not like
 ///   the no-space `+(1.foo)` / `-(1.foo)` precedence exemption. The unary path now
 ///   distinguishes those forms without re-flagging chained receivers.
+///
+/// ## Investigation findings (2026-04-17, rescue-body parity)
+///
+/// ### FP root causes fixed:
+/// - **Single-statement rescue-body call descendants:** RuboCop's `rescue?` matcher
+///   allows parens anywhere in the one direct rescue-body statement, including direct
+///   call arguments like `handle_exception((throw && :throw || raise && :raise), ...)`
+///   and `raise ArgumentError, ("message")`. nitrocop had narrowed this to line-start
+///   expressions and predicates only, which produced false positives in `i18n` and
+///   `rswag`. The rescue-body exemption now mirrors Parser AST depth more closely while
+///   still excluding exception-list parens and multi-statement rescue bodies.
+///
+/// ### FN root causes fixed:
+/// - **Parenthesized multi-assignment statement groups:** multiline begin-style groups
+///   whose body is entirely assignments, like the `reline` auto-indent calculation,
+///   should still report redundant outer parens as "an assignment". Prism exposes these
+///   as multiple statements under one `ParenthesesNode`, so the multi-statement path now
+///   reuses the assignment-context check for all-assignment groups.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -523,6 +541,10 @@ impl RedundantParensVisitor<'_> {
 
         if inner_nodes.len() != 1 {
             if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
+                self.add_offense(node, msg);
+            } else if let Some(msg) =
+                self.check_multiple_statement_assignment_parens(&inner_nodes, parent)
+            {
                 self.add_offense(node, msg);
             }
             return;
@@ -877,6 +899,44 @@ impl RedundantParensVisitor<'_> {
         classify_simple(inner_nodes.last()?)
     }
 
+    fn check_multiple_statement_assignment_parens(
+        &self,
+        inner_nodes: &[ruby_prism::Node<'_>],
+        parent: Option<&ParentInfo>,
+    ) -> Option<&'static str> {
+        if self.is_nested_unparenthesized_call_argument_parentheses() {
+            return None;
+        }
+
+        if !inner_nodes
+            .iter()
+            .all(|node| is_assignment(node) || is_assignment_call(node))
+        {
+            return None;
+        }
+
+        if self.has_ternary_ancestor() || self.is_parent_statements_conditional_body() {
+            return None;
+        }
+
+        let should_flag = match parent {
+            None => true,
+            Some(p) => {
+                let begin_like_parent = p.is_statements_node
+                    && (p.is_parentheses_body
+                        || p.statements_child_count > 1
+                        || self.parent_stack.len() <= 2
+                        || matches!(p.kind, ParentKind::Interpolation));
+                begin_like_parent
+                    && !p.is_assignment_parent
+                    && !self.is_endless_def_body_parent()
+                    && !self.is_parent_statements_block_body()
+            }
+        };
+
+        should_flag.then_some("an assignment")
+    }
+
     fn is_nested_unparenthesized_call_argument_parentheses(&self) -> bool {
         let mut saw_outer_parentheses = false;
 
@@ -911,8 +971,10 @@ impl RedundantParensVisitor<'_> {
     /// Returns true when the parens are in one of the rescue-body positions that
     /// RuboCop accepts:
     /// - the parenthesized expression itself starts the rescue-body statement
-    /// - or the parens are the exact predicate of a direct `if`/`unless`/`while`/`until`
+    /// - the parens are the exact predicate of a direct `if`/`unless`/`while`/`until`
     ///   statement that starts the rescue-body line
+    /// - or the parens are inside the direct call statement of a single-statement
+    ///   rescue body, such as `handle_exception((...))` or `raise ArgumentError, ("...")`
     ///
     /// Inline rescue expressions like `(disconnect rescue nil) if cond` are still
     /// offenses even when they appear in rescue bodies, so they are excluded here.
@@ -925,7 +987,9 @@ impl RedundantParensVisitor<'_> {
             return false;
         }
 
-        self.is_direct_rescue_body_expression(node) || self.is_direct_rescue_body_predicate(node)
+        self.is_direct_rescue_body_expression(node)
+            || self.is_direct_rescue_body_predicate(node)
+            || self.is_direct_rescue_body_call_descendant(node)
     }
 
     fn is_direct_rescue_body_expression(&self, node: &ruby_prism::ParenthesesNode<'_>) -> bool {
@@ -955,6 +1019,57 @@ impl RedundantParensVisitor<'_> {
         {
             return true;
         }
+        false
+    }
+
+    fn is_direct_rescue_body_call_descendant(
+        &self,
+        node: &ruby_prism::ParenthesesNode<'_>,
+    ) -> bool {
+        let start = node.location().start_offset();
+        let mut call_index = None;
+
+        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
+            let info = &self.parent_stack[i];
+            if info.is_statements_node && !matches!(info.kind, ParentKind::RescueBody) {
+                continue;
+            }
+
+            match info.kind {
+                ParentKind::Other if !info.is_assignment_parent => continue,
+                ParentKind::Call => {
+                    if !begins_its_line(self.source, info.node_start_offset) {
+                        return false;
+                    }
+                    call_index = Some(i);
+                    break;
+                }
+                _ => return false,
+            }
+        }
+
+        let Some(call_index) = call_index else {
+            return false;
+        };
+
+        for i in (0..call_index).rev() {
+            let info = &self.parent_stack[i];
+            if info.is_statements_node && !matches!(info.kind, ParentKind::RescueBody) {
+                continue;
+            }
+
+            match info.kind {
+                ParentKind::RescueBody => {
+                    return info.rescue_body_single_statement
+                        && info
+                            .rescue_body_start_offset
+                            .is_some_and(|off| start >= off);
+                }
+                ParentKind::Other if !info.is_assignment_parent => continue,
+                _ => return false,
+            }
+        }
+
         false
     }
 
