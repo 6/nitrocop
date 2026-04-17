@@ -25,3 +25,9 @@ process(if ready?
         else
           fallback_value
         end)
+
+# Tabs-style block bodies still align from the block base, not the `do` token.
+create_table :score_adjustments do |t|
+	  t.integer :kind, null: false
+^^^ Layout/IndentationWidth: Use 1 (not 2) tabs for indentation.
+end

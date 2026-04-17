@@ -36,3 +36,11 @@ content = label || if ready?
                    else
                      fallback_value
                    end
+
+# Parenthesized multiline conditionals used as the last call argument are
+# ignored by RuboCop's CheckAssignment path.
+process((if ready?
+           primary_value
+         else
+           fallback_value
+         end))
