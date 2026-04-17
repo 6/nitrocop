@@ -425,3 +425,15 @@ ensure # cleanup
     42
   end
 end
+
+# `private` inside a begin/rescue body still makes the following method non-public
+class BeginRescuePrivate
+  begin
+    private
+
+    def hidden_helper
+      42
+    end
+  rescue LoadError
+  end
+end
