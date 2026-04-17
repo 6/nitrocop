@@ -11,15 +11,15 @@ Every offense is compared by file path, line number, and cop name.
 | Metric | Value |
 |--------|------:|
 | Repos | 5588 |
-| Repos with 100% match | 3360 |
+| Repos with 100% match | 3363 |
 | Files inspected | 590,707 |
-| Offenses compared | 28,380,647 |
-| Matches (both agree) | 28,370,739 |
-| FP (nitrocop extra) | 4,162 |
-| FN (nitrocop missing) | 5,746 |
+| Offenses compared | 28,380,628 |
+| Matches (both agree) | 28,370,764 |
+| FP (nitrocop extra) | 4,143 |
+| FN (nitrocop missing) | 5,721 |
 | Registered cops | 915 |
-| Cops with exact match | 862 |
-| Cops with divergence | 22 |
+| Cops with exact match | 865 |
+| Cops with divergence | 19 |
 | Cops with no corpus data | 31 |
 | **Match rate (default config)** | **99.96%** |
 | **Match rate (all variants)** | **99.89%** |
@@ -36,18 +36,18 @@ Results using each cop's default RuboCop configuration.
 | Bundler | 7 | 7 | 0 | 0 | 157,862 | 0 | 0 | 100.0% |
 | FactoryBot | 11 | 11 | 0 | 0 | 48,577 | 0 | 0 | 100.0% |
 | Gemspec | 10 | 10 | 0 | 0 | 53,953 | 0 | 0 | 100.0% |
-| Layout | 100 | 96 | 4 | 0 | 4,202,105 | 1,849 | 5,329 | 99.8% |
-| Lint | 148 | 141 | 4 | 3 | 4,625,299 | 1,020 | 342 | 99.9% |
+| Layout | 100 | 96 | 4 | 0 | 4,202,109 | 1,849 | 5,325 | 99.8% |
+| Lint | 148 | 141 | 4 | 3 | 4,625,315 | 1,020 | 326 | 99.9% |
 | Metrics | 10 | 10 | 0 | 0 | 680,810 | 0 | 0 | 100.0% |
 | Migration | 1 | 1 | 0 | 0 | 155 | 0 | 0 | 100.0% |
 | Naming | 19 | 19 | 0 | 0 | 309,479 | 0 | 0 | 100.0% |
 | Performance | 52 | 52 | 0 | 0 | 112,142 | 0 | 0 | 100.0% |
 | RSpec | 113 | 112 | 0 | 1 | 2,908,776 | 0 | 0 | 100.0% |
 | RSpecRails | 8 | 7 | 0 | 1 | 35,273 | 0 | 0 | 100.0% |
-| Rails | 138 | 103 | 11 | 24 | 453,754 | 1,284 | 60 | 99.7% |
+| Rails | 138 | 105 | 9 | 24 | 453,758 | 1,267 | 56 | 99.7% |
 | Rake | 5 | 5 | 0 | 0 | 5,824 | 0 | 0 | 100.0% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
-| Style | 287 | 282 | 3 | 2 | 14,768,545 | 9 | 15 | 99.9% |
+| Style | 287 | 283 | 2 | 2 | 14,768,546 | 7 | 14 | 99.9% |
 
 ### All `EnforcedStyle` Variants
 
@@ -58,24 +58,24 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Bundler | 7 | 7 | 0 | 0 | 169,513 | 0 | 0 | 100.0% |
 | FactoryBot | 11 | 11 | 0 | 0 | 317,179 | 0 | 0 | 100.0% |
 | Gemspec | 10 | 10 | 0 | 0 | 70,379 | 0 | 0 | 100.0% |
-| Layout | 100 | 92 | 8 | 0 | 36,212,986 | 4,818 | 14,425 | 99.9% |
-| Lint | 148 | 141 | 4 | 3 | 4,636,842 | 1,020 | 342 | 99.9% |
+| Layout | 100 | 92 | 8 | 0 | 36,213,045 | 4,794 | 14,366 | 99.9% |
+| Lint | 148 | 141 | 4 | 3 | 4,636,858 | 1,020 | 326 | 99.9% |
 | Metrics | 10 | 10 | 0 | 0 | 680,810 | 0 | 0 | 100.0% |
 | Migration | 1 | 1 | 0 | 0 | 155 | 0 | 0 | 100.0% |
 | Naming | 19 | 19 | 0 | 0 | 2,253,051 | 0 | 0 | 100.0% |
 | Performance | 52 | 52 | 0 | 0 | 112,142 | 0 | 0 | 100.0% |
 | RSpec | 113 | 112 | 0 | 1 | 3,993,190 | 0 | 0 | 100.0% |
 | RSpecRails | 8 | 7 | 0 | 1 | 50,807 | 0 | 0 | 100.0% |
-| Rails | 138 | 97 | 17 | 24 | 507,999 | 1,347 | 119 | 99.7% |
+| Rails | 138 | 100 | 14 | 24 | 508,005 | 1,330 | 113 | 99.7% |
 | Rake | 5 | 5 | 0 | 0 | 5,824 | 0 | 0 | 100.0% |
 | Security | 6 | 6 | 0 | 0 | 8,185 | 0 | 0 | 100.0% |
-| Style | 287 | 280 | 5 | 2 | 24,354,590 | 31,146 | 24,583 | 99.7% |
+| Style | 287 | 281 | 4 | 2 | 24,354,591 | 31,144 | 24,582 | 99.7% |
 
 ## Top Divergence Contributors (repos with most diverging cops)
 
 | Repo | Diverging Cops | FP Cops | FN Cops | Total FP | Total FN |
 |------|---------------:|--------:|--------:|---------:|---------:|
-| Coursemology__coursemology2__70d42e7 | 15 | 14 | 2 | 531 | 1 |
+| Coursemology__coursemology2__70d42e7 | 15 | 14 | 1 | 531 | 1 |
 | GSA__search-gov__4acf0bf | 14 | 12 | 3 | 273 | 15 |
 | WikiEducationFoundation__WikiEduDashboard__0d6258c | 13 | 12 | 1 | 206 | 2 |
 | department-of-veterans-affairs__vets-api__038d1df | 13 | 13 | 2 | 920 | 9 |
@@ -84,10 +84,10 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | hitobito__hitobito__195efd2 | 13 | 12 | 2 | 286 | 3 |
 | scinote-eln__scinote-web__8435988 | 13 | 13 | 3 | 223 | 20 |
 | sharetribe__sharetribe__c5b7b8f | 13 | 11 | 3 | 344 | 14 |
-| akicho8__shogi-extend__3650350 | 12 | 9 | 3 | 117 | 7 |
 | alphagov__whitehall__a640792 | 12 | 9 | 4 | 161 | 67 |
 | antiwork__gumroad__782a69f | 12 | 10 | 3 | 316 | 49 |
 | demarche-numerique__demarche.numerique.gouv.fr__420d1b2 | 12 | 10 | 4 | 237 | 11 |
+| akicho8__shogi-extend__3650350 | 11 | 9 | 2 | 117 | 6 |
 | benwbrum__fromthepage__fe3b4ed | 11 | 10 | 1 | 368 | 13 |
 | codeforjapan__decidim-cfj__32928ca | 11 | 10 | 1 | 347 | 2 |
 | ekylibre__ekylibre__1d5a3b5 | 11 | 10 | 3 | 759 | 13 |
@@ -106,37 +106,34 @@ Results combining default config and every non-default `EnforcedStyle` option.
 
 ## Diverging Cops
 
-22 cops diverge from RuboCop on the corpus (default config). 862 cops match RuboCop exactly. 31 cops have no corpus data.
- 12 additional cops diverge only in non-default style variants.
+19 cops diverge from RuboCop on the corpus (default config). 865 cops match RuboCop exactly. 31 cops have no corpus data.
+ 11 additional cops diverge only in non-default style variants.
 
 | Cop | Matches | FP | FN | Match % |
 |-----|--------:|---:|---:|--------:|
 | Rails/ThreeStateBooleanColumn | 6,996 | 13 | 25 | 99.4% |
-| Rails/CreateTableWithTimestamps | 3,546 | 14 | 0 | 99.6% |
 | Layout/MultilineOperationIndentation (default) | 43,840 | 204 | 3,296 | 92.6% |
 | ↳ Layout/MultilineOperationIndentation (indented) | 8,650 | 38 | 35 | 99.1% |
 | Rails/ResponseParsedBody | 2,924 | 544 | 0 | 84.3% |
 | Rails/ReversibleMigrationMethodDefinition | 3,015 | 0 | 31 | 98.9% |
-| Layout/MultilineMethodCallIndentation (default) | 39,001 | 1,307 | 1,640 | 92.9% |
-| ↳ Layout/MultilineMethodCallIndentation (indented) | 14,671 | 666 | 232 | 94.2% |
-| ↳ Layout/MultilineMethodCallIndentation (indented_relative_to_receiver) | 34,870 | 19 | 269 | 99.1% |
+| Layout/MultilineMethodCallIndentation (default) | 39,005 | 1,307 | 1,636 | 92.9% |
+| ↳ Layout/MultilineMethodCallIndentation (indented) | 14,674 | 666 | 229 | 94.2% |
+| ↳ Layout/MultilineMethodCallIndentation (indented_relative_to_receiver) | 34,873 | 19 | 266 | 99.1% |
 | Rails/BulkChangeTable | 2,469 | 37 | 0 | 98.5% |
 | Lint/RedundantCopDisableDirective | 2,123 | 952 | 193 | 64.9% |
 | Rails/UniqueValidationWithoutIndex | 0 | 610 | 0 | 0.0% |
 | Layout/RedundantLineBreak | 276,059 | 271 | 250 | 99.8% |
 | Layout/SpaceAroundOperators (default) | 151,351 | 67 | 143 | 99.8% |
 | ↳ Layout/SpaceAroundOperators (space, space) | 33,981 | 45 | 20 | 99.8% |
-| Rails/AddColumnIndex | 201 | 3 | 4 | 96.6% |
 | Lint/UselessAssignment | 27,119 | 68 | 127 | 99.2% |
 | Rails/UnusedIgnoredColumns | 0 | 40 | 0 | 0.0% |
 | Rails/MigrationClassName | 11 | 11 | 0 | 50.0% |
-| Lint/ShadowingOuterLocalVariable | 4,304 | 0 | 21 | 99.5% |
-| Style/RedundantParentheses | 23,597 | 8 | 6 | 99.9% |
+| Style/RedundantParentheses | 23,597 | 6 | 6 | 99.9% |
 | Style/ConditionalAssignment (default) | 13,097 | 1 | 8 | 99.9% |
 | ↳ Style/ConditionalAssignment (assign_inside_condition) | 24,932 | 14 | 0 | 99.9% |
+| Lint/ShadowingOuterLocalVariable | 4,320 | 0 | 5 | 99.8% |
 | Lint/ShadowedArgument | 305 | 0 | 1 | 99.6% |
 | Rails/Delegate | 21,191 | 1 | 0 | 99.9% |
-| Style/DocumentationMethod | 1,095,458 | 0 | 1 | 99.9% |
 | Rails/RedundantTravelBack | 62 | 11 | 0 | 84.9% |
 
 **Variant-only divergence** (perfect in default config, diverge in non-default styles):
@@ -155,7 +152,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Style/BlockDelimiters (semantic) | 132,037 | 163 | 0 | 99.8% |
 | ↳ Style/BlockDelimiters (always_braces) | 331,390 | 1 | 0 | 99.9% |
 | Layout/IndentationWidth (default) | 255,692 | 0 | 0 | 100.0% |
-| ↳ Layout/IndentationWidth (relative_to_receiver) | 92,900 | 109 | 50 | 99.8% |
+| ↳ Layout/IndentationWidth (relative_to_receiver) | 92,949 | 85 | 1 | 99.9% |
 | Rails/WhereExists (default) | 1,078 | 0 | 0 | 100.0% |
 | ↳ Rails/WhereExists (where) | 2,090 | 28 | 28 | 97.3% |
 | Rails/TimeZone (default) | 34,767 | 0 | 0 | 100.0% |
@@ -166,8 +163,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ↳ Rails/PluckInWhere (aggressive) | 305 | 0 | 9 | 97.1% |
 | Rails/HttpStatus (default) | 3,758 | 0 | 0 | 100.0% |
 | ↳ Rails/HttpStatus (numeric) | 6,736 | 0 | 6 | 99.9% |
-| Rails/Date (default) | 3,896 | 0 | 0 | 100.0% |
-| ↳ Rails/Date (strict) | 2,842 | 0 | 2 | 99.9% |
 | Layout/SpaceInsideStringInterpolation (default) | 3,520 | 0 | 0 | 100.0% |
 | ↳ Layout/SpaceInsideStringInterpolation (space) | 300,778 | 1 | 0 | 99.9% |
 
@@ -184,18 +179,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 - FN: `chesterbr__cruzalinhas__45cbdf9: db/migrate/20141001231524_create_gtfs_engine_calendars.gtfs_engine.rb:8  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
 - FN: `chesterbr__cruzalinhas__45cbdf9: db/migrate/20141001231524_create_gtfs_engine_calendars.gtfs_engine.rb:9  [Boolean columns should always have a default value and a `NOT NULL` constraint.]`
 - ... and 22 more FN
-
-</details>
-
-<details>
-<summary><strong>Rails/CreateTableWithTimestamps</strong> — 3,546 matches, 14 FP, 0 FN (99.6%)</summary>
-
-**Default config** (14 FP, 0 FN):
-
-- FP: `eigenben__jazz_model__58cd08d: db/schema.rb:2  [Add `t.timestamps` to `create_table` block.]`
-- FP: `eigenben__jazz_model__58cd08d: db/schema.rb:11  [Add `t.timestamps` to `create_table` block.]`
-- FP: `eigenben__jazz_model__58cd08d: db/schema.rb:16  [Add `t.timestamps` to `create_table` block.]`
-- ... and 11 more FP
 
 </details>
 
@@ -251,20 +234,20 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Layout/MultilineMethodCallIndentation</strong> — 39,001 matches, 1,992 FP, 2,141 FN (92.9%)</summary>
+<summary><strong>Layout/MultilineMethodCallIndentation</strong> — 39,005 matches, 1,992 FP, 2,131 FN (92.9%)</summary>
 
-**Default config** (1,307 FP, 1,640 FN):
+**Default config** (1,307 FP, 1,636 FN):
 
 - FP: `ActiveCampaign__postmark-gem__a50ff39: spec/unit/postmark/message_extensions/mail_spec.rb:341  [Align `and_return` with `receive(:get_template)` on line 340.]`
 - FP: `ActiveCampaign__postmark-gem__a50ff39: spec/unit/postmark/message_extensions/mail_spec.rb:344  [Align `and_return` with `receive(:validate_template)` on line 343.]`
 - FP: `ActiveCampaign__postmark-gem__a50ff39: spec/unit/postmark/message_extensions/mail_spec.rb:353  [Align `and` with `change` on line 352.]`
 - ... and 97 more FP
 - FN: `24pullrequests__24pullrequests__381028d: app/models/aggregation_filter.rb:7  [Use 2 (not 0) spaces for indenting an expression spanning multiple lines.]`
-- FN: `Arachni__arachni__c1710d6: spec/arachni/element/form_spec.rb:577  [Use 2 (not 4) spaces for indenting an expression spanning multiple lines.]`
 - FN: `Arie__serveme__7f28d1b: spec/services/stac_log_processor_spec.rb:382  [Use 2 (not 44) spaces for indenting an expression spanning multiple lines.]`
+- FN: `Arie__serveme__7f28d1b: spec/services/stac_log_processor_spec.rb:439  [Use 2 (not 44) spaces for indenting an expression spanning multiple lines.]`
 - ... and 97 more FN
 
-**indented** (666 FP, 232 FN):
+**indented** (666 FP, 229 FN):
 
 - FP: `Freika__dawarich__3d1ae95: spec/services/places/name_fetcher_spec.rb:108  [Use 2 (not 0) spaces for indentation of a chained method call.]`
 - FP: `Freika__dawarich__3d1ae95: spec/services/places/name_fetcher_spec.rb:109  [Use 2 (not 0) spaces for indentation of a chained method call.]`
@@ -275,7 +258,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 - FN: `Arachni__arachni__c1710d6: lib/arachni/framework/parts/browser.rb:126  [Use 2 (not 4) spaces for indenting a condition in an `if` statement spanning multiple lines.]`
 - ... and 97 more FN
 
-**indented_relative_to_receiver** (19 FP, 269 FN):
+**indented_relative_to_receiver** (19 FP, 266 FN):
 
 - FP: `chef__chef__e58e1a1: spec/integration/recipes/resource_load_spec.rb:50  [Indent `.select` 2 spaces more than `self` on line 49.]`
 - FP: `chef__chef__e58e1a1: spec/integration/recipes/resource_load_spec.rb:51  [Indent `.map` 2 spaces more than `self` on line 49.]`
@@ -372,21 +355,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Rails/AddColumnIndex</strong> — 201 matches, 3 FP, 4 FN (96.6%)</summary>
-
-**Default config** (3 FP, 4 FN):
-
-- FP: `Coursemology__coursemology2__70d42e7: db/migrate/20220819091113_create_new_codaveri_feedbacks_table.rb:14  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- FP: `cyberark__conjur__8031a2a: db/migrate/20180410071554_current_policy.rb:13  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- FP: `pupilfirst__pupilfirst__001ec46: db/migrate/20221027192041_add_discord_user_id.rb:3  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- FN: `Coursemology__coursemology2__70d42e7: db/migrate/20220819091113_create_new_codaveri_feedbacks_table.rb:15  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- FN: `cyberark__conjur__8031a2a: db/migrate/20180410071554_current_policy.rb:14  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- FN: `pupilfirst__pupilfirst__001ec46: db/migrate/20221027192041_add_discord_user_id.rb:8  [`add_column` does not accept an `index` key, use `add_index` instead.]`
-- ... and 1 more FN
-
-</details>
-
-<details>
 <summary><strong>Lint/UselessAssignment</strong> — 27,119 matches, 68 FP, 127 FN (99.2%)</summary>
 
 **Default config** (68 FP, 127 FN):
@@ -427,29 +395,17 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Lint/ShadowingOuterLocalVariable</strong> — 4,304 matches, 0 FP, 21 FN (99.5%)</summary>
+<summary><strong>Style/RedundantParentheses</strong> — 23,597 matches, 6 FP, 6 FN (99.9%)</summary>
 
-**Default config** (0 FP, 21 FN):
-
-- FN: `ConfigLMM__ConfigLMM__26d3a20: Plugins/OS/Linux/Linux.lmm.rb:76  [Shadowing outer local variable - `connection`.]`
-- FN: `ConfigLMM__ConfigLMM__26d3a20: Plugins/OS/Linux/Linux.lmm.rb:90  [Shadowing outer local variable - `connection`.]`
-- FN: `ConfigLMM__ConfigLMM__26d3a20: Plugins/OS/Linux/Linux.lmm.rb:111  [Shadowing outer local variable - `connection`.]`
-- ... and 18 more FN
-
-</details>
-
-<details>
-<summary><strong>Style/RedundantParentheses</strong> — 23,597 matches, 8 FP, 6 FN (99.9%)</summary>
-
-**Default config** (8 FP, 6 FN):
+**Default config** (6 FP, 6 FN):
 
 - FP: `louismullie__treat__f63495e: lib/treat/workers/lexicalizers/sensers/wordnet.rb:61  [Don't use parentheses around a method call.]`
 - FP: `opf__openproject__f5a451d: app/helpers/watchers_helper.rb:64  [Don't use parentheses around an interpolated expression.]`
 - FP: `parruda__swarm__5179529: test/fixtures/sse_responses.rb:137  [Don't use parentheses around a literal.]`
-- ... and 5 more FP
+- ... and 3 more FP
+- FN: `lorint__brick__fa07b7f: lib/brick/extensions.rb:1212  [Don't use parentheses around a method argument.]`
 - FN: `natalie-lang__natalie__b507cff: spec/core/float/uminus_spec.rb:8  [Don't use parentheses around a literal.]`
 - FN: `natalie-lang__natalie__b507cff: spec/core/integer/uminus_spec.rb:9  [Don't use parentheses around a literal.]`
-- FN: `natalie-lang__natalie__b507cff: spec/language/precedence_spec.rb:112  [Don't use parentheses around a literal.]`
 - ... and 3 more FN
 
 </details>
@@ -475,6 +431,18 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
+<summary><strong>Lint/ShadowingOuterLocalVariable</strong> — 4,320 matches, 0 FP, 5 FN (99.8%)</summary>
+
+**Default config** (0 FP, 5 FN):
+
+- FN: `hackedteam__rcs-db__6cff59d: lib/rcs-db/build/exploit.rb:153  [Shadowing outer local variable - `f`.]`
+- FN: `hackedteam__rcs-db__6cff59d: lib/rcs-db/build/exploit.rb:187  [Shadowing outer local variable - `f`.]`
+- FN: `hackedteam__rcs-db__6cff59d: lib/rcs-db/build/linux.rb:141  [Shadowing outer local variable - `f`.]`
+- ... and 2 more FN
+
+</details>
+
+<details>
 <summary><strong>Lint/ShadowedArgument</strong> — 305 matches, 0 FP, 1 FN (99.6%)</summary>
 
 **Default config** (0 FP, 1 FN):
@@ -489,15 +457,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 **Default config** (1 FP, 0 FN):
 
 - FP: `ruby__did_you_mean__74d3054: evaluation/calculator.rb:35  [Use `delegate` to define delegations.]`
-
-</details>
-
-<details>
-<summary><strong>Style/DocumentationMethod</strong> — 1,095,458 matches, 0 FP, 1 FN (99.9%)</summary>
-
-**Default config** (0 FP, 1 FN):
-
-- FN: `trainline-eu__stations__3982bfb: test_data.rb:571  [Missing method documentation comment.]`
 
 </details>
 
@@ -541,18 +500,15 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary><strong>Layout/IndentationWidth</strong> — 255,692 matches, 109 FP, 50 FN (100.0%)</summary>
+<summary><strong>Layout/IndentationWidth</strong> — 255,692 matches, 85 FP, 1 FN (100.0%)</summary>
 
-**relative_to_receiver** (109 FP, 50 FN):
+**relative_to_receiver** (85 FP, 1 FN):
 
-- FP: `JEG2__highline__0321f84: lib/highline/string_extensions.rb:77  [Use 1 (not 0) tabs for indented_internal_methods indentation.]`
 - FP: `Shopify__roast__9c72794: lib/roast/cog/output.rb:48  [Use 1 (not 0) tabs for indented_internal_methods indentation.]`
-- FP: `activeadmin__activeadmin__c3de750: lib/active_admin/resource_controller/resource_class_methods.rb:19  [Use 1 (not 0) tabs for indented_internal_methods indentation.]`
-- ... and 97 more FP
+- FP: `ankane__blazer__c17d8ec: lib/blazer/adapters/snowflake_adapter.rb:26  [Use 1 (not 0) tabs for indented_internal_methods indentation.]`
+- FP: `cyberark__conjur__8031a2a: app/domain/authentication/authenticate.rb:35  [Use 1 (not 0) tabs for indented_internal_methods indentation.]`
+- ... and 82 more FP
 - FN: `molybdenum-99__reality__0ac3b48: script/lib/nokogiri_more.rb:159  [Use 1 (not 2) tabs for indentation.]`
-- FN: `yippee-fun__phlex__8012266: lib/phlex/compiler/method_compiler.rb:357  [Use 1 (not 0) tabs for indentation.]`
-- FN: `yippee-fun__phlex__8012266: lib/phlex/compiler/method_compiler.rb:362  [Use 1 (not 0) tabs for indentation.]`
-- ... and 47 more FN
 
 </details>
 
@@ -585,16 +541,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 **space** (1 FP, 0 FN):
 
 - FP: `pivotal__LicenseFinder__00b04cb: spec/lib/license_finder/package_managers/cocoa_pods_spec.rb:65  [Missing space inside string interpolation.]`
-
-</details>
-
-<details>
-<summary><strong>Rails/Date</strong> — 3,896 matches, 0 FP, 2 FN (100.0%)</summary>
-
-**strict** (0 FP, 2 FN):
-
-- FN: `rails__rails__d7c8ae6: activesupport/test/core_ext/date_ext_test.rb:17  [Do not use `Date.yesterday` without zone. Use `Time.zone.yesterday` instead.]`
-- FN: `rails__rails__d7c8ae6: activesupport/test/core_ext/date_ext_test.rb:21  [Do not use `Date.tomorrow` without zone. Use `Time.zone.tomorrow` instead.]`
 
 </details>
 
@@ -816,7 +762,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | digital-fabric__papercraft__9d28587 | 42 | 98.8% | 2,830 | 33 | 0 |
 | diowa__icare__8d2f83a | 119 | 98.8% | 2,133 | 25 | 0 |
 | chrisfrank__rack-component__530a537 | 14 | 98.8% | 347 | 4 | 0 |
-| foodcoops__foodsoft__14e75af | 627 | 98.8% | 14,522 | 167 | 0 |
+| foodcoops__foodsoft__14e75af | 627 | 98.8% | 14,522 | 166 | 0 |
 | gocardless__statesman__2cfe66d | 45 | 98.8% | 2,965 | 34 | 0 |
 | lucascaton__enumerate_it__6994e78 | 21 | 98.8% | 617 | 7 | 0 |
 | r7kamura__scheman__619a07b | 20 | 98.8% | 876 | 0 | 10 |
@@ -935,7 +881,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ttscoff__OTask__9984fe4 | 7 | 99.2% | 421 | 3 | 0 |
 | windy__cywin__289cea1 | 318 | 99.2% | 5,642 | 40 | 0 |
 | 24pullrequests__24pullrequests__381028d | 220 | 99.3% | 5,396 | 37 | 1 |
-| eigenben__jazz_model__58cd08d | 49 | 99.3% | 2,132 | 15 | 0 |
 | hackclub__auth__b5a2934 | 331 | 99.3% | 11,812 | 83 | 0 |
 | nikushi__problem_details__5f04ddb | 29 | 99.3% | 284 | 2 | 0 |
 | r00k__refactoring-good-to-great__9d09870 | 13 | 99.3% | 143 | 0 | 1 |
@@ -971,7 +916,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | jameshibbard__react-rails-crud-app__e6b0f95 | 39 | 99.3% | 307 | 2 | 0 |
 | lobsters__lobsters__fce8b85 | 494 | 99.3% | 20,943 | 130 | 6 |
 | rom-rb__rom-rails__3cbde6d | 74 | 99.3% | 918 | 6 | 0 |
-| ruby-i18n__i18n__b0fffb8 | 93 | 99.3% | 6,336 | 41 | 0 |
 | spree__spree_multi_vendor__d16867b | 116 | 99.3% | 2,317 | 15 | 0 |
 | xwmx__pandoc-ruby__22f114c | 8 | 99.3% | 770 | 5 | 0 |
 | Bishwas-py__deviser-club__2d1b857 | 118 | 99.3% | 2,023 | 13 | 0 |
@@ -980,6 +924,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | MaksimAbramchuk__ruby-telegram-bot-starter-kit__bc85476 | 10 | 99.3% | 158 | 1 | 0 |
 | RefugeRestrooms__refugerestrooms__1c8ecbd | 127 | 99.3% | 1,902 | 12 | 0 |
 | openHPI__codeocean__7876111 | 649 | 99.3% | 16,001 | 95 | 6 |
+| ruby-i18n__i18n__b0fffb8 | 93 | 99.3% | 6,336 | 40 | 0 |
 | svenfuchs__i18n-active_record__0605ccf | 23 | 99.3% | 476 | 3 | 0 |
 | virolea__rosetta__7a447dd | 90 | 99.3% | 1,115 | 7 | 0 |
 | Growstuff__growstuff__f0afcad | 636 | 99.3% | 20,851 | 128 | 0 |
@@ -1086,7 +1031,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | archonic__limestone__bfc9b64 | 144 | 99.5% | 2,832 | 14 | 0 |
 | cambridge-healthcare__hi_sinatra-docker__093e707 | 12 | 99.5% | 203 | 0 | 1 |
 | dalibor__octoshark__13c3a35 | 26 | 99.5% | 603 | 3 | 0 |
-| lucas-aragno__sinatra-graphql__7527c1e | 24 | 99.5% | 406 | 2 | 0 |
 | ChrisZou__geekweibo__e9f77ee | 117 | 99.5% | 1,439 | 7 | 0 |
 | IAPark__tiktoken_ruby__fafe686 | 12 | 99.5% | 408 | 2 | 0 |
 | WikiEducationFoundation__WikiEduDashboard__0d6258c | 1,401 | 99.5% | 43,110 | 206 | 2 |
@@ -1321,7 +1265,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | c10l__vagrant-butcher__169cc1d | 21 | 99.6% | 308 | 0 | 1 |
 | drivy__checker_jobs__5e3a55b | 40 | 99.6% | 920 | 3 | 0 |
 | dukechronicle__chronline__01635e9 | 312 | 99.6% | 10,251 | 31 | 2 |
-| edavis10__redmine__2d6f552 | 1,006 | 99.6% | 107,928 | 304 | 47 |
+| edavis10__redmine__2d6f552 | 1,006 | 99.6% | 107,929 | 304 | 46 |
 | errbit__errbit__2c8101f | 229 | 99.6% | 9,217 | 30 | 0 |
 | flazz__semver__ce1cc06 | 7 | 99.6% | 304 | 0 | 1 |
 | grosser__git-autobisect__116491c | 7 | 99.6% | 309 | 1 | 0 |
@@ -1349,7 +1293,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ossert__ossert__e05c49e | 78 | 99.6% | 2,540 | 8 | 0 |
 | projectcypress__cypress__ace17cd | 343 | 99.6% | 14,181 | 45 | 0 |
 | red-data-tools__enumerable-statistics__3042fe1 | 44 | 99.6% | 1,875 | 5 | 1 |
-| redmine__redmine__a1a0959 | 1,115 | 99.6% | 113,527 | 309 | 48 |
+| redmine__redmine__a1a0959 | 1,115 | 99.6% | 113,528 | 309 | 47 |
 | rustyio__super-imap__98b407b | 146 | 99.6% | 3,495 | 11 | 0 |
 | somleng__somleng__70759a8 | 1,180 | 99.6% | 28,562 | 85 | 4 |
 | standardrb__standard-rails__c998da0 | 14 | 99.6% | 312 | 1 | 0 |
@@ -1406,7 +1350,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | judofyr__gash__55614ca | 17 | 99.7% | 735 | 0 | 2 |
 | kontera-technologies__nutcracker-web__03a6d2f | 8 | 99.7% | 369 | 1 | 0 |
 | podemos-info__participa__ba54d4c | 434 | 99.7% | 22,800 | 60 | 3 |
-| pry0cc__cloud-ranges__c53aa2e | 2 | 99.7% | 367 | 0 | 1 |
 | rails3book__ticketee__67362e1 | 193 | 99.7% | 3,641 | 8 | 2 |
 | redhotvengeance__deep_thought__c2ded3c | 43 | 99.7% | 1,816 | 5 | 0 |
 | scsmith__language_list__972cf7e | 8 | 99.7% | 360 | 1 | 0 |
@@ -1477,6 +1420,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | jules2689__extended_bundler-errors__a0e9aa9 | 12 | 99.7% | 399 | 1 | 0 |
 | julianrubisch__better-stimulus__a2ecac0 | 95 | 99.7% | 1,633 | 4 | 0 |
 | koppen__redmine_github_hook__06d1aee | 15 | 99.7% | 414 | 1 | 0 |
+| lucas-aragno__sinatra-graphql__7527c1e | 24 | 99.7% | 406 | 1 | 0 |
 | palkan__downstream__f11cfff | 33 | 99.7% | 809 | 2 | 0 |
 | prydonius__spinning_cursor__e0f2a9a | 13 | 99.7% | 818 | 0 | 2 |
 | renuo__i18n-docs__cdf45bc | 14 | 99.7% | 411 | 1 | 0 |
@@ -1497,7 +1441,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | chef-boneyard__chef-client__3e37a6e | 49 | 99.7% | 862 | 2 | 0 |
 | cobyism__dciy__afde48e | 48 | 99.7% | 856 | 2 | 0 |
 | comfy__comfortable-mexican-sofa__8f7e425 | 197 | 99.7% | 9,851 | 23 | 0 |
-| cyberark__conjur__8031a2a | 938 | 99.7% | 53,064 | 120 | 4 |
+| cyberark__conjur__8031a2a | 938 | 99.7% | 53,065 | 120 | 3 |
 | department-of-veterans-affairs__vets-api__038d1df | 8,267 | 99.7% | 398,195 | 920 | 9 |
 | feedbin__feedbin__6396029 | 1,020 | 99.7% | 27,585 | 61 | 3 |
 | geekq__workflow__24212f4 | 23 | 99.7% | 844 | 2 | 0 |
@@ -1654,6 +1598,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | carrierwaveuploader__carrierwave-aws__0d3cb7c | 21 | 99.8% | 542 | 1 | 0 |
 | castle__ruby-u2f__2f9b3da | 35 | 99.8% | 531 | 1 | 0 |
 | eigenben__has_draft__aad90ee | 21 | 99.8% | 536 | 1 | 0 |
+| eigenben__jazz_model__58cd08d | 49 | 99.8% | 2,132 | 4 | 0 |
 | htdebeer__pandocomatic__b068329 | 67 | 99.8% | 2,211 | 4 | 0 |
 | inferno-framework__fhir_client__abc3dde | 46 | 99.8% | 2,710 | 0 | 5 |
 | infinitered__ruby-xcdm__0e3212d | 12 | 99.8% | 541 | 1 | 0 |
@@ -1704,7 +1649,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | otwcode__otwarchive__412f04f | 1,041 | 99.8% | 75,072 | 126 | 7 |
 | railsadminteam__rails_admin__d8e0809 | 464 | 99.8% | 17,591 | 30 | 1 |
 | renuo__moirai__f42dcb3 | 76 | 99.8% | 1,170 | 2 | 0 |
-| ruby-formatter__rufo__a90e654 | 158 | 99.8% | 10,876 | 4 | 15 |
 | ruby__ostruct__f5033ba | 7 | 99.8% | 583 | 1 | 0 |
 | ruport__ruport__efdd597 | 68 | 99.8% | 7,564 | 1 | 12 |
 | sconover__wrong__9fae5b8 | 59 | 99.8% | 2,860 | 5 | 0 |
@@ -1722,7 +1666,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | codeforamerica__ohana-api__e3ab280 | 460 | 99.8% | 11,186 | 19 | 0 |
 | fractaledmind__activerecord-enhancedsqlite3-adapter__305795a | 19 | 99.8% | 594 | 0 | 1 |
 | hamcrest__ramcrest__0a02f5e | 35 | 99.8% | 621 | 1 | 0 |
-| harryw__raft__2ffe2b1 | 6 | 99.8% | 604 | 0 | 1 |
 | hendrikschneider__jekyll-analytics__5b56c53 | 19 | 99.8% | 592 | 1 | 0 |
 | hschne__rails-mini-profiler__b9c3798 | 144 | 99.8% | 1,843 | 3 | 0 |
 | jcypret__hashid-rails__e0e2982 | 20 | 99.8% | 608 | 1 | 0 |
@@ -1749,7 +1692,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Shopify__seafoam__83225c3 | 55 | 99.8% | 3,779 | 6 | 0 |
 | adamcooke__authie__df35c0a | 52 | 99.8% | 1,287 | 2 | 0 |
 | adzap__validates_timeliness__a36d6f7 | 41 | 99.8% | 1,934 | 3 | 0 |
-| akicho8__shogi-extend__3650350 | 2,298 | 99.8% | 79,212 | 117 | 7 |
+| akicho8__shogi-extend__3650350 | 2,298 | 99.8% | 79,213 | 117 | 6 |
 | alassek__activerecord-pg_enum__8863c40 | 76 | 99.8% | 1,250 | 2 | 0 |
 | alexreisner__geocoder__2d3be47 | 251 | 99.8% | 11,975 | 9 | 10 |
 | cjbottaro__schizo__8f05d1b | 22 | 99.8% | 665 | 1 | 0 |
@@ -1776,6 +1719,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | pluosi__app-host__703ed39 | 101 | 99.8% | 2,608 | 4 | 0 |
 | pry__pry-stack_explorer__2124bbf | 20 | 99.8% | 1,295 | 2 | 0 |
 | red-data-tools__red_amber__15fc3e5 | 49 | 99.8% | 3,287 | 4 | 1 |
+| ruby-formatter__rufo__a90e654 | 158 | 99.8% | 10,878 | 4 | 13 |
 | rusrails__rusrails__354a7fd | 54 | 99.8% | 637 | 1 | 0 |
 | skaes__time_bandits__6354956 | 38 | 99.8% | 1,315 | 2 | 0 |
 | square__ETL__029433c | 9 | 99.8% | 661 | 1 | 0 |
@@ -1945,7 +1889,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | subhransu__railsauth__fd3493b | 46 | 99.8% | 782 | 1 | 0 |
 | thoughtbot__high_voltage__7e8e621 | 41 | 99.8% | 780 | 1 | 0 |
 | tilfin__ougai__397d077 | 25 | 99.8% | 1,655 | 1 | 1 |
-| trainline-eu__stations__3982bfb | 6 | 99.8% | 1,619 | 0 | 2 |
 | voxpupuli__onceover__b329bba | 60 | 99.8% | 2,434 | 3 | 0 |
 | ackama__rails-template__a88fa84 | 79 | 99.8% | 1,752 | 2 | 0 |
 | active-elastic-job__active-elastic-job__09552d9 | 101 | 99.8% | 1,673 | 0 | 2 |
@@ -1964,6 +1907,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | jodosha__minegems__c71728d | 119 | 99.8% | 2,548 | 0 | 3 |
 | joshmn__caffeinate__93c8fe5 | 137 | 99.8% | 2,513 | 0 | 3 |
 | lantins__resque-retry__7f083c1 | 31 | 99.8% | 1,742 | 0 | 2 |
+| lorint__brick__fa07b7f | 145 | 99.8% | 7,924 | 5 | 4 |
 | maid__maid__ee7fd79 | 40 | 99.8% | 1,804 | 2 | 0 |
 | marcoroth__gum-ruby__faf9e2c | 39 | 99.8% | 872 | 1 | 0 |
 | mdp__gibberish__d538e79 | 15 | 99.8% | 837 | 1 | 0 |
@@ -2016,7 +1960,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | lgierth__promise.rb__a531455 | 14 | 99.8% | 952 | 1 | 0 |
 | lockstep__rails_new__80cdf9b | 129 | 99.8% | 1,933 | 2 | 0 |
 | locoframework__loco-rails__69b8af3 | 156 | 99.8% | 1,837 | 2 | 0 |
-| lorint__brick__fa07b7f | 145 | 99.8% | 7,925 | 5 | 3 |
 | mame__optcarrot__9c88f5f | 49 | 99.8% | 4,558 | 5 | 0 |
 | mattbrictson__nextgen__a1bb4aa | 303 | 99.8% | 4,829 | 5 | 0 |
 | mayu-live__framework__820608a | 199 | 99.8% | 8,702 | 5 | 4 |
@@ -2079,7 +2022,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | neo4jrb__neo4j-core__4b649fc | 62 | 99.9% | 3,145 | 3 | 0 |
 | nerdEd__gtfs__630a435 | 49 | 99.9% | 1,020 | 1 | 0 |
 | obie__desiru__73e038a | 158 | 99.9% | 10,059 | 10 | 0 |
-| opf__openproject__f5a451d | 9,286 | 99.9% | 398,057 | 60 | 310 |
+| opf__openproject__f5a451d | 9,286 | 99.9% | 398,057 | 59 | 310 |
 | palkan__anyway_config__e171bf6 | 105 | 99.9% | 4,176 | 4 | 0 |
 | palkan__isolator__1ffb396 | 90 | 99.9% | 2,158 | 2 | 0 |
 | pat__riddle__748ca04 | 84 | 99.9% | 4,316 | 0 | 4 |
@@ -2090,7 +2033,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ruby-debug__ruby-debug-ide__3a74a47 | 68 | 99.9% | 4,029 | 1 | 3 |
 | ruby-rdf__spira__4f48d4d | 83 | 99.9% | 5,007 | 5 | 0 |
 | ruby__rake__c1c6e81 | 100 | 99.9% | 9,158 | 2 | 7 |
-| ruby__reline__e507d6f | 48 | 99.9% | 6,343 | 5 | 1 |
 | rubyrep__rubyrep__2078a40 | 140 | 99.9% | 14,151 | 13 | 1 |
 | salsify__avromatic__35c7765 | 99 | 99.9% | 3,244 | 1 | 2 |
 | savonrb__gyoku__c9483b7 | 17 | 99.9% | 1,079 | 1 | 0 |
@@ -2235,6 +2177,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | revans__Ti__dee2942 | 28 | 99.9% | 1,427 | 1 | 0 |
 | ruby__did_you_mean__74d3054 | 52 | 99.9% | 1,420 | 1 | 0 |
 | ruby__optparse__b693a2c | 88 | 99.9% | 2,810 | 2 | 0 |
+| ruby__reline__e507d6f | 48 | 99.9% | 6,344 | 5 | 0 |
 | ruby__ruby.wasm__24fbf24 | 82 | 99.9% | 3,920 | 3 | 0 |
 | rubysec__bundler-audit__f8b06eb | 46 | 99.9% | 2,714 | 2 | 0 |
 | saturnflyer__surrounded__8b0c56a | 41 | 99.9% | 1,277 | 1 | 0 |
@@ -2311,6 +2254,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | somaticio__tensorflow.rb__e8723dd | 26 | 99.9% | 1,453 | 1 | 0 |
 | thoughtbot__gitsh__7b890ea | 194 | 99.9% | 6,459 | 4 | 0 |
 | torba-rb__torba__b06cbb1 | 45 | 99.9% | 1,521 | 1 | 0 |
+| trainline-eu__stations__3982bfb | 6 | 99.9% | 1,620 | 0 | 1 |
 | tute__merit__f359a7a | 95 | 99.9% | 1,596 | 1 | 0 |
 | tweetstream__tweetstream__cae45e7 | 22 | 99.9% | 1,629 | 1 | 0 |
 | upserve__dockly__5fb477d | 44 | 99.9% | 3,023 | 1 | 1 |
@@ -2345,7 +2289,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | flavorjones__loofah__e6f4751 | 37 | 99.9% | 3,687 | 2 | 0 |
 | galtzo-floss__gem_bench__c46d7fa | 43 | 99.9% | 1,931 | 1 | 0 |
 | github-linguist__linguist__fbdd23b | 101 | 99.9% | 11,167 | 6 | 0 |
-| hackedteam__rcs-db__6cff59d | 361 | 99.9% | 35,373 | 0 | 19 |
 | hanami__hanami-utils__c31573b | 61 | 99.9% | 5,344 | 3 | 0 |
 | janlelis__wirb__9d0b381 | 26 | 99.9% | 1,885 | 1 | 0 |
 | jhawthorn__rapidjson-ruby__9292377 | 26 | 99.9% | 1,698 | 1 | 0 |
@@ -2395,7 +2338,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | yohasebe__ruby-spacy__d97000a | 64 | 99.9% | 1,961 | 0 | 1 |
 | zombocom__derailed_benchmarks__e8b29db | 72 | 99.9% | 1,994 | 1 | 0 |
 | CocoaPods__Xcodeproj__2cf6a22 | 133 | 99.9% | 9,043 | 3 | 1 |
-| ConfigLMM__ConfigLMM__26d3a20 | 136 | 99.9% | 18,165 | 0 | 9 |
 | Diego81__omnicontacts__105b40f | 35 | 99.9% | 2,446 | 1 | 0 |
 | InfluxCommunity__influxdb-ruby__e8fdec6 | 54 | 99.9% | 4,044 | 2 | 0 |
 | NoBrainerORM__nobrainer__be4dd19 | 206 | 99.9% | 12,435 | 1 | 4 |
@@ -2434,6 +2376,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | gcao__aspector__c82396d | 90 | 99.9% | 2,416 | 0 | 1 |
 | gel-rb__gel__34b69dc | 125 | 99.9% | 8,057 | 3 | 1 |
 | grape__grape__8a1963c | 306 | 99.9% | 15,930 | 7 | 0 |
+| hackedteam__rcs-db__6cff59d | 361 | 99.9% | 35,376 | 0 | 16 |
 | hacketyhack__hackety-hack.com__a97400e | 111 | 99.9% | 2,242 | 1 | 0 |
 | html2rss__html2rss__7672db3 | 182 | 99.9% | 4,971 | 2 | 0 |
 | inertiajs__inertia-rails__a23caca | 138 | 99.9% | 4,385 | 2 | 0 |
@@ -2469,7 +2412,6 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | reidmorrison__rocketjob__3faeb88 | 160 | 99.9% | 6,054 | 3 | 0 |
 | ricardochimal__taps__93bd272 | 29 | 99.9% | 2,208 | 1 | 0 |
 | rick__linode__9c46d30 | 40 | 99.9% | 2,261 | 0 | 1 |
-| rswag__rswag__0a5a049 | 101 | 99.9% | 2,189 | 1 | 0 |
 | rtomayko__tilt__9e2dba1 | 87 | 99.9% | 4,396 | 1 | 1 |
 | ruby-concurrency__concurrent-ruby__30dc89e | 350 | 99.9% | 24,837 | 5 | 7 |
 | ruby-git__ruby-git__2eecb07 | 312 | 99.9% | 10,840 | 4 | 1 |
@@ -2545,7 +2487,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | guard__guard-rspec__1cf25c7 | 41 | 99.9% | 2,579 | 1 | 0 |
 | haml__haml__0880837 | 106 | 99.9% | 6,652 | 2 | 0 |
 | hanami__hanami-router__3fb8039 | 87 | 99.9% | 5,708 | 2 | 0 |
-| hashicorp__vagrant__92e8886 | 1,460 | 99.9% | 87,561 | 2 | 28 |
+| hashicorp__vagrant__92e8886 | 1,460 | 99.9% | 87,562 | 2 | 27 |
 | heartcombo__simple_form__91c4fe0 | 103 | 99.9% | 3,124 | 0 | 1 |
 | hotwired__turbo-rails__435135b | 120 | 99.9% | 3,122 | 1 | 0 |
 | imikimi__monotable__02def17 | 95 | 99.9% | 9,066 | 0 | 3 |
@@ -2740,6 +2682,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | zendesk__zendesk_api_client_rb__7f573a8 | 131 | 99.9% | 8,102 | 2 | 0 |
 | 0dayInc__pwn__c3d3e6d | 644 | 99.9% | 18,862 | 0 | 2 |
 | CompanyBook__massive_record__dbb5758 | 185 | 99.9% | 18,882 | 3 | 0 |
+| ConfigLMM__ConfigLMM__26d3a20 | 136 | 99.9% | 18,172 | 0 | 2 |
 | DataDog__dogstatsd-ruby__bf701af | 56 | 99.9% | 5,312 | 1 | 0 |
 | Dynflow__dynflow__f64d11c | 239 | 99.9% | 10,859 | 2 | 0 |
 | NARKOZ__gitlab__8aef58f | 170 | 99.9% | 7,048 | 1 | 0 |
@@ -2865,7 +2808,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | ynab__ynab-sdk-ruby__633360c | 148 | 99.9% | 16,414 | 3 | 0 |
 | yoshoku__rumale__769c8aa | 433 | 99.9% | 14,489 | 1 | 1 |
 | AndyObtiva__glimmer-dsl-swt__449cf07 | 342 | 99.9% | 24,931 | 2 | 0 |
-| Arachni__arachni__c1710d6 | 1,064 | 99.9% | 103,251 | 1 | 6 |
+| Arachni__arachni__c1710d6 | 1,064 | 99.9% | 103,252 | 1 | 5 |
 | BallAerospace__COSMOS__01afe3c | 623 | 99.9% | 63,366 | 0 | 2 |
 | DataDog__datadog-ci-rb__cadff60 | 661 | 99.9% | 44,694 | 2 | 0 |
 | ManageIQ__manageiq__b530ec7 | 2,222 | 99.9% | 203,422 | 2 | 14 |
@@ -4274,6 +4217,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | harm-smits__42docs__f40cae7 | 1 | 100.0% | 16 | 0 | 0 |
 | harrisj__iron_ebooks__31aa842 | 3 | 100.0% | 178 | 0 | 0 |
 | harrison-broadbent__better_mailer_previews__13eff43 | 45 | 100.0% | 350 | 0 | 0 |
+| harryw__raft__2ffe2b1 | 6 | 100.0% | 605 | 0 | 0 |
 | hartator__wayback-machine-downloader__653b94b | 9 | 100.0% | 567 | 0 | 0 |
 | hashdog__mongoid-simple-tags__814742f | 7 | 100.0% | 341 | 0 | 0 |
 | hashicorp__vault-rails__95327ed | 43 | 100.0% | 1,835 | 0 | 0 |
@@ -5352,6 +5296,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | protobuf-ruby__beefcake__c0a97e7 | 18 | 100.0% | 1,685 | 0 | 0 |
 | proton__mongoid_rateable__cba4078 | 20 | 100.0% | 2,803 | 0 | 0 |
 | provideal__tabulatr__9265e64 | 57 | 100.0% | 2,351 | 0 | 0 |
+| pry0cc__cloud-ranges__c53aa2e | 2 | 100.0% | 368 | 0 | 0 |
 | pry__pry-coolline__ec4d14d | 10 | 100.0% | 327 | 0 | 0 |
 | psyho__bogus__e4393fe | 131 | 100.0% | 3,957 | 0 | 0 |
 | public-activity__public_activity__d820088 | 57 | 100.0% | 916 | 0 | 0 |
@@ -5539,6 +5484,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | rsolr__rsolr__a60ec42 | 26 | 100.0% | 2,196 | 0 | 0 |
 | rspec__rspec-collection_matchers__5a4b4ba | 15 | 100.0% | 913 | 0 | 0 |
 | rspec__rspec-its__37d3526 | 10 | 100.0% | 476 | 0 | 0 |
+| rswag__rswag__0a5a049 | 101 | 100.0% | 2,189 | 0 | 0 |
 | rubenfonseca__twitter-amqp-websocket-example__2ea3282 | 3 | 100.0% | 57 | 0 | 0 |
 | rubocop__guard-rubocop__d893134 | 13 | 100.0% | 521 | 0 | 0 |
 | rubocop__rubocop-rake__64ce2a9 | 25 | 100.0% | 189 | 0 | 0 |
@@ -6298,13 +6244,14 @@ Results combining default config and every non-default `EnforcedStyle` option.
 </details>
 
 <details>
-<summary>Perfect cops (862 cops with 100% match rate)</summary>
+<summary>Perfect cops (865 cops with 100% match rate)</summary>
 
 | Cop | Matches |
 |-----|--------:|
 | Style/StringLiterals | 4,180,746 |
 | Lint/ConstantResolution | 4,070,486 |
 | Style/MethodCallWithArgsParentheses | 3,360,348 |
+| Style/DocumentationMethod | 1,095,459 |
 | Style/StringHashKeys | 688,708 |
 | Style/Copyright | 585,769 |
 | Style/HashSyntax | 580,838 |
@@ -6644,6 +6591,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Rails/PluckId | 3,576 |
 | RSpec/RepeatedExampleGroupDescription | 3,573 |
 | Rails/FindEach | 3,570 |
+| Rails/CreateTableWithTimestamps | 3,546 |
 | Style/MultilineIfModifier | 3,536 |
 | Layout/SpaceInsideStringInterpolation | 3,520 |
 | Rails/ReversibleMigration | 3,518 |
@@ -6972,6 +6920,7 @@ Results combining default config and every non-default `EnforcedStyle` option.
 | Lint/ToJSON | 206 |
 | Performance/DoubleStartEndWith | 206 |
 | Rails/ReflectionClassName | 206 |
+| Rails/AddColumnIndex | 205 |
 | Style/EndlessMethod | 205 |
 | Style/NestedFileDirname | 204 |
 | Rails/DotSeparatedKeys | 203 |
