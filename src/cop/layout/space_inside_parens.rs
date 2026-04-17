@@ -1,6 +1,6 @@
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
-    HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
+    FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
     PINNED_EXPRESSION_NODE, SUPER_NODE, YIELD_NODE,
 };
 use crate::cop::{Cop, CopConfig};
@@ -107,6 +107,41 @@ use crate::parse::source::SourceFile;
 /// checking for a `:` immediately preceded by an identifier character
 /// (excluding `::` constant resolution). This feeds into
 /// `ignores_open_side()` alongside the existing command-form check.
+///
+/// ## Corpus investigation (2026-04-16)
+///
+/// The remaining `compact`-style misses came from treating raw `(` / `)`
+/// bytes as if they always represented paren tokens. RuboCop only collapses
+/// true consecutive paren tokens:
+///
+/// 1. `g( ( 3 + 5 ) * x )` should remove the space between `(` and `(`.
+/// 2. `g( f( x ) )` / `uri_parse( to_absolute(...) )` should remove the space
+///    between `)` and `)`.
+/// 3. `warning(%(\n...\n))` must still require a space before the outer `)`
+///    because the inner `)` belongs to a percent-string delimiter, not a
+///    nested paren token.
+///
+/// Fix: for `compact`, opening-side collapse now only allows adjacent `((`
+/// and reports `"( ("` as extraneous space, while closing-side collapse only
+/// treats adjacent/spaced `))` as collapsible when the last inner child is
+/// itself a paren-carrying node. That matches RuboCop's token-based behavior
+/// without weakening ordinary string/literal cases.
+///
+/// ## Corpus investigation (2026-04-16, follow-up)
+///
+/// Two variant mismatches remained:
+///
+/// 1. Prism parses `Point(*, 1, *a)` pattern parens as `FindPatternNode`, not
+///    `ArrayPatternNode`, so both `space` and `compact` missed those offenses.
+/// 2. RuboCop tokenizes multiline plain quoted strings like
+///    `select("...\n...")` as a single `tSTRING` token. The opening `(` still
+///    checks against that token, but the closing `)` is ignored because the
+///    token started on a previous line. Percent strings like `%(\n...\n)` still
+///    expose a same-line `tSTRING_END`, so their closing side remains checked.
+///
+/// Fix: add `FindPatternNode` paren extraction, and skip close-side
+/// missing-space checks only when the final inner node is a multiline plain
+/// quoted `StringNode` whose closing quote is immediately before the outer `)`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -128,6 +163,7 @@ impl Cop for SpaceInsideParens {
             CALL_NODE,
             DEF_NODE,
             DEFINED_NODE,
+            FIND_PATTERN_NODE,
             HASH_PATTERN_NODE,
             MULTI_TARGET_NODE,
             MULTI_WRITE_NODE,
@@ -206,6 +242,7 @@ impl Cop for SpaceInsideParens {
                     source,
                     diagnostics,
                     &mut corrections,
+                    node,
                     bytes,
                     close_side,
                     close_start,
@@ -214,25 +251,25 @@ impl Cop for SpaceInsideParens {
             }
             "compact" => {
                 if !ignore_open_side {
-                    check_missing_open_space(
+                    check_compact_open_space(
                         self,
                         source,
                         diagnostics,
                         &mut corrections,
+                        open_end,
                         bytes,
                         open_side,
-                        true,
                     );
                 }
-                check_missing_close_space(
+                check_compact_close_space(
                     self,
                     source,
                     diagnostics,
                     &mut corrections,
+                    node,
                     bytes,
                     close_side,
                     close_start,
-                    true,
                 );
             }
             _ => {
@@ -309,6 +346,14 @@ fn paren_offsets(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<(usize, us
     if let Some(hash_pattern) = node.as_hash_pattern_node() {
         let open = hash_pattern.opening_loc()?;
         let close = hash_pattern.closing_loc()?;
+        if open.as_slice() == b"(" && close.as_slice() == b")" {
+            return Some((open.start_offset(), open.end_offset(), close.start_offset()));
+        }
+    }
+
+    if let Some(find_pattern) = node.as_find_pattern_node() {
+        let open = find_pattern.opening_loc()?;
+        let close = find_pattern.closing_loc()?;
         if open.as_slice() == b"(" && close.as_slice() == b")" {
             return Some((open.start_offset(), open.end_offset(), close.start_offset()));
         }
@@ -638,12 +683,59 @@ fn check_missing_open_space(
     );
 }
 
+fn check_compact_open_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    open_end: usize,
+    bytes: &[u8],
+    open_side: NextSameLineItem,
+) {
+    let NextSameLineItem::Code(code_start) = open_side else {
+        return;
+    };
+
+    if bytes.get(code_start) == Some(&b'(') {
+        if code_start == open_end {
+            return;
+        }
+
+        push_remove_offense(
+            cop,
+            source,
+            diagnostics,
+            corrections,
+            open_end,
+            code_start,
+            MSG,
+        );
+        return;
+    }
+
+    if code_start == 0 {
+        return;
+    }
+    if bytes.get(code_start - 1) == Some(&b' ') {
+        return;
+    }
+    push_insert_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        code_start,
+        MSG_NO_SPACE,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_missing_close_space(
     cop: &SpaceInsideParens,
     source: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
     corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node: &ruby_prism::Node<'_>,
     bytes: &[u8],
     close_side: Option<usize>,
     close_start: usize,
@@ -652,6 +744,9 @@ fn check_missing_close_space(
     let Some(prev_code) = close_side else {
         return;
     };
+    if ignores_close_side_for_multiline_plain_string(node, prev_code) {
+        return;
+    }
     if allow_consecutive_right_parens && bytes.get(prev_code) == Some(&b')') {
         return;
     }
@@ -666,6 +761,131 @@ fn check_missing_close_space(
         close_start,
         MSG_NO_SPACE,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_compact_close_space(
+    cop: &SpaceInsideParens,
+    source: &SourceFile,
+    diagnostics: &mut Vec<Diagnostic>,
+    corrections: &mut Option<&mut Vec<crate::correction::Correction>>,
+    node: &ruby_prism::Node<'_>,
+    bytes: &[u8],
+    close_side: Option<usize>,
+    close_start: usize,
+) {
+    let Some(prev_code) = close_side else {
+        return;
+    };
+    if ignores_close_side_for_multiline_plain_string(node, prev_code) {
+        return;
+    }
+
+    if bytes.get(prev_code) == Some(&b')')
+        && compact_allows_consecutive_close_paren(node, bytes, prev_code)
+    {
+        if prev_code + 1 == close_start {
+            return;
+        }
+
+        push_remove_offense(
+            cop,
+            source,
+            diagnostics,
+            corrections,
+            prev_code + 1,
+            close_start,
+            MSG,
+        );
+        return;
+    }
+
+    if prev_code + 1 != close_start {
+        return;
+    }
+
+    push_insert_offense(
+        cop,
+        source,
+        diagnostics,
+        corrections,
+        close_start,
+        MSG_NO_SPACE,
+    );
+}
+
+fn compact_allows_consecutive_close_paren(
+    node: &ruby_prism::Node<'_>,
+    bytes: &[u8],
+    prev_code: usize,
+) -> bool {
+    let Some(last_inner) = last_inner_node(node) else {
+        return false;
+    };
+
+    paren_offsets(&last_inner, bytes).is_some_and(|(_, _, inner_close)| inner_close == prev_code)
+}
+
+fn ignores_close_side_for_multiline_plain_string(
+    node: &ruby_prism::Node<'_>,
+    prev_code: usize,
+) -> bool {
+    let Some(last_inner) = last_inner_node(node) else {
+        return false;
+    };
+    let Some(string) = last_inner.as_string_node() else {
+        return false;
+    };
+
+    let Some(opening) = string.opening_loc() else {
+        return false;
+    };
+    let Some(closing) = string.closing_loc() else {
+        return false;
+    };
+    if !matches!(opening.as_slice(), b"\"" | b"'") || closing.as_slice() != opening.as_slice() {
+        return false;
+    }
+
+    string.location().as_slice().contains(&b'\n') && closing.start_offset() == prev_code
+}
+
+fn last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    if let Some(paren) = node.as_parentheses_node() {
+        let body = paren.body()?;
+        if let Some(stmts) = body.as_statements_node() {
+            return stmts.body().iter().last();
+        }
+        return Some(body);
+    }
+
+    if let Some(call) = node.as_call_node() {
+        return call
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(yield_node) = node.as_yield_node() {
+        return yield_node
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(super_node) = node.as_super_node() {
+        return super_node
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(pinned) = node.as_pinned_expression_node() {
+        return Some(pinned.expression());
+    }
+
+    if let Some(defined) = node.as_defined_node() {
+        return Some(defined.value());
+    }
+
+    None
 }
 
 fn push_remove_offense(
@@ -724,6 +944,12 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
+    crate::cop_variant_fixture_tests!(
+        SpaceInsideParens,
+        "cops/layout/space_inside_parens",
+        compact,
+        space
+    );
     crate::cop_autocorrect_fixture_tests!(SpaceInsideParens, "cops/layout/space_inside_parens");
 
     #[test]
@@ -762,6 +988,54 @@ mod tests {
         };
         let src = b"x = ( 1 + 2 )\n";
         assert_cop_no_offenses_full_with_config(&SpaceInsideParens, src, config);
+    }
+
+    #[test]
+    fn space_style_ignores_close_side_for_multiline_plain_string() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("space".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"select(\"DISTINCT ON(LOWER(miq_reports.name), miq_report_results.miq_report_id) LOWER(miq_reports.name), \\\n      miq_report_results.miq_report_id\")\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "space style should only flag the opening side"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+        assert!(diags[0].message.contains("No space"));
+    }
+
+    #[test]
+    fn compact_style_ignores_close_side_for_multiline_plain_string() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("compact".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"select(\"DISTINCT ON(LOWER(miq_reports.name), miq_report_results.miq_report_id) LOWER(miq_reports.name), \\\n      miq_report_results.miq_report_id\")\n";
+        let diags = run_cop_full_with_config(&SpaceInsideParens, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "compact style should only flag the opening side for multiline strings"
+        );
+        assert_eq!(diags[0].location.line, 1);
+        assert_eq!(diags[0].location.column, 7);
+        assert!(diags[0].message.contains("No space"));
     }
 
     #[test]
