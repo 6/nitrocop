@@ -819,3 +819,40 @@ def calc_error(gcps)
     end
   end
 end
+
+# FN fix: case/when single-statement branch should still flag nested shadowing
+def deploy_linux(protocol, target, context)
+  case protocol
+  when "ssh"
+    self.withConnection(target) do |connection|
+      self.class.withConnection(connection, context) do |connection|
+                                                         ^^^^^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `connection`.
+        use(connection)
+      end
+    end
+  end
+end
+
+# FN fix: if single-statement branch should still flag nested shadowing
+def backup_linux(target, context)
+  if target
+    self.withConnection(target) do |connection|
+      self.class.withConnection(connection, context) do |connection|
+                                                         ^^^^^^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `connection`.
+        use(connection)
+      end
+    end
+  end
+end
+
+# FN fix: nested receiver call in conditional branch still shadows outer block param
+def yomiage_process(last)
+  if last.tag_bundle
+    last.tag_bundle.each do |e|
+      e.each do |e|
+                 ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `e`.
+        talk(e.name)
+      end
+    end
+  end
+end

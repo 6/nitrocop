@@ -298,6 +298,11 @@ impl ShadowingContext {
         // `variable_node(variable)` can be an enclosing single-statement outer
         // block when the param lives in a nested block inside that block's body
         // (e.g. an else-branch `items.each do |k| values.each do |k| ... end`).
+        // That outer-block propagation is only valid for check 6 (else-branch
+        // ownership). Check 5 (`variable_node == outer_local_variable_node`)
+        // should only consider the innermost block itself; otherwise we
+        // suppress real offenses where an outer block param shadows inside the
+        // same single-statement `if`/`when` branch.
         let mut enclosing_blocks =
             self.block_body_ranges
                 .iter()
@@ -317,7 +322,7 @@ impl ShadowingContext {
                 && self.block_cond_parents.iter().any(|entry| {
                     entry.block_start == *block_start
                         && entry.cond_offset == outer_cond
-                        && (entry.is_single_stmt_branch || entry.is_else_of_if_type)
+                        && (entry.is_else_of_if_type || (first && entry.is_single_stmt_branch))
                 })
             {
                 return true;
@@ -605,6 +610,14 @@ impl ShadowingContext {
 ///     call, which incorrectly flagged the `riscv-unified-db` `t` example. Fix:
 ///     record call-argument ranges and add a narrow else-branch suppression only
 ///     for direct call-argument nesting one expression layer below that branch.
+///
+/// 14. **FN: check-5 propagation through an outer block was too broad.**
+///     RuboCop only lets the nested-block compatibility path walk outward
+///     through enclosing single-statement blocks for check 6's if-else ownership
+///     quirk. Reusing check 5 on those outer blocks suppressed real offenses
+///     like nested `connection`/`e` block params inside the same `if` or
+///     `case/when` branch. Fix: keep outer-block propagation for check 6 only,
+///     and restrict check 5 to the innermost block.
 ///
 /// ## Migration to VariableForce
 ///
