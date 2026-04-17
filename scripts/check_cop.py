@@ -363,17 +363,60 @@ show up in the cop-specific sample. They're selected by highest nitrocop_total
 """
 
 
-def canary_repos(data: dict, exclude: set[str], n: int = CANARY_REPO_COUNT) -> set[str]:
+def variant_covered_repos(run_id: int | None) -> set[str] | None:
+    """Return the set of repos that the variant oracle actually ran against.
+
+    The variant oracle uses --max-variant-repos to cap variant runs to the
+    top-N repos by manifest order. Repos beyond that limit have no variant
+    baseline data — any nitrocop output on them during --style CI runs
+    becomes a false "regression" against a stale 0-offense baseline.
+
+    Returns None when the oracle artifact doesn't expose per-repo variant
+    data (older artifacts); callers should then skip filtering.
+    """
+    if run_id is None:
+        return None
+    from shared.corpus_artifacts import get_variant_results_path
+    path = get_variant_results_path(int(run_id))
+    if not path:
+        return None
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    covered: set[str] = set()
+    for batch in data.get("batches", []):
+        for repo_id in batch.get("by_repo_cop", {}):
+            covered.add(repo_id)
+    return covered or None
+
+
+def canary_repos(
+    data: dict,
+    exclude: set[str],
+    n: int = CANARY_REPO_COUNT,
+    *,
+    variant_covered: set[str] | None = None,
+) -> set[str]:
     """Return the top-N highest-activity repos as canaries for wholesale regressions.
 
     Ranks by `nitrocop_total` (total offenses across all cops) — a rough proxy
     for how much Ruby code is exercised. Excludes repos already in the sample.
+
+    When *variant_covered* is provided, only repos in that set are eligible.
+    This prevents false FPs when running a variant check: the variant oracle
+    only runs on the first 1000 repos (--max-variant-repos), so a canary
+    beyond that limit has baseline_rc=0 and any nitrocop output becomes a
+    "regression" against stale baseline data.
     """
     by_repo = data.get("by_repo", [])
     if not by_repo:
         return set()
+    candidates = (r for r in by_repo if r.get("status") == "ok" and r.get("repo") not in exclude)
+    if variant_covered is not None:
+        candidates = (r for r in candidates if r.get("repo") in variant_covered)
     ranked = sorted(
-        (r for r in by_repo if r.get("status") == "ok" and r.get("repo") not in exclude),
+        candidates,
         key=lambda r: r.get("nitrocop_total", 0),
         reverse=True,
     )
@@ -383,6 +426,7 @@ def canary_repos(data: dict, exclude: set[str], n: int = CANARY_REPO_COUNT) -> s
 def relevant_repos_for_cop(
     cop_name: str, data: dict, *, sample: int | None = None,
     include_gated: bool = False,
+    variant_covered_repos: set[str] | None = None,
 ) -> set[str]:
     """Return the repos worth rerunning for a cop in quick mode.
 
@@ -474,7 +518,9 @@ def relevant_repos_for_cop(
         # Always add canary repos to catch wholesale regressions from
         # changes to shared infrastructure (codemap.rs, linter.rs, etc.)
         # that break files where the cop has no baseline activity.
-        canaries = canary_repos(data, exclude=sampled)
+        canaries = canary_repos(
+            data, exclude=sampled, variant_covered=variant_covered_repos,
+        )
         if canaries:
             sampled |= canaries
             print(f"  --sample: added {len(canaries)} canary repos by nitrocop_total "
@@ -554,8 +600,19 @@ def clone_repos_for_cop(
         print("ERROR: manifest.jsonl not found", file=sys.stderr)
         sys.exit(1)
 
-    needed = relevant_repos_for_cop(cop_name, data, sample=sample,
-                                    include_gated=include_gated)
+    # When running against a specific variant, filter canary sampling to repos
+    # that the variant oracle actually covered. Canaries beyond the oracle's
+    # --max-variant-repos limit have no baseline and cause false regressions.
+    variant_covered = (
+        variant_covered_repos(variant_run_id)
+        if (style_label or check_variants)
+        else None
+    )
+    needed = relevant_repos_for_cop(
+        cop_name, data, sample=sample,
+        include_gated=include_gated,
+        variant_covered_repos=variant_covered,
+    )
     if not needed:
         print(f"  No baseline activity or divergence for {cop_name}", file=sys.stderr)
 

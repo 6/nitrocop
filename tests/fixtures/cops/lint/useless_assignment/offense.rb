@@ -211,6 +211,16 @@ is_found ? found += [c] : found
 is_found ? found += [c] : found
            ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `found`.
 
+# FN fix: sibling-branch reads must not keep an exclusive assignment alive.
+def unformat_guid(guid)
+  if guid.length == 22
+    guid = ifc_guid_to_hex(guid)
+    ^^^^ Lint/UselessAssignment: Useless assignment to variable - `guid`.
+  else
+    guid.tr('-', '')
+  end
+end
+
 # FN fix: sequential overwrites before block capture — the variable is later
 # captured by a block, but earlier overwrites are still useless.
 def sequential_then_block_capture

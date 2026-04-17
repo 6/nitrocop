@@ -351,7 +351,7 @@ def test_cleanup_failure_closes_pr_then_deletes_branch_and_requeues_issue(tmp_pa
             "--issue-number", "376",
             "--repo", "6/nitrocop",
             "--backend-label", "claude-oauth / hard",
-            "--model-label", "Claude Opus 4.6 (OAuth, high)",
+            "--model-label", "Claude Opus 4.7 (OAuth, xhigh)",
             "--mode", "fix",
             "--run-url", "https://github.com/6/nitrocop/actions/runs/23699434606",
         ])
@@ -407,7 +407,7 @@ def test_cleanup_failure_includes_agent_findings_when_result_file_exists(tmp_pat
             "--issue-number", "376",
             "--repo", "6/nitrocop",
             "--backend-label", "claude-oauth / hard",
-            "--model-label", "Claude Opus 4.6 (OAuth, high)",
+            "--model-label", "Claude Opus 4.7 (OAuth, xhigh)",
             "--mode", "fix",
             "--run-url", "https://github.com/6/nitrocop/actions/runs/23699434606",
         ])
@@ -451,7 +451,7 @@ def test_cleanup_failure_warns_and_keeps_issue_state_when_pr_close_fails(tmp_pat
             "--issue-number", "376",
             "--repo", "6/nitrocop",
             "--backend-label", "claude-oauth / hard",
-            "--model-label", "Claude Opus 4.6 (OAuth, high)",
+            "--model-label", "Claude Opus 4.7 (OAuth, xhigh)",
             "--mode", "fix",
             "--run-url", "https://github.com/6/nitrocop/actions/runs/23699434606",
         ])

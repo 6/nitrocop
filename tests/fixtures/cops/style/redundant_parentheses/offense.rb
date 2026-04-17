@@ -341,3 +341,23 @@ rescue Exception => e
   raise ASSERTION_CLASS, e.message, (e.backtrace.reject { |line| File.expand_path(line).match?(/#{path}/) })
                                     ^ Style/RedundantParentheses: Don't use parentheses around a method call.
 end
+
+(((ruby_rails_versions_hash[ruby_version] || {})['rails']) || '').split(',')
+ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+!!((@btc_txbuilder_provider_consumed_unspent_outputs ||= {})[btc_txbuilder_outpoint_id(output)])
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+begin
+  work
+rescue Exception => e
+  (disconnect rescue nil) if @state != CONNECTING_STATE
+  ^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+end
+
+begin
+  work
+ensure
+  (cache.close rescue nil) if cache
+  ^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
+end

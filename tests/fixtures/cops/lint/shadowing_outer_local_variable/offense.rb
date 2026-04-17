@@ -679,3 +679,143 @@ def pass_arguments(a_args, opt_positionals, rest_positionals)
     end
   end
 end
+
+# FN fix: multi-statement when body should not inherit outer else-branch suppression
+def handle_grouped_chunk(grouped_chunk)
+  grouped_chunk.each do |grp|
+    if grp.count == 1
+      line = grp[0]
+      parse(line)
+    else
+      case
+      when grp[0] =~ /Class:/
+        grp = grp.map(&:strip)
+        vals = []
+        grp.each do |line|
+                     ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `line`.
+          vals << line
+        end
+      end
+    end
+  end
+end
+
+# FN fix: nested if body inside else branch should still see earlier branch local
+def all(index, direction, ids_key, limit)
+  if primary?
+    use_primary
+  else
+    if index && index.options[:unique]
+      id = fetch(prepared_index)
+      find(id)
+    else
+      if direction.to_s == "desc"
+        ids = fetch_ids(ids_key, limit).compact
+        ids.collect { |id| find(id) }
+                       ^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `id`.
+      end
+    end
+  end
+end
+
+# FN fix: earlier for-loop index remains visible inside later collection block
+def print_yaku_stats(raw_actions, name_to_yaku_stats)
+  for raw_action in raw_actions
+    if raw_action.type == :hora
+      for yaku, fan in raw_action.yakus
+        use(yaku, fan)
+      end
+    end
+  end
+
+  for name, yaku_stats in name_to_yaku_stats.sort
+    for yaku, count in yaku_stats.sort_by { |yaku, count| -count }
+                                             ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `yaku`.
+    end
+  end
+end
+
+# FN fix: later for-loop collection block shadows prior for-loop index
+def print_dora_stats(name_to_yaku_stats, name_to_dora_stats)
+  for name, yaku_stats in name_to_yaku_stats.sort
+    for yaku, count in yaku_stats.sort_by { |yaku, count| -count }
+      use(yaku, count)
+    end
+  end
+
+  for name, dora_stats in name_to_dora_stats.sort
+    for dora, count in dora_stats.sort_by { |dora, count| -count }
+                                                   ^^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `count`.
+    end
+  end
+end
+
+# FN fix: proc hash value in else branch still shadows sibling-branch local
+def set_for_else_branch(target)
+  if target.kind_of?(TkFont)
+    configs = { font: target.actual_hash }
+  elsif target.kind_of?(Hash)
+    fnt = target[:font] rescue ""
+    fnt = fnt.actual_hash if fnt.kind_of?(TkFont)
+    configs = { font: fnt }
+  else
+    configs = {
+      font: target.cget_tkstring(:font),
+      command: proc { |fnt, *args|
+                       ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `fnt`.
+        target.font = normalize(fnt, target)
+      }
+    }
+  end
+  configs
+end
+
+# FN fix: rightward pattern matching locals are outer scope for later blocks
+def run_completion(text)
+  @params => { position: pos }
+  text.modify_for_completion(text, pos) do |string, trigger, pos|
+                                                             ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `pos`.
+  end
+end
+
+# FN fix: same-branch unless body still flags direct child block params
+def generate_checks(chat)
+  @test_paths.each do |status_path|
+    unless @checked_paths[status_path]
+      check_list = []
+      test = chat.copy_request
+      test.set_dir(status_path)
+      check_list.each do |test|
+                          ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `test`.
+        run(test)
+      end
+    end
+  end
+end
+
+# FN fix: explicit begin/rescue wrapper does not make the block a direct if child
+def calc_error(gcps)
+  if gcps.size > 3
+    begin
+      dest_set = gcps.map(&:dest_coords)
+      source_set = gcps.map(&:source_coords)
+      cx_dst = cy_dst = cx_src = cy_src = 0
+
+      x = Matrix[* dest_set.map { |dst| [dst[0] - cx_dst] }].transpose
+      y = Matrix[* dest_set.map { |dst| [dst[1] - cy_dst] }].transpose
+      aa = Matrix[* source_set.map { |src| [1.0, src[0] - cx_src, src[1] - cy_src] }]
+      q = (aa.transpose * aa).inverse
+      a = q * (aa.transpose * x.transpose)
+      b = q * (aa.transpose * y.transpose)
+      w = [a[1, 0], b[1, 0], a[2, 0], b[2, 0], cx_dst, cy_dst]
+
+      source_set.each do |x, y|
+                          ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `x`.
+                             ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `y`.
+        use(w, x, y)
+      end
+    rescue StandardError
+      handle_error
+    end
+  end
+end

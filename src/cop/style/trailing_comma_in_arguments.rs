@@ -1,4 +1,7 @@
-use crate::cop::shared::node_type::{BLOCK_ARGUMENT_NODE, CALL_NODE};
+use crate::cop::shared::node_type::{
+    BLOCK_ARGUMENT_NODE, CALL_NODE, INDEX_AND_WRITE_NODE, INDEX_OPERATOR_WRITE_NODE,
+    INDEX_OR_WRITE_NODE,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -48,6 +51,19 @@ use super::trailing_comma;
 /// preserve the braced-hash `consistent_comma` carveout, fall back to
 /// `EnforcedStyle` when the multiline-specific key is absent, and implement the
 /// `diff_comma` newline predicate (including `\r\n`).
+///
+/// Investigation (2026-04-16)
+///
+/// Two remaining variant gaps were still real:
+/// - Prism wraps `foo(a: 1, b: 2)` as a single `KeywordHashNode`, but RuboCop
+///   only expands braceless hashes when that hash itself is multiline. The
+///   previous fix expanded every keyword hash, which made `comma` reject
+///   trailing commas for single-line keyword hashes on their own line and miss
+///   missing commas when such a hash followed another argument line.
+/// - Prism parses `obj[\n  key\n] ||= value` / `+= value` as
+///   `IndexOrWriteNode` / `IndexOperatorWriteNode`, while RuboCop still sees
+///   the inner `[]` send. Fix: mirror RuboCop by linting those index-write
+///   nodes with the same argument-list logic as plain `[]` calls.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -56,7 +72,13 @@ impl Cop for TrailingCommaInArguments {
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
-        &[BLOCK_ARGUMENT_NODE, CALL_NODE]
+        &[
+            BLOCK_ARGUMENT_NODE,
+            CALL_NODE,
+            INDEX_AND_WRITE_NODE,
+            INDEX_OPERATOR_WRITE_NODE,
+            INDEX_OR_WRITE_NODE,
+        ]
     }
 
     fn check_node(
@@ -68,27 +90,111 @@ impl Cop for TrailingCommaInArguments {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let call_node = match node.as_call_node() {
-            Some(c) => c,
-            None => return,
-        };
+        let (
+            arguments,
+            closing_start,
+            node_end_offset,
+            has_closing_token,
+            call_start_line,
+            method_line,
+        ) = if let Some(call_node) = node.as_call_node() {
+            let has_closing_token = call_node.closing_loc().is_some();
+            let (closing_start, node_end_offset) = match call_node.closing_loc() {
+                Some(loc) => {
+                    let start = loc.start_offset();
+                    (start, start)
+                }
+                None if call_node.name().as_slice() == b"[]" => {
+                    let end = call_node.location().end_offset();
+                    (end, end.saturating_sub(1))
+                }
+                None => return,
+            };
 
-        let has_closing_token = call_node.closing_loc().is_some();
-        let (closing_start, node_end_offset) = match call_node.closing_loc() {
-            Some(loc) => {
-                let start = loc.start_offset();
-                (start, start)
-            }
-            None if call_node.name().as_slice() == b"[]" => {
-                let end = call_node.location().end_offset();
-                (end, end.saturating_sub(1))
-            }
-            None => return,
-        };
+            let arguments = match call_node.arguments() {
+                Some(args) => args,
+                None => return,
+            };
 
-        let arguments = match call_node.arguments() {
-            Some(args) => args,
-            None => return,
+            // The comma before &block is a separator, not a trailing comma.
+            if let Some(block) = call_node.block() {
+                if block.as_block_argument_node().is_some() {
+                    return;
+                }
+            }
+
+            let call_start_line = source
+                .offset_to_line_col(call_node.location().start_offset())
+                .0;
+            let method_line = call_node
+                .message_loc()
+                .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
+                .unwrap_or(call_start_line);
+
+            (
+                arguments,
+                closing_start,
+                node_end_offset,
+                has_closing_token,
+                call_start_line,
+                method_line,
+            )
+        } else if let Some(write) = node.as_index_or_write_node() {
+            let arguments = match write.arguments() {
+                Some(args) => args,
+                None => return,
+            };
+            let closing_start = write.closing_loc().start_offset();
+            let call_start_line = source.offset_to_line_col(write.location().start_offset()).0;
+            let method_line = source
+                .offset_to_line_col(write.opening_loc().start_offset())
+                .0;
+            (
+                arguments,
+                closing_start,
+                closing_start,
+                true,
+                call_start_line,
+                method_line,
+            )
+        } else if let Some(write) = node.as_index_and_write_node() {
+            let arguments = match write.arguments() {
+                Some(args) => args,
+                None => return,
+            };
+            let closing_start = write.closing_loc().start_offset();
+            let call_start_line = source.offset_to_line_col(write.location().start_offset()).0;
+            let method_line = source
+                .offset_to_line_col(write.opening_loc().start_offset())
+                .0;
+            (
+                arguments,
+                closing_start,
+                closing_start,
+                true,
+                call_start_line,
+                method_line,
+            )
+        } else if let Some(write) = node.as_index_operator_write_node() {
+            let arguments = match write.arguments() {
+                Some(args) => args,
+                None => return,
+            };
+            let closing_start = write.closing_loc().start_offset();
+            let call_start_line = source.offset_to_line_col(write.location().start_offset()).0;
+            let method_line = source
+                .offset_to_line_col(write.opening_loc().start_offset())
+                .0;
+            (
+                arguments,
+                closing_start,
+                closing_start,
+                true,
+                call_start_line,
+                method_line,
+            )
+        } else {
+            return;
         };
 
         let arg_list = arguments.arguments();
@@ -102,14 +208,6 @@ impl Cop for TrailingCommaInArguments {
         let has_heredoc = arg_list
             .iter()
             .any(|arg| trailing_comma::is_heredoc_node(&arg));
-
-        // Skip if there's a block argument (&block) between last arg and closing paren.
-        // The comma before &block is a separator, not a trailing comma.
-        if let Some(block) = call_node.block() {
-            if block.as_block_argument_node().is_some() {
-                return;
-            }
-        }
 
         // Check for a trailing comma between the last argument and closing paren.
         if closing_start > bytes.len() || node_end_offset > bytes.len() {
@@ -137,13 +235,11 @@ impl Cop for TrailingCommaInArguments {
 
         // Determine if the call is multiline and whether a trailing comma should be present
         let close_line = source.offset_to_line_col(node_end_offset).0;
-        let call_start_line = source
-            .offset_to_line_col(call_node.location().start_offset())
-            .0;
         let call_is_multiline = close_line > call_start_line;
 
-        // Expand KeywordHashNode to count individual keyword args.
-        let elem_locs = trailing_comma::effective_element_locations(arg_list.iter());
+        // Expand only multiline braceless hashes, matching RuboCop's
+        // `elements(node)` behavior for method arguments.
+        let elem_locs = trailing_comma::effective_element_locations(source, arg_list.iter());
         let effective_args = elem_locs.len();
 
         let is_multiline = call_is_multiline
@@ -159,9 +255,8 @@ impl Cop for TrailingCommaInArguments {
                 is_multiline
                     && !method_name_and_arguments_on_same_line(
                         source,
-                        &call_node,
                         &last_arg,
-                        call_start_line,
+                        method_line,
                         close_line,
                         last_end,
                     )
@@ -219,9 +314,8 @@ fn is_only_horizontal_whitespace_and_comma(bytes: &[u8]) -> bool {
 
 fn method_name_and_arguments_on_same_line(
     source: &SourceFile,
-    call_node: &ruby_prism::CallNode<'_>,
     last_arg: &ruby_prism::Node<'_>,
-    call_start_line: usize,
+    method_line: usize,
     close_line: usize,
     last_end: usize,
 ) -> bool {
@@ -240,10 +334,6 @@ fn method_name_and_arguments_on_same_line(
         return true;
     }
 
-    let method_line = call_node
-        .message_loc()
-        .map(|loc| source.offset_to_line_col(loc.start_offset()).0)
-        .unwrap_or(call_start_line);
     method_line == last_arg_end_line
 }
 
@@ -461,8 +551,8 @@ mod tests {
 
     #[test]
     fn comma_style_keyword_args_sharing_line_no_offense() {
-        // Keyword args form a single KeywordHashNode in Prism, but the
-        // no_elements_on_same_line check must expand it to individual elements.
+        // A single-line keyword hash stays a single logical argument in
+        // RuboCop, so comma style does not require a trailing comma here.
         let source =
             b"Retriable.retriable(\n  on: StandardError,\n  tries: 7, base_interval: 1.0\n)\n";
         let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
@@ -485,13 +575,15 @@ mod tests {
     }
 
     #[test]
-    fn comma_style_mixed_args_keyword_sharing_line_no_offense() {
-        // Positional arg + keyword args where keywords share a line
+    fn comma_style_mixed_args_keyword_sharing_line_offense() {
+        // A single-line keyword hash still counts as one argument, so with a
+        // positional arg above it comma style requires a trailing comma here.
         let source = b"foo(\n  1,\n  a: 2, b: 3\n)\n";
         let diags = run_cop_full_with_config(&TrailingCommaInArguments, source, comma_config());
-        assert!(
-            diags.is_empty(),
-            "comma style should not flag when keyword args share a line (mixed args)"
+        assert_eq!(
+            diags.len(),
+            1,
+            "comma style should flag when a single-line keyword hash follows another argument line"
         );
     }
 
@@ -547,6 +639,28 @@ mod tests {
                 "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.diff_comma.rb"
             ),
             alias_style_config("diff_comma"),
+        );
+    }
+
+    #[test]
+    fn offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/offense.consistent_comma.rb"
+            ),
+            alias_style_config("consistent_comma"),
+        );
+    }
+
+    #[test]
+    fn no_offense_consistent_comma_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TrailingCommaInArguments,
+            include_bytes!(
+                "../../../tests/fixtures/cops/style/trailing_comma_in_arguments/no_offense.consistent_comma.rb"
+            ),
+            alias_style_config("consistent_comma"),
         );
     }
 }
