@@ -57,6 +57,7 @@ x = (0..10)
 (not x)
 (a until b)
 (a while b)
+not((a, b = 1, 2))
 # Operator with unparenthesized call arg
 foo + (bar baz)
 # Negative numeric base in exponentiation
@@ -182,6 +183,15 @@ x ({ y: 1 }.merge({ y: 2 })), z
 foo :plain => ({:error => 0}.to_json), :other => 1
 Contract ({ :a => Num, :b => Num}) => Num
 foo.to match(({ a: 1 }))
+bar foo(
+  1,
+  (
+    {
+      a: 1,
+      b: 2,
+    }.to_json
+  )
+)
 # Chained receiver with operator/logical inner — parens needed for operator precedence
 (a + b).to_s(base)
 (arr || []).each { |x| x }
@@ -307,11 +317,6 @@ while (pop_messages(queue_url, 10).length > 0)
 end
 # Single-line def body with assignment — not a multi-statement begin
 def start_handlers; (@start_handlers ||= {}); end
-# Double-negation on numeric — Prism collapses --5 to -@(5),
-# but RuboCop (Parser) sees (send (int -5) :-@) and doesn't flag
-(--5.5).should be_close(5.5, 0.01)
-(--5).should == 5
-(--2).should == 2
 # Rescue clause body — RuboCop's rescue? only exempts single-statement resbodies
 begin
   work
@@ -375,3 +380,13 @@ r_dir_name = :name
 if_condition_3 = (!new_dirs.any? { |d| d == r_dir_name })
 # Spaced unary plus used as a chained receiver keeps its parens
 print (+ 'frozen string').frozen? ? 'immutable' : 'mutable'
+# Parenthesized interpolation inside dynamic symbols is accepted
+path = send(:"#{(watched ? 'unwatch' : 'watch')}_path", object_id: object.id)
+# Hash-literal receiver chains stay accepted inside interpolation
+sse_lines << "data: #{({ type: "message_stop" }).to_json}\n\n"
+# do..end block descendants in a chained receiver keep the outer parens
+((synsets.collect do |ss|
+  ss.send(options[:nym])
+end - [word.value]).flatten).uniq.map do |token|
+  token.gsub("_", " ")
+end
