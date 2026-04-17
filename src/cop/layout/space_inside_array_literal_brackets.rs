@@ -29,10 +29,21 @@
 ///   literals and reported compact-style offenses. Fixed by skipping files with
 ///   a non-UTF-8 encoding comment and regex literals containing invalid high-bit
 ///   `\xHH` escape runs.
+/// - compact follow-up (2026-04-17): the raw-byte compact `]]` scan treated
+///   comment text and `%[...]` string delimiters as real array brackets, causing
+///   FPs on commented-out array lines and FNs/FPs around multiline percent
+///   literals. RuboCop only considers code tokens, so compact adjacency checks
+///   now consult `CodeMap` and ignore non-code brackets. Also, Prism-style named
+///   constant patterns like `Prism::ArgumentsNode[arguments: [ ... ]]` are
+///   bracket-owned by the enclosing `HashPatternNode`, not by the inner
+///   `arguments: [ ... ]` array pattern. Match RuboCop's
+///   `find_node_with_brackets` by remapping array/array-pattern checks to the
+///   nearest enclosing bracketed hash pattern.
 use crate::cop::shared::node_type::{ARRAY_NODE, ARRAY_PATTERN_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
-use crate::parse::source::SourceFile;
+use crate::parse::{codemap::CodeMap, source::SourceFile};
+use ruby_prism::Visit;
 
 pub struct SpaceInsideArrayLiteralBrackets;
 
@@ -49,11 +60,11 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
         true
     }
 
-    fn check_node(
+    fn check_source(
         &self,
         source: &SourceFile,
-        node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
+        code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -62,34 +73,17 @@ impl Cop for SpaceInsideArrayLiteralBrackets {
             return;
         }
 
-        let (opening, closing, is_array_pattern) = if let Some(array) = node.as_array_node() {
-            match (array.opening_loc(), array.closing_loc()) {
-                (Some(o), Some(c)) => (o, c, false),
-                _ => return, // Implicit array (no brackets)
-            }
-        } else if let Some(pattern) = node.as_array_pattern_node() {
-            match (pattern.opening_loc(), pattern.closing_loc()) {
-                (Some(o), Some(c)) => (o, c, true),
-                _ => return,
-            }
-        } else {
-            return;
-        };
-
-        // Only check [ ] arrays, not %w() etc.
-        if opening.as_slice() != b"[" || closing.as_slice() != b"]" {
-            return;
-        }
-
-        self.check_brackets(
+        let mut visitor = SpaceInsideArrayLiteralBracketsVisitor {
+            cop: self,
             source,
-            &opening,
-            &closing,
-            is_array_pattern,
+            code_map,
             config,
             diagnostics,
             corrections,
-        );
+            hash_pattern_stack: Vec::new(),
+            pushed_hash_pattern_stack: Vec::new(),
+        };
+        visitor.visit(&parse_result.node());
     }
 }
 
@@ -98,16 +92,16 @@ impl SpaceInsideArrayLiteralBrackets {
     fn check_brackets(
         &self,
         source: &SourceFile,
-        opening: &ruby_prism::Location<'_>,
-        closing: &ruby_prism::Location<'_>,
+        open_start: usize,
+        open_end: usize,
+        close_start: usize,
         is_array_pattern: bool,
+        code_map: &CodeMap,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let bytes = source.as_bytes();
-        let open_end = opening.end_offset();
-        let close_start = closing.start_offset();
 
         if is_array_pattern && prev_non_whitespace(bytes, close_start) == Some(b',') {
             return;
@@ -122,7 +116,7 @@ impl SpaceInsideArrayLiteralBrackets {
             if close_start == open_end {
                 // Truly empty: []
                 if empty_style == "space" {
-                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let (line, column) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -147,7 +141,7 @@ impl SpaceInsideArrayLiteralBrackets {
                     close_start == open_end + 1 && bytes.get(open_end) == Some(&b' ');
                 match empty_style {
                     "no_space" => {
-                        let (line, column) = source.offset_to_line_col(opening.start_offset());
+                        let (line, column) = source.offset_to_line_col(open_start);
                         let mut diag = self.diagnostic(
                             source,
                             line,
@@ -168,7 +162,7 @@ impl SpaceInsideArrayLiteralBrackets {
                     }
                     "space" if !is_single_space => {
                         // Multiple spaces or newline: correct to single space
-                        let (line, column) = source.offset_to_line_col(opening.start_offset());
+                        let (line, column) = source.offset_to_line_col(open_start);
                         let mut diag = self.diagnostic(
                             source,
                             line,
@@ -196,8 +190,8 @@ impl SpaceInsideArrayLiteralBrackets {
         let enforced = config.get_str("EnforcedStyle", "no_space");
 
         // For multiline arrays, determine which bracket sides to skip.
-        let (open_line, _) = source.offset_to_line_col(opening.start_offset());
-        let (close_line, _) = source.offset_to_line_col(closing.start_offset());
+        let (open_line, _) = source.offset_to_line_col(open_start);
+        let (close_line, _) = source.offset_to_line_col(close_start);
         let is_multiline = open_line != close_line;
 
         let start_ok = if is_multiline {
@@ -226,7 +220,7 @@ impl SpaceInsideArrayLiteralBrackets {
             "no_space" => {
                 if !start_ok && space_after_open {
                     let space_end = scan_space_forward(bytes, open_end);
-                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let (line, column) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -247,7 +241,7 @@ impl SpaceInsideArrayLiteralBrackets {
                 }
                 if !end_ok && space_before_close {
                     let space_start = scan_space_backward(bytes, close_start);
-                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let (line, column) = source.offset_to_line_col(close_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -269,7 +263,7 @@ impl SpaceInsideArrayLiteralBrackets {
             }
             "space" => {
                 if !start_ok && !space_after_open {
-                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let (line, column) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -289,7 +283,7 @@ impl SpaceInsideArrayLiteralBrackets {
                     diagnostics.push(diag);
                 }
                 if !end_ok && !space_before_close {
-                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let (line, column) = source.offset_to_line_col(close_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -310,8 +304,8 @@ impl SpaceInsideArrayLiteralBrackets {
                 }
             }
             "compact" => {
-                let multi_dim_left = is_adjacent_bracket_forward(bytes, open_end);
-                let multi_dim_right = is_adjacent_bracket_backward(bytes, close_start);
+                let multi_dim_left = is_adjacent_bracket_forward(bytes, code_map, open_end);
+                let multi_dim_right = is_adjacent_bracket_backward(bytes, code_map, close_start);
 
                 // Left side: whitespace check includes newlines for compact collapse
                 let ws_after_open =
@@ -320,7 +314,7 @@ impl SpaceInsideArrayLiteralBrackets {
                 if multi_dim_left && ws_after_open {
                     // Space (or newline) before nested [[ should be collapsed
                     let ws_end = scan_all_whitespace_forward(bytes, open_end);
-                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let (line, column) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -340,7 +334,7 @@ impl SpaceInsideArrayLiteralBrackets {
                     diagnostics.push(diag);
                 } else if !multi_dim_left && !start_ok && !space_after_open {
                     // Non-nested: require space (like space style)
-                    let (line, column) = source.offset_to_line_col(opening.start_offset());
+                    let (line, column) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -370,7 +364,7 @@ impl SpaceInsideArrayLiteralBrackets {
                 if multi_dim_right && ws_before_close {
                     // Space (or newline) after nested ]] should be collapsed
                     let ws_start = scan_all_whitespace_backward(bytes, close_start);
-                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let (line, column) = source.offset_to_line_col(close_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -390,7 +384,7 @@ impl SpaceInsideArrayLiteralBrackets {
                     diagnostics.push(diag);
                 } else if !multi_dim_right && !end_ok && !space_before_close {
                     // Non-nested: require space (like space style)
-                    let (line, column) = source.offset_to_line_col(closing.start_offset());
+                    let (line, column) = source.offset_to_line_col(close_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -412,6 +406,110 @@ impl SpaceInsideArrayLiteralBrackets {
             }
             _ => {}
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BracketSpan {
+    open_start: usize,
+    open_end: usize,
+    close_start: usize,
+    is_array_pattern: bool,
+}
+
+impl BracketSpan {
+    fn from_locations(
+        opening: &ruby_prism::Location<'_>,
+        closing: &ruby_prism::Location<'_>,
+        is_array_pattern: bool,
+    ) -> Self {
+        Self {
+            open_start: opening.start_offset(),
+            open_end: opening.end_offset(),
+            close_start: closing.start_offset(),
+            is_array_pattern,
+        }
+    }
+}
+
+struct SpaceInsideArrayLiteralBracketsVisitor<'a> {
+    cop: &'a SpaceInsideArrayLiteralBrackets,
+    source: &'a SourceFile,
+    code_map: &'a CodeMap,
+    config: &'a CopConfig,
+    diagnostics: &'a mut Vec<Diagnostic>,
+    corrections: Option<&'a mut Vec<crate::correction::Correction>>,
+    hash_pattern_stack: Vec<BracketSpan>,
+    pushed_hash_pattern_stack: Vec<bool>,
+}
+
+impl SpaceInsideArrayLiteralBracketsVisitor<'_> {
+    fn current_owner_or(&self, own: BracketSpan) -> BracketSpan {
+        self.hash_pattern_stack.last().copied().unwrap_or(own)
+    }
+
+    fn check_span(&mut self, span: BracketSpan) {
+        let corrections = self.corrections.as_mut().map(|corr| &mut **corr);
+        self.cop.check_brackets(
+            self.source,
+            span.open_start,
+            span.open_end,
+            span.close_start,
+            span.is_array_pattern,
+            self.code_map,
+            self.config,
+            self.diagnostics,
+            corrections,
+        );
+    }
+}
+
+impl<'pr> Visit<'pr> for SpaceInsideArrayLiteralBracketsVisitor<'_> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        if let Some(pattern) = node.as_hash_pattern_node() {
+            if let (Some(opening), Some(closing)) = (pattern.opening_loc(), pattern.closing_loc()) {
+                if opening.as_slice() == b"[" && closing.as_slice() == b"]" {
+                    self.hash_pattern_stack
+                        .push(BracketSpan::from_locations(&opening, &closing, false));
+                    self.pushed_hash_pattern_stack.push(true);
+                    return;
+                }
+            }
+        }
+
+        self.pushed_hash_pattern_stack.push(false);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        if self.pushed_hash_pattern_stack.pop() == Some(true) {
+            self.hash_pattern_stack.pop();
+        }
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_array_node(&mut self, node: &ruby_prism::ArrayNode<'pr>) {
+        if let (Some(opening), Some(closing)) = (node.opening_loc(), node.closing_loc()) {
+            if opening.as_slice() == b"[" && closing.as_slice() == b"]" {
+                let owner =
+                    self.current_owner_or(BracketSpan::from_locations(&opening, &closing, false));
+                self.check_span(owner);
+            }
+        }
+
+        ruby_prism::visit_array_node(self, node);
+    }
+
+    fn visit_array_pattern_node(&mut self, node: &ruby_prism::ArrayPatternNode<'pr>) {
+        if let (Some(opening), Some(closing)) = (node.opening_loc(), node.closing_loc()) {
+            if opening.as_slice() == b"[" && closing.as_slice() == b"]" {
+                let owner =
+                    self.current_owner_or(BracketSpan::from_locations(&opening, &closing, true));
+                self.check_span(owner);
+            }
+        }
+
+        ruby_prism::visit_array_pattern_node(self, node);
     }
 }
 
@@ -510,12 +608,12 @@ fn next_line_starts_with_comment(bytes: &[u8], pos: usize) -> bool {
 
 /// Check if the next non-whitespace character after `pos` is `[`.
 /// Compact style skips newline tokens between adjacent brackets.
-fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
+fn is_adjacent_bracket_forward(bytes: &[u8], code_map: &CodeMap, pos: usize) -> bool {
     let mut i = pos;
     while i < bytes.len() {
         match bytes[i] {
             b' ' | b'\t' | b'\n' | b'\r' => i += 1,
-            b'[' => return true,
+            b'[' if code_map.is_code(i) => return true,
             _ => return false,
         }
     }
@@ -523,32 +621,39 @@ fn is_adjacent_bracket_forward(bytes: &[u8], pos: usize) -> bool {
 }
 
 /// Check if the previous non-whitespace character before `pos` is `]`
-/// from a real bracket array (not `%w[...]`, `%i[...]`, etc.).
+/// from a real bracket array/pattern in code, not from comment or string text.
 /// Compact style skips newline tokens between adjacent brackets.
-fn is_adjacent_bracket_backward(bytes: &[u8], pos: usize) -> bool {
+fn is_adjacent_bracket_backward(bytes: &[u8], code_map: &CodeMap, pos: usize) -> bool {
     let mut i = pos;
     while i > 0 {
         i -= 1;
         match bytes[i] {
             b' ' | b'\t' | b'\n' | b'\r' => continue,
             b']' => {
-                // Found `]` — find its matching `[` via bracket counting,
-                // then check it's not a %w[/%i[/etc. delimiter.
+                if !code_map.is_code(i) {
+                    return false;
+                }
+
+                // Found a code `]` — find its matching code `[` via bracket counting.
                 let mut depth: usize = 1;
                 let mut j = i;
                 while j > 0 && depth > 0 {
                     j -= 1;
+                    if !code_map.is_code(j) {
+                        continue;
+                    }
                     match bytes[j] {
                         b']' => depth += 1,
                         b'[' => depth -= 1,
                         _ => {}
                     }
                 }
-                if depth == 0 && j > 0 && bytes[j] == b'[' {
-                    // Check if preceded by %<letter> (e.g. %w[, %i[, %I[, %W[)
-                    if j >= 2 && bytes[j - 2] == b'%' && bytes[j - 1].is_ascii_alphabetic() {
-                        return false;
-                    }
+                if depth == 0
+                    && j >= 2
+                    && bytes[j - 2] == b'%'
+                    && matches!(bytes[j - 1], b'w' | b'i' | b'W' | b'I')
+                {
+                    return false;
                 }
                 return depth == 0;
             }

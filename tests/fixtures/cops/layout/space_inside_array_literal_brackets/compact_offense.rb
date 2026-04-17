@@ -25,3 +25,23 @@ in ADT[*head, tail]
       ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets missing.
                   ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets missing.
 end
+# %[] literals are not real bracket arrays - outer ] still needs a space
+data(
+  "accepts empty element" => [ root(e("test")), %[
+    <test>
+    </test>
+  ]],
+   ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets missing.
+)
+# Brackets belong to the enclosing Prism::...Node[...] hash pattern, not the inner arguments: [ ... ]
+case node
+in Prism::CallNode[
+  name: :respond_to?,
+  arguments: Prism::ArgumentsNode[
+    arguments: [
+      Prism::SymbolNode[unescaped: new_framework]
+    ]
+  ]
+  ^ Layout/SpaceInsideArrayLiteralBrackets: Space inside array literal brackets detected.
+]
+end
