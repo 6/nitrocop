@@ -449,7 +449,7 @@ impl SpaceInsideArrayLiteralBracketsVisitor<'_> {
     }
 
     fn check_span(&mut self, span: BracketSpan) {
-        let corrections = self.corrections.as_mut().map(|corr| &mut **corr);
+        let corrections = self.corrections.as_deref_mut();
         self.cop.check_brackets(
             self.source,
             span.open_start,
