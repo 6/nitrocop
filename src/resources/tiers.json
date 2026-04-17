@@ -589,6 +589,7 @@
     "Rails/StripHeredoc": "stable",
     "Rails/StrongParametersExpect": "stable",
     "Rails/TableNameAssignment": "stable",
+    "Rails/ThreeStateBooleanColumn": "stable",
     "Rails/TimeZone": "stable",
     "Rails/TimeZoneAssignment": "stable",
     "Rails/ToFormattedS": "stable",
