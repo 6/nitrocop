@@ -227,3 +227,105 @@ module ScumblrTask
     end
   end
 end
+
+# FN: nested index setter assignment remains an offense inside an outer conditional
+def add_address(post, options)
+  if address = options[:billing_address] || options[:address]
+    if address[:address2]
+    ^^^^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+      post[:billing_address]    = address[:address1].to_s << ' ' << address[:address2].to_s
+    else
+      post[:billing_address]    = address[:address1].to_s
+    end
+  end
+
+  if address = options[:shipping_address]
+    if address[:address2]
+    ^^^^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+      post[:shipping_address]   = address[:address1].to_s << ' ' << address[:address2].to_s
+    else
+      post[:shipping_address]   = address[:address1].to_s
+    end
+  end
+end
+
+# FN: local variable assignment in branches should still be detected
+module Rserve
+  class REXP
+    class List < REXP::Vector
+      def to_debug_string
+        t = super + (as_list.named? ? "named" : "")
+        if @payload.named?
+        ^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+          inner = "{" + @payload.size.times.map { |i| "#{@payload.names[i]}=#{@payload.data[i].to_debug_string}" }.join(",") + "}"
+        else
+          inner = "{" + @payload.size.times.map { |i| @payload.data[i].to_debug_string.to_s }.join(",") + "}"
+        end
+        t + inner
+      end
+    end
+  end
+end
+
+# FN: operator assignment branches should still be compared
+module Statsample
+  module Reliability
+    class ScaleAnalysis
+      def report_building(builder)
+        builder.section(name: @name) do |s|
+          sid = stats_if_deleted
+          s.table(name: _("Items report for %s") % @name) do |t|
+            @ds.fields.each do |f|
+              row = ["#{@ds[f].name}(#{f})"]
+              if sid[f]
+              ^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+                row += [sprintf("%0.5f", sid[f][:mean]), sprintf("%0.5f", sid[f][:variance_sample]), sprintf("%0.5f", sid[f][:sds])]
+              else
+                row += %w[- - -]
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+# FN: case-equality comparisons in branches should still be treated as assignment-like
+module BrakemanTester
+  module FindWarning
+    def find(opts = {})
+      warnings.select do |w|
+        opts.all? do |k, v|
+          if k == :relative_path
+          ^^^^^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+            v === w.file.relative
+          else
+            v === w.send(k)
+          end
+        end
+      end
+    end
+  end
+end
+
+# FN: ternary with case-equality comparisons should still be flagged
+module Concurrent
+  module ErlangActor
+    class OnPool < AbstractActor
+      def internal_receive
+        rules_matcher  = Or[*@behaviour.map(&:first)]
+        matcher        = -> m { m.is_a?(Ask) ? rules_matcher === m.message : rules_matcher === m }
+                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+      end
+    end
+
+    class OnThread < AbstractActor
+      def receive(*rules, timeout: nil, timeout_value: nil, &given_block)
+        rules_matcher = Or[*rules.map(&:first)]
+        matcher       = -> m { m.is_a?(Ask) ? rules_matcher === m.message : rules_matcher === m }
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+      end
+    end
+  end
+end

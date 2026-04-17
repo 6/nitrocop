@@ -96,3 +96,25 @@ end
 
 # ternary with assignment whose correction would exceed line length should not be flagged
 (t.empty? || t == "y" || t == "yes" || t == "yeah") ? conf["env"]["testmode_enabled"] = true : conf["env"]["testmode_enabled"] = false
+
+# FP: safe-navigation comparisons are csend in RuboCop and should not be flagged
+def custom_start?
+  increment_by&.<(0) ? start_with&.!=(max_value) : start_with&.!=(min_value)
+end
+
+# Default config: line-length guard suppresses this offense, but it returns when
+# Layout/LineLength is disabled in repo config.
+module Jetpants
+  class Pool
+    def to_hash(for_app_config = false)
+      if for_app_config
+        slave_data = active_slave_weights.map { |db, weight| { 'host' => db.to_s, 'weight' => weight } }
+      else
+        slave_data = active_slave_weights.map { |db, weight| { 'host' => db.to_s, 'weight' => weight, 'role' => 'ACTIVE_SLAVE' } } +
+                     standby_slaves.map { |db| { 'host' => db.to_s, 'role' => 'STANDBY_SLAVE' } } +
+                     backup_slaves.map { |db| { 'host' => db.to_s, 'role' => 'BACKUP_SLAVE' } }
+      end
+      slave_data
+    end
+  end
+end

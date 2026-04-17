@@ -2,6 +2,7 @@ use std::cell::RefCell;
 
 use regex::Regex;
 
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{
     CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE, CASE_MATCH_NODE,
@@ -84,6 +85,17 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// suppressed in full files even though RuboCop still flagged them.
 /// RuboCop also measures the resulting line length in characters, not UTF-8
 /// bytes, so multibyte branch text like `…` must not inflate the guard.
+///
+/// FN/FP fix (2026-04-17): RuboCop's assignment-like `send` matcher includes
+/// case equality (`===`) but excludes safe-navigation `csend`. nitrocop was
+/// missing `===` branches like `v === foo` / `v === bar`, which hid real
+/// offenses in block and lambda bodies, and it was incorrectly flagging safe-
+/// navigation comparisons like `foo&.!=(bar)` that RuboCop ignores.
+///
+/// Config fix (2026-04-17): this cop also depends on `Layout/LineLength`
+/// config when deciding whether autocorrection would overflow. Repos that
+/// disable `Layout/LineLength` should still register offenses for long
+/// conditional assignments instead of silently inheriting the default 120.
 ///
 /// Variant fix (2026-04-16): for `EnforcedStyle=assign_inside_condition`,
 /// `SingleLineConditionsOnly` uses RuboCop's raw branch deconstruction. That
@@ -769,6 +781,9 @@ fn get_assignment_value<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism:
     }
     // Call nodes: setter methods, []=, <<, comparisons
     if let Some(call) = node.as_call_node() {
+        if method_dispatch_predicates::is_safe_navigation(&call) {
+            return None;
+        }
         if is_assignment_type_call(call.name().as_slice()) {
             let args = call.arguments()?;
             return args.arguments().iter().last();
@@ -1024,6 +1039,9 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
     // RuboCop also treats shovel and comparison/operator sends as
     // assignment-like here.
     if let Some(call) = node.as_call_node() {
+        if method_dispatch_predicates::is_safe_navigation(&call) {
+            return None;
+        }
         let method = call.name().as_slice();
         // Check []= BEFORE is_setter_method — is_setter_method matches any
         // name ending with `=`, which includes `[]=`.  The generic setter path
@@ -1058,7 +1076,7 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
         // RuboCop's assignment_type? treats these as assignment-like.
         if matches!(
             method,
-            b"==" | b"!=" | b"<=" | b">=" | b"=~" | b"!~" | b"<=>" | b"<" | b">"
+            b"==" | b"===" | b"!=" | b"<=" | b">=" | b"=~" | b"!~" | b"<=>" | b"<" | b">"
         ) {
             let recv_src = receiver_source(call.receiver());
             let method_str = String::from_utf8_lossy(method);
@@ -1303,6 +1321,20 @@ mod tests {
         }
     }
 
+    fn assign_to_condition_with_line_length(max: u64, enabled: bool) -> CopConfig {
+        use std::collections::HashMap;
+        CopConfig {
+            options: HashMap::from([
+                (
+                    "MaxLineLength".into(),
+                    serde_yml::Value::Number(serde_yml::Number::from(max)),
+                ),
+                ("LineLengthEnabled".into(), serde_yml::Value::Bool(enabled)),
+            ]),
+            ..CopConfig::default()
+        }
+    }
+
     #[test]
     fn assign_inside_condition_offense_fixture() {
         crate::testutil::assert_cop_offenses_full_with_config(
@@ -1351,5 +1383,35 @@ mod tests {
         assert_eq!(diags[0].location.line, 3, "{diags:?}");
         assert_eq!(diags[0].location.column, 2, "{diags:?}");
         assert_eq!(diags[0].message, ASSIGN_TO_CONDITION_MSG, "{diags:?}");
+    }
+
+    #[test]
+    fn assign_to_condition_flags_long_branch_when_line_length_disabled() {
+        let source = br#"module Jetpants
+  class Pool
+    def to_hash(for_app_config = false)
+      if for_app_config
+        slave_data = active_slave_weights.map { |db, weight| { 'host' => db.to_s, 'weight' => weight } }
+      else
+        slave_data = active_slave_weights.map { |db, weight| { 'host' => db.to_s, 'weight' => weight, 'role' => 'ACTIVE_SLAVE' } } +
+                     standby_slaves.map { |db| { 'host' => db.to_s, 'role' => 'STANDBY_SLAVE' } } +
+                     backup_slaves.map { |db| { 'host' => db.to_s, 'role' => 'BACKUP_SLAVE' } }
+      end
+      slave_data
+    end
+  end
+end
+"#;
+
+        let diags = crate::testutil::run_cop_full_with_config(
+            &ConditionalAssignment,
+            source,
+            assign_to_condition_with_line_length(120, false),
+        );
+
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].location.line, 4, "{diags:?}");
+        assert_eq!(diags[0].location.column, 6, "{diags:?}");
+        assert_eq!(diags[0].message, MSG, "{diags:?}");
     }
 }

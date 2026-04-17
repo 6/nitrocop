@@ -2325,6 +2325,7 @@ impl ResolvedConfig {
         if matches!(
             name,
             "Style/IfUnlessModifier"
+                | "Style/ConditionalAssignment"
                 | "Style/WhileUntilModifier"
                 | "Style/GuardClause"
                 | "Style/SoleNestedConditional"
@@ -3364,6 +3365,26 @@ mod tests {
         let config = load_config(Some(&path), None, None).unwrap();
         let cc = config.cop_config("Layout/LineLength");
         assert_eq!(cc.options.get("Max").and_then(|v| v.as_u64()), Some(120));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn conditional_assignment_inherits_layout_line_length_config() {
+        let dir = std::env::temp_dir().join("nitrocop_test_conditional_assignment_line_length");
+        fs::create_dir_all(&dir).unwrap();
+        let path = write_config(&dir, "Layout/LineLength:\n  Enabled: false\n  Max: 140\n");
+        let config = load_config(Some(&path), None, None).unwrap();
+        let cc = config.cop_config("Style/ConditionalAssignment");
+        assert_eq!(
+            cc.options.get("MaxLineLength").and_then(|v| v.as_u64()),
+            Some(140)
+        );
+        assert_eq!(
+            cc.options
+                .get("LineLengthEnabled")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
