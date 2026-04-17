@@ -17,6 +17,7 @@ thread_local! {
 
 struct ShadowingContext {
     ractor_block_ranges: Vec<(usize, usize)>,
+    begin_node_ranges: Vec<(usize, usize)>,
     branch_intervals: Vec<BranchInterval>,
     expression_ranges: Vec<(usize, usize, usize)>,
     single_stmt_block_bodies: HashSet<usize>,
@@ -40,6 +41,7 @@ impl ShadowingContext {
     fn new() -> Self {
         Self {
             ractor_block_ranges: Vec::new(),
+            begin_node_ranges: Vec::new(),
             branch_intervals: Vec::new(),
             expression_ranges: Vec::new(),
             single_stmt_block_bodies: HashSet::new(),
@@ -119,6 +121,12 @@ impl ShadowingContext {
     /// Check if a given offset is inside a Ractor.new block.
     fn is_in_ractor_block(&self, offset: usize) -> bool {
         self.ractor_block_ranges
+            .iter()
+            .any(|(s, e)| *s <= offset && offset < *e)
+    }
+
+    fn is_in_begin_wrapper(&self, offset: usize) -> bool {
+        self.begin_node_ranges
             .iter()
             .any(|(s, e)| *s <= offset && offset < *e)
     }
@@ -293,6 +301,10 @@ impl ShadowingContext {
         let Some((block_start, _, _)) = innermost else {
             return false;
         };
+
+        if self.is_in_begin_wrapper(*block_start) {
+            return false;
+        }
 
         // Check if this specific block has a matching conditional parent entry.
         self.block_cond_parents.iter().any(|entry| {
@@ -504,6 +516,33 @@ impl ShadowingContext {
 ///    the direct-RHS case. Fix: only apply that compatibility path when the
 ///    block is exactly one expression layer deep inside the assignment RHS.
 ///
+/// 7. **FN: VariableForce missed outer locals introduced by `for` and `=>`.**
+///    Destructured `for` indices and rightward-pattern locals were not being
+///    declared in the shared variable engine, so later blocks could not find
+///    them as outer locals. Fix: assign all nested `for` targets and
+///    `MatchRequiredNode` pattern targets before visiting descendants.
+///
+/// 8. **FN: check-6 suppression leaked from `unless`/non-`if` branches.**
+///    RuboCop's "else branch owns the scope" suppression only applies to real
+///    `if`/`elsif` else branches, not `unless` bodies or `case`/`when` bodies.
+///    Fix: track that suppression eligibility separately from generic
+///    branch-identity metadata and only enable it for true `if`-style else
+///    branches.
+///
+/// 9. **FN: hash literal values looked like direct assignment RHS blocks.**
+///    A `proc { |x| }` nested inside a hash assigned in a branch was treated as
+///    if it were the direct RHS block of the outer assignment, which suppressed
+///    real offenses like Tk's `command: proc { |fnt| ... }` pattern. Fix:
+///    record hash literals as expression nesting so only the direct RHS block
+///    gets assignment-RHS suppression.
+///
+/// 10. **FN: explicit `begin` wrappers are not direct conditional children.**
+///     RuboCop's check-5/check-6 shortcut only applies when the block's
+///     effective variable node is the conditional itself (or its else branch).
+///     A `begin ... rescue ... end` wrapper breaks that parentage, so the
+///     shortcut must not suppress blocks nested under the begin. Fix: record
+///     explicit begin-node ranges and disable that shortcut through them.
+///
 /// ## Migration to VariableForce
 ///
 /// This cop was migrated from a 1,857-line standalone AST visitor to use the shared
@@ -620,6 +659,7 @@ impl Cop for ShadowingOuterLocalVariable {
     ) {
         let mut collector = ContextCollector {
             ractor_block_ranges: Vec::new(),
+            begin_node_ranges: Vec::new(),
             branch_intervals: Vec::new(),
             expression_ranges: Vec::new(),
             single_stmt_block_bodies: HashSet::new(),
@@ -643,6 +683,7 @@ impl Cop for ShadowingOuterLocalVariable {
         SHADOWING_CTX.with(|cell| {
             let mut ctx = cell.borrow_mut();
             ctx.ractor_block_ranges = collector.ractor_block_ranges;
+            ctx.begin_node_ranges = collector.begin_node_ranges;
             ctx.branch_intervals = collector.branch_intervals;
             ctx.expression_ranges = collector.expression_ranges;
             ctx.single_stmt_block_bodies = collector.single_stmt_block_bodies;
@@ -820,6 +861,7 @@ struct CondBranchEntry {
     is_if_type: bool,
     single_stmt: bool,
     is_else_clause: bool,
+    allow_check6_else_suppression: bool,
     expression_depth_base: usize,
 }
 
@@ -828,6 +870,7 @@ struct CondBranchEntry {
 struct ContextCollector {
     // Output data
     ractor_block_ranges: Vec<(usize, usize)>,
+    begin_node_ranges: Vec<(usize, usize)>,
     branch_intervals: Vec<BranchInterval>,
     expression_ranges: Vec<(usize, usize, usize)>,
     single_stmt_block_bodies: HashSet<usize>,
@@ -911,6 +954,7 @@ impl ContextCollector {
             is_if_type: true,
             single_stmt: then_single_stmt,
             is_else_clause: false,
+            allow_check6_else_suppression: false,
             expression_depth_base: self.expression_depth,
         };
         self.push_branch(pred_entry, pred_start, pred_end);
@@ -929,6 +973,7 @@ impl ContextCollector {
                 is_if_type: true,
                 single_stmt: then_single_stmt,
                 is_else_clause: false,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(body_entry, body_start, body_end);
@@ -950,6 +995,7 @@ impl ContextCollector {
                     is_if_type: true,
                     single_stmt: false,
                     is_else_clause: true,
+                    allow_check6_else_suppression: true,
                     expression_depth_base: self.expression_depth,
                 };
                 self.push_branch(elsif_outer_entry, sub_start, sub_end);
@@ -971,6 +1017,7 @@ impl ContextCollector {
                     is_if_type: true,
                     single_stmt: else_single_stmt,
                     is_else_clause: true,
+                    allow_check6_else_suppression: true,
                     expression_depth_base: self.expression_depth,
                 };
                 self.push_branch(else_entry, sub_start, sub_end);
@@ -1004,6 +1051,7 @@ impl ContextCollector {
                 is_if_type: false,
                 single_stmt: false,
                 is_else_clause: false,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(cond_entry, start, end);
@@ -1084,6 +1132,12 @@ impl<'pr> Visit<'pr> for ContextCollector {
         }
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        self.begin_node_ranges
+            .push((node.location().start_offset(), node.location().end_offset()));
+        ruby_prism::visit_begin_node(self, node);
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         // Detect Ractor.new blocks
         if is_ractor_new_call(node) {
@@ -1130,6 +1184,15 @@ impl<'pr> Visit<'pr> for ContextCollector {
         if let Some(block) = node.block() {
             self.visit(&block);
         }
+    }
+
+    fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
+        let start = node.location().start_offset();
+        let end = node.location().end_offset();
+        self.expression_depth += 1;
+        self.record_expression_range(start, end);
+        ruby_prism::visit_hash_node(self, node);
+        self.expression_depth -= 1;
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
@@ -1310,13 +1373,14 @@ impl<'pr> Visit<'pr> for ContextCollector {
         // remains single-statement (each intermediate branch has ≤1 statement).
         if self.expression_depth == 0 {
             let mut is_innermost = true;
+            let mut can_propagate = true;
             for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
                 .filter(|e| e.is_body)
             {
-                if !is_innermost && !entry.single_stmt {
+                if !is_innermost && (!can_propagate || !entry.single_stmt) {
                     break;
                 }
                 self.block_cond_parents.push(BlockCondParentEntry {
@@ -1328,8 +1392,9 @@ impl<'pr> Visit<'pr> for ContextCollector {
                     // a block nested inside a single-stmt when body was incorrectly
                     // treated as a direct child of the case node.
                     is_single_stmt_branch: is_innermost && entry.single_stmt,
-                    is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
+                    is_else_of_if_type: entry.allow_check6_else_suppression,
                 });
+                can_propagate = entry.single_stmt;
                 is_innermost = false;
             }
         }
@@ -1390,21 +1455,23 @@ impl<'pr> Visit<'pr> for ContextCollector {
         // Same propagation logic as visit_block_node.
         if self.expression_depth == 0 {
             let mut is_innermost = true;
+            let mut can_propagate = true;
             for entry in self
                 .conditional_branch_stack
                 .iter()
                 .rev()
                 .filter(|e| e.is_body)
             {
-                if !is_innermost && !entry.single_stmt {
+                if !is_innermost && (!can_propagate || !entry.single_stmt) {
                     break;
                 }
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
                     cond_offset: entry.cond_offset,
                     is_single_stmt_branch: is_innermost && entry.single_stmt,
-                    is_else_of_if_type: entry.is_else_clause && entry.is_if_type,
+                    is_else_of_if_type: entry.allow_check6_else_suppression,
                 });
+                can_propagate = entry.single_stmt;
                 is_innermost = false;
             }
         }
@@ -1444,6 +1511,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: true,
                 single_stmt: else_single_stmt,
                 is_else_clause: false,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(else_entry, else_start, else_end);
@@ -1464,6 +1532,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: true,
                 single_stmt: body_single_stmt,
                 is_else_clause: true,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(body_entry, body_start, body_end);
@@ -1485,6 +1554,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
             is_if_type: false,
             single_stmt: false,
             is_else_clause: false,
+            allow_check6_else_suppression: false,
             expression_depth_base: self.expression_depth,
         };
         self.push_branch(entry, start, end);
@@ -1505,6 +1575,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
             is_if_type: false,
             single_stmt: false,
             is_else_clause: false,
+            allow_check6_else_suppression: false,
             expression_depth_base: self.expression_depth,
         };
         self.push_branch(entry, start, end);
@@ -1527,6 +1598,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: false,
                 single_stmt: true,
                 is_else_clause: false,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(pred_entry, pred_start, pred_end);
@@ -1551,6 +1623,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: false,
                 single_stmt: when_single_stmt,
                 is_else_clause: false,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(when_entry, when_start, when_end);
@@ -1576,6 +1649,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: false,
                 single_stmt: else_single_stmt,
                 is_else_clause: true,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(else_entry, else_start, else_end);
@@ -1613,6 +1687,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: false,
                 single_stmt: in_single_stmt,
                 is_else_clause: false,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(in_entry, in_start, in_end);
@@ -1634,6 +1709,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 is_if_type: false,
                 single_stmt: else_single_stmt,
                 is_else_clause: true,
+                allow_check6_else_suppression: false,
                 expression_depth_base: self.expression_depth,
             };
             self.push_branch(else_entry, else_start, else_end);

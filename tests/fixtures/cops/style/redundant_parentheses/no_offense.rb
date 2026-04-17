@@ -323,6 +323,15 @@ begin
 rescue
   (x && y)
 end
+# Rescue-body conditional parens are accepted when they belong to the
+# direct statement that starts the rescue clause.
+begin
+  work
+rescue StandardError => e
+  if ((a && b) || c)
+    handle
+  end
+end
 # Bracket chaining — (expr)[key] is chained like (expr).method
 (n.next_element || n.parent)['id'] ||= n['name']
 # self[] receiver — RuboCop's square_brackets? doesn't include self

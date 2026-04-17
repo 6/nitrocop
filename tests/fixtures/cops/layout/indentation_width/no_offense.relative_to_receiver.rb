@@ -1,4 +1,4 @@
-# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent
+# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable
 class Manager
 
     private :load, :available
@@ -29,3 +29,10 @@ m = Module.new do
     File.expand_path($0) == File.expand_path(__FILE__)
   end
 end
+
+# Nested operators do not make the if-body align to the outer assignment.
+content = label || if ready?
+                     primary_value
+                   else
+                     fallback_value
+                   end
