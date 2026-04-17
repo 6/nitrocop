@@ -1,5 +1,7 @@
 use std::cell::RefCell;
 
+use regex::Regex;
+
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{
     CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE, CASE_MATCH_NODE,
@@ -74,6 +76,14 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// (starting column) to the first line's length, double-counting indentation.
 /// RuboCop's `longest_line` computes each branch line's length independently
 /// of the node's column position. Dropped `node_col` to match.
+///
+/// FN reduction (2026-04-16): RuboCop's line-length guard removes both the
+/// assignment text and any leading indentation before it using
+/// `/\s*#{assignment_regex}/`. nitrocop was only removing the assignment
+/// itself, so nested branches near the length threshold were incorrectly
+/// suppressed in full files even though RuboCop still flagged them.
+/// RuboCop also measures the resulting line length in characters, not UTF-8
+/// bytes, so multibyte branch text like `…` must not inflate the guard.
 ///
 /// Variant fix (2026-04-16): for `EnforcedStyle=assign_inside_condition`,
 /// `SingleLineConditionsOnly` uses RuboCop's raw branch deconstruction. That
@@ -1258,25 +1268,23 @@ fn exceeds_line_limit(
         Ok(s) => s,
         Err(_) => return false,
     };
-    let lhs_trimmed = lhs_text.trim_end();
+    let assignment_pattern = format!(r"\s*{}", regex::escape(lhs_text).replace(r"\ ", r"\s*"));
+    let assignment_regex = match Regex::new(&assignment_pattern) {
+        Ok(regex) => regex,
+        Err(_) => return false,
+    };
     let mut max_remaining = 0;
     for line in src.lines() {
-        // Remove first occurrence of the LHS anywhere in the line, matching
-        // RuboCop's `line.sub(assignment_regex, '')`. For if/else branches
-        // the LHS is at the start; for ternaries it appears mid-line.
-        let remaining = if let Some(pos) = line.find(lhs_trimmed) {
-            let before = &line[..pos];
-            let after = &line[pos + lhs_trimmed.len()..];
-            let after_trimmed = after.trim_start();
-            before.len() + after_trimmed.len()
-        } else {
-            line.len()
-        };
+        // Match RuboCop's `line.sub(assignment_regex, '')`: remove the first
+        // occurrence of the assignment text, including any leading
+        // indentation/whitespace before it, and allow flexible whitespace
+        // between assignment tokens.
+        let remaining = assignment_regex.replacen(line, 1, "").chars().count();
         if remaining > max_remaining {
             max_remaining = remaining;
         }
     }
-    lhs_text.len() + max_remaining > max_line_length
+    lhs_text.chars().count() + max_remaining > max_line_length
 }
 
 #[cfg(test)]
