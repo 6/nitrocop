@@ -277,6 +277,19 @@ use ruby_prism::Visit;
 ///   wrappers such as `CONST = Class.new do`, `class_exec do`, and `if ... class`.
 ///   Visibility now uses Prism's full visitor and checks every statement list,
 ///   while keeping RuboCop's sibling-scope rules intact.
+///
+/// ## Investigation (2026-04-17): FP=1 on ruby/did_you_mean
+///
+/// `def distance(...) end if RUBY_ENGINE != 'jruby'` inside `module_eval do`
+/// with a sibling `module_function`. Prism's modifier-if parses the `def ... end`
+/// as an `IfNode` sharing its start offset with the inner `DefNode`. The sibling
+/// scan's `contains_def_at` only recognised the def itself and defs passed as
+/// access-modifier arguments, so it didn't spot the def inside the IfNode, and
+/// the visitor fell through to the if-body scope where `module_function` is not
+/// a sibling. RuboCop's `each_ancestor(:module, :begin)` treats conditional
+/// wrappers as transparent, so it finds `module_function` in the outer `:begin`.
+/// Fix: `contains_def_at` now recurses into `IfNode`/`UnlessNode` branches so
+/// the outer scope still recognises the wrapped def.
 pub struct Delegate;
 
 impl Cop for Delegate {
@@ -656,6 +669,42 @@ impl<'pr> VisibilityChecker<'_> {
                         && arg.location().start_offset() == self.def_offset
                     {
                         return true;
+                    }
+                }
+            }
+        }
+        // Conditional wrappers (`def ... end if cond`, `def ... end unless cond`,
+        // or prefix `if cond; def ...; end`) are transparent for visibility scope:
+        // RuboCop's `each_ancestor(:module, :begin)` walks past them, so a def
+        // inside an `if` still sees access modifiers from the outer scope.
+        if let Some(if_node) = node.as_if_node() {
+            if let Some(stmts) = if_node.statements() {
+                for s in stmts.body().iter() {
+                    if self.contains_def_at(&s) {
+                        return true;
+                    }
+                }
+            }
+            if let Some(subsequent) = if_node.subsequent() {
+                if self.contains_def_at(&subsequent) {
+                    return true;
+                }
+            }
+        }
+        if let Some(unless_node) = node.as_unless_node() {
+            if let Some(stmts) = unless_node.statements() {
+                for s in stmts.body().iter() {
+                    if self.contains_def_at(&s) {
+                        return true;
+                    }
+                }
+            }
+            if let Some(else_clause) = unless_node.else_clause() {
+                if let Some(stmts) = else_clause.statements() {
+                    for s in stmts.body().iter() {
+                        if self.contains_def_at(&s) {
+                            return true;
+                        }
                     }
                 }
             }

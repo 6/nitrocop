@@ -347,3 +347,14 @@ q - Quit, do not update ignored warnings
     @ignore_config.unignore warning
   end
 end
+
+# `end if cond` modifier-if wrapping a def inside a block body where
+# `module_function` is a sibling. The IfNode shares its start offset with
+# the DefNode in Prism, so the visibility check must recurse through the
+# IfNode to see the `module_function` sibling.
+DidYouMean::JaroWinkler.module_eval do
+  module_function
+  def distance(str1, str2)
+    ::JaroWinkler.distance(str1, str2)
+  end if RUBY_ENGINE != 'jruby'
+end
