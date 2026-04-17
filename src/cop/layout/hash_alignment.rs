@@ -72,6 +72,14 @@ use ruby_prism::Visit;
 ///    table style and multiline-proc/hash variants in the corpus. Fixed by keeping the
 ///    value column for non-omitted values and only suppressing newline value spacing in
 ///    `key` style.
+///
+/// 7. **Bundled `EnforcedStyle` alias + single-pair table hashes (2026-04-17):**
+///    local variant validation passes `EnforcedStyle: rocket, colon, last_arg_style`
+///    for this cop, but the implementation only read the split RuboCop keys. That left
+///    `check_cop.py --style EnforcedStyle=...` effectively on default behavior. RuboCop
+///    also checks the first pair in single-pair hashes under `table` style, while the cop
+///    returned early unless there were at least two pairs. Fixed by parsing the bundled
+///    alias in the cop and letting `check_table_style` inspect single-pair hashes.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -128,6 +136,35 @@ fn parse_styles(config: &CopConfig, key: &str, default: &str) -> Vec<AlignStyle>
         "table" => vec![AlignStyle::Table],
         _ => vec![AlignStyle::Key],
     }
+}
+
+fn parse_style_value(value: &str) -> Option<AlignStyle> {
+    match value.trim() {
+        "key" => Some(AlignStyle::Key),
+        "separator" => Some(AlignStyle::Separator),
+        "table" => Some(AlignStyle::Table),
+        _ => None,
+    }
+}
+
+fn parse_enforced_style_alias(
+    config: &CopConfig,
+) -> Option<(Vec<AlignStyle>, Vec<AlignStyle>, String)> {
+    let value = config.options.get("EnforcedStyle")?.as_str()?;
+    let parts: Vec<&str> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    Some((
+        vec![parse_style_value(parts[0])?],
+        vec![parse_style_value(parts[1])?],
+        parts[2].to_string(),
+    ))
 }
 
 /// Info about a single hash pair extracted from the AST.
@@ -503,7 +540,7 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
 /// Check a hash under the "table" alignment style.
 fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffense> {
     let mut offenses = Vec::new();
-    if pairs.len() < 2 {
+    if pairs.is_empty() {
         return offenses;
     }
 
@@ -785,9 +822,20 @@ impl HashAlignment {
         is_last_argument_hash: bool,
     ) {
         let _allow_multiple = config.get_bool("AllowMultipleStyles", true);
-        let rocket_styles = parse_styles(config, "EnforcedHashRocketStyle", "key");
-        let colon_styles = parse_styles(config, "EnforcedColonStyle", "key");
-        let last_arg_style = config.get_str("EnforcedLastArgumentHashStyle", "always_inspect");
+        let (rocket_styles, colon_styles, last_arg_style) =
+            if let Some((rocket_styles, colon_styles, last_arg_style)) =
+                parse_enforced_style_alias(config)
+            {
+                (rocket_styles, colon_styles, last_arg_style)
+            } else {
+                (
+                    parse_styles(config, "EnforcedHashRocketStyle", "key"),
+                    parse_styles(config, "EnforcedColonStyle", "key"),
+                    config
+                        .get_str("EnforcedLastArgumentHashStyle", "always_inspect")
+                        .to_string(),
+                )
+            };
         let arg_alignment_style = config.get_str("ArgumentAlignmentStyle", "with_first_argument");
         let fixed_indentation = arg_alignment_style == "with_fixed_indentation";
 
@@ -828,8 +876,11 @@ impl HashAlignment {
 
         // Match RuboCop's `on_send` / `ignore_hash_argument?`: only ignore a hash
         // when this node is actually the last argument of a call-like node.
-        if should_ignore_last_argument_hash(is_last_argument_hash, is_keyword_hash, last_arg_style)
-        {
+        if should_ignore_last_argument_hash(
+            is_last_argument_hash,
+            is_keyword_hash,
+            last_arg_style.as_str(),
+        ) {
             return;
         }
 
@@ -1095,6 +1146,17 @@ mod tests {
     }
 
     #[test]
+    fn separator_always_ignore_inline_first_pair_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_inline_first_pair_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
     fn ignore_explicit_offense_fixture() {
         crate::testutil::assert_cop_offenses_full_with_config(
             &HashAlignment,
@@ -1146,6 +1208,38 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_first_pair_offense.rb"
             ),
             variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn table_ignore_implicit_inline_first_pair_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_inline_first_pair_offense.rb"
+            ),
+            variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn enforced_style_alias_is_respected_for_variant_checks() {
+        use crate::testutil::run_cop_full_with_config;
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "EnforcedStyle".into(),
+                serde_yml::Value::String("separator, separator, always_ignore".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let src = b"data = {\n  aa: 0,\n  b: 1,\n}\n";
+        let diags = run_cop_full_with_config(&HashAlignment, src, config);
+        assert_eq!(
+            diags.len(),
+            1,
+            "bundled EnforcedStyle alias should configure separator alignment"
         );
     }
 
