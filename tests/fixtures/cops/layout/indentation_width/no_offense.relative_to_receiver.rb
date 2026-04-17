@@ -44,3 +44,20 @@ process((if ready?
          else
            fallback_value
          end))
+
+# RuboCop skips indented_internal_methods handling for class_eval blocks nested
+# inside a method body.
+def wrapper(base)
+  base.class_eval do
+    undef :before if method_defined? :before
+    def before
+      body
+    end
+
+    private
+
+    def helper
+      body
+    end
+  end
+end

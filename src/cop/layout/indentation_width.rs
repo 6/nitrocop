@@ -188,6 +188,15 @@ use ruby_prism::Visit;
 ///   previous port reused the keyword/opening offset for tabs math, which
 ///   missed offenses in blocks like `create_table ... do` when the body line
 ///   used tabs or mixed indentation.
+/// - Fixed batch-1 variant divergence in two narrow cases:
+///   1. `indented_internal_methods` does not apply to `class_eval`/`class_exec`
+///      style blocks nested inside a method body. RuboCop skips the extra
+///      internal-method member walk there, so `private` sections inside those
+///      dynamic-eval blocks must not trigger false positives.
+///   2. Tabs-style `private def` / adjacent-def bodies use RuboCop's raw column
+///      delta instead of the visual tab-width delta. That means a body indented
+///      by one literal tab under `private def` still reports as "0 tabs" in
+///      batch 1, and nitrocop must mirror that quirk to avoid false negatives.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -503,6 +512,7 @@ fn extracted_rhs<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<ruby_prism::No
 struct AncestorContext {
     start_offset: usize,
     rhs_span: Option<(usize, usize)>,
+    is_def: bool,
 }
 
 struct AncestorFinder {
@@ -526,6 +536,7 @@ impl<'pr> Visit<'pr> for AncestorFinder {
         self.stack.push(AncestorContext {
             start_offset: node.location().start_offset(),
             rhs_span,
+            is_def: node.as_def_node().is_some(),
         });
     }
 
@@ -552,6 +563,27 @@ fn ancestors_for_node(
     };
     finder.visit(&parse_result.node());
     finder.found.unwrap_or_default()
+}
+
+fn node_has_def_ancestor(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    node: &ruby_prism::Node<'_>,
+) -> bool {
+    ancestors_for_node(parse_result, node)
+        .iter()
+        .any(|ancestor| ancestor.is_def)
+}
+
+fn is_eval_exec_block_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"class_eval"
+            | b"module_eval"
+            | b"instance_eval"
+            | b"class_exec"
+            | b"module_exec"
+            | b"instance_exec"
+    )
 }
 
 fn variable_style_base_offset(
@@ -631,6 +663,7 @@ struct MemberStyles<'a> {
 struct IndentationOptions {
     width: usize,
     tabs_style: bool,
+    raw_tabs_columns: bool,
 }
 
 impl IndentationWidth {
@@ -671,6 +704,7 @@ impl IndentationWidth {
         options: IndentationOptions,
     ) -> isize {
         if options.tabs_style
+            && !options.raw_tabs_columns
             && (line_uses_tab_indentation(source, base_offset)
                 || line_uses_tab_indentation(source, target_offset))
         {
@@ -1235,6 +1269,7 @@ impl Cop for IndentationWidth {
         let options = IndentationOptions {
             width,
             tabs_style: indentation_style == "tabs",
+            raw_tabs_columns: false,
         };
         let allowed_patterns = config
             .get_string_array("AllowedPatterns")
@@ -1376,6 +1411,15 @@ impl Cop for IndentationWidth {
 
         if let Some(def_node) = node.as_def_node() {
             let kw_offset = def_node.def_keyword_loc().start_offset();
+            let modifier_offset = if align_style == "keyword" {
+                None
+            } else {
+                def_modifier_base_offset(source, kw_offset)
+            };
+            let def_options = IndentationOptions {
+                raw_tabs_columns: options.tabs_style && modifier_offset.is_some(),
+                ..options
+            };
             let (base_offset, base_col) = if align_style == "keyword" {
                 // EnforcedStyleAlignWith: keyword — indent relative to `def` keyword column
                 (kw_offset, source.offset_to_line_col(kw_offset).1)
@@ -1388,7 +1432,7 @@ impl Cop for IndentationWidth {
                 // matches on_send using leftmost_modifier_of). For non-modifier
                 // contexts like `x = def foo` or `(def bar`, use the def
                 // keyword column to match RuboCop's on_def behavior.
-                if let Some(modifier_offset) = def_modifier_base_offset(source, kw_offset) {
+                if let Some(modifier_offset) = modifier_offset {
                     (
                         modifier_offset,
                         source.offset_to_line_col(modifier_offset).1,
@@ -1408,10 +1452,10 @@ impl Cop for IndentationWidth {
                         (base_offset, base_col),
                         None,
                         begin_node.statements(),
-                        options,
+                        def_options,
                     ));
                     // Check rescue/ensure/else clauses.
-                    self.check_begin_clauses(source, &begin_node, options, diagnostics);
+                    self.check_begin_clauses(source, &begin_node, def_options, diagnostics);
                 } else {
                     // Regular def body (StatementsNode).
                     diagnostics.extend(self.check_body_indentation(
@@ -1420,7 +1464,7 @@ impl Cop for IndentationWidth {
                         base_offset,
                         base_col,
                         Some(body),
-                        options,
+                        def_options,
                     ));
                 }
             }
@@ -1587,6 +1631,8 @@ impl Cop for IndentationWidth {
                     }
                     if consistency_style == "indented_internal_methods"
                         && body_contains_access_modifier(block.body())
+                        && !(is_eval_exec_block_name(call_node.name().as_slice())
+                            && node_has_def_ancestor(_parse_result, node))
                     {
                         diagnostics.extend(self.check_block_internal_method_members(
                             source,
