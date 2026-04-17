@@ -312,7 +312,7 @@ def start_handlers; (@start_handlers ||= {}); end
 (--5.5).should be_close(5.5, 0.01)
 (--5).should == 5
 (--2).should == 2
-# Rescue clause body — RuboCop's rescue? exempts parens inside resbody
+# Rescue clause body — RuboCop's rescue? only exempts single-statement resbodies
 begin
   work
 rescue StandardError
@@ -323,8 +323,8 @@ begin
 rescue
   (x && y)
 end
-# Rescue-body conditional parens are accepted when they belong to the
-# direct statement that starts the rescue clause.
+# Rescue-body conditional parens are accepted when the rescue body has
+# a single direct statement.
 begin
   work
 rescue StandardError => e
@@ -354,3 +354,9 @@ selected_participants = []
 participants = [Struct.new(:id).new(1)]
 rand_num = 0
 if_condition_2 = (!selected_participants.include? participants[rand_num].id)
+# Negated explicit-receiver call with a block is also accepted
+new_dirs = []
+r_dir_name = :name
+if_condition_3 = (!new_dirs.any? { |d| d == r_dir_name })
+# Spaced unary plus used as a chained receiver keeps its parens
+print (+ 'frozen string').frozen? ? 'immutable' : 'mutable'
