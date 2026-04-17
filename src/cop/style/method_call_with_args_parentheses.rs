@@ -228,6 +228,33 @@ use crate::parse::source::SourceFile;
 ///    was leaking the outer `Call` parent into the block body, so inner calls
 ///    like `Class.new(TestInteraction) do ... end` were incorrectly treated as
 ///    chained arguments and skipped.
+///
+/// ## Failed attempt (2026-04-16, PR #2197, closed)
+///
+/// An agent tried to fix the remaining `omit_parentheses` divergence by:
+/// - Adding `ParentKind::CallAssignedRhs` and `ParentKind::Super` variants
+/// - Adding a `block_parent_is_call_like: Vec<bool>` stack to track whether
+///   the ancestor through a block is a call-like expression
+/// - Introducing `visit_parser_block_body` that pops/restores parents to
+///   mimic Parser's `block` wrapper semantics
+/// - Changing `call_in_argument_with_block` to consult
+///   `current_parent_is_call_like()` / `in_call_like_block_parent()`
+/// - Visiting `SuperNode` arguments for nested omit-paren calls
+///
+/// Result: -2,256 FP, +2,897 FN (net +641 worse).  The block-parent tracking
+/// was too aggressive — it suppressed legitimate omit-paren offenses that
+/// live inside blocks whose parent happens to be a call-like node.  The
+/// specific pattern that over-suppresses: `foo.bar { |x| baz(x) }` where
+/// `baz(x)` should still be an omit offense but the new logic marks it as
+/// an allowed call-in-block-in-call.
+///
+/// What a correct fix would need: `call_in_argument_with_block` should only
+/// allow parens when the block is being passed AS AN ARGUMENT to the outer
+/// call (i.e., the outer call has a trailing block literal), not whenever
+/// the outer context happens to be call-like.  Verify with RuboCop on
+/// `AlchemyCMS/alchemy_cms/app/components/alchemy/admin/tags_list.rb:26`
+/// (FN) and a simple `foo.bar { baz(x) }` (must flag baz) before changing
+/// parent tracking.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
