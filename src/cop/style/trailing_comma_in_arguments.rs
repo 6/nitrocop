@@ -64,6 +64,17 @@ use super::trailing_comma;
 ///   `IndexOrWriteNode` / `IndexOperatorWriteNode`, while RuboCop still sees
 ///   the inner `[]` send. Fix: mirror RuboCop by linting those index-write
 ///   nodes with the same argument-list logic as plain `[]` calls.
+///
+/// Investigation (2026-04-17)
+///
+/// The remaining 28 `consistent_comma` false positives were multiline bracket
+/// assignments such as `headers[\n  key\n] = value`. RuboCop's `on_send`
+/// checks only parenthesized sends or `[]`, so bracket-assignment syntax
+/// `[]=` is skipped. Prism exposes that syntax as a dotless `CallNode` with
+/// method `[]=`, which nitrocop had incorrectly linted like `[]`. Fix: skip
+/// dotless `[]=` calls while still checking explicit `.[]=(` sends and
+/// Prism-only index-write nodes (`||=`, `&&=`, `+=`) that RuboCop still
+/// treats like the inner `[]` send.
 pub struct TrailingCommaInArguments;
 
 impl Cop for TrailingCommaInArguments {
@@ -98,13 +109,21 @@ impl Cop for TrailingCommaInArguments {
             call_start_line,
             method_line,
         ) = if let Some(call_node) = node.as_call_node() {
+            let method_name = call_node.name().as_slice();
+
+            // Prism models `foo[key] = value` as a dotless `[]=`
+            // call, but RuboCop only checks parenthesized sends and `[]`.
+            if method_name == b"[]=" && call_node.call_operator_loc().is_none() {
+                return;
+            }
+
             let has_closing_token = call_node.closing_loc().is_some();
             let (closing_start, node_end_offset) = match call_node.closing_loc() {
                 Some(loc) => {
                     let start = loc.start_offset();
                     (start, start)
                 }
-                None if call_node.name().as_slice() == b"[]" => {
+                None if method_name == b"[]" => {
                     let end = call_node.location().end_offset();
                     (end, end.saturating_sub(1))
                 }
@@ -479,6 +498,18 @@ mod tests {
             diags.len(),
             1,
             "consistent_comma should handle [] method calls without a closing token"
+        );
+    }
+
+    #[test]
+    fn consistent_comma_explicit_bracket_setter_still_offense() {
+        let source = b"headers.[]=(\n  \"X-Discourse-Event-Signature\",\n  signature\n)\n";
+        let diags =
+            run_cop_full_with_config(&TrailingCommaInArguments, source, consistent_comma_config());
+        assert_eq!(
+            diags.len(),
+            1,
+            "consistent_comma should still flag explicit .[]= calls"
         );
     }
 
