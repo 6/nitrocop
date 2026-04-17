@@ -147,6 +147,24 @@ use crate::parse::source::SourceFile;
 ///
 /// Sample-15 corpus validation: 0 FP regression, 0 FN regression,
 /// -1,324 FP resolved, -190 FN resolved.
+///
+/// ## Corpus fix (2026-04-17)
+///
+/// Two remaining FN clusters came from Prism details that are narrower than
+/// the current port treated them:
+///
+/// 1. `call.block()` is present for both real blocks (`{}` / `do..end`) and
+///    block-pass arguments (`&:strip`). RuboCop's block-chain alignment only
+///    applies to real blocks, so calls like `.collect(&:strip)\n  .compact`
+///    must still align `.compact` with the earlier chain base instead of with
+///    `.collect`.
+/// 2. Prism exposes `opening_loc` for `[]` / `[]=` calls as well as `(` arg
+///    lists. For the default `aligned` style, RuboCop's
+///    `inside_arg_list_parentheses?` only skips actual `(` argument lists, so
+///    chains in `[]=` RHS expressions such as
+///    `headers['Cookie'] = final_cookies_hash.\n  map { ... }` must still be
+///    checked. The non-default styles keep the older broad skip behavior for
+///    now because narrowing them regressed their corpus baselines.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -612,7 +630,7 @@ fn find_block_chain_alignment(
 
     // Direct receiver with block
     if let Some(call) = receiver.as_call_node() {
-        if call.block().is_some() {
+        if has_real_block(&call) {
             if let Some(dot_loc) = call.call_operator_loc() {
                 let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
                 let loc = call.location();
@@ -920,8 +938,14 @@ impl Visit<'_> for ChainVisitor<'_> {
             self.visit(&recv);
         }
 
-        // Visit arguments: if call has parens, mark as in_paren_args
-        let has_parens = node.opening_loc().is_some();
+        // RuboCop only skips actual parenthesized arg lists here. Prism also
+        // reports `opening_loc` for `[]`/`[]=`, but square brackets do not
+        // suppress this cop.
+        let has_parens = if self.style == "aligned" {
+            call_has_parenthesized_args(node)
+        } else {
+            node.opening_loc().is_some()
+        };
         if let Some(args) = node.arguments() {
             if has_parens {
                 let saved_paren = self.in_paren_args;
@@ -971,7 +995,7 @@ fn find_block_chain_col(
     current_dot_line: usize,
 ) -> Option<usize> {
     if let Some(call) = receiver.as_call_node() {
-        if call.block().is_some() {
+        if has_real_block(&call) {
             if let Some(dot_loc) = call.call_operator_loc() {
                 let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
                 let loc = call.location();
@@ -1011,14 +1035,23 @@ fn has_matching_dot_on_line(
 
 /// Walk down the receiver chain to find the root (node with no receiver),
 /// then return the first call with a dot above it. Returns (line, col, byte_offset).
+///
+/// Prism keeps multiline blocks attached to the underlying `CallNode`, unlike
+/// RuboCop's parser AST where the block wraps the send. When a chain continues
+/// after a multiline block via an inline post-block call (`end.compact`), that
+/// post-block call is the first alignment anchor RuboCop uses. Stop descending
+/// once the current call's receiver is a multiline real-block call so we align
+/// to `.compact` rather than tunneling back to the original `.map`.
 fn find_first_call_dot(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
 ) -> Option<(usize, usize, usize)> {
     if let Some(call) = node.as_call_node() {
         if let Some(recv) = call.receiver() {
-            if let Some(deeper) = find_first_call_dot(source, &recv) {
-                return Some(deeper);
+            if !receiver_is_multiline_block_call(source, &recv) {
+                if let Some(deeper) = find_first_call_dot(source, &recv) {
+                    return Some(deeper);
+                }
             }
         }
         if let Some(dot_loc) = call.call_operator_loc() {
@@ -1037,8 +1070,10 @@ fn find_first_call_info(
 ) -> Option<(usize, usize, usize, String, usize)> {
     if let Some(call) = node.as_call_node() {
         if let Some(recv) = call.receiver() {
-            if let Some(deeper) = find_first_call_info(source, &recv) {
-                return Some(deeper);
+            if !receiver_is_multiline_block_call(source, &recv) {
+                if let Some(deeper) = find_first_call_info(source, &recv) {
+                    return Some(deeper);
+                }
             }
         }
         if let Some(dot_loc) = call.call_operator_loc() {
@@ -1051,6 +1086,25 @@ fn find_first_call_info(
         }
     }
     None
+}
+
+fn receiver_is_multiline_block_call(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+    let call = match node.as_call_node() {
+        Some(call) => call,
+        None => return false,
+    };
+    let block = match call.block() {
+        Some(block) if has_real_block(&call) => block,
+        _ => return false,
+    };
+    let block = match block.as_block_node() {
+        Some(block) => block,
+        None => return false,
+    };
+    let loc = block.location();
+    let (start_line, _) = source.offset_to_line_col(loc.start_offset());
+    let (end_line, _) = source.offset_to_line_col(loc.end_offset());
+    start_line != end_line
 }
 
 /// Check if the chain root is a parenthesized expression (begin node).
@@ -1326,7 +1380,7 @@ fn find_alignment_base_description(
     if !is_trailing_dot {
         // Check for block chain
         if let Some(call) = receiver.as_call_node() {
-            if call.block().is_some() {
+            if has_real_block(&call) {
                 if let Some(dot_loc) = call.call_operator_loc() {
                     let (block_dot_line, _) = source.offset_to_line_col(dot_loc.start_offset());
                     let loc = call.location();
@@ -1377,7 +1431,7 @@ fn find_chain_root_description(
     let loc = node.location();
     let (line, _) = source.offset_to_line_col(loc.start_offset());
     let name = std::str::from_utf8(loc.as_slice()).unwrap_or("?");
-    let name = name.split_whitespace().next().unwrap_or("?");
+    let name = name.lines().next().unwrap_or("?").trim_end();
     (name.to_string(), line)
 }
 
@@ -1392,6 +1446,14 @@ fn extract_call_source(call: ruby_prism::CallNode<'_>) -> Option<String> {
     } else {
         Some(name.to_string())
     }
+}
+
+fn call_has_parenthesized_args(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.opening_loc().is_some_and(|loc| loc.as_slice() == b"(")
+}
+
+fn has_real_block(call: &ruby_prism::CallNode<'_>) -> bool {
+    matches!(call.block(), Some(block) if block.as_block_node().is_some())
 }
 
 #[cfg(test)]
