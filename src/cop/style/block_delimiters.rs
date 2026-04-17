@@ -56,6 +56,26 @@ use std::collections::HashSet;
 /// - `queue << -> do logger.info { ... } end` must NOT use that ignore path:
 ///   RuboCop treats a lambda passed as the sole operator argument like a block
 ///   argument and still checks nested blocks inside it
+///
+/// ## Fix (2026-04-17): match RuboCop's semantic tail-equality and syntax bail-out
+///
+/// Two remaining variant mismatches were RuboCop quirks rather than new style rules:
+///
+/// - `parent.children.last == node` in RuboCop compares AST nodes structurally,
+///   not by identity, so an earlier block statement that is structurally equal
+///   to the true tail expression (for example a repeated `assert_queries(1) { ... }`
+///   or `reverse.each { ... }` before a final `reverse.each do ... end`) also
+///   counts as `rv_of_scope`
+/// - Prism stores `&Proc.new {}` on `call.block()` as a `BlockArgumentNode`,
+///   not in `call.arguments()`, so semantic style must still mark the wrapped
+///   `Proc.new` call as `rv_used`
+/// - Prism folds `foo[bar] ||= baz` into `IndexOrWriteNode`, so the block call
+///   inside the receiver must be marked `rv_used` even though there is no
+///   intermediate `CallNode` for `[]`
+/// - Under `EnforcedStyle: always_braces`, RuboCop's Translation::Parser also
+///   bails out on some non-UTF-8 files with high `\xHH` escapes (for example
+///   `# encoding:windows-1252` with `\xdf` regex escapes), so nitrocop now
+///   skips this cop on those parser-incompatible files too
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -73,6 +93,12 @@ impl Cop for BlockDelimiters {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
+        if enforced_style == "always_braces"
+            && (parse_result.errors().next().is_some()
+                || has_non_utf8_encoding_with_parser_incompatible_content(source.as_bytes()))
+        {
+            return;
+        }
         let procedural_methods = config
             .get_string_array("ProceduralMethods")
             .unwrap_or_else(|| vec!["tap".to_string()]);
@@ -425,6 +451,9 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
                 mark_rv_used_on_call(&arg, &mut self.rv_used_calls);
             }
         }
+        if let Some(block_arg) = node.block() {
+            mark_rv_used_on_call(&block_arg, &mut self.rv_used_calls);
+        }
 
         // Phase 2: Check this call's block (if any)
         if let Some(block) = node.block() {
@@ -510,7 +539,8 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'_>) {
         // Mark the last statement's call as rv_of_scope (return value of scope).
-        // This matches RuboCop's `parent.children.last == node` check.
+        // RuboCop uses AST `==` here, so earlier siblings that are structurally
+        // equal to the actual last child also count as rv_of_scope.
         let body: Vec<_> = node.body().iter().collect();
         if self.is_program_body {
             // Program body: only mark if multiple statements (matches Parser's
@@ -518,15 +548,19 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             // is nil and rv_of_scope is false)
             self.is_program_body = false;
             if body.len() > 1 {
-                if let Some(last) = body.last() {
-                    mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
-                }
+                mark_rv_of_scope_on_statement_tail_matches(
+                    &body,
+                    self.source,
+                    &mut self.rv_of_scope_calls,
+                );
             }
         } else {
             // Non-program body (def, block, class, etc.): always mark last child
-            if let Some(last) = body.last() {
-                mark_rv_of_scope_on_node(last, &mut self.rv_of_scope_calls);
-            }
+            mark_rv_of_scope_on_statement_tail_matches(
+                &body,
+                self.source,
+                &mut self.rv_of_scope_calls,
+            );
         }
         ruby_prism::visit_statements_node(self, node);
     }
@@ -634,31 +668,64 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
     }
 
     fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'_>) {
+        if let Some(receiver) = node.receiver() {
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+        }
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_call_operator_write_node(self, node);
     }
 
     fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'_>) {
+        if let Some(receiver) = node.receiver() {
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+        }
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_call_and_write_node(self, node);
     }
 
     fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'_>) {
+        if let Some(receiver) = node.receiver() {
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+        }
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_call_or_write_node(self, node);
     }
 
     fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'_>) {
+        if let Some(receiver) = node.receiver() {
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                mark_rv_used_on_call(&arg, &mut self.rv_used_calls);
+            }
+        }
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_index_operator_write_node(self, node);
     }
 
     fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'_>) {
+        if let Some(receiver) = node.receiver() {
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                mark_rv_used_on_call(&arg, &mut self.rv_used_calls);
+            }
+        }
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_index_and_write_node(self, node);
     }
 
     fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'_>) {
+        if let Some(receiver) = node.receiver() {
+            mark_rv_used_on_call(&receiver, &mut self.rv_used_calls);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                mark_rv_used_on_call(&arg, &mut self.rv_used_calls);
+            }
+        }
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_index_or_write_node(self, node);
     }
@@ -913,6 +980,10 @@ fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize
         rv_used.insert(super_node.keyword_loc().start_offset());
     } else if let Some(fwd_super) = node.as_forwarding_super_node() {
         rv_used.insert(fwd_super.location().start_offset());
+    } else if let Some(block_arg) = node.as_block_argument_node() {
+        if let Some(expression) = block_arg.expression() {
+            mark_rv_used_on_call(&expression, rv_used);
+        }
     } else if let Some(parens) = node.as_parentheses_node() {
         // Propagate through parentheses: `(map do ... end)` → rv_used
         if let Some(body) = parens.body() {
@@ -994,6 +1065,196 @@ fn mark_rv_of_scope_on_node(node: &ruby_prism::Node<'_>, rv_of_scope: &mut HashS
             }
         }
     }
+}
+
+fn mark_rv_of_scope_on_statement_tail_matches(
+    statements: &[ruby_prism::Node<'_>],
+    source: &SourceFile,
+    rv_of_scope: &mut HashSet<usize>,
+) {
+    let Some(last) = statements.last() else {
+        return;
+    };
+
+    for statement in statements {
+        if statement_matches_scope_tail(statement, last, source) {
+            mark_rv_of_scope_on_node(statement, rv_of_scope);
+        }
+    }
+}
+
+fn statement_matches_scope_tail(
+    candidate: &ruby_prism::Node<'_>,
+    last: &ruby_prism::Node<'_>,
+    source: &SourceFile,
+) -> bool {
+    let candidate_loc = candidate.location();
+    let last_loc = last.location();
+    if candidate_loc.start_offset() == last_loc.start_offset()
+        && candidate_loc.end_offset() == last_loc.end_offset()
+    {
+        return true;
+    }
+
+    match (candidate.as_call_node(), last.as_call_node()) {
+        (Some(candidate_call), Some(last_call)) => {
+            block_calls_match_scope_tail(&candidate_call, &last_call, source)
+        }
+        _ => false,
+    }
+}
+
+fn block_calls_match_scope_tail(
+    candidate: &ruby_prism::CallNode<'_>,
+    last: &ruby_prism::CallNode<'_>,
+    source: &SourceFile,
+) -> bool {
+    let (Some(candidate_block), Some(last_block)) = (
+        candidate.block().and_then(|block| block.as_block_node()),
+        last.block().and_then(|block| block.as_block_node()),
+    ) else {
+        return false;
+    };
+
+    if candidate.name().as_slice() != last.name().as_slice() {
+        return false;
+    }
+
+    normalized_non_whitespace(
+        source,
+        candidate.location().start_offset(),
+        candidate_block.opening_loc().start_offset(),
+    ) == normalized_non_whitespace(
+        source,
+        last.location().start_offset(),
+        last_block.opening_loc().start_offset(),
+    ) && optional_node_source_matches(
+        candidate_block.parameters(),
+        last_block.parameters(),
+        source,
+    ) && optional_node_source_matches(candidate_block.body(), last_block.body(), source)
+}
+
+fn optional_node_source_matches(
+    candidate: Option<ruby_prism::Node<'_>>,
+    last: Option<ruby_prism::Node<'_>>,
+    source: &SourceFile,
+) -> bool {
+    match (candidate, last) {
+        (None, None) => true,
+        (Some(candidate_node), Some(last_node)) => {
+            let candidate_loc = candidate_node.location();
+            let last_loc = last_node.location();
+            normalized_non_whitespace(
+                source,
+                candidate_loc.start_offset(),
+                candidate_loc.end_offset(),
+            ) == normalized_non_whitespace(source, last_loc.start_offset(), last_loc.end_offset())
+        }
+        _ => false,
+    }
+}
+
+fn normalized_non_whitespace(source: &SourceFile, start: usize, end: usize) -> Vec<u8> {
+    source
+        .as_bytes()
+        .get(start..end)
+        .unwrap_or(&[])
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect()
+}
+
+fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool {
+    let mut start = 0;
+    for _ in 0..3 {
+        let end = bytes[start..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map(|pos| start + pos)
+            .unwrap_or(bytes.len());
+        let line = &bytes[start..end];
+        let trimmed: Vec<u8> = line.iter().copied().filter(|byte| *byte != b'\r').collect();
+
+        if trimmed.starts_with(b"#") {
+            let lower: Vec<u8> = trimmed
+                .iter()
+                .map(|byte| byte.to_ascii_lowercase())
+                .collect();
+            if let Some(pos) = find_subsequence(&lower, b"encoding")
+                .or_else(|| find_subsequence(&lower, b"coding"))
+            {
+                let after = &lower[pos..];
+                let value_start = after
+                    .iter()
+                    .position(|&byte| byte == b':' || byte == b'=')
+                    .map(|pos| pos + 1)
+                    .unwrap_or(after.len());
+                let value = &after[value_start..];
+                let value_trimmed: Vec<u8> = value
+                    .iter()
+                    .copied()
+                    .skip_while(|byte| *byte == b' ')
+                    .collect();
+                let enc_end = value_trimmed
+                    .iter()
+                    .position(|byte| {
+                        !byte.is_ascii_alphanumeric() && *byte != b'-' && *byte != b'_'
+                    })
+                    .unwrap_or(value_trimmed.len());
+                let enc_name = &value_trimmed[..enc_end];
+
+                if enc_name == b"utf"
+                    || enc_name == b"utf8"
+                    || enc_name.starts_with(b"utf-8")
+                    || enc_name.starts_with(b"utf_8")
+                    || enc_name == b"binary"
+                    || enc_name.starts_with(b"ascii-8bit")
+                    || enc_name.starts_with(b"ascii_8bit")
+                    || enc_name == b"us-ascii"
+                    || enc_name == b"ascii"
+                {
+                    return false;
+                }
+
+                if !enc_name.is_empty() {
+                    return bytes.iter().any(|&byte| byte >= 0x80) || has_high_hex_escapes(bytes);
+                }
+            }
+        }
+
+        start = end + 1;
+        if start >= bytes.len() {
+            break;
+        }
+    }
+    false
+}
+
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn has_high_hex_escapes(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+
+    for window in bytes.windows(4) {
+        if window[0] == b'\\' && window[1] == b'x' {
+            let high = window[2];
+            let low = window[3];
+            let high_is_8_plus = matches!(high, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F');
+            if high_is_8_plus && low.is_ascii_hexdigit() {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Check if a block corresponds to Parser's `:block` type (not `:itblock` or `:numblock`).
@@ -1671,6 +1932,14 @@ mod tests {
     #[test]
     fn always_braces_no_offense_multi_line_braces() {
         let source = b"each { |x|\n  x\n}\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn always_braces_no_offense_parser_incompatible_non_utf8_file() {
+        let source = b"# encoding:windows-1252\nassert_match(/^(\\xdf)\\1$/i, \"\\xdf\\xdf\")\n[0x8a, 0x8c, 0x8e, *0xc0..0xd6, *0xd8..0xde, 0x9f].zip([0x9a, 0x9c, 0x9e, *0xe0..0xf6, *0xf8..0xfe, 0xff]).each do |c1, c2|\n  c1 = c1.chr(\"windows-1252\")\n  c2 = c2.chr(\"windows-1252\")\nend\n";
         let config = config_with_style("always_braces");
         let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
         assert!(diags.is_empty(), "got: {:?}", diags);
