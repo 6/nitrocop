@@ -269,6 +269,19 @@ def method_with_rubocop_disable_after_short_doc
   42
 end
 
+# Mentioning the incomplete `# rubocop:` marker still counts as documentation.
+class DirectiveCommentDocs
+  # Checks if the comment starts with `# rubocop:` marker
+  def start_with_marker?
+    42
+  end
+
+  # Checks if the comment is malformed as a `# rubocop:` directive
+  def malformed?
+    42
+  end
+end
+
 # Inline prefix containing `private` makes method non-public (no docs needed)
 memoized internal private def memoized_private_method
   42
@@ -307,6 +320,14 @@ end
 # [c, d] ← to ← [to.begin, to.end]
 def method_with_arrow_comment
   42
+end
+
+# A comment line that starts with `#{` is still documentation outside interpolation.
+class HashLiteralCommentDocs
+  #{1=>{:name=>"Local Area Connection", :mac_address=>"0800275FAC5B", :interface_index=>"11", :index=>"7"}}
+  def self.create_vm_interface_map(windows_machine, guest_network)
+    42
+  end
 end
 
 # Postfix `unless` on class should not leak wrapped_comment_depth into class body

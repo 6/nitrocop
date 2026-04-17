@@ -312,3 +312,6 @@ def cocoapods_generate_specs_cp_repos_dir
 
 def test_ids_reserved
 ^ Style/DocumentationMethod: Missing method documentation comment.
+
+def test_ids_reserved
+^ Style/DocumentationMethod: Missing method documentation comment.
