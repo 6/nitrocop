@@ -3,6 +3,11 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// RuboCop anchors `EnforcedStyle: space` opening-side offenses on the `#{`
+/// token itself, not on the first interpolated character. A corpus variant
+/// mismatch showed this matters for continued strings like the LicenseFinder
+/// `raise_error("... \\\n#{project_path}...")` case: the missing-space offense
+/// must still point at `#{` while the autocorrect inserts after it.
 pub struct SpaceInsideStringInterpolation;
 
 impl Cop for SpaceInsideStringInterpolation {
@@ -47,6 +52,7 @@ impl Cop for SpaceInsideStringInterpolation {
         }
 
         let bytes = source.as_bytes();
+        let open_start = open_loc.start_offset(); // position of `#` in `#{`
         let open_end = open_loc.end_offset(); // position after `#{`
         let close_start = close_loc.start_offset(); // position of `}`
 
@@ -62,7 +68,7 @@ impl Cop for SpaceInsideStringInterpolation {
             "space" => {
                 // Require spaces
                 if !space_after_open {
-                    let (line, col) = source.offset_to_line_col(open_end);
+                    let (line, col) = source.offset_to_line_col(open_start);
                     let mut diag = self.diagnostic(
                         source,
                         line,
@@ -156,6 +162,11 @@ mod tests {
     crate::cop_fixture_tests!(
         SpaceInsideStringInterpolation,
         "cops/layout/space_inside_string_interpolation"
+    );
+    crate::cop_variant_fixture_tests!(
+        SpaceInsideStringInterpolation,
+        "cops/layout/space_inside_string_interpolation",
+        space
     );
     crate::cop_autocorrect_fixture_tests!(
         SpaceInsideStringInterpolation,
