@@ -706,9 +706,7 @@ fn check_text_scanner_extra_space(
         while p < bytes.len() && bytes[p] == b' ' {
             p += 1;
         }
-        if p >= bytes.len() || bytes[p] == b'\n' || bytes[p] == b'\r' {
-            multi_after = false;
-        } else if p < bytes.len() && bytes[p] == b'#' {
+        if p >= bytes.len() || bytes[p] == b'\n' || bytes[p] == b'\r' || bytes[p] == b'#' {
             multi_after = false;
         } else {
             // Check RHS alignment for trailing space.  RuboCop's
@@ -1573,9 +1571,9 @@ impl OperatorChecker<'_> {
             while p < bytes.len() && bytes[p] == b' ' {
                 p += 1;
             }
-            if followed_only_by_space_then_newline(bytes, end) {
-                multi_space_after = false;
-            } else if p < bytes.len() && bytes[p] == b'#' {
+            if followed_only_by_space_then_newline(bytes, end)
+                || (p < bytes.len() && bytes[p] == b'#')
+            {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
