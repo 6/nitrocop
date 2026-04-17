@@ -91,3 +91,10 @@ def prepare_headers
     map { |k, v| "#{Cookie.encode(k)}=#{Cookie.encode(v)}" }.join(';')
     ^^^ Layout/MultilineMethodCallIndentation: Align `map` with `final_cookies_hash` on line 73.
 end
+
+# Trailing-dot setter call: RuboCop checks setter methods like ordinary chains
+trigger = proc do
+  described_class.new(url: url, inputs: { name: 'value' }).
+      nonce_name = 'stuff'
+      ^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
+end
