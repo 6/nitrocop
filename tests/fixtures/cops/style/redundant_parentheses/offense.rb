@@ -409,3 +409,29 @@ if next_line.empty?
   )
   process_auto_indent 1, add_newline: true
 end
+
+begin
+  send(method, *args, **kwargs, &block)
+rescue ActiveModel::MissingAttributeError => e
+  if e.message.start_with?('missing attribute: ')
+    unless has_field
+      (brick_orig_relation || self).instance_variable_set(:@brick_new_alf, ((always_loads[this_model.name] ||= []) << col_name))
+                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
+    end
+  end
+end
+
+( 1 ; 2 )
+^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(1; 2)
+^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--5.5).should be_close(5.5, TOLERANCE)
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--5).should == 5
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--2).should == 2
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
