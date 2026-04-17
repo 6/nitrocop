@@ -85,6 +85,96 @@ def test_canary_repos_empty_when_no_by_repo():
     assert check_cop.canary_repos({}, exclude=set()) == set()
 
 
+def test_canary_repos_filtered_by_variant_covered():
+    """Canaries beyond the variant oracle's coverage should be excluded.
+
+    The variant oracle uses --max-variant-repos to cap variant runs. Canaries
+    outside that set have no baseline data and would produce false FP
+    regressions during --style CI runs.
+    """
+    data = {
+        "by_repo": [
+            {"repo": "big-outside-variant", "status": "ok", "nitrocop_total": 100000},
+            {"repo": "medium-covered", "status": "ok", "nitrocop_total": 50000},
+            {"repo": "small-covered", "status": "ok", "nitrocop_total": 100},
+        ],
+    }
+    # Only `medium-covered` and `small-covered` have variant baseline data.
+    # The biggest repo is NOT covered, so it must be filtered out.
+    result = check_cop.canary_repos(
+        data, exclude=set(), n=5,
+        variant_covered={"medium-covered", "small-covered"},
+    )
+    assert "big-outside-variant" not in result
+    assert result == {"medium-covered", "small-covered"}
+
+
+def test_canary_repos_none_variant_covered_preserves_old_behavior():
+    """Passing variant_covered=None (default) keeps pre-filter behavior."""
+    data = {
+        "by_repo": [
+            {"repo": "a", "status": "ok", "nitrocop_total": 100},
+            {"repo": "b", "status": "ok", "nitrocop_total": 200},
+        ],
+    }
+    result = check_cop.canary_repos(data, exclude=set(), n=5, variant_covered=None)
+    assert result == {"a", "b"}
+
+
+def test_relevant_repos_with_variant_covered_filter():
+    """When variant_covered_repos is passed, canaries are filtered to that set."""
+    data = {
+        "cop_activity_repos": {"Style/Foo": [f"active-{i}" for i in range(20)]},
+        "by_repo_cop": {},
+        "by_repo": [
+            {"repo": f"active-{i}", "status": "ok", "nitrocop_total": 1}
+            for i in range(20)
+        ] + [
+            {"repo": "canary-uncovered", "status": "ok", "nitrocop_total": 100000},
+            {"repo": "canary-covered", "status": "ok", "nitrocop_total": 50000},
+        ],
+    }
+    result = check_cop.relevant_repos_for_cop(
+        "Style/Foo", data, sample=5,
+        variant_covered_repos={"canary-covered", *[f"active-{i}" for i in range(20)]},
+    )
+    assert "canary-covered" in result
+    assert "canary-uncovered" not in result
+
+
+def test_variant_covered_repos_returns_none_for_no_run_id():
+    assert check_cop.variant_covered_repos(None) is None
+
+
+def test_variant_covered_repos_parses_variant_baselines(tmp_path, monkeypatch):
+    """Loads variant-covered repo IDs from the oracle artifact."""
+    variant_path = tmp_path / "style-variant-results-42.json"
+    variant_path.write_text(json.dumps({
+        "batches": [
+            {"name": "variant_batch_1", "by_repo_cop": {
+                "repo-in-batch1": {"Style/Foo": {"fp": 1, "fn": 0}},
+                "repo-in-both": {"Style/Foo": {"fp": 0, "fn": 1}},
+            }},
+            {"name": "variant_batch_2", "by_repo_cop": {
+                "repo-in-batch2": {"Style/Bar": {"fp": 0, "fn": 1}},
+                "repo-in-both": {"Style/Foo": {"fp": 0, "fn": 1}},
+            }},
+        ],
+    }))
+
+    def fake_path(run_id):
+        return variant_path if run_id == 42 else None
+
+    # Patch the module-level resolver used inside variant_covered_repos
+    import sys as _sys
+    fake_mod = type(_sys)("shared.corpus_artifacts")
+    fake_mod.get_variant_results_path = fake_path
+    monkeypatch.setitem(_sys.modules, "shared.corpus_artifacts", fake_mod)
+
+    covered = check_cop.variant_covered_repos(42)
+    assert covered == {"repo-in-batch1", "repo-in-batch2", "repo-in-both"}
+
+
 def test_relevant_repos_with_sample_includes_canaries():
     """When --sample is set, canary repos are added to catch wholesale regressions."""
     data = {
