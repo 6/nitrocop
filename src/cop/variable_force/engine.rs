@@ -837,6 +837,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         };
         let loc = node.location();
         let saved_depth = self.branch_depth;
+        let saved_stack = std::mem::take(&mut self.branch_stack);
         self.branch_depth = 0;
         self.enter_scope(kind, loc.start_offset(), loc.end_offset());
         if let Some(params) = node.parameters() {
@@ -847,15 +848,19 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.leave_scope();
         self.branch_depth = saved_depth;
+        self.branch_stack = saved_stack;
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         let loc = node.location();
         let body_empty = node.body().is_none();
-        // Save and reset branch_depth: block body starts a fresh scope.
-        // Assignments to outer variables are marked captured_by_block by the
-        // variable table, which the cop uses as a conditional indicator.
+        // Save and reset branch_depth/branch_stack: block body starts a fresh
+        // scope. Assignments to outer variables are marked captured_by_block
+        // by the variable table, which the cop uses as a conditional indicator.
+        // Clearing branch_stack ensures outer branches (e.g. a begin/ensure
+        // body wrapping the block) do not bleed into in-block branch checks.
         let saved_depth = self.branch_depth;
+        let saved_stack = std::mem::take(&mut self.branch_stack);
         self.branch_depth = 0;
         self.enter_scope(ScopeKind::Block, loc.start_offset(), loc.end_offset());
         self.table.current_scope_mut().body_empty = body_empty;
@@ -869,12 +874,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.leave_scope();
         self.branch_depth = saved_depth;
+        self.branch_stack = saved_stack;
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         let loc = node.location();
         let body_empty = node.body().is_none();
         let saved_depth = self.branch_depth;
+        let saved_stack = std::mem::take(&mut self.branch_stack);
         self.branch_depth = 0;
         self.enter_scope(ScopeKind::Block, loc.start_offset(), loc.end_offset());
         self.table.current_scope_mut().body_empty = body_empty;
@@ -888,6 +895,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.leave_scope();
         self.branch_depth = saved_depth;
+        self.branch_stack = saved_stack;
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {

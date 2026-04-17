@@ -158,3 +158,15 @@ def initialize(x, y = nil, &action)
   set_position(x, y)
   action&.call
 end
+
+# FN fix: def nested inside `begin/ensure` must not treat the outer begin body
+# as a conditional branch for the def's own short-circuit shadowing.
+begin
+  def scrub(char = nil, &block)
+    char && block = lambda { |c| char }
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ Lint/ShadowedArgument: Argument `block` was shadowed by a local variable before it was used.
+    block.call("x")
+  end
+ensure
+  nil
+end
