@@ -14,12 +14,13 @@ use ruby_prism::Visit;
 /// special keyword args like `params:` / `headers:`, kw-splats, and forwarded
 /// args / kwargs.
 ///
-/// FP=8342 came from corpus baseline runs forcing `TargetRailsVersion: 7.0`
-/// even on legacy Rails 3.x/4.x repos. RuboCop still suppresses this cop there
-/// because the actual `railties` lockfile version is below 5.0, while nitrocop
-/// only looked at the injected target version. The fix keeps the existing
-/// target-version gate but also skips when the real lockfile `railties` version
-/// is known and below 5.0.
+/// The important RuboCop quirk here is the version gate: `minimum_target_rails_version 5.0`
+/// is implemented through `requires_gem 'railties', '>= 5.0'`, so this cop must
+/// not run just because `TargetRailsVersion` is configured. It only runs when
+/// `railties` is actually present in the project's lockfile and meets the
+/// minimum version. That avoids false positives in non-Rails repos and legacy
+/// Rails 3.x/4.x apps that still have controller specs with positional request
+/// arguments.
 pub struct HttpPositionalArguments;
 
 const HTTP_METHODS: &[&[u8]] = &[b"get", b"post", b"put", b"patch", b"delete", b"head"];
@@ -119,13 +120,16 @@ impl Cop for HttpPositionalArguments {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        if !config.target_rails_version().is_some_and(|v| v >= 5.0) {
+        let Some(target_rails_version) = config.target_rails_version() else {
+            return;
+        };
+        if target_rails_version < 5.0 {
             return;
         }
-        // Corpus baseline config forces TargetRailsVersion: 7.0 globally, but
-        // RuboCop still disables this cop for repos whose actual lockfile
-        // `railties` version is below 5.0.
-        if config.railties_version().is_some_and(|v| v < 5.0) {
+        let Some(railties_version) = config.railties_version() else {
+            return;
+        };
+        if railties_version < 5.0 {
             return;
         }
 
@@ -354,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn fires_without_railties_in_lockfile_when_target_rails_version_is_set() {
+    fn skipped_without_railties_in_lockfile_when_target_rails_version_is_set() {
         let mut options = HashMap::new();
         options.insert(
             "TargetRailsVersion".to_string(),
@@ -366,14 +370,13 @@ mod tests {
         };
         let diagnostics = crate::testutil::run_cop_full_internal(
             &HttpPositionalArguments,
-            b"get :show, :id => 12\n",
+            b"post :create, { scan_comment: valid_attributes }, valid_session\n",
             config,
             "spec/some_spec.rb",
         );
-        assert_eq!(
-            diagnostics.len(),
-            1,
-            "Should fire with TargetRailsVersion even without railties in lockfile"
+        assert!(
+            diagnostics.is_empty(),
+            "Should not fire when railties is not in Gemfile.lock (matches RuboCop's requires_gem gate)"
         );
     }
 
