@@ -591,3 +591,30 @@ def call_target(target_num)
 ensure
   cleanup(obj)
 end
+
+# RHS assignment of a short-circuited `&&` may never run, so the initial value
+# is still live after the expression.
+short_circuit_and_value = nil
+true && false && short_circuit_and_value = 1
+puts short_circuit_and_value
+
+# Keyword `and` has the same short-circuit assignment behavior.
+short_circuit_keyword_and_value = nil
+true and false and short_circuit_keyword_and_value = 1
+puts short_circuit_keyword_and_value
+
+# Nested rescue/re-raise keeps outer rescue variables live across exception flow.
+def nested_rescue_reraise
+  begin
+    begin
+      raise "Error 1"
+    rescue => e1
+      raise "Error 2"
+    end
+  rescue => e2
+    e2.cause == e1
+    raise e2
+  rescue => e
+    e.cause == e1
+  end
+end

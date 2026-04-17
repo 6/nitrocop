@@ -16,6 +16,8 @@ pub struct Reference {
     pub sequence: usize,
     /// Branch context ID, if this reference is inside a conditional branch.
     pub branch_id: Option<usize>,
+    /// Full stack of active branch-context IDs from outermost to innermost.
+    pub branch_path: Vec<usize>,
 }
 
 impl Reference {
@@ -26,6 +28,7 @@ impl Reference {
             explicit: true,
             sequence: 0,
             branch_id: None,
+            branch_path: Vec::new(),
         }
     }
 
@@ -36,6 +39,7 @@ impl Reference {
             explicit: false,
             sequence: 0,
             branch_id: None,
+            branch_path: Vec::new(),
         }
     }
 }
