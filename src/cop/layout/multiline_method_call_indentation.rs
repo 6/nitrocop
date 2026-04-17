@@ -165,6 +165,14 @@ use crate::parse::source::SourceFile;
 ///    `headers['Cookie'] = final_cookies_hash.\n  map { ... }` must still be
 ///    checked. The non-default styles keep the older broad skip behavior for
 ///    now because narrowing them regressed their corpus baselines.
+///
+/// ## Corpus fix (2026-04-17)
+///
+/// Two more FN patterns came from custom shortcuts that RuboCop does not use:
+///
+/// 1. Setter calls like `receiver.\n    name = value` were skipped entirely.
+///    RuboCop still checks those nodes; only the parent walk used for the left
+///    hand side ignores assignment-method ancestors.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -229,12 +237,6 @@ impl ChainVisitor<'_> {
             Some(loc) => loc,
             None => return,
         };
-
-        // Skip assignment methods like `foo.bar = x` — RuboCop's left_hand_side
-        // walks up through parents and skips assignment_method? calls.
-        if is_assignment_method(call_node) {
-            return;
-        }
 
         let receiver_loc = receiver.location();
         let (recv_end_line, _) = self.source.offset_to_line_col(receiver_loc.end_offset());
@@ -434,6 +436,9 @@ impl ChainVisitor<'_> {
         // For trailing dot: the receiver's chain root (LHS) determines the base
         // indentation. Check if indentation is wrong.
         if is_trailing_dot {
+            if is_assignment_method(call_node) {
+                return None;
+            }
             let lhs_line = find_chain_start_line(self.source, receiver);
             let lhs_bytes = self.source.lines().nth(lhs_line - 1).unwrap_or(b"");
             let lhs_indent = indentation_of(lhs_bytes);
@@ -539,11 +544,6 @@ impl ChainVisitor<'_> {
             self.width
         )
     }
-}
-
-/// Check if a call node is a setter method (e.g., `foo.bar = x`).
-fn is_assignment_method(call: &ruby_prism::CallNode<'_>) -> bool {
-    method_identifier_predicates::is_assignment_method(call.name().as_slice())
 }
 
 /// Get the line number of the selector/method name for a call node.
@@ -926,6 +926,10 @@ fn find_previous_continuation_dot(
         }
     }
     None
+}
+
+fn is_assignment_method(call: &ruby_prism::CallNode<'_>) -> bool {
+    method_identifier_predicates::is_assignment_method(call.name().as_slice())
 }
 
 impl Visit<'_> for ChainVisitor<'_> {
