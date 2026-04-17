@@ -341,11 +341,17 @@ impl CopFilterSet {
         // Include: file must match on at least one path form.
         // This supports both absolute patterns (/tmp/test/db/**) and
         // relative patterns (db/migrate/**).
-        let included = filter.is_included(path)
-            || rel_path.is_some_and(|rel| filter.is_included(rel))
-            || rel_to_base.is_some_and(|rel| filter.is_included(rel))
-            || rel_to_scan_root.is_some_and(|rel| filter.is_included(rel))
-            || stripped.is_some_and(|s| filter.is_included(s));
+        let included_on_path = filter.is_included(path);
+        let included_on_rel_path = rel_path.is_some_and(|rel| filter.is_included(rel));
+        let included_on_rel_to_base = rel_to_base.is_some_and(|rel| filter.is_included(rel));
+        let included_on_rel_to_scan_root =
+            rel_to_scan_root.is_some_and(|rel| filter.is_included(rel));
+        let included_on_stripped = stripped.is_some_and(|s| filter.is_included(s));
+        let included = included_on_path
+            || included_on_rel_path
+            || included_on_rel_to_base
+            || included_on_rel_to_scan_root
+            || included_on_stripped;
         if !included {
             return false;
         }
@@ -560,6 +566,28 @@ fn extract_ruby_regexp(s: &str) -> Option<&str> {
 /// Build a `GlobSet` from a list of pattern strings, skipping any that are
 /// Ruby regexp patterns (these are handled separately by `build_regex_set`).
 /// Returns `None` if no glob patterns remain.
+fn expand_zero_depth_globs(pattern: &str) -> Vec<String> {
+    let mut expanded = std::collections::HashSet::from([pattern.to_string()]);
+    let mut pending = vec![pattern.to_string()];
+
+    while let Some(current) = pending.pop() {
+        let mut start = 0;
+        while let Some(idx) = current[start..].find("**/") {
+            let idx = start + idx;
+            let mut variant = current.clone();
+            variant.replace_range(idx..idx + 3, "");
+            if expanded.insert(variant.clone()) {
+                pending.push(variant);
+            }
+            start = idx + 1;
+        }
+    }
+
+    let mut variants: Vec<_> = expanded.into_iter().collect();
+    variants.sort();
+    variants
+}
+
 fn build_glob_set(patterns: &[&str]) -> Option<GlobSet> {
     if patterns.is_empty() {
         return None;
@@ -570,9 +598,11 @@ fn build_glob_set(patterns: &[&str]) -> Option<GlobSet> {
         if extract_ruby_regexp(pat).is_some() {
             continue; // Skip regex patterns — handled by build_regex_set
         }
-        if let Ok(glob) = GlobBuilder::new(pat).literal_separator(true).build() {
-            builder.add(glob);
-            count += 1;
+        for expanded in expand_zero_depth_globs(pat) {
+            if let Ok(glob) = GlobBuilder::new(&expanded).literal_separator(true).build() {
+                builder.add(glob);
+                count += 1;
+            }
         }
     }
     if count == 0 {
@@ -3257,18 +3287,21 @@ fn glob_matches(pattern: &str, path: &Path) -> bool {
         }
         return false;
     }
-    let glob = match GlobBuilder::new(pattern).literal_separator(false).build() {
-        Ok(g) => g,
-        Err(_) => return false,
-    };
-    let matcher = glob.compile_matcher();
-    // Try matching against the path as given
-    if matcher.is_match(path) {
-        return true;
+    for expanded in expand_zero_depth_globs(pattern) {
+        let glob = match GlobBuilder::new(&expanded).literal_separator(false).build() {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let matcher = glob.compile_matcher();
+        if matcher.is_match(path) {
+            return true;
+        }
+        let path_str = path.to_string_lossy();
+        if matcher.is_match(path_str.as_ref()) {
+            return true;
+        }
     }
-    // Also try matching against just the path string (handles both relative and absolute)
-    let path_str = path.to_string_lossy();
-    matcher.is_match(path_str.as_ref())
+    false
 }
 
 #[cfg(test)]
