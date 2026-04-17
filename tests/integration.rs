@@ -5508,18 +5508,19 @@ fn ignore_disable_comments_skips_redundant_disable_check() {
 }
 
 #[test]
-fn inline_disable_comment_persists_to_eof_until_enable() {
-    let dir = temp_dir("inline_disable_to_eof");
+fn three_state_boolean_column_respects_dynamic_change_column_null_in_cli() {
+    let dir = temp_dir("three_state_boolean_column_dynamic_table");
     fs::create_dir_all(dir.join("db/migrate")).unwrap();
     fs::write(
         dir.join("db/migrate/20250101010101_query_flags.rb"),
         "# frozen_string_literal: true\n\
 class QueryFlags < ActiveRecord::Migration[7.0]\n\
   def change\n\
-    create_table :queries do |t|\n\
-      t.boolean :starred, default: false # rubocop:disable Rails/ThreeStateBooleanColumn\n\
-      t.boolean :include_subprojects, null: false, default: nil\n\
+    table = :queries\n\
+    create_table table do |t|\n\
+      t.boolean :starred\n\
     end\n\
+    change_column_null table, :starred, false\n\
   end\n\
 end\n",
     )
@@ -5538,7 +5539,7 @@ end\n",
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         !stdout.contains("Rails/ThreeStateBooleanColumn"),
-        "Inline disable should suppress later offenses until enable/EOF: {stdout}"
+        "Dynamic table expressions with matching change_column_null should not register offenses: {stdout}"
     );
 
     fs::remove_dir_all(&dir).ok();
