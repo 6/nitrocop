@@ -261,6 +261,21 @@ use ruby_prism::Visit;
 /// old text-scanner path anchored on the backslash and falsely flagged it.
 /// Fix: handle plain assignment write nodes in the AST pass and use
 /// `value().location().start_offset()` as the trailing alignment anchor.
+///
+/// ## Corpus fix (2026-04-18, adjacent-line cross alignment)
+///
+/// RuboCop's generic `aligned_with_operator?` path is narrower than nitrocop's
+/// old raw-byte check:
+/// - only `<<` and operators ending with `=` may use cross-operator alignment,
+/// - the adjacent line only contributes its *first* eligible
+///   assignment/comparison token.
+///
+/// The broader scanner was suppressing real offenses in modifier conditions and
+/// comparison lines, for example `@become              != true` aligned against
+/// a later `==` on the next line, or `max_retries  > 0` aligned against a
+/// preceding assignment `=`. Match RuboCop by preserving identical-operator
+/// alignment but restricting cross-operator alignment to the first eligible
+/// neighbor token.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -707,7 +722,10 @@ fn check_text_scanner_extra_space(
         }
     }
 
-    if multi_before && !is_plain_assignment && is_aligned_standalone(source, op_start, op_bytes) {
+    if multi_before
+        && !is_plain_assignment
+        && is_aligned_standalone(source, op_start, op_bytes, code_map)
+    {
         multi_before = false;
     }
 
@@ -903,7 +921,12 @@ fn char_col_to_bytes(line: &[u8], char_col: usize) -> Option<usize> {
 /// 1. Same operator at same char column
 /// 2. Word/space boundary at same column (aligned_words in RuboCop)
 /// 3. Cross-operator alignment (operators ending at same column)
-fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> bool {
+fn is_aligned_standalone(
+    source: &SourceFile,
+    start: usize,
+    op_bytes: &[u8],
+    code_map: &CodeMap,
+) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
     while ls > 0 && bytes[ls - 1] != b'\n' {
@@ -919,7 +942,15 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
     // All alignment operators are ASCII, so char length == byte length.
     let char_end_col = char_col + op_bytes.len();
     // Pass 1: closest non-blank, non-comment line (no indentation filter)
-    if check_alignment_standalone(&lines, line_idx, char_col, char_end_col, op_bytes, None) {
+    if check_alignment_standalone(
+        &lines,
+        line_idx,
+        char_col,
+        char_end_col,
+        op_bytes,
+        None,
+        code_map,
+    ) {
         return true;
     }
     // Pass 2: search for same-indentation lines further out
@@ -934,6 +965,7 @@ fn is_aligned_standalone(source: &SourceFile, start: usize, op_bytes: &[u8]) -> 
         char_end_col,
         op_bytes,
         Some(my_indent),
+        code_map,
     )
 }
 
@@ -944,6 +976,7 @@ fn check_alignment_standalone(
     char_end_col: usize,
     op_bytes: &[u8],
     indent_filter: Option<usize>,
+    code_map: &CodeMap,
 ) -> bool {
     for up in [true, false] {
         let mut check_idx = if up {
@@ -989,8 +1022,16 @@ fn check_alignment_standalone(
                             return true;
                         }
                     }
-                    // Check 3: cross-operator alignment (operators ending at same char column)
-                    if line_has_operator_ending_at_char_col(line_bytes, char_end_col) {
+                    // Check 3: cross-operator alignment only applies to `<<` and
+                    // operators ending with `=` and only considers the first eligible
+                    // assignment/comparison token on the adjacent line.
+                    if line_has_cross_aligned_operator_at_char_col(
+                        line_bytes,
+                        line_abs_start(lines, check_idx),
+                        char_end_col,
+                        op_bytes,
+                        code_map,
+                    ) {
                         return true;
                     }
                     break;
@@ -1009,66 +1050,141 @@ fn check_alignment_standalone(
     false
 }
 
-/// Check if a line has an assignment/comparison operator ending at the given
-/// *character* column (codepoint index, not byte index).
-fn line_has_operator_ending_at_char_col(line: &[u8], target_char_end_col: usize) -> bool {
-    let Some(target_end_col) = char_col_to_bytes(line, target_char_end_col) else {
-        return false;
-    };
-    line_has_operator_ending_at_col(line, target_end_col)
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AlignmentTokenKind {
+    EqualLike,
+    LShift,
 }
 
-/// Check if a line has an assignment/comparison operator ending at the given
-/// *byte* column. This enables cross-operator alignment detection,
-/// e.g., `=` aligned with `||=`.
-fn line_has_operator_ending_at_col(line: &[u8], target_end_col: usize) -> bool {
-    if target_end_col == 0 || target_end_col > line.len() {
+fn current_operator_allows_cross_alignment(op_bytes: &[u8]) -> bool {
+    op_bytes == b"<<" || op_bytes.last() == Some(&b'=')
+}
+
+fn line_has_cross_aligned_operator_at_char_col(
+    line: &[u8],
+    line_abs_start: usize,
+    target_char_end_col: usize,
+    current_op: &[u8],
+    code_map: &CodeMap,
+) -> bool {
+    if !current_operator_allows_cross_alignment(current_op) {
         return false;
     }
-    let end_byte = line[target_end_col - 1];
-    if end_byte != b'=' && end_byte != b'<' {
+
+    let Some((kind, end_char_col)) = first_alignment_token_on_line(line, line_abs_start, code_map)
+    else {
+        return false;
+    };
+
+    if end_char_col != target_char_end_col {
         return false;
     }
-    let col = target_end_col;
-    if end_byte == b'=' && col >= 1 {
-        // Skip if this `=` is actually the start of a multi-char operator (=>, ==, =~)
-        if col < line.len() && matches!(line[col], b'>' | b'=' | b'~') {
-            return false;
-        }
-        let before = if col >= 2 { line[col - 2] } else { b' ' };
-        // Simple `=` preceded by whitespace
-        if before == b' ' || before == b'\t' {
-            return true;
-        }
-        // `==`, `!=`, `<=`, `>=`
-        if matches!(before, b'=' | b'!' | b'<' | b'>') {
-            return true;
-        }
-        // `+=`, `-=`, `*=`, `/=`, `%=`, `^=`, `|=`, `&=`
-        if matches!(
-            before,
-            b'+' | b'-' | b'*' | b'/' | b'%' | b'^' | b'|' | b'&'
-        ) {
-            return true;
-        }
-        // `||=`, `&&=`, `**=`, `<<=`, `>>=`
-        if col >= 3 {
-            let two_before = &line[col - 3..col];
-            if two_before == b"||="
-                || two_before == b"&&="
-                || two_before == b"**="
-                || two_before == b"<<="
-                || two_before == b">>="
-            {
-                return true;
+
+    if current_op == b"<<" {
+        kind == AlignmentTokenKind::EqualLike
+    } else {
+        matches!(
+            kind,
+            AlignmentTokenKind::EqualLike | AlignmentTokenKind::LShift
+        )
+    }
+}
+
+fn line_abs_start(lines: &[&[u8]], line_idx: usize) -> usize {
+    lines.iter().take(line_idx).map(|line| line.len() + 1).sum()
+}
+
+fn first_alignment_token_on_line(
+    line: &[u8],
+    line_abs_start: usize,
+    code_map: &CodeMap,
+) -> Option<(AlignmentTokenKind, usize)> {
+    let equal_like = first_equal_like_alignment_token(line, line_abs_start, code_map)
+        .map(|(start, end_char_col)| (AlignmentTokenKind::EqualLike, start, end_char_col));
+    let lshift = first_lshift_alignment_token(line, line_abs_start, code_map)
+        .map(|(start, end_char_col)| (AlignmentTokenKind::LShift, start, end_char_col));
+
+    match (equal_like, lshift) {
+        (Some(eq), Some(ls)) => {
+            if eq.1 < ls.1 {
+                Some((eq.0, eq.2))
+            } else {
+                Some((ls.0, ls.2))
             }
         }
+        (Some(eq), None) => Some((eq.0, eq.2)),
+        (None, Some(ls)) => Some((ls.0, ls.2)),
+        (None, None) => None,
     }
-    // `<<` (append operator, treated as assignment-like for alignment)
-    if end_byte == b'<' && col >= 2 && line[col - 2] == b'<' {
-        return true;
+}
+
+fn first_equal_like_alignment_token(
+    line: &[u8],
+    line_abs_start: usize,
+    code_map: &CodeMap,
+) -> Option<(usize, usize)> {
+    let three_char_ops: [&[u8]; 6] = [b"===", b"<<=", b">>=", b"||=", b"&&=", b"**="];
+    let two_char_ops: [&[u8]; 12] = [
+        b"==", b"!=", b"<=", b">=", b"+=", b"-=", b"*=", b"/=", b"%=", b"^=", b"|=", b"&=",
+    ];
+
+    for i in 0..line.len() {
+        let abs_offset = line_abs_start + i;
+        if !code_map.is_code(abs_offset) {
+            continue;
+        }
+
+        if i + 3 <= line.len() && three_char_ops.contains(&&line[i..i + 3]) {
+            return Some((i, bytes_to_char_col(line, i + 3)));
+        }
+
+        if i + 2 <= line.len() {
+            let two = &line[i..i + 2];
+            if two_char_ops.contains(&two) {
+                return Some((i, bytes_to_char_col(line, i + 2)));
+            }
+        }
+
+        if line[i] == b'=' && is_plain_equal_alignment_token(line, i) {
+            return Some((i, bytes_to_char_col(line, i + 1)));
+        }
     }
-    false
+
+    None
+}
+
+fn first_lshift_alignment_token(
+    line: &[u8],
+    line_abs_start: usize,
+    code_map: &CodeMap,
+) -> Option<(usize, usize)> {
+    for i in 0..line.len().saturating_sub(1) {
+        let abs_offset = line_abs_start + i;
+        if !code_map.is_code(abs_offset) {
+            continue;
+        }
+
+        if &line[i..i + 2] == b"<<" && (i + 2 >= line.len() || line[i + 2] != b'=') {
+            return Some((i, bytes_to_char_col(line, i + 2)));
+        }
+    }
+
+    None
+}
+
+fn is_plain_equal_alignment_token(line: &[u8], i: usize) -> bool {
+    if i + 1 < line.len() && matches!(line[i + 1], b'>' | b'=' | b'~') {
+        return false;
+    }
+
+    if i == 0 {
+        return false;
+    }
+
+    !matches!(
+        line[i - 1],
+        b'!' | b'<' | b'>' | b'=' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|' | b'^' | b'~'
+    )
 }
 
 /// RuboCop-compatible check for plain assignment extra leading space.
@@ -1443,7 +1559,7 @@ impl OperatorChecker<'_> {
     /// Delegates to the standalone alignment checker which supports
     /// cross-operator alignment (e.g., `||=` aligned with `=`).
     fn is_aligned_with_adjacent(&self, start: usize, op_bytes: &[u8]) -> bool {
-        is_aligned_standalone(self.source, start, op_bytes)
+        is_aligned_standalone(self.source, start, op_bytes, self.code_map)
     }
 
     /// Check operator spacing for a "should have space" operator.
