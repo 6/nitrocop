@@ -1,5 +1,14 @@
-# nitrocop-filename: db/migrate/20220101000000_add_users.rb
-class AddUsers < ActiveRecord::Migration[7.0]
+# nitrocop-filename: db/migrate/20140910085815_add_rpush.rb
+class AddRpush < ActiveRecord::Migration[7.0]
 end
-class Addusers < ActiveRecord::Migration[7.0]
+
+class Addrpush < ActiveRecord::Migration[7.0]
+end
+
+class AddRpush < ActiveRecord::Migration
+  class CreateRapnsNotifications < ActiveRecord::Migration
+  end
+
+  class CreateRapnsFeedback < ActiveRecord::Migration
+  end
 end
