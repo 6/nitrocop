@@ -502,6 +502,7 @@
     "Rails/DangerousColumnNames": "stable",
     "Rails/Date": "stable",
     "Rails/DefaultScope": "stable",
+    "Rails/Delegate": "stable",
     "Rails/DelegateAllowBlank": "stable",
     "Rails/DeprecatedActiveModelErrorsMethods": "stable",
     "Rails/DotSeparatedKeys": "stable",
