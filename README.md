@@ -16,8 +16,8 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
 - Tested on [**5,588 open-source repos**](docs/corpus.md):
-  - **897 of 915** cops match RuboCop exactly with default config
-  - **889 of 915** match across all `EnforcedStyle` variants
+  - **899 of 915** cops match RuboCop exactly with default config
+  - **893 of 915** match across all `EnforcedStyle` variants
   - Across **28.38M** offenses compared, **28.37M** (99.96%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
@@ -78,7 +78,7 @@ Compared with RuboCop on [**5,588 open-source repos**](docs/corpus.md) (590k Rub
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Rails | 138 | 130 | 128 |
+| Rails | 138 | 132 | 132 |
 
 **[rubocop-performance](https://github.com/rubocop/rubocop-performance)** `1.26.1` (52 cops)
 
