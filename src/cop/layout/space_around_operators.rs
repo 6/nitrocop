@@ -943,7 +943,6 @@ fn is_aligned_standalone(
     let char_end_col = char_col + op_bytes.len();
     // Pass 1: closest non-blank, non-comment line (no indentation filter)
     if check_alignment_standalone(
-        source,
         &lines,
         line_idx,
         char_col,
@@ -960,7 +959,6 @@ fn is_aligned_standalone(
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(0);
     check_alignment_standalone(
-        source,
         &lines,
         line_idx,
         char_col,
@@ -972,7 +970,6 @@ fn is_aligned_standalone(
 }
 
 fn check_alignment_standalone(
-    source: &SourceFile,
     lines: &[&[u8]],
     line_idx: usize,
     char_col: usize,
@@ -1029,9 +1026,8 @@ fn check_alignment_standalone(
                     // operators ending with `=` and only considers the first eligible
                     // assignment/comparison token on the adjacent line.
                     if line_has_cross_aligned_operator_at_char_col(
-                        source,
-                        check_idx + 1,
                         line_bytes,
+                        line_abs_start(lines, check_idx),
                         char_end_col,
                         op_bytes,
                         code_map,
@@ -1065,9 +1061,8 @@ fn current_operator_allows_cross_alignment(op_bytes: &[u8]) -> bool {
 }
 
 fn line_has_cross_aligned_operator_at_char_col(
-    source: &SourceFile,
-    line_num: usize,
     line: &[u8],
+    line_abs_start: usize,
     target_char_end_col: usize,
     current_op: &[u8],
     code_map: &CodeMap,
@@ -1076,8 +1071,7 @@ fn line_has_cross_aligned_operator_at_char_col(
         return false;
     }
 
-    let Some((kind, end_char_col)) =
-        first_alignment_token_on_line(line, source.line_start_offset(line_num), code_map)
+    let Some((kind, end_char_col)) = first_alignment_token_on_line(line, line_abs_start, code_map)
     else {
         return false;
     };
@@ -1094,6 +1088,10 @@ fn line_has_cross_aligned_operator_at_char_col(
             AlignmentTokenKind::EqualLike | AlignmentTokenKind::LShift
         )
     }
+}
+
+fn line_abs_start(lines: &[&[u8]], line_idx: usize) -> usize {
+    lines.iter().take(line_idx).map(|line| line.len() + 1).sum()
 }
 
 fn first_alignment_token_on_line(
