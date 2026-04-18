@@ -319,6 +319,23 @@ if tracker_class
   end
 end
 
+# private inside the same conditional branch should suppress branch-local delegations.
+module Octopus
+  module Migrator
+    if Octopus.atleast_rails52?
+      private
+
+      def connection
+        ActiveRecord::Base.connection
+      end
+    else
+      def migrate_with_octopus(&block)
+        migrate_without_octopus(&block)
+      end
+    end
+  end
+end
+
 # Heredoc text containing `do not` should not look like a Ruby `do` block opener
 # and cancel the enclosing private section for later methods.
 class InteractiveIgnorer
