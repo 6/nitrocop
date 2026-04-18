@@ -22,6 +22,30 @@ end)
 has_many :items, (proc do
   order(:position)
 end)
+# do..end block call used as a modifier condition keeps its parens
+def fetch_match
+  return reset_to_match_entry_view(
+    "Sorry"
+  ) if (
+    error? do
+      work
+    end
+  )
+end
+# do..end block call assigned directly keeps its parens
+def repositories=(repos)
+  @repositories = (
+    repos.map do |repo|
+      repo
+    end
+  )
+end
+# lambda do on the RHS of ||= keeps its parens
+def to_json
+  @@fix_string ||= (lambda do |obj|
+    obj
+  end)
+end
 # break/return/next with adjacent parens — keyword directly touching open paren
 break(value) unless value
 return(result) if done
