@@ -1,6 +1,3 @@
-use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use crate::cop::shared::node_type::{CALL_NODE, CALL_OPERATOR_WRITE_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -159,6 +156,8 @@ impl Cop for UnusedIgnoredColumns {
 mod tests {
     use super::*;
     use crate::schema::Schema;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn setup_schema() {
         let schema_bytes =
