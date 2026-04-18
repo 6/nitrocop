@@ -88,6 +88,16 @@ use ruby_prism::Visit;
 ///    separator/value columns and produced FPs whenever RuboCop would have accepted the
 ///    alignment. Fixed by counting non-continuation bytes (UTF-8 codepoint count) for
 ///    `key_char_len` so it composes with column math.
+///
+/// 9. **Variant-only `separator`/`table` FPs (2026-04-18):**
+///    - RuboCop's `pairs_on_same_line?` uses pair line ranges, not just the starting line.
+///      A pair like `bbb: { ... }, dddd: 3` makes `table`/`separator` uncheckable even
+///      though the outer pairs start on distinct lines. The previous implementation only
+///      tracked start lines, so it over-flagged outer hashes in `table` style.
+///    - RuboCop 1.84.2 also has an autocorrect clobber bug in `separator` style when the
+///      first pair's value starts on the next line and a later shorter key keeps its value
+///      on the same line. The cop crashes while registering corrections and emits no
+///      offenses. nitrocop now mirrors that quirk by suppressing that narrow shape.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -184,6 +194,8 @@ struct PairInfo {
     /// Line and column of the key (or kwsplat) start.
     line: usize,
     col: usize,
+    /// Last line touched by the pair, matching RuboCop's range-based `same_line?`.
+    last_line: usize,
     /// Whether this element begins its line.
     begins_line: bool,
     /// Whether this is a keyword splat (**foo).
@@ -220,6 +232,11 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
         let key_end = key.location().end_offset();
         let elem_start = key_start;
         let (line, col) = source.offset_to_line_col(elem_start);
+        let last_line = if elem_end > elem_start {
+            source.offset_to_line_col(elem_end - 1).0
+        } else {
+            line
+        };
         let begins_line = crate::cop::shared::util::begins_its_line(source, elem_start);
         let (_, key_end_col) = source.offset_to_line_col(key_end);
         // Count characters (UTF-8 codepoints), not bytes, so this matches the
@@ -255,6 +272,7 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
             elem_end,
             line,
             col,
+            last_line,
             begins_line,
             is_kwsplat: false,
             is_rocket,
@@ -275,12 +293,18 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
         // **foo keyword splat
         let elem_start = elem.location().start_offset();
         let (line, col) = source.offset_to_line_col(elem_start);
+        let last_line = if elem_end > elem_start {
+            source.offset_to_line_col(elem_end - 1).0
+        } else {
+            line
+        };
         let begins_line = crate::cop::shared::util::begins_its_line(source, elem_start);
         Some(PairInfo {
             elem_start,
             elem_end,
             line,
             col,
+            last_line,
             begins_line,
             is_kwsplat: true,
             is_rocket: false,
@@ -349,6 +373,36 @@ fn should_ignore_last_argument_hash(
         "ignore_implicit" => is_keyword_hash,
         _ => false,
     }
+}
+
+fn pair_same_line(first: &PairInfo, second: &PairInfo) -> bool {
+    first.last_line == second.line || first.line == second.last_line
+}
+
+fn pairs_on_same_line(pairs: &[PairInfo]) -> bool {
+    let non_kwsplat: Vec<&PairInfo> = pairs.iter().filter(|p| !p.is_kwsplat).collect();
+    non_kwsplat
+        .windows(2)
+        .any(|window| pair_same_line(window[0], window[1]))
+}
+
+fn has_separator_style_autocorrect_clobber(pairs: &[PairInfo]) -> bool {
+    let Some(first) = first_pair(pairs) else {
+        return false;
+    };
+    if !first.value_on_new_line {
+        return false;
+    }
+
+    pairs.iter().any(|pair| {
+        !std::ptr::eq(pair, first)
+            && !pair.is_kwsplat
+            && pair.begins_line
+            && !pair.is_value_omission
+            && !pair.value_on_new_line
+            && pair.is_rocket == first.is_rocket
+            && pair.key_end_col < first.key_end_col
+    })
 }
 
 /// Find the first non-kwsplat pair (matching RuboCop's `node.pairs.first`).
@@ -478,6 +532,10 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
         return offenses;
     }
 
+    if has_separator_style_autocorrect_clobber(pairs) {
+        return offenses;
+    }
+
     let first = match first_pair(pairs) {
         Some(p) => p,
         None => return offenses,
@@ -572,13 +630,8 @@ fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffens
         return offenses;
     }
 
-    // Check if any pairs are on the same line (table requires each pair on its own line)
-    let mut lines_seen = std::collections::HashSet::new();
-    for p in &non_kwsplat {
-        if !lines_seen.insert(p.line) {
-            // Two pairs on the same line — not checkable for table
-            return offenses;
-        }
+    if pairs_on_same_line(pairs) {
+        return offenses;
     }
 
     // Calculate max key width and expected positions
@@ -732,11 +785,8 @@ fn is_checkable(style: AlignStyle, pairs: &[PairInfo]) -> bool {
     }
 
     // Check pairs on same line
-    let mut lines_seen = std::collections::HashSet::new();
-    for p in &non_kwsplat {
-        if !lines_seen.insert(p.line) {
-            return false;
-        }
+    if pairs_on_same_line(pairs) {
+        return false;
     }
 
     true
@@ -1242,6 +1292,28 @@ mod tests {
             &HashAlignment,
             include_bytes!(
                 "../../../tests/fixtures/cops/layout/hash_alignment/table_multibyte_key_no_offense.rb"
+            ),
+            variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn separator_multiline_first_pair_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/separator_multiline_first_pair_no_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn table_same_line_multiline_pair_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/table_same_line_multiline_pair_no_offense.rb"
             ),
             variant_config("table", "table", "ignore_implicit"),
         );
