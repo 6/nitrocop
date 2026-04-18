@@ -110,6 +110,31 @@ x = (foo; bar)
 x += (foo; bar)
 x + (foo; bar)
 x((foo; bar))
+# Multiple expressions in ternary branches and non-begin bodies that RuboCop accepts
+def create_xyz(page, name: nil, left: nil, top: nil, zoom: nil)
+  destination = [page, Destination::REVERSE_TYPE_MAPPING.fetch(:xyz), left, top, zoom]
+  name ? (add(name, destination); name) : destination
+end
+def leader_line_length(length = nil)
+  length ? (self[:LL] = length; self) : self[:LL]
+end
+def store(name, v)
+  (@exports << [name, v]
+   nil)
+end
+attachments.map! do |a|
+  begin
+    import_attachment(post, a)
+  rescue StandardError
+    (
+      puts $!
+      nil
+    )
+  end
+end
+@cache.delete_if do |k, v|
+  (v.close; true) if k =~ /^#{host}\//
+end
 # Empty parens
 ()
 # Chained unary

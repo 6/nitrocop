@@ -403,6 +403,12 @@ use crate::parse::source::SourceFile;
 ///   `EmbeddedStatementsNode`, and the send path only reports unparenthesized-arg calls in
 ///   singular-parent contexts. Interpolated-regex embedded statements now mark that shape as a
 ///   single child without changing string-interpolation behavior.
+/// - **Multi-statement parens use the first expression plus ancestor context:** RuboCop decides
+///   `(a; b)` from the first inner expression and the first real ancestor, so ternary branches,
+///   rescue bodies, and conditional bodies like `name ? (add(...); name) : other`,
+///   `rescue; (puts $!; nil)`, and `(v.close; true) if cond` stay accepted, while top-level and
+///   method-body forms like `(1; 2)` and `def x; (foo; bar); end` still report. nitrocop had
+///   approximated this from the last expression, which produced the remaining corpus FPs.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -584,14 +590,43 @@ impl RedundantParensVisitor<'_> {
         };
         let is_receiver = self.is_receiver_of_parent_call(node, parent);
         if inner_nodes.len() != 1 {
-            if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
-                self.add_offense(node, msg);
-            } else if let Some(msg) =
-                self.check_multiple_statement_assignment_parens(&inner_nodes, parent)
+            if let Some(msg) = self.check_multiple_statement_assignment_parens(&inner_nodes, parent)
             {
                 self.add_offense(node, msg);
+            } else if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
+                self.add_offense(node, msg);
+            } else if !begins_its_line(self.source, node.location().start_offset())
+                || self.has_ternary_ancestor()
+                || self.is_parent_statements_conditional_body()
+                || inner_nodes.first().is_some_and(|first| {
+                    first.as_call_node().is_some()
+                        && self.is_allowed_rescue_body_parens(node, first)
+                })
+            {
+                return;
             } else if let Some(msg) = self.check_multiple_statement_parens(&inner_nodes) {
                 self.add_offense(node, msg);
+            } else if let Some(first) = inner_nodes.first() {
+                if first.as_and_node().is_some() || first.as_or_node().is_some() {
+                    if let Some(msg) =
+                        check_logical(&self.source.content, node, first, parent, is_receiver)
+                    {
+                        self.add_offense(node, msg);
+                    }
+                } else if is_comparison(first)
+                    && !is_receiver
+                    && !is_chained_or_indexed(&self.source.content, node)
+                    && self.parent_stack.len() <= 2
+                    && parent.is_none_or(|p| matches!(p.kind, ParentKind::Other))
+                {
+                    self.add_offense(node, "a comparison expression");
+                } else if first.as_call_node().is_some() {
+                    if let Some(msg) =
+                        check_method_call(&self.source.content, node, first, parent, is_receiver)
+                    {
+                        self.add_offense(node, msg);
+                    }
+                }
             }
             return;
         }
@@ -953,7 +988,7 @@ impl RedundantParensVisitor<'_> {
             return None;
         }
 
-        classify_simple(inner_nodes.last()?)
+        classify_simple(inner_nodes.first()?)
     }
 
     fn check_multiple_statement_assignment_parens(
@@ -998,23 +1033,7 @@ impl RedundantParensVisitor<'_> {
         &self,
         inner_nodes: &[ruby_prism::Node<'_>],
     ) -> Option<&'static str> {
-        let msg = classify_simple(inner_nodes.last()?)?;
-
-        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
-            let info = &self.parent_stack[i];
-
-            if info.is_statements_node {
-                continue;
-            }
-
-            return if i == 0 || matches!(info.kind, ParentKind::Def | ParentKind::Block) {
-                Some(msg)
-            } else {
-                None
-            };
-        }
-
-        Some(msg)
+        classify_simple(inner_nodes.first()?)
     }
 
     fn is_nested_unparenthesized_call_argument_parentheses(&self) -> bool {
