@@ -28,6 +28,12 @@ use crate::parse::source::SourceFile;
 /// full enclosing model name and pluralizes only the last table-name segment so
 /// it matches RuboCop on namespaced and compound model names.
 ///
+/// More recent FP investigation showed the remaining corpus mismatches were not
+/// in this matcher: repos that do not load `rubocop-rails` should not run this
+/// cop at all, even when nitrocop is invoked with `--only`. The runtime config
+/// loader now preserves that RuboCop behavior and only force-enables plugin
+/// departments under `--force-default-config`.
+///
 /// ## Synthetic corpus note
 /// RuboCop's SchemaLoader crashes on `t.timestamps` (no arguments) in
 /// db/schema.rb because `Column.new` calls `node.first_argument.str_content`
