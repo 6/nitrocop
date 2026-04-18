@@ -251,6 +251,16 @@ use ruby_prism::Visit;
 /// to `on_binary`, so those keyword operators should use the normal binary
 /// spacing rules, including extra-space checks in modifier-return and
 /// multiline-condition contexts.
+///
+/// ## Corpus fix (2026-04-18)
+///
+/// Plain `=` assignments with a continued multiline RHS need trailing-space
+/// alignment to start from the actual RHS node, not the first non-space byte
+/// on the assignment line. RuboCop therefore accepts webmock-style code like
+/// `expected =  \` followed by aligned string continuation lines, while the
+/// old text-scanner path anchored on the backslash and falsely flagged it.
+/// Fix: handle plain assignment write nodes in the AST pass and use
+/// `value().location().start_offset()` as the trailing alignment anchor.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -1433,19 +1443,34 @@ impl OperatorChecker<'_> {
     /// Check operator spacing for a "should have space" operator.
     /// Reports missing space or extra space around the operator.
     fn check_operator_spacing(&mut self, op_loc: &ruby_prism::Location<'_>) {
-        self.check_operator_spacing_with_trailing_anchor(op_loc, None, false);
+        self.check_operator_spacing_with_trailing_anchor(op_loc, None, false, false);
     }
 
     /// RuboCop treats `||=` and `&&=` like plain assignments for extra leading
     /// space, but still enforces trailing-space rules.
     fn check_assignment_like_operator_spacing(&mut self, op_loc: &ruby_prism::Location<'_>) {
-        self.check_operator_spacing_with_trailing_anchor(op_loc, None, true);
+        self.check_operator_spacing_with_trailing_anchor(op_loc, None, false, true);
+    }
+
+    fn check_plain_assignment_spacing(
+        &mut self,
+        op_loc: &ruby_prism::Location<'_>,
+        value: &ruby_prism::Node<'_>,
+    ) {
+        self.reported_offsets.insert(op_loc.start_offset());
+        self.check_operator_spacing_with_trailing_anchor(
+            op_loc,
+            Some(value.location().start_offset()),
+            true,
+            true,
+        );
     }
 
     fn check_operator_spacing_with_trailing_anchor(
         &mut self,
         op_loc: &ruby_prism::Location<'_>,
         trailing_anchor: Option<usize>,
+        trailing_anchor_token_match: bool,
         assignment_like_leading: bool,
     ) {
         let start = op_loc.start_offset();
@@ -1488,6 +1513,7 @@ impl OperatorChecker<'_> {
                     op_str,
                     op_loc.as_slice(),
                     trailing_anchor,
+                    trailing_anchor_token_match,
                     assignment_like_leading,
                 );
             }
@@ -1537,6 +1563,7 @@ impl OperatorChecker<'_> {
         op_str: &str,
         op_bytes: &[u8],
         trailing_anchor: Option<usize>,
+        trailing_anchor_token_match: bool,
         assignment_like_leading: bool,
     ) {
         let bytes = self.source.as_bytes();
@@ -1586,10 +1613,7 @@ impl OperatorChecker<'_> {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
-                    // For trailing_anchor (e.g. `=>` pair key position),
-                    // disable token matching — short key names would
-                    // spuriously match on adjacent lines.
-                    if is_aligned_rhs_standalone(self.source, anchor, false) {
+                    if is_aligned_rhs_standalone(self.source, anchor, trailing_anchor_token_match) {
                         multi_space_after = false;
                     }
                 } else if let Some(rhs_start) = util::first_non_space_on_line(bytes, end) {
@@ -1739,6 +1763,7 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                 self.check_operator_spacing_with_trailing_anchor(
                     &equal_loc,
                     trailing_anchor,
+                    true,
                     false,
                 );
             }
@@ -1773,6 +1798,55 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
         }
 
         ruby_prism::visit_call_node(self, node);
+    }
+
+    // === Plain assignments (`=`) ===
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'pr>,
+    ) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+
+    fn visit_global_variable_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableWriteNode<'pr>,
+    ) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_constant_path_write_node(self, node);
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_multi_write_node(self, node);
     }
 
     // === Logical operators (&&, ||) ===
@@ -1981,6 +2055,7 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                 self.check_operator_spacing_with_trailing_anchor(
                     &op_loc,
                     Some(node.location().start_offset()),
+                    false,
                     false,
                 );
             }
