@@ -464,25 +464,9 @@ o.col_type.nil? \
 warn 'Please use one of the standard log levels: ' \
 
 !current_course_user&.
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
-Datadog::Tracing::Contrib::Sidekiq::Patcher
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
-Datadog::Tracing::Contrib::Sidekiq::Patcher
-^ Layout/RedundantLineBreak: Redundant line break detected.
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
 
 o.col_type.nil? \
 ^ Layout/RedundantLineBreak: Redundant line break detected.
 
-warn 'Please use one of the standard log levels: ' \
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
 Message.new(
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
-allow(transport).to receive(:send_request).and_return(
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
-render :partial => "commentbox", :layout => false,
-^ Layout/RedundantLineBreak: Redundant line break detected.
