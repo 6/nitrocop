@@ -123,9 +123,9 @@ fn is_active_record_migration_const(node: ruby_prism::Node<'_>) -> bool {
         return false;
     };
 
-    if !migration
+    if migration
         .name()
-        .is_some_and(|name| name.as_slice() == b"Migration")
+        .is_none_or(|name| name.as_slice() != b"Migration")
     {
         return false;
     }
