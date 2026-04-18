@@ -398,6 +398,11 @@ use crate::parse::source::SourceFile;
 ///   positives in cases like `@value = (items.map do ... end)` and `return x if (error? do ...
 ///   end)`. The method-call check now mirrors RuboCop by treating any `do..end` call chain as
 ///   plausible, while the earlier method-argument check still reports true argument offenses.
+/// - **Regex interpolation with unparenthesized call args:** `/#{(Regexp::escape foo)}/`
+///   should still report "a method call". Prism wraps the interpolation body in an
+///   `EmbeddedStatementsNode`, and the send path only reports unparenthesized-arg calls in
+///   singular-parent contexts. Interpolated-regex embedded statements now mark that shape as a
+///   single child without changing string-interpolation behavior.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -495,6 +500,7 @@ struct ParentInfo {
     single_child: bool,
     is_statements_node: bool,
     is_interpolated_string_node: bool,
+    is_interpolated_regexp_node: bool,
     is_parentheses_body: bool,
     is_parentheses_node: bool,
     call_parenthesized: bool,
@@ -1650,6 +1656,7 @@ impl RedundantParensVisitor<'_> {
             single_child: false,
             is_statements_node: false,
             is_interpolated_string_node: false,
+            is_interpolated_regexp_node: false,
             is_parentheses_body: false,
             is_parentheses_node: false,
             call_parenthesized: false,
@@ -2492,11 +2499,19 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         let is_parentheses_body = self.parent_stack.len() >= 2
             && self.parent_stack[self.parent_stack.len() - 2].is_parentheses_node;
+        let is_string_interpolation_body = self.parent_stack.len() >= 2
+            && self.parent_stack[self.parent_stack.len() - 2].is_interpolated_string_node;
+        let is_regex_interpolation_body = self.parent_stack.len() >= 2
+            && self.parent_stack[self.parent_stack.len() - 2].is_interpolated_regexp_node;
         if let Some(top) = self.parent_stack.last_mut() {
             top.is_statements_node = true;
-            top.single_child = node.body().len() == 1 && is_parentheses_body;
+            top.single_child =
+                node.body().len() == 1 && (is_parentheses_body || is_regex_interpolation_body);
             top.is_parentheses_body = is_parentheses_body;
             top.statements_child_count = node.body().len();
+            if is_string_interpolation_body {
+                top.kind = ParentKind::Interpolation;
+            }
         }
         ruby_prism::visit_statements_node(self, node);
     }
@@ -2506,6 +2521,16 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
             top.is_interpolated_string_node = true;
         }
         ruby_prism::visit_interpolated_string_node(self, node);
+    }
+
+    fn visit_interpolated_regular_expression_node(
+        &mut self,
+        node: &ruby_prism::InterpolatedRegularExpressionNode<'pr>,
+    ) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.is_interpolated_regexp_node = true;
+        }
+        ruby_prism::visit_interpolated_regular_expression_node(self, node);
     }
 
     fn visit_parentheses_node(&mut self, node: &ruby_prism::ParenthesesNode<'pr>) {
@@ -2872,11 +2897,19 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
     }
 
     fn visit_embedded_statements_node(&mut self, node: &ruby_prism::EmbeddedStatementsNode<'pr>) {
-        if self.parent_stack.len() >= 2
-            && self.parent_stack[self.parent_stack.len() - 2].is_interpolated_string_node
-        {
+        if self.parent_stack.len() >= 2 {
+            let is_string_interpolation =
+                self.parent_stack[self.parent_stack.len() - 2].is_interpolated_string_node;
+            let is_regex_interpolation =
+                self.parent_stack[self.parent_stack.len() - 2].is_interpolated_regexp_node;
             if let Some(top) = self.parent_stack.last_mut() {
-                top.kind = ParentKind::Interpolation;
+                if is_string_interpolation {
+                    top.kind = ParentKind::Interpolation;
+                } else if is_regex_interpolation {
+                    top.single_child = node
+                        .statements()
+                        .is_some_and(|stmts| stmts.body().len() == 1);
+                }
             }
         }
         ruby_prism::visit_embedded_statements_node(self, node);

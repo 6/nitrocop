@@ -437,4 +437,6 @@ end
 ^ Style/RedundantParentheses: Don't use parentheses around a literal.
 
 when /\A#{(Regexp::escape scenarios_path)}/, /\A#{(Regexp::escape agents_path)}/, /\A#{(Regexp::escape events_path)}/
-^ Style/RedundantParentheses: Don't use parentheses around a method call.
+          ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+                                                  ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+                                                                                       ^ Style/RedundantParentheses: Don't use parentheses around a method call.
