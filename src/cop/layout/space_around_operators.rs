@@ -1418,6 +1418,12 @@ const BINARY_OPERATORS: &[&[u8]] = &[
 /// Additional operators detected via CallNode (match operators, ===)
 const MATCH_OPERATORS: &[&[u8]] = &[b"=~", b"!~", b"==="];
 
+#[derive(Clone, Copy)]
+struct TrailingAnchor {
+    offset: usize,
+    token_match: bool,
+}
+
 struct OperatorChecker<'a> {
     cop: &'a SpaceAroundOperators,
     source: &'a SourceFile,
@@ -1443,13 +1449,13 @@ impl OperatorChecker<'_> {
     /// Check operator spacing for a "should have space" operator.
     /// Reports missing space or extra space around the operator.
     fn check_operator_spacing(&mut self, op_loc: &ruby_prism::Location<'_>) {
-        self.check_operator_spacing_with_trailing_anchor(op_loc, None, false, false);
+        self.check_operator_spacing_with_trailing_anchor(op_loc, None, false);
     }
 
     /// RuboCop treats `||=` and `&&=` like plain assignments for extra leading
     /// space, but still enforces trailing-space rules.
     fn check_assignment_like_operator_spacing(&mut self, op_loc: &ruby_prism::Location<'_>) {
-        self.check_operator_spacing_with_trailing_anchor(op_loc, None, false, true);
+        self.check_operator_spacing_with_trailing_anchor(op_loc, None, true);
     }
 
     fn check_plain_assignment_spacing(
@@ -1460,8 +1466,10 @@ impl OperatorChecker<'_> {
         self.reported_offsets.insert(op_loc.start_offset());
         self.check_operator_spacing_with_trailing_anchor(
             op_loc,
-            Some(value.location().start_offset()),
-            true,
+            Some(TrailingAnchor {
+                offset: value.location().start_offset(),
+                token_match: true,
+            }),
             true,
         );
     }
@@ -1469,8 +1477,7 @@ impl OperatorChecker<'_> {
     fn check_operator_spacing_with_trailing_anchor(
         &mut self,
         op_loc: &ruby_prism::Location<'_>,
-        trailing_anchor: Option<usize>,
-        trailing_anchor_token_match: bool,
+        trailing_anchor: Option<TrailingAnchor>,
         assignment_like_leading: bool,
     ) {
         let start = op_loc.start_offset();
@@ -1513,7 +1520,6 @@ impl OperatorChecker<'_> {
                     op_str,
                     op_loc.as_slice(),
                     trailing_anchor,
-                    trailing_anchor_token_match,
                     assignment_like_leading,
                 );
             }
@@ -1562,8 +1568,7 @@ impl OperatorChecker<'_> {
         end: usize,
         op_str: &str,
         op_bytes: &[u8],
-        trailing_anchor: Option<usize>,
-        trailing_anchor_token_match: bool,
+        trailing_anchor: Option<TrailingAnchor>,
         assignment_like_leading: bool,
     ) {
         let bytes = self.source.as_bytes();
@@ -1613,7 +1618,7 @@ impl OperatorChecker<'_> {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
-                    if is_aligned_rhs_standalone(self.source, anchor, trailing_anchor_token_match) {
+                    if is_aligned_rhs_standalone(self.source, anchor.offset, anchor.token_match) {
                         multi_space_after = false;
                     }
                 } else if let Some(rhs_start) = util::first_non_space_on_line(bytes, end) {
@@ -1762,8 +1767,10 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
 
                 self.check_operator_spacing_with_trailing_anchor(
                     &equal_loc,
-                    trailing_anchor,
-                    true,
+                    trailing_anchor.map(|offset| TrailingAnchor {
+                        offset,
+                        token_match: true,
+                    }),
                     false,
                 );
             }
@@ -2054,8 +2061,10 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                 self.reported_offsets.insert(op_loc.start_offset());
                 self.check_operator_spacing_with_trailing_anchor(
                     &op_loc,
-                    Some(node.location().start_offset()),
-                    false,
+                    Some(TrailingAnchor {
+                        offset: node.location().start_offset(),
+                        token_match: false,
+                    }),
                     false,
                 );
             }
