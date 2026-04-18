@@ -251,6 +251,16 @@ use ruby_prism::Visit;
 /// to `on_binary`, so those keyword operators should use the normal binary
 /// spacing rules, including extra-space checks in modifier-return and
 /// multiline-condition contexts.
+///
+/// ## Corpus fix (2026-04-18)
+///
+/// Plain `=` assignments with a continued multiline RHS need trailing-space
+/// alignment to start from the actual RHS node, not the first non-space byte
+/// on the assignment line. RuboCop therefore accepts webmock-style code like
+/// `expected =  \` followed by aligned string continuation lines, while the
+/// old text-scanner path anchored on the backslash and falsely flagged it.
+/// Fix: handle plain assignment write nodes in the AST pass and use
+/// `value().location().start_offset()` as the trailing alignment anchor.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -1408,6 +1418,12 @@ const BINARY_OPERATORS: &[&[u8]] = &[
 /// Additional operators detected via CallNode (match operators, ===)
 const MATCH_OPERATORS: &[&[u8]] = &[b"=~", b"!~", b"==="];
 
+#[derive(Clone, Copy)]
+struct TrailingAnchor {
+    offset: usize,
+    token_match: bool,
+}
+
 struct OperatorChecker<'a> {
     cop: &'a SpaceAroundOperators,
     source: &'a SourceFile,
@@ -1442,10 +1458,26 @@ impl OperatorChecker<'_> {
         self.check_operator_spacing_with_trailing_anchor(op_loc, None, true);
     }
 
+    fn check_plain_assignment_spacing(
+        &mut self,
+        op_loc: &ruby_prism::Location<'_>,
+        value: &ruby_prism::Node<'_>,
+    ) {
+        self.reported_offsets.insert(op_loc.start_offset());
+        self.check_operator_spacing_with_trailing_anchor(
+            op_loc,
+            Some(TrailingAnchor {
+                offset: value.location().start_offset(),
+                token_match: true,
+            }),
+            true,
+        );
+    }
+
     fn check_operator_spacing_with_trailing_anchor(
         &mut self,
         op_loc: &ruby_prism::Location<'_>,
-        trailing_anchor: Option<usize>,
+        trailing_anchor: Option<TrailingAnchor>,
         assignment_like_leading: bool,
     ) {
         let start = op_loc.start_offset();
@@ -1536,7 +1568,7 @@ impl OperatorChecker<'_> {
         end: usize,
         op_str: &str,
         op_bytes: &[u8],
-        trailing_anchor: Option<usize>,
+        trailing_anchor: Option<TrailingAnchor>,
         assignment_like_leading: bool,
     ) {
         let bytes = self.source.as_bytes();
@@ -1586,10 +1618,7 @@ impl OperatorChecker<'_> {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
-                    // For trailing_anchor (e.g. `=>` pair key position),
-                    // disable token matching — short key names would
-                    // spuriously match on adjacent lines.
-                    if is_aligned_rhs_standalone(self.source, anchor, false) {
+                    if is_aligned_rhs_standalone(self.source, anchor.offset, anchor.token_match) {
                         multi_space_after = false;
                     }
                 } else if let Some(rhs_start) = util::first_non_space_on_line(bytes, end) {
@@ -1738,7 +1767,10 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
 
                 self.check_operator_spacing_with_trailing_anchor(
                     &equal_loc,
-                    trailing_anchor,
+                    trailing_anchor.map(|offset| TrailingAnchor {
+                        offset,
+                        token_match: true,
+                    }),
                     false,
                 );
             }
@@ -1773,6 +1805,55 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
         }
 
         ruby_prism::visit_call_node(self, node);
+    }
+
+    // === Plain assignments (`=`) ===
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_local_variable_write_node(self, node);
+    }
+
+    fn visit_instance_variable_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableWriteNode<'pr>,
+    ) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_instance_variable_write_node(self, node);
+    }
+
+    fn visit_class_variable_write_node(&mut self, node: &ruby_prism::ClassVariableWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_class_variable_write_node(self, node);
+    }
+
+    fn visit_global_variable_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableWriteNode<'pr>,
+    ) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_global_variable_write_node(self, node);
+    }
+
+    fn visit_constant_write_node(&mut self, node: &ruby_prism::ConstantWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_constant_write_node(self, node);
+    }
+
+    fn visit_constant_path_write_node(&mut self, node: &ruby_prism::ConstantPathWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_constant_path_write_node(self, node);
+    }
+
+    fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
+        let value = node.value();
+        self.check_plain_assignment_spacing(&node.operator_loc(), &value);
+        ruby_prism::visit_multi_write_node(self, node);
     }
 
     // === Logical operators (&&, ||) ===
@@ -1980,7 +2061,10 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                 self.reported_offsets.insert(op_loc.start_offset());
                 self.check_operator_spacing_with_trailing_anchor(
                     &op_loc,
-                    Some(node.location().start_offset()),
+                    Some(TrailingAnchor {
+                        offset: node.location().start_offset(),
+                        token_match: false,
+                    }),
                     false,
                 );
             }
