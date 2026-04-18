@@ -435,3 +435,6 @@ end
 
 (--2).should == 2
 ^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+when /\A#{(Regexp::escape scenarios_path)}/, /\A#{(Regexp::escape agents_path)}/, /\A#{(Regexp::escape events_path)}/
+^ Style/RedundantParentheses: Don't use parentheses around a method call.

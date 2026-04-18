@@ -386,6 +386,18 @@ use crate::parse::source::SourceFile;
 /// - **Nested call arguments inside single-statement rescue-body conditionals:** a single
 ///   rescue-body `if`/`unless` is still accepted, but parens inside calls nested under that
 ///   conditional, like the `brick` method-argument case, must still be reported.
+///
+/// ## Investigation findings (2026-04-18)
+///
+/// ### FP root causes fixed:
+/// - **Parenthesized `do..end` block calls in non-argument contexts:** RuboCop accepts
+///   `(foo do ... end)` shapes in direct assignment, modifier-condition, boolean, and similar
+///   expression contexts, while still reporting them when the outer parens are merely a
+///   parenthesized method argument like `match(event, (on Finished do ... end))`. nitrocop was
+///   only exempting `do..end` descendants when another call ancestor existed, which left false
+///   positives in cases like `@value = (items.map do ... end)` and `return x if (error? do ...
+///   end)`. The method-call check now mirrors RuboCop by treating any `do..end` call chain as
+///   plausible, while the earlier method-argument check still reports true argument offenses.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -565,13 +577,6 @@ impl RedundantParensVisitor<'_> {
             None
         };
         let is_receiver = self.is_receiver_of_parent_call(node, parent);
-        let has_call_ancestor = self
-            .parent_stack
-            .iter()
-            .rev()
-            .skip(1)
-            .any(|info| matches!(info.kind, ParentKind::Call));
-
         if inner_nodes.len() != 1 {
             if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
                 self.add_offense(node, msg);
@@ -915,14 +920,9 @@ impl RedundantParensVisitor<'_> {
 
         // Method call (includes unary operations)
         if inner.as_call_node().is_some() {
-            if let Some(msg) = check_method_call(
-                &self.source.content,
-                node,
-                inner,
-                parent,
-                is_receiver,
-                has_call_ancestor,
-            ) {
+            if let Some(msg) =
+                check_method_call(&self.source.content, node, inner, parent, is_receiver)
+            {
                 self.add_offense(node, msg);
             }
         }
@@ -1771,7 +1771,6 @@ fn check_method_call<'a>(
     inner: &ruby_prism::Node<'_>,
     parent: Option<&ParentInfo>,
     is_receiver: bool,
-    has_call_ancestor: bool,
 ) -> Option<&'a str> {
     let call = inner.as_call_node()?;
 
@@ -1790,9 +1789,10 @@ fn check_method_call<'a>(
         return None;
     }
 
-    // If the inner call has a do..end block (or a descendant with do..end block
-    // in a method chain), parens may be required.
-    if has_call_ancestor && has_do_end_block_in_chain(&call) {
+    // RuboCop accepts parenthesized do..end block calls as plausible method-call
+    // grouping in direct expression contexts, but still reports them earlier when
+    // they are merely parenthesized method arguments.
+    if has_do_end_block_in_chain(&call) {
         return None;
     }
 
