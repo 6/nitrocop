@@ -29,10 +29,18 @@ pub struct Assignment {
     /// while/until, rescue, block, lambda). Used by ShadowedArgument to
     /// distinguish conditional from unconditional shadowing.
     pub in_branch: bool,
+    /// Whether ShadowedArgument should treat this assignment as conditional.
+    /// Short-circuit `&&`/`||` RHS writes stay reportable there, but block/
+    /// closure writes and real branch bodies remain conditional.
+    pub shadowing_in_branch: bool,
     /// Branch context ID, if this assignment is inside a conditional branch.
     /// Used together with `BranchContext` in the engine to determine whether
     /// two assignments/references are in mutually exclusive branches.
     pub branch_id: Option<usize>,
+    /// Full stack of active branch-context IDs from outermost to innermost.
+    /// Needed to preserve exclusivity when assignments are nested inside
+    /// additional branches, e.g. a modifier `if` inside a rescue clause.
+    pub branch_path: Vec<usize>,
     /// Byte offset range of the RHS value node (`start..end`). For
     /// `x = Model.create(name: 'Joe')`, this covers `Model.create(name: 'Joe')`.
     /// For block-wrapped assignments like `x = Model.create { ... }`, this
@@ -53,7 +61,9 @@ impl Assignment {
             rhs_references_var: false,
             sequence: 0,
             in_branch: false,
+            shadowing_in_branch: false,
             branch_id: None,
+            branch_path: Vec::new(),
             value_range: None,
         }
     }

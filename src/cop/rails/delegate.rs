@@ -277,6 +277,29 @@ use ruby_prism::Visit;
 ///   wrappers such as `CONST = Class.new do`, `class_exec do`, and `if ... class`.
 ///   Visibility now uses Prism's full visitor and checks every statement list,
 ///   while keeping RuboCop's sibling-scope rules intact.
+///
+/// ## Investigation (2026-04-17): FP=1 on ruby/did_you_mean
+///
+/// `def distance(...) end if RUBY_ENGINE != 'jruby'` inside `module_eval do`
+/// with a sibling `module_function`. Prism's modifier-if parses the `def ... end`
+/// as an `IfNode` sharing its start offset with the inner `DefNode`. The sibling
+/// scan's `contains_def_at` only recognised the def itself and defs passed as
+/// access-modifier arguments, so it didn't spot the def inside the IfNode, and
+/// the visitor fell through to the if-body scope where `module_function` is not
+/// a sibling. RuboCop's `each_ancestor(:module, :begin)` treats conditional
+/// wrappers as transparent, so it finds `module_function` in the outer `:begin`.
+/// Fix: `contains_def_at` now recurses into `IfNode`/`UnlessNode` branches so
+/// the outer scope still recognises the wrapped def.
+///
+/// ## Investigation (2026-04-18): FP=1 on thiagopradi/octopus
+///
+/// `private` declared inside the same `if` branch as `def connection` should
+/// suppress the delegation, but the visibility walker treated every `IfNode` as
+/// fully transparent and stopped at the outer scope before it reached the branch
+/// body. The fix splits "def is nested under an `if`" from "def is a direct
+/// sibling in this statement list": outer conditional scopes still stay
+/// transparent for `module_function`, while branch-local `private` and
+/// `protected` are only resolved where the def is a direct sibling.
 pub struct Delegate;
 
 impl Cop for Delegate {
@@ -560,17 +583,30 @@ impl<'pr> VisibilityChecker<'_> {
     fn check_siblings(&mut self, stmts: impl Iterator<Item = ruby_prism::Node<'pr>>) -> bool {
         let stmts: Vec<_> = stmts.collect();
 
-        // First check if our def is a direct child of this scope
-        let has_our_def = stmts.iter().any(|s| self.contains_def_at(s));
-        if !has_our_def {
+        // `module_function` applies through conditional wrappers, but bare
+        // `private`/`protected` only apply when the def is a direct sibling in
+        // the same statement list.
+        let has_direct_def = stmts.iter().any(|s| self.is_direct_def_at(s));
+        let has_nested_def = has_direct_def || stmts.iter().any(|s| self.contains_def_at(s));
+        if !has_nested_def {
             return false;
         }
 
-        // Found the scope — compute visibility.
-        // If any ancestor has module_function, the def is non-public.
-        if self.ancestor_has_module_function {
+        // Ancestor or sibling `module_function` suppresses the def even when an
+        // `if`/`unless` wrapper sits between them.
+        let scope_has_module_function = stmts.iter().any(|s| {
+            s.as_call_node().is_some_and(|call| {
+                access_modifier_predicates::is_access_modifier_declaration(&call)
+                    && call.name().as_slice() == b"module_function"
+            })
+        });
+        if self.ancestor_has_module_function || scope_has_module_function {
             self.result = Some(true);
             return true;
+        }
+
+        if !has_direct_def {
+            return false;
         }
 
         let mut current_visibility = b"public".as_slice();
@@ -645,7 +681,7 @@ impl<'pr> VisibilityChecker<'_> {
             .is_some_and(|sym| sym.unescaped() == self.method_name)
     }
 
-    fn contains_def_at(&self, node: &ruby_prism::Node<'_>) -> bool {
+    fn is_direct_def_at(&self, node: &ruby_prism::Node<'_>) -> bool {
         if node.as_def_node().is_some() && node.location().start_offset() == self.def_offset {
             return true;
         }
@@ -656,6 +692,49 @@ impl<'pr> VisibilityChecker<'_> {
                         && arg.location().start_offset() == self.def_offset
                     {
                         return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn contains_def_at(&self, node: &ruby_prism::Node<'_>) -> bool {
+        if self.is_direct_def_at(node) {
+            return true;
+        }
+        // Conditional wrappers (`def ... end if cond`, `def ... end unless cond`,
+        // or prefix `if cond; def ...; end`) are only transparent for
+        // `module_function` lookup. Branch-local `private`/`protected` are still
+        // resolved in the nested statement list where the def is a direct sibling.
+        if let Some(if_node) = node.as_if_node() {
+            if let Some(stmts) = if_node.statements() {
+                for s in stmts.body().iter() {
+                    if self.contains_def_at(&s) {
+                        return true;
+                    }
+                }
+            }
+            if let Some(subsequent) = if_node.subsequent() {
+                if self.contains_def_at(&subsequent) {
+                    return true;
+                }
+            }
+        }
+        if let Some(unless_node) = node.as_unless_node() {
+            if let Some(stmts) = unless_node.statements() {
+                for s in stmts.body().iter() {
+                    if self.contains_def_at(&s) {
+                        return true;
+                    }
+                }
+            }
+            if let Some(else_clause) = unless_node.else_clause() {
+                if let Some(stmts) = else_clause.statements() {
+                    for s in stmts.body().iter() {
+                        if self.contains_def_at(&s) {
+                            return true;
+                        }
                     }
                 }
             }

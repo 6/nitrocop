@@ -361,3 +361,82 @@ ensure
   (cache.close rescue nil) if cache
   ^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a one-line rescue.
 end
+
+if ((GitlabCli::Config[:display_results_in_pager] && !options['nopager']) || options['pager'])
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a logical expression.
+
+confirmed = true
+if (confirmed)
+   ^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a variable.
+
+assert_equal (+ 1.second), 1.second
+             ^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+
+# Multi-statement rescue bodies still flag direct expressions and predicates
+begin
+  work
+rescue StandardError => e
+  text = nil
+  (foo.bar).to_s
+  ^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+end
+
+begin
+  work
+rescue StandardError => e
+  text = nil
+  if ((a && b) || c)
+     ^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a logical expression.
+    handle
+  end
+end
+
+begin
+  work
+rescue Errno::EFBIG
+  text = nil
+  raise if (retried)
+           ^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method call.
+end
+
+if next_line.empty?
+  (
+  ^ Style/RedundantParentheses: Don't use parentheses around an assignment.
+    indent1 = 1
+    indent2 = 2
+    indent = indent2 || indent1
+    cursor_line = ' ' * indent + cursor_line
+  )
+  process_auto_indent 1, add_newline: true
+end
+
+begin
+  send(method, *args, **kwargs, &block)
+rescue ActiveModel::MissingAttributeError => e
+  if e.message.start_with?('missing attribute: ')
+    unless has_field
+      (brick_orig_relation || self).instance_variable_set(:@brick_new_alf, ((always_loads[this_model.name] ||= []) << col_name))
+                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a method argument.
+    end
+  end
+end
+
+( 1 ; 2 )
+^^^^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(1; 2)
+^^^^^^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--5.5).should be_close(5.5, TOLERANCE)
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--5).should == 5
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+(--2).should == 2
+^ Style/RedundantParentheses: Don't use parentheses around a literal.
+
+when /\A#{(Regexp::escape scenarios_path)}/, /\A#{(Regexp::escape agents_path)}/, /\A#{(Regexp::escape events_path)}/
+          ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+                                                  ^ Style/RedundantParentheses: Don't use parentheses around a method call.
+                                                                                       ^ Style/RedundantParentheses: Don't use parentheses around a method call.

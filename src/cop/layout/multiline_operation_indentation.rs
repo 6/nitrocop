@@ -1,3 +1,9 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use ruby_prism::Visit;
+
+use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{AND_NODE, CALL_NODE, OR_NODE};
 use crate::cop::shared::util::{begins_its_line, indentation_of};
 use crate::cop::{Cop, CopConfig};
@@ -36,12 +42,149 @@ use crate::parse::source::SourceFile;
 /// continuations (for example `if lhs &&\n     rhs >=\n       value`).
 /// We mirror both quirks here and include `===`, `=~`, and `!~` in the
 /// operator-method set so regex/case-equality conditions are checked too.
+///
+/// Key fix (2026-04-17): aligned style was still treating every multiline
+/// operator call like RuboCop's `argument_in_method_call`, which hid plain
+/// same-column chains in method bodies (`"a" +\n"b"`) and bottle-style string
+/// concatenations. We now cache a small ancestor-derived context per file and
+/// keep the same-column fallback only when the operator call is genuinely
+/// nested inside a method argument, so `raise Error,\n"..." +` stays accepted
+/// while ordinary method-body chains become offenses again.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
     b"+", b"-", b"*", b"/", b"%", b"**", b"==", b"===", b"!=", b"=~", b"!~", b"<", b">", b"<=",
     b">=", b"<=>", b"&", b"|", b"^", b"<<", b">>",
 ];
+
+#[derive(Clone, Copy, Default)]
+struct OperatorCallContext {
+    method_argument: bool,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+struct CallKey {
+    start: usize,
+    end: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct CacheKey {
+    parse_result_ptr: usize,
+    source_ptr: usize,
+    source_len: usize,
+}
+
+thread_local! {
+    static OPERATOR_CALL_CONTEXT_CACHE: RefCell<Option<(CacheKey, HashMap<CallKey, OperatorCallContext>)>> =
+        const { RefCell::new(None) };
+}
+
+struct OperatorCallContextVisitor<'pr> {
+    ancestors: Vec<ruby_prism::Node<'pr>>,
+    contexts: HashMap<CallKey, OperatorCallContext>,
+}
+
+impl<'pr> Visit<'pr> for OperatorCallContextVisitor<'pr> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        self.ancestors.push(node);
+    }
+
+    fn visit_branch_node_leave(&mut self) {
+        self.ancestors.pop();
+    }
+
+    fn visit_leaf_node_enter(&mut self, _node: ruby_prism::Node<'pr>) {}
+
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        if OPERATOR_METHODS.contains(&node.name().as_slice()) {
+            let current = node.as_node();
+            self.contexts.insert(
+                call_key(node),
+                OperatorCallContext {
+                    method_argument: operator_call_argument_context(&self.ancestors, &current),
+                },
+            );
+        }
+
+        ruby_prism::visit_call_node(self, node);
+    }
+}
+
+fn call_key(call: &ruby_prism::CallNode<'_>) -> CallKey {
+    let loc = call.location();
+    CallKey {
+        start: loc.start_offset(),
+        end: loc.end_offset(),
+    }
+}
+
+fn node_within_node(inner: &ruby_prism::Node<'_>, outer: &ruby_prism::Node<'_>) -> bool {
+    let inner_loc = inner.location();
+    let outer_loc = outer.location();
+    inner_loc.start_offset() >= outer_loc.start_offset()
+        && inner_loc.end_offset() <= outer_loc.end_offset()
+}
+
+fn operator_call_argument_context(
+    ancestors: &[ruby_prism::Node<'_>],
+    current: &ruby_prism::Node<'_>,
+) -> bool {
+    for ancestor in ancestors.iter().rev().skip(1) {
+        if ancestor.as_block_node().is_some() {
+            return false;
+        }
+
+        let Some(call) = ancestor.as_call_node() else {
+            continue;
+        };
+
+        if method_identifier_predicates::is_setter_method(call.name().as_slice()) {
+            continue;
+        }
+
+        if call.arguments().is_some_and(|args| {
+            args.arguments()
+                .iter()
+                .any(|arg| node_within_node(current, &arg))
+        }) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn operator_call_context(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    source: &SourceFile,
+    call: &ruby_prism::CallNode<'_>,
+) -> OperatorCallContext {
+    let cache_key = CacheKey {
+        parse_result_ptr: parse_result as *const _ as usize,
+        source_ptr: source.as_bytes().as_ptr() as usize,
+        source_len: source.as_bytes().len(),
+    };
+
+    OPERATOR_CALL_CONTEXT_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let needs_rebuild = !matches!(cache.as_ref(), Some((key, _)) if *key == cache_key);
+
+        if needs_rebuild {
+            let mut visitor = OperatorCallContextVisitor {
+                ancestors: Vec::new(),
+                contexts: HashMap::new(),
+            };
+            visitor.visit(&parse_result.node());
+            *cache = Some((cache_key, visitor.contexts));
+        }
+
+        cache
+            .as_ref()
+            .and_then(|(_, contexts)| contexts.get(&call_key(call)).copied())
+            .unwrap_or_default()
+    })
+}
 
 impl Cop for MultilineOperationIndentation {
     fn name(&self) -> &'static str {
@@ -56,7 +199,7 @@ impl Cop for MultilineOperationIndentation {
         &self,
         source: &SourceFile,
         node: &ruby_prism::Node<'_>,
-        _parse_result: &ruby_prism::ParseResult<'_>,
+        parse_result: &ruby_prism::ParseResult<'_>,
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
@@ -92,14 +235,16 @@ impl Cop for MultilineOperationIndentation {
                 return;
             }
 
-            // Delegate to shared binary checker with accept_left_alignment=true.
-            // The same-column fallback is only used in aligned style. We keep
-            // the flag here because we still need that fallback for operator
-            // calls when matching RuboCop's aligned-style behavior in method-arg
-            // and nested-if contexts without parent pointers.
+            let call_context = operator_call_context(parse_result, source, &call_node);
             let first_arg = &args[0];
-            diagnostics
-                .extend(self.check_binary_node(source, &receiver, first_arg, config, style, true));
+            diagnostics.extend(self.check_binary_node(
+                source,
+                &receiver,
+                first_arg,
+                config,
+                style,
+                call_context.method_argument,
+            ));
             return;
         }
 

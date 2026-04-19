@@ -553,6 +553,50 @@ def ask_user(message, choices)
   choice.last
 end
 
+# FP fix: block nested in the sole else-branch expression is suppressed
+# (corpus: riscv/riscv-unified-db logic.rb:3418)
+def from_dimacs(dimacs)
+  nodes = dimacs.each_line.map do |line|
+    if line =~ /^(((-?\d+) )+)0/
+      ts = $1.strip.split(" ")
+      if ts.size == 1
+        t = ts.fetch(0)
+        if t[0] == "-"
+          t[1..]
+        else
+          t
+        end
+      else
+        LogicNode.new(:or,
+          ts.map do |t|
+            if t[0] == "-"
+              t[1..]
+            else
+              t
+            end
+          end
+        )
+      end
+    end
+  end
+  nodes
+end
+
+# FP fix: post-condition begin/while declaration still belongs to the if branch
+# (corpus: ruby/tk itemconfig.rb:1201 and treeview.rb:503)
+def current_itemconfiginfo(items, slot)
+  if ready?
+    if slot
+      begin
+        conf = items.first
+        slot = conf
+      end while false
+    else
+      items.each { |conf| use(conf) }
+    end
+  end
+end
+
 # FP fix: if/else — variable in if-branch, block param in assignment RHS in else-branch
 # (corpus: randy-girard/app_perf latency_bands_service.rb:37)
 def process_data(data)
@@ -577,5 +621,19 @@ def echo(major, minor)
     end
   else
     item = list.find_item(minor)
+  end
+end
+
+# FP fix: nested block inside the sole else-branch block statement is suppressed
+# (corpus: trogdoro/xiki topic_expander.rb:889)
+def found_by_user(items, flag)
+  if flag
+    work
+  else
+    items.each do |k, values|
+      values.each do |k, value|
+        puts [k, value]
+      end
+    end
   end
 end

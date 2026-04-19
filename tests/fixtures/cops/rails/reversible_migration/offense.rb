@@ -55,3 +55,12 @@ class FixAuthInfos2 < ActiveRecord::Migration[6.0]
     end
   end
 end
+
+class RemoveActiveFromProfileField < ActiveRecord::Migration[6.0]
+  def change
+    def change
+      safety_assured { remove_column :profile_fields, :active }
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/ReversibleMigration: remove_column(without type) is not reversible.
+    end
+  end
+end

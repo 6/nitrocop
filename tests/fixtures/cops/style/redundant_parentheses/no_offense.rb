@@ -22,6 +22,30 @@ end)
 has_many :items, (proc do
   order(:position)
 end)
+# do..end block call used as a modifier condition keeps its parens
+def fetch_match
+  return reset_to_match_entry_view(
+    "Sorry"
+  ) if (
+    error? do
+      work
+    end
+  )
+end
+# do..end block call assigned directly keeps its parens
+def repositories=(repos)
+  @repositories = (
+    repos.map do |repo|
+      repo
+    end
+  )
+end
+# lambda do on the RHS of ||= keeps its parens
+def to_json
+  @@fix_string ||= (lambda do |obj|
+    obj
+  end)
+end
 # break/return/next with adjacent parens — keyword directly touching open paren
 break(value) unless value
 return(result) if done
@@ -57,6 +81,7 @@ x = (0..10)
 (not x)
 (a until b)
 (a while b)
+not((a, b = 1, 2))
 # Operator with unparenthesized call arg
 foo + (bar baz)
 # Negative numeric base in exponentiation
@@ -85,6 +110,48 @@ x = (foo; bar)
 x += (foo; bar)
 x + (foo; bar)
 x((foo; bar))
+# Multi-statement parens whose first real ancestor is a call (not begin/def/block)
+%
+(foo + bar)
+%
+(
+  foo
+  bar
+)
+%
+(foo)
+class NamespaceParser
+  def namespace_response
+    data = Namespaces.new((SP!; namespace),
+                          (SP!; namespace),
+                          (SP!; namespace))
+  end
+end
+# Multiple expressions in ternary branches and non-begin bodies that RuboCop accepts
+def create_xyz(page, name: nil, left: nil, top: nil, zoom: nil)
+  destination = [page, Destination::REVERSE_TYPE_MAPPING.fetch(:xyz), left, top, zoom]
+  name ? (add(name, destination); name) : destination
+end
+def leader_line_length(length = nil)
+  length ? (self[:LL] = length; self) : self[:LL]
+end
+def store(name, v)
+  (@exports << [name, v]
+   nil)
+end
+attachments.map! do |a|
+  begin
+    import_attachment(post, a)
+  rescue StandardError
+    (
+      puts $!
+      nil
+    )
+  end
+end
+@cache.delete_if do |k, v|
+  (v.close; true) if k =~ /^#{host}\//
+end
 # Empty parens
 ()
 # Chained unary
@@ -182,6 +249,15 @@ x ({ y: 1 }.merge({ y: 2 })), z
 foo :plain => ({:error => 0}.to_json), :other => 1
 Contract ({ :a => Num, :b => Num}) => Num
 foo.to match(({ a: 1 }))
+bar foo(
+  1,
+  (
+    {
+      a: 1,
+      b: 2,
+    }.to_json
+  )
+)
 # Chained receiver with operator/logical inner — parens needed for operator precedence
 (a + b).to_s(base)
 (arr || []).each { |x| x }
@@ -307,12 +383,7 @@ while (pop_messages(queue_url, 10).length > 0)
 end
 # Single-line def body with assignment — not a multi-statement begin
 def start_handlers; (@start_handlers ||= {}); end
-# Double-negation on numeric — Prism collapses --5 to -@(5),
-# but RuboCop (Parser) sees (send (int -5) :-@) and doesn't flag
-(--5.5).should be_close(5.5, 0.01)
-(--5).should == 5
-(--2).should == 2
-# Rescue clause body — RuboCop's rescue? exempts parens inside resbody
+# Rescue clause body — RuboCop's rescue? only exempts single-statement resbodies
 begin
   work
 rescue StandardError
@@ -323,13 +394,28 @@ begin
 rescue
   (x && y)
 end
-# Rescue-body conditional parens are accepted when they belong to the
-# direct statement that starts the rescue clause.
+# Rescue-body conditional parens are accepted when the rescue body has
+# a single direct statement.
 begin
   work
 rescue StandardError => e
   if ((a && b) || c)
     handle
+  end
+end
+# Single-statement rescue bodies also keep parens in the direct call's arguments.
+def transliterate(key, throw: false, raise: false, locale: nil, replacement: nil, **options)
+  config.backend.transliterate(locale, key, replacement)
+rescue I18n::ArgumentError => exception
+  handle_exception((throw && :throw || raise && :raise), exception, locale, key, options)
+end
+def add_path
+  begin
+    param_value = params.fetch(p[:name].to_s).to_s
+  rescue KeyError
+    raise ArgumentError, ("`#{p[:name]}`" \
+      'parameter key present, but not defined within example group' \
+      '(i. e `it` or `let` block)')
   end
 end
 # Bracket chaining — (expr)[key] is chained like (expr).method
@@ -354,3 +440,19 @@ selected_participants = []
 participants = [Struct.new(:id).new(1)]
 rand_num = 0
 if_condition_2 = (!selected_participants.include? participants[rand_num].id)
+# Negated explicit-receiver call with a block is also accepted
+new_dirs = []
+r_dir_name = :name
+if_condition_3 = (!new_dirs.any? { |d| d == r_dir_name })
+# Spaced unary plus used as a chained receiver keeps its parens
+print (+ 'frozen string').frozen? ? 'immutable' : 'mutable'
+# Parenthesized interpolation inside dynamic symbols is accepted
+path = send(:"#{(watched ? 'unwatch' : 'watch')}_path", object_id: object.id)
+# Hash-literal receiver chains stay accepted inside interpolation
+sse_lines << "data: #{({ type: "message_stop" }).to_json}\n\n"
+# do..end block descendants in a chained receiver keep the outer parens
+((synsets.collect do |ss|
+  ss.send(options[:nym])
+end - [word.value]).flatten).uniq.map do |token|
+  token.gsub("_", " ")
+end

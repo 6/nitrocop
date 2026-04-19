@@ -73,3 +73,46 @@ def foo
     ^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.all` on line 58.
     .map { |e| e.name }
 end
+
+# Block-pass receiver: RuboCop does not treat `&:strip` as a block for alignment
+def ignored_organisations_string=(organisations_string)
+  self.ignored_organisations = (organisations_string || "")
+    .split(",")
+    ^^^^^^ Layout/MultilineMethodCallIndentation: Align `.split` with `(organisations_string || "")` on line 65.
+    .collect(&:strip)
+    ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.collect` with `(organisations_string || "")` on line 65.
+      .compact
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.compact` with `(organisations_string || "")` on line 65.
+end
+
+# []= receiver: square brackets are not parenthesized arg lists
+def prepare_headers
+  headers['Cookie'] = final_cookies_hash.
+    map { |k, v| "#{Cookie.encode(k)}=#{Cookie.encode(v)}" }.join(';')
+    ^^^ Layout/MultilineMethodCallIndentation: Align `map` with `final_cookies_hash` on line 73.
+end
+
+# Trailing-dot setter call: RuboCop checks setter methods like ordinary chains
+trigger = proc do
+  described_class.new(url: url, inputs: { name: 'value' }).
+      nonce_name = 'stuff'
+      ^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
+end
+
+# Repeated continuation dots should not inherit a bad column from the first one
+def self.pull_request_filter
+  where("contributions.user_id = aggregation_filters.user_id")
+  .where("contributions.title ILIKE aggregation_filters.title_pattern")
+  ^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+  .arel.exists.not
+  ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+end
+
+# RSpec stub chain: later dots still use the chain indent when the first continuation is wrong
+before do
+  allow(SteamCondenser::Community::SteamId).to receive(:steam_id_to_community_id)
+                                              .with("STEAM_0:0:173804217")
+                                              ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 44) spaces for indentation of a chained method call.
+                                              .and_return(76_561_198_307_874_162)
+                                              ^^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 44) spaces for indentation of a chained method call.
+end

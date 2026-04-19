@@ -364,15 +364,24 @@ show up in the cop-specific sample. They're selected by highest nitrocop_total
 
 
 def variant_covered_repos(run_id: int | None) -> set[str] | None:
-    """Return the set of repos that the variant oracle actually ran against.
+    """Return the set of repos that the variant oracle actually tested.
 
     The variant oracle uses --max-variant-repos to cap variant runs to the
-    top-N repos by manifest order. Repos beyond that limit have no variant
-    baseline data — any nitrocop output on them during --style CI runs
-    becomes a false "regression" against a stale 0-offense baseline.
+    first N repos in manifest order (sorted by stars). Repos beyond that
+    limit have no variant baseline data — any nitrocop/rubocop divergence
+    on them during --style CI runs becomes a false "regression" against a
+    zero baseline.
 
-    Returns None when the oracle artifact doesn't expose per-repo variant
-    data (older artifacts); callers should then skip filtering.
+    Reconstructs the tested set from manifest order + the oracle batch's
+    ``total_repos`` field rather than scanning ``by_repo_cop``, because
+    ``by_repo_cop`` only contains repos with cop-level divergence — repos
+    that the oracle tested AND matched perfectly never appear in it and
+    must still be recognized as "tested" so going from 0 to N divergence
+    gets flagged.
+
+    Returns None when run_id is missing, the artifact can't be read, the
+    artifact predates the ``total_repos`` field, or the manifest is
+    missing; callers should then skip filtering.
     """
     if run_id is None:
         return None
@@ -384,11 +393,15 @@ def variant_covered_repos(run_id: int | None) -> set[str] | None:
         data = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return None
-    covered: set[str] = set()
-    for batch in data.get("batches", []):
-        for repo_id in batch.get("by_repo_cop", {}):
-            covered.add(repo_id)
-    return covered or None
+    limits = [batch.get("total_repos", 0) for batch in data.get("batches", [])]
+    limit = max(limits) if limits else 0
+    if limit <= 0:
+        return None
+    manifest = load_manifest()
+    if not manifest:
+        return None
+    # `manifest` preserves manifest.jsonl insertion order (Python 3.7+ dicts).
+    return set(list(manifest.keys())[:limit])
 
 
 def canary_repos(
@@ -454,6 +467,14 @@ def relevant_repos_for_cop(
         if cop_name in cops:
             relevant.add(repo_id)
 
+    # Variant checks only have baseline data for the first N manifest repos
+    # (the oracle's --max-variant-repos limit). Sampling any repo beyond that
+    # limit produces a false regression because the baseline entry is missing
+    # (treated as 0) while the actual nc/rc divergence is non-zero. Filter
+    # `relevant` down to tested repos when running a variant check.
+    if variant_covered_repos is not None:
+        relevant &= variant_covered_repos
+
     # For Include-gated cops with zero baseline, sample from the full manifest.
     # These cops have no oracle data because both tools fail to resolve their
     # Include patterns. We sample broadly to get coverage.
@@ -470,6 +491,10 @@ def relevant_repos_for_cop(
             relevant = set(manifest.keys())
             print(f"  Include-gated cop with zero baseline — sampling from "
                   f"{len(relevant)} manifest repos", file=sys.stderr)
+        # Re-apply the variant filter after the Include-gated fallback so
+        # broad manifest sampling can't smuggle in untested repos.
+        if variant_covered_repos is not None:
+            relevant &= variant_covered_repos
 
     if sample is not None and len(relevant) > sample:
         # Always include repos with known divergence (FP or FN)
@@ -805,6 +830,7 @@ def rerun_local_per_repo(
     total_shards: int | None = None,
     sample: int | None = None,
     include_gated: bool = False,
+    variant_covered_repos: set[str] | None = None,
 ) -> dict[str, int]:
     """Re-run nitrocop locally using per-repo subprocess mode.
 
@@ -817,8 +843,11 @@ def rerun_local_per_repo(
 
     relevant_repos = None
     if quick:
-        relevant_repos = relevant_repos_for_cop(cop_name, data, sample=sample,
-                                                include_gated=include_gated)
+        relevant_repos = relevant_repos_for_cop(
+            cop_name, data, sample=sample,
+            include_gated=include_gated,
+            variant_covered_repos=variant_covered_repos,
+        )
         if not has_activity_index:
             print(
                 "WARNING: corpus artifact lacks cop_activity_repos; "
@@ -1231,8 +1260,15 @@ def _run_rubocop_for_variant(
         repo_dir,
     ]
     try:
+        # Run from within the repo so RuboCop's make_excludes_absolute
+        # prefixes relative cop Exclude patterns (e.g., `**/*.gemspec`) with
+        # the repo path. Without cwd=repo_dir, RuboCop prefixes with the
+        # caller's cwd, the pattern no longer matches the target files, and
+        # patterns like Rails/TimeZone's `Exclude: ['**/*.gemspec']` silently
+        # stop excluding — producing spurious FNs vs the corpus oracle.
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=env)
+            cmd, capture_output=True, text=True, timeout=timeout, env=env,
+            cwd=repo_dir)
         data = json.loads(result.stdout)
         # Filter to only the requested cop and deduplicate by (path, line),
         # matching the deduplication that run_nitrocop applies on the NC side.
@@ -1407,14 +1443,24 @@ def main():
 
     ensure_binary()
 
+    # Variant checks must only sample from repos the oracle actually tested
+    # (the first --max-variant-repos entries by manifest order). Sampling any
+    # repo beyond that yields a false regression because the baseline is zero
+    # but the nc/rc divergence is real. Compute once here and thread through
+    # both the clone path and the local-rerun path.
+    _style_label = None
+    if args.style and "=" in args.style:
+        _style_label = args.style.split("=", 1)[1]
+    _variant_covered = (
+        variant_covered_repos(corpus_run_id)
+        if (_style_label or args.check_variants)
+        else None
+    )
+
     # Validate local corpus matches manifest (warns about stale/missing repos)
     if args.rerun:
         if args.clone:
             # Clone into temp dir with oracle-identical path structure
-            # Extract style label from --style for variant-aware sampling
-            _style_label = None
-            if args.style and "=" in args.style:
-                _style_label = args.style.split("=", 1)[1]
             tmpdir = clone_repos_for_cop(
                 args.cop, data,
                 shard_index=args.shard_index, total_shards=args.total_shards,
@@ -1514,6 +1560,7 @@ def main():
                 total_shards=args.total_shards,
                 sample=args.sample,
                 include_gated=include_gated and zero_baseline,
+                variant_covered_repos=_variant_covered,
             )
             save_cached_results(args.cop, per_repo)
 

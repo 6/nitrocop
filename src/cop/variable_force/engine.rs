@@ -29,14 +29,33 @@ pub struct RegisteredConsumer<'a> {
 pub struct BranchContext {
     /// Unique ID for this branch context.
     pub id: usize,
+    /// Scope index active when the branch was entered. Variables declared in a
+    /// nested scope must ignore outer-scope branch contexts.
+    pub scope_index: usize,
     /// ID of the parent conditional node (e.g., the IfNode). Used to
     /// determine if two branches belong to the same conditional.
-    pub parent_id: usize,
+    pub parent_id: u64,
     /// Which child of the conditional this branch is (0=then, 1=else, etc.).
     pub child_index: usize,
     /// Predicate-assignment contexts execute before the guarded branch and
     /// must stay visible to reads in that branch.
     pub predicate_context: bool,
+    /// Modifier-form conditionals (`body if (x = ...)`, `body while (x = ...)`)
+    /// must keep walking to an older assignment so the variable is in scope on
+    /// the left side of the keyword, matching RuboCop's
+    /// `in_modifier_conditional?` special-case.
+    pub modifier_conditional: bool,
+    /// Exception-handler main bodies (`begin` under rescue/ensure) can exit
+    /// into sibling branches, so their writes are not exclusive with later
+    /// rescue/else/ensure reads.
+    pub may_jump_to_other_branch: bool,
+    /// Exception-handler main bodies may terminate before later writes run, so
+    /// references must keep walking past them instead of consuming the branch.
+    pub may_run_incompletely: bool,
+    /// Short-circuit logical branches (`&&`, `||`, `and`, `or`) stay
+    /// reportable for ShadowedArgument even though VF must model them as
+    /// branches for assignment liveness.
+    pub short_circuit: bool,
 }
 
 /// The VariableForce engine. Walks the Prism AST and builds a complete
@@ -82,17 +101,48 @@ impl<'a> Engine<'a> {
         seq
     }
 
+    fn branch_parent_id(location: &ruby_prism::Location<'_>) -> u64 {
+        ((location.start_offset() as u64) << 32) ^ (location.end_offset() as u64)
+    }
+
     /// Push a new branch context for a child of a conditional node.
     /// `parent_id` identifies the conditional node (use its start offset),
     /// `child_index` identifies which child (0=then, 1=else, etc.).
-    fn push_branch(&mut self, parent_id: usize, child_index: usize, predicate_context: bool) {
+    fn push_branch(&mut self, parent_id: u64, child_index: usize, predicate_context: bool) {
+        self.push_branch_with_flags(
+            parent_id,
+            child_index,
+            predicate_context,
+            false,
+            false,
+            false,
+            false,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)] // internal branch-context helper threading independent flags
+    fn push_branch_with_flags(
+        &mut self,
+        parent_id: u64,
+        child_index: usize,
+        predicate_context: bool,
+        modifier_conditional: bool,
+        may_jump_to_other_branch: bool,
+        may_run_incompletely: bool,
+        short_circuit: bool,
+    ) {
         let id = self.next_branch_id;
         self.next_branch_id += 1;
         let context = BranchContext {
             id,
+            scope_index: self.table.current_scope_index(),
             parent_id,
             child_index,
             predicate_context,
+            modifier_conditional,
+            may_jump_to_other_branch,
+            may_run_incompletely,
+            short_circuit,
         };
         self.branch_contexts.push(context.clone());
         // Keep the live VariableTable copy in sync so reference tracking can
@@ -109,6 +159,29 @@ impl<'a> Engine<'a> {
     /// The current branch ID, if inside a branch.
     fn current_branch_id(&self) -> Option<usize> {
         self.branch_stack.last().copied()
+    }
+
+    fn current_branch_path(&self) -> Vec<usize> {
+        self.branch_stack.clone()
+    }
+
+    fn current_shadowing_in_branch(&self) -> bool {
+        if self.branch_depth == 0 {
+            return false;
+        }
+
+        // Some conditional contexts (currently case/case-match predicates)
+        // increment branch_depth without pushing a branch context. They still
+        // count as conditional for ShadowedArgument.
+        if self.branch_depth > self.branch_stack.len() {
+            return true;
+        }
+
+        self.branch_stack.iter().any(|&id| {
+            self.branch_contexts
+                .get(id)
+                .is_some_and(|context| !context.short_circuit)
+        })
     }
 
     /// Check if two branch IDs are mutually exclusive (belong to the same
@@ -476,7 +549,9 @@ impl<'a> Engine<'a> {
 
             let mut assignment = Assignment::new(offset, AssignmentKind::For);
             assignment.in_branch = self.branch_depth > 0;
+            assignment.shadowing_in_branch = self.current_shadowing_in_branch();
             assignment.branch_id = self.current_branch_id();
+            assignment.branch_path = self.current_branch_path();
             self.table.assign_to_variable(&name, assignment);
         }
     }
@@ -513,7 +588,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         assign.sequence = seq;
         assign.rhs_references_var = rhs_refs_var;
         assign.in_branch = self.branch_depth > 0;
+        assign.shadowing_in_branch = self.current_shadowing_in_branch();
         assign.branch_id = self.current_branch_id();
+        assign.branch_path = self.current_branch_path();
         let val = node.value();
         assign.value_range = Some((val.location().start_offset(), val.location().end_offset()));
         self.table.assign_to_variable(&name, assign);
@@ -525,6 +602,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut reference = Reference::new(node.location().start_offset(), scope_index);
         reference.sequence = seq;
         reference.branch_id = self.current_branch_id();
+        reference.branch_path = self.current_branch_path();
         self.table
             .reference_variable(node.name().as_slice(), reference);
     }
@@ -543,6 +621,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut r = Reference::new(offset, si);
         r.sequence = seq;
         r.branch_id = self.current_branch_id();
+        r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
         self.visit(&node.value());
         let seq = self.next_sequence();
@@ -550,7 +629,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.sequence = seq;
         a.rhs_references_var = true; // operator-writes always read the var
         a.in_branch = self.branch_depth > 0;
+        a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
+        a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
     }
 
@@ -568,6 +649,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut r = Reference::new(offset, si);
         r.sequence = seq;
         r.branch_id = self.current_branch_id();
+        r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
         self.visit(&node.value());
         let seq = self.next_sequence();
@@ -575,7 +657,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.sequence = seq;
         a.rhs_references_var = true;
         a.in_branch = self.branch_depth > 0;
+        a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
+        a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
     }
 
@@ -593,6 +677,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let mut r = Reference::new(offset, si);
         r.sequence = seq;
         r.branch_id = self.current_branch_id();
+        r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
         self.visit(&node.value());
         let seq = self.next_sequence();
@@ -600,7 +685,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.sequence = seq;
         a.rhs_references_var = true;
         a.in_branch = self.branch_depth > 0;
+        a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
+        a.branch_path = self.current_branch_path();
         self.table.assign_to_variable(&name, a);
     }
 
@@ -668,7 +755,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             .collect();
 
         let in_branch = self.branch_depth > 0;
+        let shadowing_in_branch = self.current_shadowing_in_branch();
         let branch_id = self.current_branch_id();
+        let branch_path = self.current_branch_path();
         let seq = self.next_sequence();
 
         for target in node.lefts().iter() {
@@ -684,7 +773,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                     .is_some_and(|(_, r)| *r);
                 let mut a = Assignment::new(offset, AssignmentKind::Multiple);
                 a.in_branch = in_branch;
+                a.shadowing_in_branch = shadowing_in_branch;
                 a.branch_id = branch_id;
+                a.branch_path = branch_path.clone();
                 a.sequence = seq;
                 a.rhs_references_var = rhs_refs_var;
                 self.table.assign_to_variable(&name, a);
@@ -711,7 +802,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                             .is_some_and(|(_, r)| *r);
                         let mut a = Assignment::new(offset, AssignmentKind::Rest);
                         a.in_branch = in_branch;
+                        a.shadowing_in_branch = shadowing_in_branch;
                         a.branch_id = branch_id;
+                        a.branch_path = branch_path.clone();
                         a.sequence = seq;
                         a.rhs_references_var = rhs_refs_var;
                         self.table.assign_to_variable(&name, a);
@@ -734,7 +827,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                     .is_some_and(|(_, r)| *r);
                 let mut a = Assignment::new(offset, AssignmentKind::Multiple);
                 a.in_branch = in_branch;
+                a.shadowing_in_branch = shadowing_in_branch;
                 a.branch_id = branch_id;
+                a.branch_path = branch_path.clone();
                 a.sequence = seq;
                 a.rhs_references_var = rhs_refs_var;
                 self.table.assign_to_variable(&name, a);
@@ -755,6 +850,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         };
         let loc = node.location();
         let saved_depth = self.branch_depth;
+        let saved_stack = std::mem::take(&mut self.branch_stack);
         self.branch_depth = 0;
         self.enter_scope(kind, loc.start_offset(), loc.end_offset());
         if let Some(params) = node.parameters() {
@@ -765,15 +861,19 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.leave_scope();
         self.branch_depth = saved_depth;
+        self.branch_stack = saved_stack;
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
         let loc = node.location();
         let body_empty = node.body().is_none();
-        // Save and reset branch_depth: block body starts a fresh scope.
-        // Assignments to outer variables are marked captured_by_block by the
-        // variable table, which the cop uses as a conditional indicator.
+        // Save and reset branch_depth/branch_stack: block body starts a fresh
+        // scope. Assignments to outer variables are marked captured_by_block
+        // by the variable table, which the cop uses as a conditional indicator.
+        // Clearing branch_stack ensures outer branches (e.g. a begin/ensure
+        // body wrapping the block) do not bleed into in-block branch checks.
         let saved_depth = self.branch_depth;
+        let saved_stack = std::mem::take(&mut self.branch_stack);
         self.branch_depth = 0;
         self.enter_scope(ScopeKind::Block, loc.start_offset(), loc.end_offset());
         self.table.current_scope_mut().body_empty = body_empty;
@@ -787,12 +887,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.leave_scope();
         self.branch_depth = saved_depth;
+        self.branch_stack = saved_stack;
     }
 
     fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
         let loc = node.location();
         let body_empty = node.body().is_none();
         let saved_depth = self.branch_depth;
+        let saved_stack = std::mem::take(&mut self.branch_stack);
         self.branch_depth = 0;
         self.enter_scope(ScopeKind::Block, loc.start_offset(), loc.end_offset());
         self.table.current_scope_mut().body_empty = body_empty;
@@ -806,6 +908,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         }
         self.leave_scope();
         self.branch_depth = saved_depth;
+        self.branch_stack = saved_stack;
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
@@ -844,24 +947,33 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        let is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
 
-        // If the predicate contains a local variable write, wrap it in a
-        // branch context. In modifier-if (`puts a if (a = 123)`), the
-        // predicate assignment is conditional from the perspective of later
-        // code — RuboCop treats it as branched.
+        // RuboCop's ShadowedArgument treats any assignment under an if/unless
+        // predicate as conditional, even though the predicate itself always
+        // executes. For statement form, bump branch_depth without pushing a
+        // branch context so the assignment stays visible to later reads like
+        // a `case` predicate write. Modifier form still needs a real
+        // predicate context so the left-hand body can see an earlier
+        // assignment (`puts a if (a = 123)`).
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0, true);
+            if is_modifier {
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+            }
         }
         self.visit(&node.predicate());
         if pred_has_write {
-            self.pop_branch();
+            if is_modifier {
+                self.pop_branch();
+            }
             self.branch_depth -= 1;
         }
 
-        let body_child = if pred_has_write { 1 } else { 0 };
+        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         self.push_branch(parent_id, body_child, false);
         if let Some(stmts) = node.statements() {
@@ -881,16 +993,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        let is_modifier = node.end_keyword_loc().is_none();
 
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0, true);
+            if is_modifier {
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+            }
         }
         self.visit(&node.predicate());
         if pred_has_write {
-            self.pop_branch();
+            if is_modifier {
+                self.pop_branch();
+            }
             self.branch_depth -= 1;
         }
 
@@ -900,7 +1018,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // A (the unless body, as else-branch). We must match this order
         // for `find_variable` to return the same declaration_offset as
         // RuboCop's VF.
-        let body_child = if pred_has_write { 1 } else { 0 };
+        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         if let Some(else_clause) = node.else_clause() {
             self.push_branch(parent_id, body_child, false);
@@ -921,12 +1039,36 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.branch_depth -= 1;
     }
 
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        self.visit(&node.left());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true);
+        self.visit(&node.right());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        self.visit(&node.left());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true);
+        self.visit(&node.right());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
-        let parent_id = node.location().start_offset();
-        // If the predicate contains a local variable write (e.g., `case value = super`),
-        // wrap it in a branch context. RuboCop's `conditional_assignment?` walks up
-        // from the assignment node and finds the `case` parent is `conditional?`,
-        // treating the assignment as branched.
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        // `case` targets are always evaluated before any clause runs, so
+        // assignments inside them are unbranched for liveness purposes. Bump
+        // branch_depth without a context so ShadowedArgument's
+        // `current_shadowing_in_branch` still treats a predicate assignment
+        // like `case value = super` as conditional.
         if let Some(pred) = node.predicate() {
             let pred_has_write = predicate_has_lvar_write(&pred);
             if pred_has_write {
@@ -970,14 +1112,17 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
     fn visit_match_required_node(&mut self, node: &ruby_prism::MatchRequiredNode<'pr>) {
         // `expr => pattern` creates local variables that remain visible in the
-        // surrounding scope. Declare them before visiting descendants so later
-        // reads in the same method can resolve them through VariableTable.
-        declare_and_assign_pattern_targets(self, &node.pattern());
+        // surrounding scope. RuboCop's `process_pattern_match_variable` only
+        // declares these — it does not record an assignment — so cops that
+        // iterate `variable.assignments` (e.g. RSpec/LeakyLocalVariable) stay
+        // quiet on pattern-match-only bindings. Match that behavior.
+        declare_pattern_targets(self, &node.pattern());
         ruby_prism::visit_match_required_node(self, node);
     }
 
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         if let Some(pred) = node.predicate() {
             let pred_has_write = predicate_has_lvar_write(&pred);
             if pred_has_write {
@@ -1008,15 +1153,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         let is_post_condition = node.is_begin_modifier();
 
         if is_post_condition {
             // Post-condition loop (begin...end while): visit body first,
             // then condition. Matches RuboCop's VariableForce which processes
             // body before condition for while_post/until_post nodes.
-            let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = 0;
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1027,29 +1172,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             self.pop_branch();
             self.branch_depth -= 1;
 
-            if pred_has_write {
-                self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
-            }
             self.visit(&node.predicate());
-            if pred_has_write {
-                self.pop_branch();
-                self.branch_depth -= 1;
-            }
         } else {
             // Pre-condition loop (while...end): visit condition first, then body.
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            if pred_has_write {
+            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
+            if pred_has_write && is_modifier {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
             }
             self.visit(&node.predicate());
-            if pred_has_write {
+            if pred_has_write && is_modifier {
                 self.pop_branch();
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1065,14 +1203,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         let is_post_condition = node.is_begin_modifier();
 
         if is_post_condition {
             // Post-condition loop (begin...end until): visit body first,
             // then condition. Matches RuboCop's VariableForce.
-            let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = 0;
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1083,29 +1221,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             self.pop_branch();
             self.branch_depth -= 1;
 
-            if pred_has_write {
-                self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
-            }
             self.visit(&node.predicate());
-            if pred_has_write {
-                self.pop_branch();
-                self.branch_depth -= 1;
-            }
         } else {
             // Pre-condition loop (until...end): visit condition first, then body.
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            if pred_has_write {
+            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
+            if pred_has_write && is_modifier {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
             }
             self.visit(&node.predicate());
-            if pred_has_write {
+            if pred_has_write && is_modifier {
                 self.pop_branch();
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1121,7 +1252,8 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
-        // Branch context is managed by the caller (visit_begin_node).
+        // Branch context is managed by the caller (`visit_begin_node`), which
+        // visits each rescue clause under its own sibling branch context.
         // Visit children manually instead of delegating to the default visitor
         // so we can handle the exception capture variable explicitly.
 
@@ -1142,7 +1274,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 let mut a = Assignment::new(offset, AssignmentKind::ExceptionCapture);
                 a.sequence = seq;
                 a.in_branch = self.branch_depth > 0;
+                a.shadowing_in_branch = self.current_shadowing_in_branch();
                 a.branch_id = self.current_branch_id();
+                a.branch_path = self.current_branch_path();
                 self.table.assign_to_variable(&name, a);
             }
         }
@@ -1154,11 +1288,6 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         }
 
-        // Chained rescue clauses
-        if let Some(subsequent) = node.subsequent() {
-            self.visit_rescue_node(&subsequent);
-        }
-
         // If any rescue clause contains a `retry`, treat the entire rescue
         // as a loop — the retry causes the begin body to re-execute.
         if rescue_contains_retry(node) {
@@ -1168,44 +1297,67 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        // `begin ... rescue ... else ... end` behaves like RuboCop's rescue
+        // branch model:
+        // - the main body may jump into a rescue clause or stop before later
+        //   writes, so it is not exclusive with sibling rescue/else reads
+        // - each rescue clause is its own exclusive sibling branch
+        // - the else clause is its own sibling branch
+        if let Some(first_rescue) = node.rescue_clause() {
+            let location = node.location();
+            let parent_id = Self::branch_parent_id(&location);
 
-        // Decompose begin/rescue/else/ensure into separate branches:
-        // - body (child 0) and rescue (child 1) are exclusive branches
-        // - else (child 2) is also exclusive with rescue
-        // - ensure is NOT branched (always executes)
-
-        // Body statements
-        if let Some(stmts) = node.statements() {
-            self.branch_depth += 1;
-            self.push_branch(parent_id, 0, false);
-            for stmt in stmts.body().iter() {
-                self.visit(&stmt);
+            if let Some(stmts) = node.statements() {
+                self.branch_depth += 1;
+                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false);
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+                self.pop_branch();
+                self.branch_depth -= 1;
             }
-            self.pop_branch();
-            self.branch_depth -= 1;
-        }
 
-        // Rescue clause(s)
-        if let Some(rescue_clause) = node.rescue_clause() {
-            self.branch_depth += 1;
-            self.push_branch(parent_id, 1, false);
-            self.visit_rescue_node(&rescue_clause);
-            self.pop_branch();
-            self.branch_depth -= 1;
-        }
+            // Each rescue clause is its own exclusive sibling branch.
+            let mut clause_index = 1;
+            let mut current = Some(first_rescue);
+            while let Some(rescue_clause) = current {
+                let next = rescue_clause.subsequent();
+                self.branch_depth += 1;
+                self.push_branch(parent_id, clause_index, false);
+                self.visit_rescue_node(&rescue_clause);
+                self.pop_branch();
+                self.branch_depth -= 1;
+                clause_index += 1;
+                current = next;
+            }
 
-        // Else clause
-        if let Some(else_clause) = node.else_clause() {
-            self.branch_depth += 1;
-            self.push_branch(parent_id, 2, false);
-            if let Some(stmts) = else_clause.statements() {
+            if let Some(else_clause) = node.else_clause() {
+                self.branch_depth += 1;
+                self.push_branch(parent_id, clause_index, false);
+                if let Some(stmts) = else_clause.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.visit(&stmt);
+                    }
+                }
+                self.pop_branch();
+                self.branch_depth -= 1;
+            }
+        } else if let Some(stmts) = node.statements() {
+            if node.ensure_clause().is_some() {
+                let location = node.location();
+                let parent_id = Self::branch_parent_id(&location);
+                self.branch_depth += 1;
+                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false);
+                for stmt in stmts.body().iter() {
+                    self.visit(&stmt);
+                }
+                self.pop_branch();
+                self.branch_depth -= 1;
+            } else {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
             }
-            self.pop_branch();
-            self.branch_depth -= 1;
         }
 
         // Ensure clause — NOT branched (always executes)
@@ -1240,7 +1392,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         });
 
         let in_branch = self.branch_depth > 0;
+        let shadowing_in_branch = self.current_shadowing_in_branch();
         let branch_id = self.current_branch_id();
+        let branch_path = self.current_branch_path();
         let seq = self.next_sequence();
 
         for target in node.targets().iter() {
@@ -1255,7 +1409,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 }
                 let mut a = Assignment::new(regex_offset, AssignmentKind::RegexpCapture);
                 a.in_branch = in_branch;
+                a.shadowing_in_branch = shadowing_in_branch;
                 a.branch_id = branch_id;
+                a.branch_path = branch_path.clone();
                 a.sequence = seq;
                 self.table.assign_to_variable(&name, a);
             }
@@ -1278,10 +1434,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
         let offset = node.location().start_offset();
         let si = self.table.current_scope_index();
+        let branch_id = self.current_branch_id();
+        let branch_path = self.current_branch_path();
         // Bare `super` forwards the enclosing method's arguments, not block params.
         // Only mark method-scope arguments as implicitly referenced.
         for var in self.table.enclosing_method_arguments_mut() {
-            var.reference(Reference::implicit(offset, si));
+            let mut reference = Reference::implicit(offset, si);
+            reference.branch_id = branch_id;
+            reference.branch_path = branch_path.clone();
+            var.reference(reference);
         }
         // Visit the block child so that `super do |x| ... end` declares
         // block params and visits the block body.
@@ -1304,8 +1465,13 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         {
             let offset = node.location().start_offset();
             let si = self.table.current_scope_index();
+            let branch_id = self.current_branch_id();
+            let branch_path = self.current_branch_path();
             for var in self.table.accessible_variables_mut() {
-                var.reference(Reference::implicit(offset, si));
+                let mut reference = Reference::implicit(offset, si);
+                reference.branch_id = branch_id;
+                reference.branch_path = branch_path.clone();
+                var.reference(reference);
             }
         }
         if let Some(recv) = node.receiver() {
@@ -1350,7 +1516,7 @@ fn predicate_has_lvar_write(node: &ruby_prism::Node<'_>) -> bool {
 /// can find the variable before the pattern target node is visited. Without the
 /// generic `visit_local_variable_target_node` handler, this function must also
 /// create assignments (not just declarations) for pattern match variables.
-fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+fn collect_pattern_targets(node: &ruby_prism::Node<'_>) -> Vec<(Vec<u8>, usize)> {
     struct TargetCollector {
         targets: Vec<(Vec<u8>, usize)>,
     }
@@ -1372,7 +1538,11 @@ fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism
         targets: Vec::new(),
     };
     collector.visit(node);
-    for (name, offset) in collector.targets {
+    collector.targets
+}
+
+fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+    for (name, offset) in collect_pattern_targets(node) {
         if !engine.table.variable_exists(&name) {
             engine.declare_variable(name.clone(), offset, DeclarationKind::PatternMatch);
         }
@@ -1380,8 +1550,18 @@ fn declare_and_assign_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism
         let mut a = Assignment::new(offset, AssignmentKind::Simple);
         a.sequence = seq;
         a.in_branch = engine.branch_depth > 0;
+        a.shadowing_in_branch = engine.current_shadowing_in_branch();
         a.branch_id = engine.current_branch_id();
+        a.branch_path = engine.current_branch_path();
         engine.table.assign_to_variable(&name, a);
+    }
+}
+
+fn declare_pattern_targets(engine: &mut Engine<'_>, node: &ruby_prism::Node<'_>) {
+    for (name, offset) in collect_pattern_targets(node) {
+        if !engine.table.variable_exists(&name) {
+            engine.declare_variable(name.clone(), offset, DeclarationKind::PatternMatch);
+        }
     }
 }
 
@@ -1882,6 +2062,56 @@ mod tests {
         assert!(!x_decls[1].1); // def param x — hard scope, no outer visible
     }
 
+    #[test]
+    fn test_nested_block_param_sees_outer_block_param_in_hash_value() {
+        let (_, decls) = run_with_consumer(
+            r#"def build(typename)
+  if typename.to_s.include?('monthly')
+    post_process_replace do |res|
+      res
+    end
+  else
+    post_process_replace do |res|
+      {
+        'gcm' => res.map { |res| [res['gcm'], res['annualData'].first] }.to_h
+      }
+    end
+  end
+end
+"#,
+        );
+        let res_decls: Vec<_> = decls.iter().filter(|(n, _)| n == b"res").collect();
+        assert_eq!(res_decls.len(), 3, "{res_decls:?}");
+        assert!(!res_decls[0].1, "{res_decls:?}");
+        assert!(!res_decls[1].1, "{res_decls:?}");
+        assert!(res_decls[2].1, "{res_decls:?}");
+    }
+
+    #[test]
+    fn test_nested_block_param_sees_prior_branch_local_inside_call_args() {
+        let (_, decls) = run_with_consumer(
+            r#"def build(args, target)
+  args.map do |modname|
+    if modname.type == :hash && modname.children.all? { |pair| pair.children.first.type == :prop }
+      ok
+    else
+      pair = modname.children.first
+      s(:send, s(:const, nil, :Object), :defineProperties, target,
+        s(:hash, *modname.children.map { |pair|
+          s(:pair, s(:sym, pair.children.first.children.last), pair)
+        }))
+    end
+  end
+end
+"#,
+        );
+        let pair_decls: Vec<_> = decls.iter().filter(|(n, _)| n == b"pair").collect();
+        assert_eq!(pair_decls.len(), 3, "{pair_decls:?}");
+        assert!(!pair_decls[0].1, "{pair_decls:?}");
+        assert!(!pair_decls[1].1, "{pair_decls:?}");
+        assert!(pair_decls[2].1, "{pair_decls:?}");
+    }
+
     // ── Defs (singleton method) tests ──────────────────────────────────
 
     #[test]
@@ -1961,8 +2191,71 @@ mod tests {
         let a = &def_scope.vars["a"];
         assert_eq!(a.num_assignments, 2);
         assert!(
+            a.assignments[0].referenced,
+            "modifier-if should keep the older assignment live for scope visibility"
+        );
+        assert!(
             a.assignments[1].referenced,
             "the predicate assignment should stay live for the guarded body"
+        );
+    }
+
+    #[test]
+    fn test_regular_if_predicate_assignment_overwrites_initializer() {
+        let scopes = run_engine("def foo\n  a = nil\n  if a = 123\n    puts a\n  end\nend\n");
+        let def_scope = &scopes[0];
+        let a = &def_scope.vars["a"];
+        assert_eq!(a.num_assignments, 2);
+        assert!(
+            !a.assignments[0].referenced,
+            "a normal if predicate assignment should not keep the initializer live"
+        );
+        assert!(
+            a.assignments[1].referenced,
+            "the predicate assignment should still feed the if body"
+        );
+    }
+
+    #[test]
+    fn test_outer_modifier_body_keeps_inner_if_predicate_live() {
+        let scopes =
+            run_engine("def foo(&block)\n  if (roots = parse)\n    roots\n  end if block\nend\n");
+        let def_scope = &scopes[0];
+        let roots = &def_scope.vars["roots"];
+        assert_eq!(roots.num_assignments, 1);
+        assert!(
+            roots.assignments[0].referenced,
+            "the inner if predicate assignment should still feed reads in the outer modifier body"
+        );
+    }
+
+    #[test]
+    fn test_elsif_predicate_keeps_earlier_siblings_live() {
+        let scopes = run_engine(
+            "def foo(flag, cached)\n  if flag == :imm\n    reg = 1\n  elsif flag == :indexed\n    reg = 2\n  elsif reg = cached\n    touch(reg)\n  else\n    reg = 3\n  end\n  use(reg)\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let reg = &def_scope.vars["reg"];
+        assert_eq!(reg.num_assignments, 4);
+        assert!(
+            reg.assignments
+                .iter()
+                .all(|assignment| assignment.referenced),
+            "later elsif predicate assignments must not suppress earlier sibling branches"
+        );
+    }
+
+    #[test]
+    fn test_case_branch_survives_nested_predicate_assignment() {
+        let scopes = run_engine(
+            "def foo(kind, source)\n  case kind\n  when :a\n    r = 1\n  when :b\n    r = 2\n  when :c\n    if (r = source)\n      consume(r)\n    end\n  end\n  puts r\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let r = &def_scope.vars["r"];
+        assert_eq!(r.num_assignments, 3);
+        assert!(
+            r.assignments.iter().all(|assignment| assignment.referenced),
+            "a nested predicate assignment in one case branch must not kill sibling branches"
         );
     }
 
@@ -2163,6 +2456,46 @@ mod tests {
         assert!(def_scope.vars.contains_key("e2"), "e2 should be tracked");
         assert!(def_scope.vars["e1"].num_references > 0);
         assert!(def_scope.vars["e2"].num_references > 0);
+    }
+
+    #[test]
+    fn test_multi_rescue_self_reference_keeps_clauses_exclusive() {
+        let scopes = run_engine(
+            "def foo(sock_obj)\n  begin\n    work\n  rescue Errno::ECONNRESET\n    sock_obj = disconnect(sock_obj) unless sock_obj.nil?\n  rescue StandardError\n    sock_obj = disconnect(sock_obj) unless sock_obj.nil?\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let sock_obj = &def_scope.vars["sock_obj"];
+
+        assert_eq!(sock_obj.num_assignments, 2);
+        assert_ne!(
+            sock_obj.assignments[0].branch_id, sock_obj.assignments[1].branch_id,
+            "each rescue clause should get its own sibling branch"
+        );
+        assert!(
+            !sock_obj.assignments[0].referenced,
+            "the later rescue clause must not keep the earlier clause alive"
+        );
+        assert!(
+            !sock_obj.assignments[1].referenced,
+            "the final rescue-clause write is also useless here"
+        );
+    }
+
+    #[test]
+    fn test_nested_rescue_reraise_keeps_inner_capture_live() {
+        let scopes = run_engine(
+            "def foo\n  begin\n    begin\n      raise \"Error 1\"\n    rescue => e1\n      raise \"Error 2\"\n    end\n  rescue => e2\n    e2.cause == e1\n    raise e2\n  rescue => e\n    e.cause == e1\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+
+        assert!(
+            def_scope.vars["e1"].assignments[0].referenced,
+            "outer rescue reads should keep the inner rescue capture live"
+        );
+        assert!(
+            def_scope.vars["e2"].assignments[0].referenced,
+            "re-raising the outer rescue capture should keep it live"
+        );
     }
 
     // ── Pattern match variable tests ──────────────────────────────────

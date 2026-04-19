@@ -27,6 +27,15 @@
 /// visitor that tracks `in_block_body` to replicate this behavior. This eliminated 2 FPs
 /// in the corpus (both in discourse's `lib/svg_sprite.rb`).
 ///
+/// ## Fix (2026-04) — aggressive-mode false negatives from nested calls inside block bodies
+/// The round-3 visitor tracked `in_block_body` for the entire subtree of a single-statement
+/// block body. That was broader than RuboCop's `!^any_block`, which only checks the direct
+/// parent of the `uniq` send. As a result, aggressive mode missed nested offenses like
+/// `it { expect(relation.pluck(:name).uniq).to eq(...) }` because the nested `uniq` call was
+/// inside the block body's statement, but not itself the direct block body expression. Fixed
+/// by skipping only the direct single-statement block-body call node and still visiting its
+/// children normally, which preserves RuboCop's direct-parent behavior.
+///
 /// Offense is reported at the `uniq` selector location (matching RuboCop's
 /// `node.loc.selector`), i.e., `message_loc()` of the `uniq` call node.
 use ruby_prism::Visit;
@@ -60,7 +69,6 @@ impl Cop for UniqBeforePluck {
             cop: self,
             source,
             conservative: style == "conservative",
-            in_block_body: false,
             diagnostics: Vec::new(),
         };
         visitor.visit(&parse_result.node());
@@ -72,11 +80,6 @@ struct UniqBeforePluckVisitor<'a, 'src> {
     cop: &'a UniqBeforePluck,
     source: &'src SourceFile,
     conservative: bool,
-    /// True when we're visiting statements that are the direct body of a block.
-    /// In Parser AST, a single-statement block body has the statement as a direct
-    /// child of the block node, so `!^any_block` excludes it. For multi-statement
-    /// bodies, the parent is `begin` (not block), so they ARE flagged.
-    in_block_body: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -118,11 +121,6 @@ impl UniqBeforePluckVisitor<'_, '_> {
             }
         }
 
-        // Skip if this is a direct block body (!^any_block in RuboCop)
-        if self.in_block_body {
-            return;
-        }
-
         // Report at the `uniq` selector (message_loc)
         let loc = node.message_loc().unwrap_or_else(|| node.location());
         let (line, column) = self.source.offset_to_line_col(loc.start_offset());
@@ -133,23 +131,35 @@ impl UniqBeforePluckVisitor<'_, '_> {
             "Use `distinct` before `pluck`.".to_string(),
         ));
     }
-}
 
-impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
-    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
-        self.check_uniq_call(node);
-
-        // Visit children normally (receiver, arguments)
+    fn visit_call_node_children<'pr>(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if let Some(recv) = node.receiver() {
             self.visit(&recv);
         }
         if let Some(args) = node.arguments() {
             self.visit_arguments_node(&args);
         }
-        // Visit block — block body children get in_block_body set in visit_block_node
         if let Some(block) = node.block() {
             self.visit(&block);
         }
+    }
+
+    fn visit_single_statement_block_body<'pr>(&mut self, statement: &ruby_prism::Node<'pr>) {
+        // RuboCop's `!^any_block` only skips the send whose direct parent is a block.
+        // When the direct statement is itself a call, skip checking that one node but
+        // still traverse its children so nested `pluck.uniq` calls are still considered.
+        if let Some(call) = statement.as_call_node() {
+            self.visit_call_node_children(&call);
+        } else {
+            self.visit(statement);
+        }
+    }
+}
+
+impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
+    fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
+        self.check_uniq_call(node);
+        self.visit_call_node_children(node);
     }
 
     fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
@@ -157,22 +167,16 @@ impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
         if let Some(params) = node.parameters() {
             self.visit(&params);
         }
-        // Visit body with in_block_body tracking.
         // In Parser AST, !^any_block excludes single-statement block bodies because
-        // the statement is a direct child of the block. For multi-statement bodies,
-        // the parent is `begin` (not block). In Prism, the body is always a
-        // StatementsNode. We check if it has exactly one statement — if so, set
-        // in_block_body=true for that statement.
+        // the statement itself is a direct child of the block. For multi-statement
+        // bodies, the parent is `begin` (not block), so nested `pluck.uniq` calls
+        // are still flagged.
         if let Some(body) = node.body() {
             if let Some(stmts) = body.as_statements_node() {
                 let stmt_list: Vec<_> = stmts.body().iter().collect();
                 if stmt_list.len() == 1 {
-                    let saved = self.in_block_body;
-                    self.in_block_body = true;
-                    self.visit(&stmt_list[0]);
-                    self.in_block_body = saved;
+                    self.visit_single_statement_block_body(&stmt_list[0]);
                 } else {
-                    // Multi-statement body: parent is `begin` in Parser AST, not block
                     self.visit(&body);
                 }
             } else {
@@ -190,10 +194,7 @@ impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
             if let Some(stmts) = body.as_statements_node() {
                 let stmt_list: Vec<_> = stmts.body().iter().collect();
                 if stmt_list.len() == 1 {
-                    let saved = self.in_block_body;
-                    self.in_block_body = true;
-                    self.visit(&stmt_list[0]);
-                    self.in_block_body = saved;
+                    self.visit_single_statement_block_body(&stmt_list[0]);
                 } else {
                     self.visit(&body);
                 }
@@ -208,4 +209,5 @@ impl<'pr> Visit<'pr> for UniqBeforePluckVisitor<'_, '_> {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(UniqBeforePluck, "cops/rails/uniq_before_pluck");
+    crate::cop_variant_fixture_tests!(UniqBeforePluck, "cops/rails/uniq_before_pluck", aggressive);
 }
