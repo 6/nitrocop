@@ -662,6 +662,13 @@ impl ConditionalAssignment {
             return;
         }
 
+        // RuboCop suppresses offenses when its own autocorrect would crash.
+        // The `add_offense` block raises, the Commissioner catches the error,
+        // and the offense is dropped from the report. Mirror that quirk here.
+        if rubocop_autocorrect_would_crash(source, node, &rhs) {
+            return;
+        }
+
         let (line, col) = source.offset_to_line_col(loc.start_offset());
         diagnostics.push(self.diagnostic(source, line, col, ASSIGN_TO_CONDITION_MSG.to_string()));
     }
@@ -915,6 +922,207 @@ fn has_begin_type_branches_case_match(cm: &ruby_prism::CaseMatchNode<'_>) -> boo
             if stmts_is_begin_type(&stmts) {
                 return true;
             }
+        }
+    }
+    false
+}
+
+/// Detect patterns where RuboCop's autocorrect for `assign_inside_condition`
+/// crashes, causing the offense to be dropped from the final report. Two
+/// crash modes matter:
+///
+/// 1. Empty branch body — `condition.branches.flatten.each` iterates a nil
+///    branch, and `tail(nil)` raises `NoMethodError`.
+/// 2. Misaligned `else`/`elsif`/`when`/`end` keyword — RuboCop's
+///    `remove_preceding(loc, loc.column - node_column)` raises
+///    `ArgumentError` when the difference goes negative.
+///
+/// Both are RuboCop bugs that silently suppress the offense. For 1:1
+/// compatibility nitrocop must also suppress when they would trigger.
+fn rubocop_autocorrect_would_crash(
+    source: &SourceFile,
+    assignment_node: &ruby_prism::Node<'_>,
+    rhs: &ruby_prism::Node<'_>,
+) -> bool {
+    let (_, assignment_col) = source.offset_to_line_col(assignment_node.location().start_offset());
+
+    if let Some(if_node) = rhs.as_if_node() {
+        if if_node.if_keyword_loc().is_none() {
+            // Ternary — no autocorrect crash risk.
+            return false;
+        }
+        return if_chain_would_crash(source, &if_node, assignment_col);
+    }
+    if let Some(unless_node) = rhs.as_unless_node() {
+        return unless_would_crash(source, &unless_node, assignment_col);
+    }
+    if let Some(case_node) = rhs.as_case_node() {
+        return case_would_crash(source, &case_node, assignment_col);
+    }
+    if let Some(cm) = rhs.as_case_match_node() {
+        return case_match_would_crash(source, &cm, assignment_col);
+    }
+    false
+}
+
+fn col_less_than(source: &SourceFile, offset: usize, col_threshold: usize) -> bool {
+    let (_, col) = source.offset_to_line_col(offset);
+    col < col_threshold
+}
+
+fn if_chain_would_crash(
+    source: &SourceFile,
+    if_node: &ruby_prism::IfNode<'_>,
+    assignment_col: usize,
+) -> bool {
+    // Outer if's end keyword column.
+    if let Some(end_loc) = if_node.end_keyword_loc() {
+        if col_less_than(source, end_loc.start_offset(), assignment_col) {
+            return true;
+        }
+    }
+    // First subsequent keyword column (first `elsif` or `else` after the outer if).
+    if let Some(subsequent) = if_node.subsequent() {
+        let first_kw_offset = if let Some(elsif_node) = subsequent.as_if_node() {
+            elsif_node.if_keyword_loc().map(|l| l.start_offset())
+        } else {
+            subsequent
+                .as_else_node()
+                .map(|e| e.else_keyword_loc().start_offset())
+        };
+        if let Some(off) = first_kw_offset {
+            if col_less_than(source, off, assignment_col) {
+                return true;
+            }
+        }
+    }
+
+    // Outer if body must exist (else RuboCop's `tail(nil)` would crash).
+    if if_node.statements().is_none() {
+        return true;
+    }
+
+    // Walk the elsif chain and check every branch body for presence.
+    let mut current = if_node.subsequent();
+    while let Some(subsequent) = current {
+        if let Some(elsif_node) = subsequent.as_if_node() {
+            if elsif_node.statements().is_none() {
+                return true;
+            }
+            current = elsif_node.subsequent();
+            continue;
+        }
+        if let Some(else_node) = subsequent.as_else_node() {
+            if else_node.statements().is_none() {
+                return true;
+            }
+        }
+        break;
+    }
+    false
+}
+
+fn unless_would_crash(
+    source: &SourceFile,
+    unless_node: &ruby_prism::UnlessNode<'_>,
+    assignment_col: usize,
+) -> bool {
+    if let Some(end_loc) = unless_node.end_keyword_loc() {
+        if col_less_than(source, end_loc.start_offset(), assignment_col) {
+            return true;
+        }
+    }
+    if let Some(else_clause) = unless_node.else_clause() {
+        if col_less_than(
+            source,
+            else_clause.else_keyword_loc().start_offset(),
+            assignment_col,
+        ) {
+            return true;
+        }
+        if else_clause.statements().is_none() {
+            return true;
+        }
+    }
+    // When there is no explicit else, `branches` returns only the unless body,
+    // so an empty body never trips `tail(nil)` (rubocop-ast's `branches`
+    // method guards this). An empty unless body with an explicit else would
+    // crash, but that's already covered by the else_clause path above only in
+    // rare forms; for safety, also flag if the unless body is empty AND an
+    // else is present.
+    if unless_node.else_clause().is_some() && unless_node.statements().is_none() {
+        return true;
+    }
+    false
+}
+
+fn case_would_crash(
+    source: &SourceFile,
+    case_node: &ruby_prism::CaseNode<'_>,
+    assignment_col: usize,
+) -> bool {
+    let end_loc = case_node.end_keyword_loc();
+    if col_less_than(source, end_loc.start_offset(), assignment_col) {
+        return true;
+    }
+    for condition in case_node.conditions().iter() {
+        if let Some(when_node) = condition.as_when_node() {
+            if col_less_than(
+                source,
+                when_node.keyword_loc().start_offset(),
+                assignment_col,
+            ) {
+                return true;
+            }
+            if when_node.statements().is_none() {
+                return true;
+            }
+        }
+    }
+    if let Some(else_clause) = case_node.else_clause() {
+        if col_less_than(
+            source,
+            else_clause.else_keyword_loc().start_offset(),
+            assignment_col,
+        ) {
+            return true;
+        }
+        if else_clause.statements().is_none() {
+            return true;
+        }
+    }
+    false
+}
+
+fn case_match_would_crash(
+    source: &SourceFile,
+    cm: &ruby_prism::CaseMatchNode<'_>,
+    assignment_col: usize,
+) -> bool {
+    let end_loc = cm.end_keyword_loc();
+    if col_less_than(source, end_loc.start_offset(), assignment_col) {
+        return true;
+    }
+    for condition in cm.conditions().iter() {
+        if let Some(in_node) = condition.as_in_node() {
+            if col_less_than(source, in_node.in_loc().start_offset(), assignment_col) {
+                return true;
+            }
+            if in_node.statements().is_none() {
+                return true;
+            }
+        }
+    }
+    if let Some(else_clause) = cm.else_clause() {
+        if col_less_than(
+            source,
+            else_clause.else_keyword_loc().start_offset(),
+            assignment_col,
+        ) {
+            return true;
+        }
+        if else_clause.statements().is_none() {
+            return true;
         }
     }
     false
