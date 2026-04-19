@@ -276,6 +276,16 @@ use ruby_prism::Visit;
 /// preceding assignment `=`. Match RuboCop by preserving identical-operator
 /// alignment but restricting cross-operator alignment to the first eligible
 /// neighbor token.
+///
+/// ## Corpus fix (2026-04-19)
+///
+/// Two narrow false-positive fixes were needed to match RuboCop:
+/// - `==`/`!=` written with explicit dot-call syntax still stay out of scope
+///   for this cop even when spaces appear between `.` and the operator
+///   (`pixels(...).  == Array.new(300)`).
+/// - plain regexp literals on the left side of `=~` are also accepted without
+///   spacing (`assert(/Fred/=~xml)`), but RuboCop still flags `/.../!~expr`
+///   and interpolated regexp receivers like `/#{foo}/=~x`.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -488,8 +498,9 @@ impl Cop for SpaceAroundOperators {
                         continue;
                     }
 
-                    // Skip method calls via `.` or `&.`: e.g., `x&.!= y`, `x.== y`
-                    if i > 0 && bytes[i - 1] == b'.' {
+                    // Skip method calls via `.` or `&.`: e.g., `x&.!= y`,
+                    // `x.== y`, or `x.  == y`.
+                    if uses_dot_operator_call_syntax(bytes, i) {
                         i += 2;
                         continue;
                     }
@@ -836,6 +847,15 @@ fn whitespace_run_end(bytes: &[u8], offset: usize) -> usize {
 fn has_excessive_leading_space(bytes: &[u8], op_start: usize) -> bool {
     let ws_start = whitespace_run_start(bytes, op_start);
     op_start.saturating_sub(ws_start) >= 2 && bytes[ws_start] == b' ' && bytes[ws_start + 1] == b' '
+}
+
+fn uses_dot_operator_call_syntax(bytes: &[u8], op_start: usize) -> bool {
+    let mut pos = op_start;
+    while pos > 0 && matches!(bytes[pos - 1], b' ' | b'\t') {
+        pos -= 1;
+    }
+
+    pos > 0 && bytes[pos - 1] == b'.'
 }
 
 fn has_excessive_trailing_space(bytes: &[u8], op_end: usize) -> bool {
@@ -1896,6 +1916,15 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
         }
 
         let name = node.name().as_slice();
+
+        if name == b"=~"
+            && node
+                .receiver()
+                .is_some_and(|receiver| receiver.as_regular_expression_node().is_some())
+        {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        }
 
         // Check if this is a regular binary operator call (not via .method syntax)
         let is_operator = BINARY_OPERATORS.contains(&name) || MATCH_OPERATORS.contains(&name);

@@ -48,6 +48,10 @@ table_name&.!= node.left.relation.name
 
 # Method call with dot before operator
 x.== y
+pixels(ball, 1, 300).  == Array.new(300)
+
+# Regexp literal receiver with =~ is accepted
+assert(/Fred/=~xml)
 
 # Binary operators with proper spacing
 x + y
