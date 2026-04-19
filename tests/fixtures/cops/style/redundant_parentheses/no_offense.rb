@@ -110,6 +110,7 @@ x = (foo; bar)
 x += (foo; bar)
 x + (foo; bar)
 x((foo; bar))
+# Multi-statement parens whose first real ancestor is a call (not begin/def/block)
 %
 (foo + bar)
 %
