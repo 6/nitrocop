@@ -450,3 +450,15 @@ render :partial => "commentbox", :layout => false,
 1 \
 ^ Layout/RedundantLineBreak: Redundant line break detected.
   + 2
+
+!current_course_user&.
+^ Layout/RedundantLineBreak: Redundant line break detected.
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+
+Datadog::Tracing::Contrib::Sidekiq::Patcher
+
+o.col_type.nil? \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+
+warn 'Please use one of the standard log levels: ' \

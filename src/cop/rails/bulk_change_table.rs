@@ -7,17 +7,13 @@ use crate::parse::source::SourceFile;
 /// Mirrors RuboCop's adapter resolution and migration-node coverage for
 /// `Rails/BulkChangeTable`.
 ///
-/// Adapter discovery first checks the current project root, then falls back to
-/// the enclosing git checkout of the analyzed file to match RuboCop when corpus
-/// runs execute from `/tmp`.
-///
-/// This update fixes false negatives from `config/database.yml` files that are
-/// recoverable for RuboCop but fail our strict YAML parse because of duplicate
-/// keys/sections or inline ERB values. The text fallback now resolves adapters
-/// from merged `development: <<: *default` sections and from the first nested
-/// development database entry, while still skipping files with standalone
-/// top-level ERB control-flow lines like `<% ... %>` that RuboCop ignores after
-/// a Psych syntax error.
+/// FN=13 came from treating any standalone ERB output line in
+/// `config/database.yml` as a fatal parse error. RuboCop delegates to
+/// `YAML.unsafe_load_file`, which still parses real files like timeoverflow's
+/// PostgreSQL config and leaves those ERB output fragments as odd production keys
+/// while keeping `development.adapter` available. Keep the text fallback for
+/// duplicate keys/sections, but only short-circuit standalone ERB control-flow
+/// tags and inline ERB ternary shapes that actually raise `Psych::SyntaxError`.
 pub struct BulkChangeTable;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,7 +124,9 @@ fn database_kind_from_yaml(source: &SourceFile) -> Option<DatabaseKind> {
 fn parse_database_yml(path: &std::path::Path) -> Option<DatabaseKind> {
     let contents = std::fs::read_to_string(path).ok()?;
 
-    if has_top_level_erb_control_flow(&contents) {
+    if has_standalone_erb_control_flow_lines(&contents)
+        || has_unquoted_inline_erb_ternary_values(&contents)
+    {
         return None;
     }
 
@@ -142,16 +140,36 @@ fn parse_database_yml(path: &std::path::Path) -> Option<DatabaseKind> {
     database_kind_from_text(&contents)
 }
 
-fn has_top_level_erb_control_flow(contents: &str) -> bool {
+fn has_unquoted_inline_erb_ternary_values(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return false;
+        }
+
+        let Some((_, value)) = parse_yaml_mapping_entry(trimmed) else {
+            return false;
+        };
+        let value = value.trim_start();
+
+        let expression = value
+            .strip_prefix("<%=")
+            .or_else(|| value.strip_prefix("<%-="))
+            .and_then(|rest| rest.strip_suffix("%>"))
+            .map(str::trim);
+
+        expression
+            .and_then(|expr| expr.split_once(" ? "))
+            .is_some_and(|(_, after_question)| after_question.contains(" : "))
+    })
+}
+
+fn has_standalone_erb_control_flow_lines(contents: &str) -> bool {
     contents.lines().any(|line| {
         let trimmed = line.trim_start();
-        trimmed.starts_with("%>")
+        (trimmed.starts_with("<%") && !trimmed.starts_with("<%=") && !trimmed.starts_with("<%-="))
+            || trimmed.starts_with("%>")
             || trimmed.starts_with("-%>")
-            || ((trimmed.starts_with("<%") || trimmed.starts_with("<%-"))
-                && !trimmed.starts_with("<%=")
-                && !trimmed.starts_with("<%-=")
-                && !trimmed.starts_with("<%#")
-                && !trimmed.starts_with("<%-#"))
     })
 }
 
@@ -807,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn detects_merged_defaults_with_inline_erb_control_flow() {
+    fn detects_database_yml_with_standalone_erb_output_lines_when_development_is_parseable() {
         let source = b"class RemoveFeaturesFromCategories < ActiveRecord::Migration\n  def change\n    remove_column :categories, :parent_id\n    remove_column :categories, :organization_id\n    remove_column :categories, :name_translations\n    remove_column :categories, :fqn_translations\n    remove_column :categories, :children_count\n    add_column :categories, :name, :string\n  end\nend\n";
         let diagnostics = run_in_temp_project(
             source,
@@ -819,7 +837,7 @@ mod tests {
         assert_eq!(
             diagnostics.len(),
             1,
-            "Inline ERB control flow outside development should not prevent resolving an adapter inherited from merged defaults"
+            "Standalone ERB output lines in other environments should not disable adapter detection when YAML still resolves the development adapter like RuboCop"
         );
     }
 
@@ -869,6 +887,17 @@ mod tests {
             diagnostics.len(),
             1,
             "ERB database.yml with anchors should still resolve adapter"
+        );
+    }
+
+    #[test]
+    fn skips_database_yml_with_unquoted_inline_erb_ternary_values() {
+        let source = b"def change\n  add_column :users, :name, :string\n  add_column :users, :age, :integer\nend\n";
+        let database_yml = "default: &default\n  adapter: mysql2\n  host: <%= ENV.key?('DOCKER_CONTAINER') ? 'mysql' : '127.0.0.1' %>\n\ndevelopment:\n  <<: *default\n  database: app_development\n";
+        let diagnostics = run_in_temp_project(source, CopConfig::default(), Some(database_yml));
+        assert!(
+            diagnostics.is_empty(),
+            "Unquoted inline ERB ternary values that trigger Psych syntax errors should disable adapter detection to match RuboCop"
         );
     }
 

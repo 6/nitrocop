@@ -169,3 +169,32 @@ test "SequenceSet[input]" do |input|
     input
   end
 end
+
+# FP fix: assignment in a non-modifier if predicate is conditional
+def validate_each(record, attribute, value)
+  if value = record.try(attribute)
+    super
+  end
+end
+
+# FP fix: block argument assignment in an if predicate is conditional
+listing.nodes.each do |node|
+  if node = listing.nodes.find_by(name: name)
+    self.name = node.name.succ
+  end
+end
+
+# FP fix: method argument assignment in an if predicate stays conditional
+def clear_code(url)
+  if url = find(code)
+    purge(code, url)
+  end
+end
+
+# FP fix: chained predicate assignments under `and` stay conditional
+tabs.each do |tab|
+  if win = current_window and
+    tab = win.current_tab
+    tab.html?
+  end
+end

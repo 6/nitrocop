@@ -3,6 +3,7 @@ name: Corpus Oracle
 permissions:
   contents: write
   pull-requests: write
+  actions: read  # collect-results needs this to download artifacts from a different run via source_run_id
 
 concurrency:
   group: corpus-${{ github.ref }}
@@ -15,10 +16,10 @@ on:
       repo_filter:
         description: "Run only this repo ID (e.g. 'multi_json__multi_json__c5fa9fc'), or 'all'"
         default: "all"
-      verbose_disk:
-        description: "Log disk usage in free-disk-space and during batch processing"
-        type: boolean
-        default: false
+      source_run_id:
+        description: "Recovery: skip oracle-repo/run-synthetic and re-collect from this existing run's artifacts"
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +27,7 @@ env:
 jobs:
   # ── Build nitrocop release binary ──────────────────────────────
   build-nitrocop:
+    if: ${{ inputs.source_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -48,6 +50,7 @@ jobs:
 
   # ── Compute matrix (batched, N repos per job) ──────────────────
   compute-matrix:
+    if: ${{ inputs.source_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     outputs:
@@ -68,6 +71,7 @@ jobs:
 
   # ── Run oracle on each batch of repos ────────────────────────────
   oracle-repo:
+    if: ${{ inputs.source_run_id == '' }}
     needs: [build-nitrocop, compute-matrix]
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -80,8 +84,6 @@ jobs:
           submodules: true
 
       - uses: ./.github/actions/free-disk-space
-        with:
-          verbose: ${{ inputs.verbose_disk }}
 
       - name: Download nitrocop binary
         uses: actions/download-artifact@v8
@@ -463,10 +465,7 @@ jobs:
 
             # Free disk space between repos
             rm -rf "$DEST"
-
-            if [ "${{ inputs.verbose_disk }}" = "true" ]; then
-              df -h / | tail -1
-            fi
+            df -h / | tail -1
 
             echo "::endgroup::"
           done < <(jq -c '.[]' batch_repos.json)
@@ -499,6 +498,7 @@ jobs:
 
   # ── Run synthetic benchmark (parallel with corpus batches) ────
   run-synthetic:
+    if: ${{ inputs.source_run_id == '' }}
     needs: [build-nitrocop]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -547,9 +547,14 @@ jobs:
   # ── Collect and diff all results ───────────────────────────────
   collect-results:
     needs: [oracle-repo, run-synthetic]
-    if: ${{ !cancelled() }}
+    # Run when the upstream jobs succeed OR when they were skipped because
+    # source_run_id was supplied for a recovery re-collect.
+    if: ${{ !cancelled() && (inputs.source_run_id != '' || (needs.oracle-repo.result == 'success' && needs.run-synthetic.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      # Effective run_id to download artifacts from (defaults to current run).
+      ARTIFACTS_RUN_ID: ${{ inputs.source_run_id || github.run_id }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -557,8 +562,6 @@ jobs:
           persist-credentials: false
 
       - uses: ./.github/actions/free-disk-space
-        with:
-          verbose: ${{ inputs.verbose_disk }}
 
       - name: Download all results
         uses: actions/download-artifact@v8
@@ -567,7 +570,27 @@ jobs:
           pattern: corpus-results-*
           path: all-results/
           merge-multiple: true
+          run-id: ${{ env.ARTIFACTS_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
+
+      - name: Disk after download
+        if: always()
+        run: df -h /
+
+      # Wipe partial extracts from the failed first attempt before retrying.
+      # Without this, the retry re-downloads to the same path and stacks ~50 GB
+      # of orphaned extracts on top — the cause of the 2026-04-17 ENOSPC.
+      - name: Clear partial extracts before retry
+        if: steps.download-results.outcome == 'failure'
+        run: |
+          echo "::warning::Download all results FAILED on first attempt — clearing partial extracts and retrying. See https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }} for context."
+          echo "=== Disk before clear ==="
+          df -h /
+          du -sh all-results/ 2>/dev/null || echo "all-results/ missing"
+          rm -rf all-results/
+          echo "=== Disk after clear ==="
+          df -h /
 
       - name: Retry download on failure
         if: steps.download-results.outcome == 'failure'
@@ -576,12 +599,20 @@ jobs:
           pattern: corpus-results-*
           path: all-results/
           merge-multiple: true
+          run-id: ${{ env.ARTIFACTS_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Disk after retry download
+        if: always()
+        run: df -h /
 
       - name: Download synthetic results
         uses: actions/download-artifact@v8
         with:
           name: synthetic-results
           path: synthetic-dl/
+          run-id: ${{ env.ARTIFACTS_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Place synthetic results
         run: cp synthetic-dl/synthetic-results.json bench/synthetic/synthetic-results.json
@@ -592,6 +623,12 @@ jobs:
             --manifest bench/corpus/manifest.jsonl \
             --source all-results/results/rubocop \
             --dest rubocop-cache
+
+      - name: Disk after consolidate baseline cache
+        if: always()
+        run: |
+          df -h /
+          du -sh rubocop-cache 2>/dev/null || true
 
       - name: Compute rubocop cache key
         id: rubocop-cache-key
@@ -611,12 +648,17 @@ jobs:
 
       - name: Save consolidated rubocop cache
         uses: actions/cache/save@v5
+        continue-on-error: true  # non-fatal if disk is tight; tarring transiently doubles cache footprint
         with:
           path: rubocop-cache/
           # Keyed by config hash + run_id so each successful run creates a fresh
           # consolidated cache. Batch jobs restore via restore-keys prefix match,
           # so they always get the most recent full cache regardless of batch size.
           key: rubocop-all-${{ steps.rubocop-cache-key.outputs.hash }}-${{ github.run_id }}
+
+      - name: Disk after save baseline cache
+        if: always()
+        run: df -h /
 
       - name: Consolidate variant rubocop cache
         run: |
@@ -625,12 +667,22 @@ jobs:
             --source all-results/results \
             --dest variant-rubocop-cache
 
+      - name: Disk after consolidate variant cache
+        if: always()
+        run: |
+          df -h /
+          du -sh variant-rubocop-cache 2>/dev/null || true
+
       - name: Save consolidated variant rubocop cache
         uses: actions/cache/save@v5
         continue-on-error: true  # non-fatal if disk is tight
         with:
           path: variant-rubocop-cache/
           key: variant-rubocop-all-${{ steps.rubocop-cache-key.outputs.hash }}-${{ github.run_id }}
+
+      - name: Disk after save variant cache
+        if: always()
+        run: df -h /
 
       - name: Diff and generate report
         run: |
@@ -894,7 +946,8 @@ jobs:
   # if diagnosis is slow. Splits diverging cops across 4 shards.
   diagnose:
     needs: [collect-results, build-nitrocop]
-    if: ${{ !cancelled() && needs.collect-results.result == 'success' }}
+    # Skipped during a source_run_id recovery — the binary artifact lives in the source run only.
+    if: ${{ !cancelled() && needs.collect-results.result == 'success' && inputs.source_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     strategy:
@@ -905,8 +958,6 @@ jobs:
       - uses: actions/checkout@v6
 
       - uses: ./.github/actions/free-disk-space
-        with:
-          verbose: ${{ inputs.verbose_disk }}
 
       - name: Download corpus results
         uses: actions/download-artifact@v8
@@ -949,7 +1000,7 @@ jobs:
   # ── Merge diagnosis shards into final artifact ──────────────────
   finalize-diagnosis:
     needs: [collect-results, diagnose]
-    if: ${{ !cancelled() && needs.collect-results.result == 'success' }}
+    if: ${{ !cancelled() && needs.collect-results.result == 'success' && inputs.source_run_id == '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

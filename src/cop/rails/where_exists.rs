@@ -25,6 +25,15 @@ use crate::parse::source::SourceFile;
 /// nitrocop reported at line 267 (`Category`), RuboCop at line 269 (`where`).
 ///
 /// Fix: Changed to report at `chain.inner_call.message_loc()` (the `where` keyword).
+///
+/// ## Investigation (2026-04-18)
+///
+/// Variant divergence only in `EnforcedStyle=where`: FP=28 / FN=28 were all
+/// selector-range mismatches. nitrocop reported `exists?(...)` offenses at
+/// `node.location()` (the start of the receiver chain, e.g. `Edition` or
+/// `seller.sales`), while RuboCop reports at `node.loc.selector` (the
+/// `exists?` keyword itself). Fixed by using `call.message_loc()` for the
+/// `where` style offense position.
 pub struct WhereExists;
 
 impl Cop for WhereExists {
@@ -168,7 +177,9 @@ impl WhereExists {
             return Vec::new();
         }
 
-        let loc = node.location();
+        // RuboCop's correction_range for `where` style starts at node.loc.selector,
+        // i.e. the `exists?` keyword, not the beginning of the receiver chain.
+        let loc = call.message_loc().unwrap_or(call.location());
         let (line, column) = source.offset_to_line_col(loc.start_offset());
         vec![self.diagnostic(
             source,
@@ -203,21 +214,55 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(WhereExists, "cops/rails/where_exists");
 
-    #[test]
-    fn where_style_flags_exists_with_hash_arg() {
-        use crate::cop::CopConfig;
-        use crate::testutil::run_cop_full_with_config;
+    fn where_config() -> crate::cop::CopConfig {
         use std::collections::HashMap;
 
-        let config = CopConfig {
+        crate::cop::CopConfig {
             options: HashMap::from([(
                 "EnforcedStyle".to_string(),
                 serde_yml::Value::String("where".to_string()),
             )]),
-            ..CopConfig::default()
-        };
+            ..crate::cop::CopConfig::default()
+        }
+    }
+
+    #[test]
+    fn where_style_offense_fixture() {
+        let fixture =
+            include_bytes!("../../../tests/fixtures/cops/rails/where_exists/offense.where.rb");
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: where\n")
+            .expect("fixture should start with where config directive");
+
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &WhereExists,
+            source.as_bytes(),
+            where_config(),
+        );
+    }
+
+    #[test]
+    fn where_style_no_offense_fixture() {
+        let fixture =
+            include_bytes!("../../../tests/fixtures/cops/rails/where_exists/no_offense.where.rb");
+        let fixture_str = std::str::from_utf8(fixture).expect("fixture must be valid UTF-8");
+        let source = fixture_str
+            .strip_prefix("# nitrocop-config: EnforcedStyle: where\n")
+            .expect("fixture should start with where config directive");
+
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &WhereExists,
+            source.as_bytes(),
+            where_config(),
+        );
+    }
+
+    #[test]
+    fn where_style_flags_exists_with_hash_arg() {
+        use crate::testutil::run_cop_full_with_config;
         let source = b"User.exists?(name: 'john')\n";
-        let diags = run_cop_full_with_config(&WhereExists, source, config);
+        let diags = run_cop_full_with_config(&WhereExists, source, where_config());
         assert!(
             !diags.is_empty(),
             "where style should flag exists? with hash args"
@@ -226,53 +271,23 @@ mod tests {
 
     #[test]
     fn where_style_allows_where_exists() {
-        use crate::cop::CopConfig;
         use crate::testutil::assert_cop_no_offenses_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".to_string(),
-                serde_yml::Value::String("where".to_string()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"User.where(name: 'john').exists?\n";
-        assert_cop_no_offenses_full_with_config(&WhereExists, source, config);
+        assert_cop_no_offenses_full_with_config(&WhereExists, source, where_config());
     }
 
     #[test]
     fn where_style_skips_multi_arg_exists() {
-        use crate::cop::CopConfig;
         use crate::testutil::assert_cop_no_offenses_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".to_string(),
-                serde_yml::Value::String("where".to_string()),
-            )]),
-            ..CopConfig::default()
-        };
         // RuboCop does NOT flag exists? with multiple args in "where" style
         let source = b"User.exists?('name = ?', 'john')\n";
-        assert_cop_no_offenses_full_with_config(&WhereExists, source, config);
+        assert_cop_no_offenses_full_with_config(&WhereExists, source, where_config());
     }
 
     #[test]
     fn where_style_skips_splat_arg() {
-        use crate::cop::CopConfig;
         use crate::testutil::assert_cop_no_offenses_full_with_config;
-        use std::collections::HashMap;
-
-        let config = CopConfig {
-            options: HashMap::from([(
-                "EnforcedStyle".to_string(),
-                serde_yml::Value::String("where".to_string()),
-            )]),
-            ..CopConfig::default()
-        };
         let source = b"User.exists?(*conditions)\n";
-        assert_cop_no_offenses_full_with_config(&WhereExists, source, config);
+        assert_cop_no_offenses_full_with_config(&WhereExists, source, where_config());
     }
 }
