@@ -16,9 +16,9 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
 - Tested on [**5,588 open-source repos**](docs/corpus.md):
-  - **901 of 915** cops match RuboCop exactly with default config
-  - **895 of 915** match across all `EnforcedStyle` variants
-  - Across **28.38M** offenses compared, **28.37M** (99.96%) match exactly with default config
+  - **902 of 915** cops match RuboCop exactly with default config
+  - **896 of 915** match across all `EnforcedStyle` variants
+  - Across **28.38M** offenses compared, **28.37M** (99.97%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -65,14 +65,14 @@ Compared with RuboCop on [**5,588 open-source repos**](docs/corpus.md) (590k Rub
 |------------|-----:|----------------------:|---------------------------:|
 | Layout | 100 | 96 | 92 |
 | Lint | 148 | 145 | 145 |
-| Style | 287 | 284 | 282 |
+| Style | 287 | 285 | 283 |
 | Metrics | 10 | **10 ✓** | **10 ✓** |
 | Naming | 19 | **19 ✓** | **19 ✓** |
 | Security | 6 | **6 ✓** | **6 ✓** |
 | Bundler | 7 | **7 ✓** | **7 ✓** |
 | Gemspec | 10 | **10 ✓** | **10 ✓** |
 | Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **578 (98.2%)** | **572 (97.2%)** |
+| **Total** | **588** | **579 (98.4%)** | **573 (97.4%)** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 

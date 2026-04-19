@@ -173,6 +173,10 @@ use crate::parse::source::SourceFile;
 /// 1. Setter calls like `receiver.\n    name = value` were skipped entirely.
 ///    RuboCop still checks those nodes; only the parent walk used for the left
 ///    hand side ignores assignment-method ancestors.
+/// 2. Reusing any earlier continuation dot in the receiver chain was too
+///    broad. If the first continuation dot is already misindented, later calls
+///    like `.arel` and `.and_return` must still be checked against the chain
+///    base instead of inheriting that bad column.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -364,6 +368,25 @@ impl ChainVisitor<'_> {
         rhs_col: usize,
         is_trailing_dot: bool,
     ) -> Option<usize> {
+        self.expected_aligned_impl(
+            call_node,
+            receiver,
+            rhs_line,
+            rhs_col,
+            is_trailing_dot,
+            true,
+        )
+    }
+
+    fn expected_aligned_impl(
+        &self,
+        call_node: &ruby_prism::CallNode<'_>,
+        receiver: &ruby_prism::Node<'_>,
+        rhs_line: usize,
+        rhs_col: usize,
+        is_trailing_dot: bool,
+        allow_previous_continuation: bool,
+    ) -> Option<usize> {
         if self.in_hash_value {
             return self.expected_aligned_hash_pair(
                 call_node,
@@ -425,11 +448,35 @@ impl ChainVisitor<'_> {
             return Some(col);
         }
 
-        if !is_trailing_dot {
+        if allow_previous_continuation && !is_trailing_dot {
             // Try previous continuation dot alignment — when there's a
             // continuation dot on a previous line in the chain, align with it.
-            if let Some(col) = find_previous_continuation_dot(self.source, receiver, rhs_line) {
-                return Some(col);
+            if let Some(anchor) =
+                find_previous_continuation_dot_anchor(self.source, receiver, rhs_line)
+            {
+                let continuation_count =
+                    count_previous_continuation_dots(self.source, receiver, rhs_line);
+                let anchor_receiver_has_real_block = anchor
+                    .receiver()
+                    .and_then(|receiver| receiver.as_call_node())
+                    .is_some_and(|receiver| has_real_block(&receiver));
+                let anchor_receiver_is_post_multiline_block_call = anchor
+                    .receiver()
+                    .and_then(|receiver| receiver.as_call_node())
+                    .and_then(|receiver| receiver.receiver())
+                    .is_some_and(|receiver| {
+                        receiver_is_multiline_block_call(self.source, &receiver)
+                    });
+                if continuation_count > 1
+                    || anchor_receiver_has_real_block
+                    || anchor_receiver_is_post_multiline_block_call
+                    || self.previous_continuation_anchor_is_valid(&anchor)
+                {
+                    if let Some(dot_loc) = anchor.call_operator_loc() {
+                        let (_, dot_col) = self.source.offset_to_line_col(dot_loc.start_offset());
+                        return Some(dot_col);
+                    }
+                }
             }
         }
 
@@ -446,6 +493,26 @@ impl ChainVisitor<'_> {
         }
 
         None
+    }
+
+    fn previous_continuation_anchor_is_valid(&self, call_node: &ruby_prism::CallNode<'_>) -> bool {
+        let receiver = match call_node.receiver() {
+            Some(receiver) => receiver,
+            None => return false,
+        };
+        let dot_loc = match call_node.call_operator_loc() {
+            Some(dot_loc) => dot_loc,
+            None => return false,
+        };
+        let (rhs_line, rhs_col) = self.source.offset_to_line_col(dot_loc.start_offset());
+        let expected = match self
+            .expected_aligned_impl(call_node, &receiver, rhs_line, rhs_col, false, false)
+        {
+            Some(col) => col,
+            None => self.expected_indented(call_node, &receiver),
+        };
+
+        rhs_col == expected
     }
 
     fn expected_aligned_hash_pair(
@@ -898,34 +965,58 @@ fn prev_line_ends_with_assignment(source: &SourceFile, receiver: &ruby_prism::No
     }
 }
 
-/// Find the column of a previous continuation dot in the receiver chain.
+/// Find the earliest previous continuation-dot call in the receiver chain.
 /// A continuation dot is one that is the first non-whitespace on its line.
-/// This is used for "aligned" style when there's no inline first dot.
-fn find_previous_continuation_dot(
+fn find_previous_continuation_dot_anchor<'a>(
     source: &SourceFile,
-    receiver: &ruby_prism::Node<'_>,
+    receiver: &ruby_prism::Node<'a>,
     current_line: usize,
-) -> Option<usize> {
+) -> Option<ruby_prism::CallNode<'a>> {
     if let Some(call) = receiver.as_call_node() {
         if let Some(dot_loc) = call.call_operator_loc() {
-            let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+            let (dot_line, _dot_col) = source.offset_to_line_col(dot_loc.start_offset());
             if dot_line < current_line && is_first_on_line(source, dot_loc.start_offset()) {
                 // Found a continuation dot on an earlier line.
                 // Check if there's an even earlier one to use as the alignment base.
                 if let Some(recv) = call.receiver() {
-                    if let Some(earlier) = find_previous_continuation_dot(source, &recv, dot_line) {
+                    if let Some(earlier) =
+                        find_previous_continuation_dot_anchor(source, &recv, dot_line)
+                    {
                         return Some(earlier);
                     }
                 }
-                return Some(dot_col);
+                return Some(call);
             }
             // Dot is inline or on same line; keep looking
             if let Some(recv) = call.receiver() {
-                return find_previous_continuation_dot(source, &recv, current_line);
+                return find_previous_continuation_dot_anchor(source, &recv, current_line);
             }
         }
     }
     None
+}
+
+fn count_previous_continuation_dots(
+    source: &SourceFile,
+    receiver: &ruby_prism::Node<'_>,
+    current_line: usize,
+) -> usize {
+    let Some(call) = receiver.as_call_node() else {
+        return 0;
+    };
+
+    let mut count = if let Some(dot_loc) = call.call_operator_loc() {
+        let (dot_line, _) = source.offset_to_line_col(dot_loc.start_offset());
+        usize::from(dot_line < current_line && is_first_on_line(source, dot_loc.start_offset()))
+    } else {
+        0
+    };
+
+    if let Some(recv) = call.receiver() {
+        count += count_previous_continuation_dots(source, &recv, current_line);
+    }
+
+    count
 }
 
 fn is_assignment_method(call: &ruby_prism::CallNode<'_>) -> bool {

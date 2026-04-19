@@ -34,3 +34,29 @@ assert_equal(*args.map { |str|
 })
 
 yield records.filter_map { |record| record.instance_variable_get(records_variable_name) }
+
+# Earlier blocks structurally equal to the last child inherit rv_of_scope in RuboCop
+def cached
+  assert_queries(1) { assert_equal("foo", fetch(1)) }
+
+  update!
+
+  assert_queries(1) { assert_equal("foo", fetch(1)) }
+end
+
+def reverse_each_examples
+  ARRAY.reverse.each { |x| x }
+
+  ARRAY.reverse.each do |x|
+    x
+  end
+end
+
+ActiveRecord::Base.cache do
+  controller.send(:in_paginated_batches, &Proc.new {})
+end
+
+def build_dest(rels, ret)
+  dest = rels.inject(ret) { |h, rel| h[rel] ||= {} }["columns"] ||= []
+  dest
+end

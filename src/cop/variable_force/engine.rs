@@ -951,18 +951,25 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let parent_id = Self::branch_parent_id(&location);
         let is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
 
-        // Normal predicate assignments are unbranched because the condition
-        // always runs before later reads. Only modifier form keeps a special
-        // predicate context so the left-hand body can still see an earlier
+        // RuboCop's ShadowedArgument treats any assignment under an if/unless
+        // predicate as conditional, even though the predicate itself always
+        // executes. For statement form, bump branch_depth without pushing a
+        // branch context so the assignment stays visible to later reads like
+        // a `case` predicate write. Modifier form still needs a real
+        // predicate context so the left-hand body can see an earlier
         // assignment (`puts a if (a = 123)`).
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
-        if pred_has_write && is_modifier {
+        if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+            if is_modifier {
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+            }
         }
         self.visit(&node.predicate());
-        if pred_has_write && is_modifier {
-            self.pop_branch();
+        if pred_has_write {
+            if is_modifier {
+                self.pop_branch();
+            }
             self.branch_depth -= 1;
         }
 
@@ -991,13 +998,17 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let is_modifier = node.end_keyword_loc().is_none();
 
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
-        if pred_has_write && is_modifier {
+        if pred_has_write {
             self.branch_depth += 1;
-            self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+            if is_modifier {
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+            }
         }
         self.visit(&node.predicate());
-        if pred_has_write && is_modifier {
-            self.pop_branch();
+        if pred_has_write {
+            if is_modifier {
+                self.pop_branch();
+            }
             self.branch_depth -= 1;
         }
 

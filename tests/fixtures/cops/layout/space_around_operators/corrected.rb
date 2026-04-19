@@ -174,3 +174,15 @@ def retries_exceeded?
   max_retries  = Setting.get_with_default('queue.max_retries', 0).to_i
   max_retries > 0 && self.retries >= max_retries
 end
+
+hash['medline'] = ui
+
+s.name = 'rack-jekyll'
+
+default['zabbix']['agent']['timeout'] = '3'
+
+@sessions << @drizzle_session = proposals(:drizzle_session)
+@sessions << @postgresql_session = proposals(:postgresql_session)
+
+@sessions << @cloud_session = proposals(:cloud_session)
+@sessions << @business_session   = proposals(:business_session)
