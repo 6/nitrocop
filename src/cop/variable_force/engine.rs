@@ -2041,6 +2041,56 @@ mod tests {
         assert!(!x_decls[1].1); // def param x — hard scope, no outer visible
     }
 
+    #[test]
+    fn test_nested_block_param_sees_outer_block_param_in_hash_value() {
+        let (_, decls) = run_with_consumer(
+            r#"def build(typename)
+  if typename.to_s.include?('monthly')
+    post_process_replace do |res|
+      res
+    end
+  else
+    post_process_replace do |res|
+      {
+        'gcm' => res.map { |res| [res['gcm'], res['annualData'].first] }.to_h
+      }
+    end
+  end
+end
+"#,
+        );
+        let res_decls: Vec<_> = decls.iter().filter(|(n, _)| n == b"res").collect();
+        assert_eq!(res_decls.len(), 3, "{res_decls:?}");
+        assert!(!res_decls[0].1, "{res_decls:?}");
+        assert!(!res_decls[1].1, "{res_decls:?}");
+        assert!(res_decls[2].1, "{res_decls:?}");
+    }
+
+    #[test]
+    fn test_nested_block_param_sees_prior_branch_local_inside_call_args() {
+        let (_, decls) = run_with_consumer(
+            r#"def build(args, target)
+  args.map do |modname|
+    if modname.type == :hash && modname.children.all? { |pair| pair.children.first.type == :prop }
+      ok
+    else
+      pair = modname.children.first
+      s(:send, s(:const, nil, :Object), :defineProperties, target,
+        s(:hash, *modname.children.map { |pair|
+          s(:pair, s(:sym, pair.children.first.children.last), pair)
+        }))
+    end
+  end
+end
+"#,
+        );
+        let pair_decls: Vec<_> = decls.iter().filter(|(n, _)| n == b"pair").collect();
+        assert_eq!(pair_decls.len(), 3, "{pair_decls:?}");
+        assert!(!pair_decls[0].1, "{pair_decls:?}");
+        assert!(!pair_decls[1].1, "{pair_decls:?}");
+        assert!(pair_decls[2].1, "{pair_decls:?}");
+    }
+
     // ── Defs (singleton method) tests ──────────────────────────────────
 
     #[test]

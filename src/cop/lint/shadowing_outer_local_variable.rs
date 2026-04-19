@@ -89,14 +89,12 @@ impl ShadowingContext {
                 cond_subsequent_offset: interval.subsequent_offset,
                 when_condition_of_case,
                 is_condition_var: !interval.is_body,
-                is_if_type_cond: interval.is_if_type,
             },
             None => VarBranchInfo {
                 conditional_branch: None,
                 cond_subsequent_offset: None,
                 when_condition_of_case,
                 is_condition_var: false,
-                is_if_type_cond: false,
             },
         }
     }
@@ -175,6 +173,33 @@ impl ShadowingContext {
             }
         }
         best.map(|e| (e.cond_branch, e.is_if_type))
+    }
+
+    fn innermost_block_is_statement_level_child_of_cond(
+        &self,
+        param_offset: usize,
+        cond_offset: usize,
+    ) -> bool {
+        let mut best: Option<&BlockCondParentEntry> = None;
+        for entry in self.block_cond_parents.iter() {
+            if entry.block_start <= param_offset
+                && param_offset < entry.block_end
+                && entry.cond_offset == cond_offset
+            {
+                match best {
+                    None => best = Some(entry),
+                    Some(prev) => {
+                        let width = entry.block_end.saturating_sub(entry.block_start);
+                        let prev_width = prev.block_end.saturating_sub(prev.block_start);
+                        if width <= prev_width {
+                            best = Some(entry);
+                        }
+                    }
+                }
+            }
+        }
+
+        best.is_some_and(|entry| entry.is_else_of_if_type || entry.is_single_stmt_branch)
     }
 
     /// Check if an offset is in a when body of a particular case.
@@ -311,10 +336,16 @@ impl ShadowingContext {
                 });
         let mut ordered: Vec<_> = enclosing_blocks.by_ref().collect();
         ordered.sort_by_key(|(block_start, _, body_end)| body_end.saturating_sub(*block_start));
+        let nested_block_is_expression = ordered
+            .first()
+            .is_some_and(|(block_start, _, _)| self.max_expression_depth_at(*block_start) > 0);
 
         let mut first = true;
         for (block_start, _, _) in ordered {
-            if !first && !self.single_stmt_block_bodies.contains(block_start) {
+            if !first
+                && (nested_block_is_expression
+                    || !self.single_stmt_block_bodies.contains(block_start))
+            {
                 break;
             }
 
@@ -344,7 +375,6 @@ impl ShadowingContext {
             .map(|i| (i.cond_offset, i.branch_offset));
         let block_is_in_body = block_interval.as_ref().is_some_and(|i| i.is_body);
         let block_single_stmt = block_interval.as_ref().is_some_and(|i| i.single_stmt);
-        let is_in_else_clause = block_interval.as_ref().is_some_and(|i| i.is_else_clause);
         let expr_depth_base = block_interval
             .as_ref()
             .map_or(0, |i| i.expression_depth_base);
@@ -362,12 +392,12 @@ impl ShadowingContext {
             if !is_nested_in_expression && !has_block_boundary {
                 if let Some((outer_cond, outer_branch)) = outer_info.conditional_branch {
                     if outer_cond == block_branch.0 && outer_branch != block_branch.1 {
-                        let should_suppress = if outer_info.is_if_type_cond {
-                            is_in_else_clause || block_single_stmt
-                        } else {
-                            block_single_stmt
-                        };
-                        if should_suppress {
+                        if block_single_stmt
+                            || self.innermost_block_is_statement_level_child_of_cond(
+                                param_offset,
+                                outer_cond,
+                            )
+                        {
                             return true;
                         }
                     }
@@ -495,6 +525,7 @@ impl ShadowingContext {
                     && bi.is_body
                     && bi.is_if_type
                     && bi.is_else_clause
+                    && bi.single_stmt
                     && !has_block_boundary
                     && self.is_in_call_arguments_at(param_offset, bi.expression_depth_base + 1)
                 {
@@ -619,6 +650,25 @@ impl ShadowingContext {
 ///     `case/when` branch. Fix: keep outer-block propagation for check 6 only,
 ///     and restrict check 5 to the innermost block.
 ///
+/// 15. **FN: outer-block check-6 propagation must stop at expression nesting.**
+///     RuboCop only treats an enclosing outer block as the effective
+///     `variable_node` when the nested block is itself the sole statement in
+///     that outer block body. Expression-nested blocks like
+///     `res.map { |res| ... }` inside a hash literal, or nested `File.open`
+///     blocks inside call arguments, do not inherit that ownership. Fix:
+///     only propagate check 6 through enclosing single-statement blocks when
+///     the innermost nested block itself starts at statement level.
+///
+/// 16. **FN: else-branch ownership suppressions were too broad.**
+///     The generic different-branch suppression and the top-level
+///     call-argument else-branch compatibility path were both suppressing any
+///     block somewhere inside an `if`-type `else` branch. RuboCop only
+///     suppresses the generic case for single-statement branch ownership, and
+///     only applies the call-argument workaround when that outer call is the
+///     sole expression of the `else`. Fix: require single-statement branch
+///     ownership for both paths, leaving multi-statement `else` bodies to flag
+///     as normal.
+///
 /// ## Migration to VariableForce
 ///
 /// This cop was migrated from a 1,857-line standalone AST visitor to use the shared
@@ -678,8 +728,10 @@ struct InheritedCondEntry {
 /// outer_local_variable_node.else_branch`).
 #[derive(Clone, Debug)]
 struct BlockCondParentEntry {
-    /// The block node's start offset (used as key to match against block_body_ranges).
+    /// The block node's start offset.
     block_start: usize,
+    /// End offset of the block node, so empty-body blocks can still be matched.
+    block_end: usize,
     /// The conditional's offset (matching the cond_offset in BranchInterval).
     cond_offset: usize,
     /// True if the block's branch is single-statement (check 5 equivalent).
@@ -695,7 +747,6 @@ struct VarBranchInfo {
     cond_subsequent_offset: Option<usize>,
     when_condition_of_case: Option<usize>,
     is_condition_var: bool,
-    is_if_type_cond: bool,
 }
 
 impl ShadowingOuterLocalVariable {
@@ -1466,6 +1517,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 }
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
+                    block_end: node.location().end_offset(),
                     cond_offset: entry.cond_offset,
                     // Only the innermost entry gets is_single_stmt_branch = true.
                     // Propagated entries only propagate is_else_of_if_type (RuboCop
@@ -1548,6 +1600,7 @@ impl<'pr> Visit<'pr> for ContextCollector {
                 }
                 self.block_cond_parents.push(BlockCondParentEntry {
                     block_start: node.location().start_offset(),
+                    block_end: node.location().end_offset(),
                     cond_offset: entry.cond_offset,
                     is_single_stmt_branch: is_innermost && entry.single_stmt,
                     is_else_of_if_type: entry.allow_check6_else_suppression,
@@ -1852,4 +1905,75 @@ mod tests {
         ShadowingOuterLocalVariable::new(),
         "cops/lint/shadowing_outer_local_variable"
     );
+
+    fn collect_context(source: &str) -> ShadowingContext {
+        let parse_result = ruby_prism::parse(source.as_bytes());
+        let mut collector = ContextCollector {
+            ractor_block_ranges: Vec::new(),
+            begin_node_ranges: Vec::new(),
+            branch_intervals: Vec::new(),
+            expression_ranges: Vec::new(),
+            call_argument_ranges: Vec::new(),
+            single_stmt_block_bodies: HashSet::new(),
+            inherited_cond_map: Vec::new(),
+            when_condition_ranges: Vec::new(),
+            when_body_ranges: Vec::new(),
+            assignment_rhs_ranges: Vec::new(),
+            block_body_ranges: Vec::new(),
+            defs_local_scope_ranges: Vec::new(),
+            singleton_class_body_ranges: Vec::new(),
+            branch_var_writes: Vec::new(),
+            block_cond_parents: Vec::new(),
+            conditional_branch_stack: Vec::new(),
+            when_condition_case_offset: None,
+            in_when_body_of_case: None,
+            expression_depth: 0,
+            inherited_cond_branch: None,
+        };
+        collector.visit(&parse_result.node());
+        ShadowingContext {
+            ractor_block_ranges: collector.ractor_block_ranges,
+            begin_node_ranges: collector.begin_node_ranges,
+            branch_intervals: collector.branch_intervals,
+            expression_ranges: collector.expression_ranges,
+            call_argument_ranges: collector.call_argument_ranges,
+            single_stmt_block_bodies: collector.single_stmt_block_bodies,
+            inherited_cond_map: collector.inherited_cond_map,
+            when_condition_ranges: collector.when_condition_ranges,
+            when_body_ranges: collector.when_body_ranges,
+            assignment_rhs_ranges: collector.assignment_rhs_ranges,
+            block_body_ranges: collector.block_body_ranges,
+            defs_local_scope_ranges: collector.defs_local_scope_ranges,
+            singleton_class_body_ranges: collector.singleton_class_body_ranges,
+            branch_var_writes: collector.branch_var_writes,
+            block_cond_parents: collector.block_cond_parents,
+        }
+    }
+
+    #[test]
+    fn suppresses_direct_statement_level_block_in_multi_stmt_else_branch() {
+        let source = r#"def some_method
+  if condition?
+    foo = 1
+  else
+    bar = [1, 2, 3]
+    bar.each do |foo|
+    end
+  end
+end
+"#;
+
+        let ctx = collect_context(source);
+        let outer_offset = source.find("foo = 1").unwrap();
+        let param_offset = source.find("|foo|").unwrap() + 1;
+        let outer_info = ctx.branch_info_at(outer_offset);
+        let outer_cond = outer_info.conditional_branch.unwrap().0;
+
+        assert!(
+            ctx.innermost_block_is_statement_level_child_of_cond(param_offset, outer_cond),
+            "{:#?}",
+            ctx.block_cond_parents
+        );
+        assert!(ctx.should_suppress(&outer_info, param_offset));
+    }
 }
