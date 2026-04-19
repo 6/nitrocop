@@ -34,12 +34,17 @@ pub struct BranchContext {
     pub scope_index: usize,
     /// ID of the parent conditional node (e.g., the IfNode). Used to
     /// determine if two branches belong to the same conditional.
-    pub parent_id: usize,
+    pub parent_id: u64,
     /// Which child of the conditional this branch is (0=then, 1=else, etc.).
     pub child_index: usize,
     /// Predicate-assignment contexts execute before the guarded branch and
     /// must stay visible to reads in that branch.
     pub predicate_context: bool,
+    /// Modifier-form conditionals (`body if (x = ...)`, `body while (x = ...)`)
+    /// must keep walking to an older assignment so the variable is in scope on
+    /// the left side of the keyword, matching RuboCop's
+    /// `in_modifier_conditional?` special-case.
+    pub modifier_conditional: bool,
     /// Exception-handler main bodies (`begin` under rescue/ensure) can exit
     /// into sibling branches, so their writes are not exclusive with later
     /// rescue/else/ensure reads.
@@ -96,10 +101,14 @@ impl<'a> Engine<'a> {
         seq
     }
 
+    fn branch_parent_id(location: &ruby_prism::Location<'_>) -> u64 {
+        ((location.start_offset() as u64) << 32) ^ (location.end_offset() as u64)
+    }
+
     /// Push a new branch context for a child of a conditional node.
     /// `parent_id` identifies the conditional node (use its start offset),
     /// `child_index` identifies which child (0=then, 1=else, etc.).
-    fn push_branch(&mut self, parent_id: usize, child_index: usize, predicate_context: bool) {
+    fn push_branch(&mut self, parent_id: u64, child_index: usize, predicate_context: bool) {
         self.push_branch_with_flags(
             parent_id,
             child_index,
@@ -107,14 +116,17 @@ impl<'a> Engine<'a> {
             false,
             false,
             false,
+            false,
         );
     }
 
+    #[allow(clippy::too_many_arguments)] // internal branch-context helper threading independent flags
     fn push_branch_with_flags(
         &mut self,
-        parent_id: usize,
+        parent_id: u64,
         child_index: usize,
         predicate_context: bool,
+        modifier_conditional: bool,
         may_jump_to_other_branch: bool,
         may_run_incompletely: bool,
         short_circuit: bool,
@@ -127,6 +139,7 @@ impl<'a> Engine<'a> {
             parent_id,
             child_index,
             predicate_context,
+            modifier_conditional,
             may_jump_to_other_branch,
             may_run_incompletely,
             short_circuit,
@@ -934,24 +947,26 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        let is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
 
-        // If the predicate contains a local variable write, wrap it in a
-        // branch context. In modifier-if (`puts a if (a = 123)`), the
-        // predicate assignment is conditional from the perspective of later
-        // code — RuboCop treats it as branched.
+        // Normal predicate assignments are unbranched because the condition
+        // always runs before later reads. Only modifier form keeps a special
+        // predicate context so the left-hand body can still see an earlier
+        // assignment (`puts a if (a = 123)`).
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
-        if pred_has_write {
+        if pred_has_write && is_modifier {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0, true);
+            self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
         }
         self.visit(&node.predicate());
-        if pred_has_write {
+        if pred_has_write && is_modifier {
             self.pop_branch();
             self.branch_depth -= 1;
         }
 
-        let body_child = if pred_has_write { 1 } else { 0 };
+        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         self.push_branch(parent_id, body_child, false);
         if let Some(stmts) = node.statements() {
@@ -971,15 +986,17 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        let is_modifier = node.end_keyword_loc().is_none();
 
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
-        if pred_has_write {
+        if pred_has_write && is_modifier {
             self.branch_depth += 1;
-            self.push_branch(parent_id, 0, true);
+            self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
         }
         self.visit(&node.predicate());
-        if pred_has_write {
+        if pred_has_write && is_modifier {
             self.pop_branch();
             self.branch_depth -= 1;
         }
@@ -990,7 +1007,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // A (the unless body, as else-branch). We must match this order
         // for `find_variable` to return the same declaration_offset as
         // RuboCop's VF.
-        let body_child = if pred_has_write { 1 } else { 0 };
+        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         if let Some(else_clause) = node.else_clause() {
             self.push_branch(parent_id, body_child, false);
@@ -1012,31 +1029,35 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         self.visit(&node.left());
         self.branch_depth += 1;
-        self.push_branch_with_flags(parent_id, 1, false, false, false, true);
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true);
         self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
     }
 
     fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         self.visit(&node.left());
         self.branch_depth += 1;
-        self.push_branch_with_flags(parent_id, 1, false, false, false, true);
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true);
         self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
     }
 
     fn visit_case_node(&mut self, node: &ruby_prism::CaseNode<'pr>) {
-        let parent_id = node.location().start_offset();
-        // If the predicate contains a local variable write (e.g., `case value = super`),
-        // wrap it in a branch context. RuboCop's `conditional_assignment?` walks up
-        // from the assignment node and finds the `case` parent is `conditional?`,
-        // treating the assignment as branched.
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        // `case` targets are always evaluated before any clause runs, so
+        // assignments inside them are unbranched for liveness purposes. Bump
+        // branch_depth without a context so ShadowedArgument's
+        // `current_shadowing_in_branch` still treats a predicate assignment
+        // like `case value = super` as conditional.
         if let Some(pred) = node.predicate() {
             let pred_has_write = predicate_has_lvar_write(&pred);
             if pred_has_write {
@@ -1089,7 +1110,8 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         if let Some(pred) = node.predicate() {
             let pred_has_write = predicate_has_lvar_write(&pred);
             if pred_has_write {
@@ -1120,15 +1142,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         let is_post_condition = node.is_begin_modifier();
 
         if is_post_condition {
             // Post-condition loop (begin...end while): visit body first,
             // then condition. Matches RuboCop's VariableForce which processes
             // body before condition for while_post/until_post nodes.
-            let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = 0;
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1139,29 +1161,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             self.pop_branch();
             self.branch_depth -= 1;
 
-            if pred_has_write {
-                self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
-            }
             self.visit(&node.predicate());
-            if pred_has_write {
-                self.pop_branch();
-                self.branch_depth -= 1;
-            }
         } else {
             // Pre-condition loop (while...end): visit condition first, then body.
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            if pred_has_write {
+            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
+            if pred_has_write && is_modifier {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
             }
             self.visit(&node.predicate());
-            if pred_has_write {
+            if pred_has_write && is_modifier {
                 self.pop_branch();
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1177,14 +1192,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
-        let parent_id = node.location().start_offset();
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
         let is_post_condition = node.is_begin_modifier();
 
         if is_post_condition {
             // Post-condition loop (begin...end until): visit body first,
             // then condition. Matches RuboCop's VariableForce.
-            let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = 0;
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1195,29 +1210,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             self.pop_branch();
             self.branch_depth -= 1;
 
-            if pred_has_write {
-                self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
-            }
             self.visit(&node.predicate());
-            if pred_has_write {
-                self.pop_branch();
-                self.branch_depth -= 1;
-            }
         } else {
             // Pre-condition loop (until...end): visit condition first, then body.
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            if pred_has_write {
+            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
+            if pred_has_write && is_modifier {
                 self.branch_depth += 1;
-                self.push_branch(parent_id, 0, true);
+                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
             }
             self.visit(&node.predicate());
-            if pred_has_write {
+            if pred_has_write && is_modifier {
                 self.pop_branch();
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write { 1 } else { 0 };
+            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
             self.push_branch(parent_id, body_child, false);
             if let Some(stmts) = node.statements() {
@@ -1285,11 +1293,12 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // - each rescue clause is its own exclusive sibling branch
         // - the else clause is its own sibling branch
         if let Some(first_rescue) = node.rescue_clause() {
-            let parent_id = node.location().start_offset();
+            let location = node.location();
+            let parent_id = Self::branch_parent_id(&location);
 
             if let Some(stmts) = node.statements() {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, false, true, true, false);
+                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false);
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
@@ -1324,9 +1333,10 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         } else if let Some(stmts) = node.statements() {
             if node.ensure_clause().is_some() {
-                let parent_id = node.location().start_offset();
+                let location = node.location();
+                let parent_id = Self::branch_parent_id(&location);
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, false, true, true, false);
+                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false);
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
@@ -2170,8 +2180,71 @@ end
         let a = &def_scope.vars["a"];
         assert_eq!(a.num_assignments, 2);
         assert!(
+            a.assignments[0].referenced,
+            "modifier-if should keep the older assignment live for scope visibility"
+        );
+        assert!(
             a.assignments[1].referenced,
             "the predicate assignment should stay live for the guarded body"
+        );
+    }
+
+    #[test]
+    fn test_regular_if_predicate_assignment_overwrites_initializer() {
+        let scopes = run_engine("def foo\n  a = nil\n  if a = 123\n    puts a\n  end\nend\n");
+        let def_scope = &scopes[0];
+        let a = &def_scope.vars["a"];
+        assert_eq!(a.num_assignments, 2);
+        assert!(
+            !a.assignments[0].referenced,
+            "a normal if predicate assignment should not keep the initializer live"
+        );
+        assert!(
+            a.assignments[1].referenced,
+            "the predicate assignment should still feed the if body"
+        );
+    }
+
+    #[test]
+    fn test_outer_modifier_body_keeps_inner_if_predicate_live() {
+        let scopes =
+            run_engine("def foo(&block)\n  if (roots = parse)\n    roots\n  end if block\nend\n");
+        let def_scope = &scopes[0];
+        let roots = &def_scope.vars["roots"];
+        assert_eq!(roots.num_assignments, 1);
+        assert!(
+            roots.assignments[0].referenced,
+            "the inner if predicate assignment should still feed reads in the outer modifier body"
+        );
+    }
+
+    #[test]
+    fn test_elsif_predicate_keeps_earlier_siblings_live() {
+        let scopes = run_engine(
+            "def foo(flag, cached)\n  if flag == :imm\n    reg = 1\n  elsif flag == :indexed\n    reg = 2\n  elsif reg = cached\n    touch(reg)\n  else\n    reg = 3\n  end\n  use(reg)\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let reg = &def_scope.vars["reg"];
+        assert_eq!(reg.num_assignments, 4);
+        assert!(
+            reg.assignments
+                .iter()
+                .all(|assignment| assignment.referenced),
+            "later elsif predicate assignments must not suppress earlier sibling branches"
+        );
+    }
+
+    #[test]
+    fn test_case_branch_survives_nested_predicate_assignment() {
+        let scopes = run_engine(
+            "def foo(kind, source)\n  case kind\n  when :a\n    r = 1\n  when :b\n    r = 2\n  when :c\n    if (r = source)\n      consume(r)\n    end\n  end\n  puts r\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let r = &def_scope.vars["r"];
+        assert_eq!(r.num_assignments, 3);
+        assert!(
+            r.assignments.iter().all(|assignment| assignment.referenced),
+            "a nested predicate assignment in one case branch must not kill sibling branches"
         );
     }
 

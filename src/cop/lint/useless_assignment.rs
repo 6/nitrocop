@@ -70,6 +70,17 @@ use crate::parse::source::SourceFile;
 /// `VariableTable` branch contexts in sync as branches are created, while
 /// treating predicate-assignment contexts as visible to their guarded bodies
 /// so patterns like `puts a if (a = 123)` still match RuboCop.
+///
+/// ## FN fix: normal predicate assignments overwrite prior initializers (2026-04-19)
+///
+/// RuboCop treats modifier-form conditionals as a scope quirk: `puts a if (a = 123)`
+/// keeps the older `a = nil` live so `a` exists on the left of the `if`.
+/// nitrocop had modeled every predicate assignment as a branch, which kept dead
+/// initializers like `origin = nil` alive before `if origin = input` and then
+/// broke sibling-branch liveness in larger `if`/`elsif` and `case` chains.
+/// Fixed in VariableForce by matching RuboCop's branch model: normal predicate
+/// assignments are unbranched, while modifier-form predicates keep a dedicated
+/// context so earlier assignments stay visible on the left side of the keyword.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {

@@ -582,6 +582,37 @@ rescue StandardError => e
   Result.new(status: :error, answer: nil, explanation: e.message, code: code)
 end
 
+# Later predicate assignments in an `elsif` chain must not make earlier
+# sibling-branch writes look dead when the value is read after the chain.
+def if_elsif_predicate_keeps_earlier_branches(flag, cached)
+  if flag == :imm
+    reg = 1
+  elsif flag == :indexed
+    reg = 2
+  elsif reg = cached
+    reg = reg + 1
+  else
+    reg = 3
+  end
+  use(reg)
+end
+
+# A nested predicate assignment in one case branch must not suppress sibling
+# branch writes that are still read after the case.
+def case_branch_with_nested_predicate(kind, source)
+  case kind
+  when :a
+    r = 1
+  when :b
+    r = 2
+  when :c
+    if (r = source)
+      consume(r)
+    end
+  end
+  puts r
+end
+
 # FP fix: assignment before ensure block, variable read in ensure.
 # If `start(...)` raises, the ensure block reads `obj` with the initial value.
 def call_target(target_num)

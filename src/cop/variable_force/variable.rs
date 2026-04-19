@@ -94,6 +94,9 @@ impl Variable {
         for assignment in self.assignments.iter_mut().rev() {
             let assignment_branch_path =
                 relevant_branch_path(&assignment.branch_path, self.scope_index, branch_contexts);
+            let assignment_context = assignment_branch_path
+                .last()
+                .and_then(|&id| branch_contexts.get(id));
 
             if !assignment_branch_path.is_empty()
                 && consumed_branch_paths.contains(&assignment_branch_path)
@@ -115,11 +118,7 @@ impl Variable {
                 break;
             }
 
-            if assignment_branch_path
-                .last()
-                .and_then(|&id| branch_contexts.get(id))
-                .is_some_and(|context| !context.may_run_incompletely)
-            {
+            if assignment_context.is_some_and(|context| !context.may_run_incompletely) {
                 consumed_branch_paths.push(assignment_branch_path);
             }
         }
