@@ -444,6 +444,28 @@ jobs:
               --repo-sha "$REPO_SHA" \
               --timeout 900 || true
 
+            # Resolve symlink paths + deduplicate offenses in each variant
+            # batch's JSON, same as the default pipeline does at line 339.
+            # Without this, repos with internal symlinks (e.g. rabl's fixture
+            # directories that symlink posts_controller_test.rb across
+            # padrino/rails2/rails3 fixtures) count the same file multiple
+            # times, inflating variant counts relative to what check_cop.py's
+            # _run_rubocop_for_variant produces (which normalizes via
+            # os.path.realpath). The mismatch surfaces as a false "regression"
+            # in the variant gate.
+            #
+            # Must run before the repo dir is deleted — resolve_symlink_paths
+            # uses os.path.realpath which needs the files to exist.
+            for VC_BATCH_DIR in results/variant-nitrocop-variant_batch_*; do
+              [ -d "$VC_BATCH_DIR" ] || continue
+              VC_BATCH_NAME=$(basename "$VC_BATCH_DIR" | sed 's/variant-nitrocop-//')
+              VC_RC_JSON="results/variant-rubocop-${VC_BATCH_NAME}/${REPO_ID}.json"
+              VC_NC_JSON="${VC_BATCH_DIR}/${REPO_ID}.json"
+              python3 bench/corpus/resolve_symlink_paths.py \
+                "$VC_NC_JSON" "$VC_RC_JSON" \
+                2>/dev/null || true
+            done
+
             # Extract source context for variant offenses (same as default
             # pipeline). This enables variant examples to include source
             # snippets for fixture prepopulation and agent investigation.

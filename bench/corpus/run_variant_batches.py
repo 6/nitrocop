@@ -319,6 +319,21 @@ def merge_variant_results(
                 entry["by_repo_cop"] = filtered_repo_cop
             else:
                 entry["by_repo_cop"] = data["by_repo_cop"]
+        # Preserve per-cop repo activity so check_cop.py can recognize
+        # perfect-match repos (oracle exercised the cop but nitrocop matched
+        # rubocop exactly, so they're not in by_repo_cop). Without this,
+        # those repos look "untested" to the gate and any post-oracle count
+        # shift becomes a false regression.
+        if "cop_activity_repos" in data:
+            batch_cops = style_map.get(batch_name, {})
+            activity = data["cop_activity_repos"]
+            if batch_cops:
+                entry["cop_activity_repos"] = {
+                    cop: repos for cop, repos in activity.items()
+                    if cop in batch_cops
+                }
+            else:
+                entry["cop_activity_repos"] = activity
         merged["batches"].append(entry)
     return merged
 
