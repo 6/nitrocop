@@ -125,3 +125,40 @@ def household_size_options
          .unshift([nil, nil])
          ^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 7) spaces for indentation of a chained method call.
 end
+
+# Operator RHS: later continuation dots still align with the operator RHS base
+def make_json_string expr
+  Arel.quoted('"') \
+  + expr
+      .coalesce('')
+      ^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.coalesce` with `expr` on line 108.
+      .replace('\\', '\\\\')
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      .replace('"', '\"')
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      .replace("\b", '\b')
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      .replace("\f", '\f')
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      .replace("\n", '\n')
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      .replace("\r", '\r')
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      .replace("\t", '\t') \
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+  + '"'
+end
+
+# Keyword condition: align to the full condition expression, not fallback indent
+if stripe_mapping
+    .select { |mapping| mapping.split('.')[0] == @model.name }
+    ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `stripe_mapping` on line 121.
+    .size > 0
+end
+
+# Boolean keyword condition keeps the whole condition as the alignment base
+if mixpanel_mapping && mixpanel_mapping
+    .select { |mapping| mapping.split('.')[0] == @model.name }
+    ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `mixpanel_mapping && mixpanel_mapping` on line 127.
+    .size > 0
+end
