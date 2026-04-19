@@ -1,4 +1,4 @@
-# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable
+# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable, DefEndAlignmentStyle: def
 module Wrapper
   def language_link(language, label = nil)
     language = if language.respond_to? :map

@@ -210,6 +210,20 @@ use ruby_prism::Visit;
 ///      `Layout/AccessModifierIndentation: outdent`; nitrocop now treats
 ///      one-child `StatementsNode` bodies as direct members to preserve that
 ///      quirk and catch under-indented lone access-modifier calls.
+///
+/// 2026-04-18:
+/// - Fixed `relative_to_receiver` batch-1 FPs from sibling config loss and
+///   two RuboCop quirks. `Layout/IndentationWidth` now reads
+///   `Layout/DefEndAlignment`, so adjacent-def modifiers like
+///   `private_class_method def self.parse_cgi` use the same base RuboCop does
+///   under `DefEndAlignment: def`.
+/// - Matched RuboCop's handling of class/module bodies wrapped in an implicit
+///   rescue/ensure/else begin. RuboCop checks only the wrapped main body and
+///   its clauses there; it does not run the extra class-member walk through a
+///   later `private` section.
+/// - Matched RuboCop 1.84.2's tabs-style crash for `if` expressions used as
+///   hash-pair values. Under batch 1 RuboCop drops those checks entirely, so
+///   nitrocop now suppresses only that narrow context.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -328,6 +342,58 @@ fn def_modifier_base_offset(source: &SourceFile, kw_offset: usize) -> Option<usi
     } else {
         None
     }
+}
+
+fn def_has_same_line_bare_access_modifier(source: &SourceFile, kw_offset: usize) -> bool {
+    if kw_offset == 0 {
+        return false;
+    }
+
+    let bytes = source.as_bytes();
+    let line_start = line_start_offset(source, kw_offset);
+    let mut first_non_ws = line_start;
+    while first_non_ws < bytes.len()
+        && (bytes[first_non_ws] == b' ' || bytes[first_non_ws] == b'\t')
+    {
+        first_non_ws += 1;
+    }
+    if first_non_ws == kw_offset {
+        return false;
+    }
+
+    let mut modifier_end = kw_offset;
+    while modifier_end > line_start
+        && (bytes[modifier_end - 1] == b' ' || bytes[modifier_end - 1] == b'\t')
+    {
+        modifier_end -= 1;
+    }
+    if modifier_end <= first_non_ws {
+        return false;
+    }
+
+    matches!(
+        &bytes[first_non_ws..modifier_end],
+        b"private" | b"protected" | b"public"
+    )
+}
+
+fn body_first_statement_uses_tabs(source: &SourceFile, body: &ruby_prism::Node<'_>) -> bool {
+    let first_offset = if let Some(stmts) = body.as_statements_node() {
+        stmts
+            .body()
+            .iter()
+            .next()
+            .map(|node| node.location().start_offset())
+    } else if let Some(begin_node) = body.as_begin_node() {
+        begin_node
+            .statements()
+            .and_then(|stmts| stmts.body().iter().next())
+            .map(|node| node.location().start_offset())
+    } else {
+        None
+    };
+
+    first_offset.is_some_and(|offset| line_uses_tab_indentation(source, offset))
 }
 
 fn body_members(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
@@ -525,6 +591,7 @@ fn extracted_rhs<'pr>(node: &'pr ruby_prism::Node<'pr>) -> Option<ruby_prism::No
 struct AncestorContext {
     start_offset: usize,
     rhs_span: Option<(usize, usize)>,
+    assoc_value_span: Option<(usize, usize)>,
 }
 
 struct AncestorFinder {
@@ -544,10 +611,17 @@ impl<'pr> Visit<'pr> for AncestorFinder {
             let rhs = first_part_of_call_chain(rhs);
             (rhs.location().start_offset(), rhs.location().end_offset())
         });
-
+        let assoc_value_span = node.as_assoc_node().map(|assoc| {
+            let value = assoc.value();
+            (
+                value.location().start_offset(),
+                value.location().end_offset(),
+            )
+        });
         self.stack.push(AncestorContext {
             start_offset: node.location().start_offset(),
             rhs_span,
+            assoc_value_span,
         });
     }
 
@@ -597,6 +671,17 @@ fn variable_style_base_offset(
     }
 
     None
+}
+
+fn is_hash_pair_value(
+    parse_result: &ruby_prism::ParseResult<'_>,
+    node: &ruby_prism::Node<'_>,
+) -> bool {
+    let ancestors = ancestors_for_node(parse_result, node);
+    let target_span = (node.location().start_offset(), node.location().end_offset());
+    ancestors
+        .last()
+        .is_some_and(|parent| parent.assoc_value_span == Some(target_span))
 }
 
 /// Check if the `end` keyword is the first non-whitespace character on its line.
@@ -800,6 +885,25 @@ impl IndentationWidth {
         let implicit_begin = body
             .as_begin_node()
             .filter(|begin_node| begin_node.begin_keyword_loc().is_none());
+        let implicit_begin_has_clauses = implicit_begin.as_ref().is_some_and(|begin_node| {
+            begin_node.rescue_clause().is_some()
+                || begin_node.else_clause().is_some()
+                || begin_node.ensure_clause().is_some()
+        });
+        if implicit_begin_has_clauses {
+            if let Some(begin_node) = implicit_begin {
+                let mut diagnostics = self.check_statements_body_indentation(
+                    source,
+                    base_offset,
+                    base_offset,
+                    base_col,
+                    begin_node.statements(),
+                    options,
+                );
+                self.check_begin_clauses(source, &begin_node, options, &mut diagnostics);
+                return diagnostics;
+            }
+        }
         let (direct_member, wrapped_members) = if let Some(stmts) = body.as_statements_node() {
             let members: Vec<_> = stmts.body().iter().collect();
             if members.len() == 1 {
@@ -1026,22 +1130,17 @@ impl IndentationWidth {
     /// Check body indentation.
     /// `keyword_offset` is used to determine which line the keyword is on (for same-line skip).
     /// `base_col` is the column that expected indentation is relative to.
-    fn check_body_indentation(
+    fn check_statements_body_indentation(
         &self,
         source: &SourceFile,
         keyword_offset: usize,
         base_offset: usize,
         base_col: usize,
-        body: Option<ruby_prism::Node<'_>>,
+        stmts: Option<ruby_prism::StatementsNode<'_>>,
         options: IndentationOptions,
     ) -> Vec<Diagnostic> {
-        let body = match body {
-            Some(b) => b,
-            None => return Vec::new(),
-        };
-
-        let stmts = match body.as_statements_node() {
-            Some(s) => s,
+        let stmts = match stmts {
+            Some(stmts) => stmts,
             None => return Vec::new(),
         };
 
@@ -1105,6 +1204,29 @@ impl IndentationWidth {
         }
 
         Vec::new()
+    }
+
+    fn check_body_indentation(
+        &self,
+        source: &SourceFile,
+        keyword_offset: usize,
+        base_offset: usize,
+        base_col: usize,
+        body: Option<ruby_prism::Node<'_>>,
+        options: IndentationOptions,
+    ) -> Vec<Diagnostic> {
+        let body = match body {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        self.check_statements_body_indentation(
+            source,
+            keyword_offset,
+            base_offset,
+            base_col,
+            body.as_statements_node(),
+            options,
+        )
     }
 
     fn check_statements_indentation(
@@ -1469,33 +1591,43 @@ impl Cop for IndentationWidth {
             } else {
                 def_modifier_base_offset(source, kw_offset)
             };
+            let def_end_alignment_style = config.get_str("DefEndAlignmentStyle", "start_of_line");
+            let same_line_bare_access_modifier =
+                def_has_same_line_bare_access_modifier(source, kw_offset);
             let def_options = IndentationOptions {
                 raw_tabs_columns: options.tabs_style && modifier_offset.is_some(),
                 ..options
             };
-            let (base_offset, base_col) = if align_style == "keyword" {
-                // EnforcedStyleAlignWith: keyword — indent relative to `def` keyword column
-                (kw_offset, source.offset_to_line_col(kw_offset).1)
-            } else {
-                // EnforcedStyleAlignWith: start_of_line (default).
-                // RuboCop's on_def always uses node.loc.keyword (def column).
-                // For `private def foo`, RuboCop handles it via on_send and
-                // ignores the def in on_def. We don't have that mechanism, so
-                // we use line_start_column for modifier-decorated defs (which
-                // matches on_send using leftmost_modifier_of). For non-modifier
-                // contexts like `x = def foo` or `(def bar`, use the def
-                // keyword column to match RuboCop's on_def behavior.
-                if let Some(modifier_offset) = modifier_offset {
-                    (
-                        modifier_offset,
-                        source.offset_to_line_col(modifier_offset).1,
-                    )
-                } else {
-                    (kw_offset, source.offset_to_line_col(kw_offset).1)
-                }
-            };
-
             if let Some(body) = def_node.body() {
+                let tabs_style_modifier_quirk = same_line_bare_access_modifier
+                    && def_options.tabs_style
+                    && body_first_statement_uses_tabs(source, &body);
+                let use_def_keyword_base = align_style == "keyword"
+                    || (modifier_offset.is_some()
+                        && def_end_alignment_style == "def"
+                        && !tabs_style_modifier_quirk);
+                let (base_offset, base_col) = if use_def_keyword_base {
+                    // EnforcedStyleAlignWith: keyword — indent relative to the `def`
+                    // keyword column. RuboCop also does this for adjacent-def
+                    // modifiers when `Layout/DefEndAlignment: def` is active,
+                    // except for the tabs-style `private def` quirk above.
+                    (kw_offset, source.offset_to_line_col(kw_offset).1)
+                } else {
+                    // EnforcedStyleAlignWith: start_of_line (default).
+                    // RuboCop's on_def always uses node.loc.keyword (def column).
+                    // For modifier-decorated defs handled via on_send, use the
+                    // leftmost modifier column instead. This also matches the
+                    // tabs-style `private def` quirk in the variant corpus.
+                    if let Some(modifier_offset) = modifier_offset {
+                        (
+                            modifier_offset,
+                            source.offset_to_line_col(modifier_offset).1,
+                        )
+                    } else {
+                        (kw_offset, source.offset_to_line_col(kw_offset).1)
+                    }
+                };
+
                 if let Some(begin_node) = body.as_begin_node() {
                     // Implicit begin (def with rescue/ensure/else).
                     // Check the main body statements.
@@ -1526,6 +1658,10 @@ impl Cop for IndentationWidth {
 
         if let Some(if_node) = node.as_if_node() {
             if let Some(kw_loc) = if_node.if_keyword_loc() {
+                if options.tabs_style && is_hash_pair_value(_parse_result, node) {
+                    return;
+                }
+
                 let kw_offset = kw_loc.start_offset();
                 let base_offset = if config.get_str("EndAlignmentStyle", "keyword") == "variable" {
                     variable_style_base_offset(source, _parse_result, node, kw_offset)
@@ -2319,6 +2455,94 @@ mod tests {
         assert!(
             diags.is_empty(),
             "BOM should not cause false positive: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn indentation_width_inherits_def_end_alignment_style() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join(".rubocop.yml");
+        std::fs::write(
+            &path,
+            "Layout/DefEndAlignment:\n  EnforcedStyleAlignWith: def\n",
+        )
+        .unwrap();
+        let config = crate::config::load_config(Some(&path), None, None).unwrap();
+        let cc = config.cop_config("Layout/IndentationWidth");
+        assert_eq!(
+            cc.options
+                .get("DefEndAlignmentStyle")
+                .and_then(|v| v.as_str()),
+            Some("def")
+        );
+    }
+
+    #[test]
+    fn private_class_method_def_body_is_dropped_when_def_end_aligns_with_def() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "IndentationStyleEnforced".into(),
+                    serde_yml::Value::String("tabs".into()),
+                ),
+                (
+                    "DefEndAlignmentStyle".into(),
+                    serde_yml::Value::String("def".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        let source = b"class Highlight\n  private_class_method def self.parse_cgi(str)\n      pairs = URI.decode_www_form(str).map { |k, v| [k.to_sym, v] }\n    Hash[pairs]\n  end\nend\n";
+        let diags = run_cop_full_with_config(&IndentationWidth, source, config);
+        assert!(
+            diags.is_empty(),
+            "private_class_method def body should be dropped like RuboCop's crash quirk: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn modifier_def_body_still_flags_when_overindented_with_def_end_alignment_def() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([
+                (
+                    "IndentationStyleEnforced".into(),
+                    serde_yml::Value::String("tabs".into()),
+                ),
+                (
+                    "DefEndAlignmentStyle".into(),
+                    serde_yml::Value::String("def".into()),
+                ),
+            ]),
+            ..CopConfig::default()
+        };
+        let source = b"class Example\n  private def helper\n              body\n  end\nend\n";
+        let diags = run_cop_full_with_config(&IndentationWidth, source, config);
+        assert_eq!(diags.len(), 1, "expected one offense, got: {:?}", diags);
+        assert_eq!(diags[0].message, "Use 1 (not 2) tabs for indentation.");
+    }
+
+    #[test]
+    fn hash_value_if_is_dropped_under_tabs_style() {
+        use std::collections::HashMap;
+
+        let config = CopConfig {
+            options: HashMap::from([(
+                "IndentationStyleEnforced".into(),
+                serde_yml::Value::String("tabs".into()),
+            )]),
+            ..CopConfig::default()
+        };
+        let source = b"x = {\n  value: if cond\n  a\n  else\n  b\n  end,\n}\n";
+        let diags = run_cop_full_with_config(&IndentationWidth, source, config);
+        assert!(
+            diags.is_empty(),
+            "hash-pair if bodies should be dropped like RuboCop's tabs-style crash: {:?}",
             diags
         );
     }

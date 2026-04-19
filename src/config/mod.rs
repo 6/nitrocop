@@ -2474,6 +2474,16 @@ impl ResolvedConfig {
                 .options
                 .entry("IndentationStyleEnforced".to_string())
                 .or_insert_with(|| Value::String(indentation_style.to_string()));
+
+            let def_end_alignment_config = self.cop_configs.get("Layout/DefEndAlignment");
+            let def_end_alignment_style = def_end_alignment_config
+                .and_then(|cc| cc.options.get("EnforcedStyleAlignWith"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("start_of_line");
+            config
+                .options
+                .entry("DefEndAlignmentStyle".to_string())
+                .or_insert_with(|| Value::String(def_end_alignment_style.to_string()));
         }
         // Inject Layout/SpaceInsideHashLiteralBraces EnforcedStyle for Layout/SpaceAfterComma
         // (mirrors RuboCop's `space_forbidden_before_rcurly?` which reads the sibling cop's style)
