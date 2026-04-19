@@ -274,6 +274,16 @@ use crate::parse::source::SourceFile;
 ///    block expression was used as a setter RHS or chained receiver. Fixed by
 ///    modeling only the direct single-statement block body parent, which keeps
 ///    `foo.bar { baz(x) }` as an offense while allowing `foo.bar { baz(x) }.qux`.
+///
+/// ## Variant fix (2026-04-19)
+///
+/// `has_hash_value_omission` / `has_keyword_hash_value_omission` were
+/// returning true when ANY pair had value omission. RuboCop's rule is
+/// `last_argument.pairs.last&.value_omission?` — only the LAST pair
+/// matters. Calls like
+/// `FactoryBot.create(:project, inactive:, main_language: language)` must
+/// still fire when the last pair is a regular `k: v` even though an
+/// earlier pair uses the shorthand.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -1102,27 +1112,22 @@ impl ParenVisitor<'_> {
     }
 }
 
-/// Check if a hash node has value omission (Ruby 3.1 shorthand `{foo:}`)
+/// Check if a hash node's LAST pair has value omission (Ruby 3.1 shorthand
+/// `{foo:}`). Matches RuboCop's `last_argument.pairs.last&.value_omission?` —
+/// an earlier pair being shorthand does not exempt the call when the last
+/// pair is a regular `k: v`.
 fn has_hash_value_omission(hash: &ruby_prism::HashNode<'_>) -> bool {
-    for elem in hash.elements().iter() {
-        if let Some(assoc) = elem.as_assoc_node() {
-            if assoc.value().as_implicit_node().is_some() {
-                return true;
-            }
-        }
-    }
-    false
+    hash.elements().iter().last().is_some_and(|elem| {
+        elem.as_assoc_node()
+            .is_some_and(|assoc| assoc.value().as_implicit_node().is_some())
+    })
 }
 
 fn has_keyword_hash_value_omission(kw_hash: &ruby_prism::KeywordHashNode<'_>) -> bool {
-    for elem in kw_hash.elements().iter() {
-        if let Some(assoc) = elem.as_assoc_node() {
-            if assoc.value().as_implicit_node().is_some() {
-                return true;
-            }
-        }
-    }
-    false
+    kw_hash.elements().iter().last().is_some_and(|elem| {
+        elem.as_assoc_node()
+            .is_some_and(|assoc| assoc.value().as_implicit_node().is_some())
+    })
 }
 
 fn unwrap_parenthesized_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
