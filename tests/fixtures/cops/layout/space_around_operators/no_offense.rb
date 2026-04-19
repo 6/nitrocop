@@ -170,6 +170,17 @@ end
 
 # Rational literal (no_space style default for /)
 x = 2/3r
+(2 / 3r).should == Rational(2, 3)
+(-2 / 3r).should == Rational(-2, 3)
+reduced = 20 / 6r
+ast = Yadriggy::reify { 5 / 3r }.tree.body
+
+# Predefined global $= is not an operator
+@dollar_assign = $=
+$= = @dollar_assign
+-> { a = $= }.should complain(/is no longer effective/)
+-> { $= = "_" }.should complain(/is no longer effective/)
+($= = "xyz").should == "xyz"
 
 # Ranges should not be flagged
 a, b = (1..2), (1...3)
