@@ -110,6 +110,23 @@ x = (foo; bar)
 x += (foo; bar)
 x + (foo; bar)
 x((foo; bar))
+# Multi-statement parens whose first real ancestor is a call (not begin/def/block)
+%
+(foo + bar)
+%
+(
+  foo
+  bar
+)
+%
+(foo)
+class NamespaceParser
+  def namespace_response
+    data = Namespaces.new((SP!; namespace),
+                          (SP!; namespace),
+                          (SP!; namespace))
+  end
+end
 # Multiple expressions in ternary branches and non-begin bodies that RuboCop accepts
 def create_xyz(page, name: nil, left: nil, top: nil, zoom: nil)
   destination = [page, Destination::REVERSE_TYPE_MAPPING.fetch(:xyz), left, top, zoom]
