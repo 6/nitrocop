@@ -235,6 +235,7 @@
     "Lint/ScriptPermission": "stable",
     "Lint/SelfAssignment": "stable",
     "Lint/SendWithMixinArgument": "stable",
+    "Lint/ShadowedArgument": "stable",
     "Lint/ShadowedException": "stable",
     "Lint/ShadowingOuterLocalVariable": "stable",
     "Lint/SharedMutableDefault": "stable",
