@@ -142,6 +142,22 @@ use crate::parse::source::SourceFile;
 /// Fix: add `FindPatternNode` paren extraction, and skip close-side
 /// missing-space checks only when the final inner node is a multiline plain
 /// quoted `StringNode` whose closing quote is immediately before the outer `)`.
+///
+/// ## Corpus investigation (2026-04-19)
+///
+/// The `space` variant still showed ~100 FN from binstub-style sources like
+/// `abort("Your bin/bundle...\nReplace ... again.")` — a plain double-quoted
+/// string with a real embedded newline inside `()`. The multiline-plain-string
+/// exemption above was too broad: it skipped close-side checks for every
+/// multiline `"..."` and `'...'`, but RuboCop only ignores the close side when
+/// Parser emits a single combined `tSTRING` token. Parser only does that for
+/// double-quoted strings where every newline is preceded by an odd number of
+/// backslashes (a `\<newline>` line continuation). Any bare newline — or any
+/// single-quoted multiline string — produces separate `tSTRING_BEG`/
+/// `tSTRING_END` tokens, and the close side fires on the `)` line.
+///
+/// Fix: restrict the exemption to double-quoted strings whose interior
+/// contains only line-continuation newlines.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -744,7 +760,7 @@ fn check_missing_close_space(
     let Some(prev_code) = close_side else {
         return;
     };
-    if ignores_close_side_for_multiline_plain_string(node, prev_code) {
+    if ignores_close_side_for_multiline_plain_string(node, bytes, prev_code) {
         return;
     }
     if allow_consecutive_right_parens && bytes.get(prev_code) == Some(&b')') {
@@ -777,7 +793,7 @@ fn check_compact_close_space(
     let Some(prev_code) = close_side else {
         return;
     };
-    if ignores_close_side_for_multiline_plain_string(node, prev_code) {
+    if ignores_close_side_for_multiline_plain_string(node, bytes, prev_code) {
         return;
     }
 
@@ -828,6 +844,7 @@ fn compact_allows_consecutive_close_paren(
 
 fn ignores_close_side_for_multiline_plain_string(
     node: &ruby_prism::Node<'_>,
+    bytes: &[u8],
     prev_code: usize,
 ) -> bool {
     let Some(last_inner) = last_inner_node(node) else {
@@ -843,11 +860,42 @@ fn ignores_close_side_for_multiline_plain_string(
     let Some(closing) = string.closing_loc() else {
         return false;
     };
-    if !matches!(opening.as_slice(), b"\"" | b"'") || closing.as_slice() != opening.as_slice() {
+    // Parser only folds multiple source lines into a single `tSTRING` token for
+    // double-quoted strings where every newline is preceded by an odd number of
+    // backslashes (a `\<newline>` line continuation). Any bare newline — or a
+    // single-quoted string — produces separate `tSTRING_BEG`/`tSTRING_END`
+    // tokens, and RuboCop's close-side check fires on the `)` line.
+    if opening.as_slice() != b"\"" || closing.as_slice() != b"\"" {
+        return false;
+    }
+    if closing.start_offset() != prev_code {
         return false;
     }
 
-    string.location().as_slice().contains(&b'\n') && closing.start_offset() == prev_code
+    let content = &bytes[opening.end_offset()..closing.start_offset()];
+    if !content.contains(&b'\n') {
+        return false;
+    }
+
+    only_line_continuation_newlines(content)
+}
+
+fn only_line_continuation_newlines(content: &[u8]) -> bool {
+    for (idx, &byte) in content.iter().enumerate() {
+        if byte != b'\n' {
+            continue;
+        }
+        let mut backslashes = 0usize;
+        let mut back = idx;
+        while back > 0 && content[back - 1] == b'\\' {
+            backslashes += 1;
+            back -= 1;
+        }
+        if backslashes % 2 == 0 {
+            return false;
+        }
+    }
+    true
 }
 
 fn last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
