@@ -606,9 +606,8 @@ impl RedundantParensVisitor<'_> {
                 self.add_offense(node, msg);
             } else if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
                 self.add_offense(node, msg);
-            } else if self.has_allowed_multiple_expression_ancestor() {
-                return;
-            } else if !begins_its_line(self.source, node.location().start_offset())
+            } else if self.has_allowed_multiple_expression_ancestor()
+                || !begins_its_line(self.source, node.location().start_offset())
                 || self.has_ternary_ancestor()
                 || self.is_parent_statements_conditional_body()
                 || inner_nodes.first().is_some_and(|first| {
