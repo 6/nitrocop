@@ -120,6 +120,7 @@ impl<'a> Engine<'a> {
         );
     }
 
+    #[allow(clippy::too_many_arguments)] // internal branch-context helper threading independent flags
     fn push_branch_with_flags(
         &mut self,
         parent_id: u64,
