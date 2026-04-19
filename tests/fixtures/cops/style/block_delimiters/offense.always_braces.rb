@@ -10,3 +10,5 @@ context "Rabl::Engine" do
                        ^^ Style/BlockDelimiters: Prefer `{...}` over `do...end` for blocks.
   helper(:rabl) { "café" }
 end
+
+encoded = "\x83\xA4name\xA3leo"

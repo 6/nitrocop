@@ -73,9 +73,9 @@ use std::collections::HashSet;
 ///   inside the receiver must be marked `rv_used` even though there is no
 ///   intermediate `CallNode` for `[]`
 /// - Under `EnforcedStyle: always_braces`, RuboCop's Translation::Parser also
-///   bails out on some non-UTF-8 files with high `\xHH` escapes (for example
-///   `# encoding:windows-1252` with `\xdf` regex escapes), so nitrocop now
-///   skips this cop on those parser-incompatible files too
+///   bails out on some non-UTF-8 files with high `\xHH` regex escapes (for
+///   example `# encoding:windows-1252` with `\xdf` in a regexp), so nitrocop
+///   now skips this cop on those parser-incompatible files too
 ///
 /// ## Fix (2026-04-19): keep semantic wrappers narrow and stop over-skipping `always_braces`
 ///
@@ -92,7 +92,7 @@ use std::collections::HashSet;
 ///   and repeated `<<-CODE` blocks could be misclassified as identical tails
 /// - `always_braces` was skipping on any Prism parse error, but RuboCop still
 ///   checks recoverable files such as builder templates with top-level `yield`;
-///   only the non-UTF-8 high-`\xHH` parser crash still needs the skip
+///   only the non-UTF-8 high-`\xHH` regexp parser crash still needs the skip
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -1371,7 +1371,9 @@ fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool 
                 }
 
                 if !enc_name.is_empty() {
-                    return has_high_hex_escapes(bytes);
+                    return bytes
+                        .split(|&byte| byte == b'\n')
+                        .any(line_contains_high_hex_escape_in_regex_literal);
                 }
             }
         }
@@ -1390,23 +1392,131 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn has_high_hex_escapes(bytes: &[u8]) -> bool {
-    if bytes.len() < 4 {
-        return false;
-    }
+fn line_contains_high_hex_escape_in_regex_literal(line: &[u8]) -> bool {
+    let mut start = 0;
 
-    for window in bytes.windows(4) {
-        if window[0] == b'\\' && window[1] == b'x' {
-            let high = window[2];
-            let low = window[3];
-            let high_is_8_plus = matches!(high, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F');
-            if high_is_8_plus && low.is_ascii_hexdigit() {
-                return true;
+    while start < line.len() {
+        let Some(open_idx) = line[start..].iter().position(|&byte| byte == b'/') else {
+            return false;
+        };
+        let slash_idx = start + open_idx;
+        if !looks_like_regex_open(line, slash_idx) {
+            start = slash_idx + 1;
+            continue;
+        }
+
+        let body_start = slash_idx + 1;
+        let mut idx = body_start;
+        let mut escaped = false;
+
+        while idx < line.len() {
+            let byte = line[idx];
+
+            if escaped {
+                escaped = false;
+                idx += 1;
+                continue;
             }
+
+            if byte == b'\\' {
+                escaped = true;
+                idx += 1;
+                continue;
+            }
+
+            if byte == b'/' {
+                if contains_non_utf8_hex_escape(&line[body_start..idx]) {
+                    return true;
+                }
+                start = idx + 1;
+                break;
+            }
+
+            idx += 1;
+        }
+
+        if idx >= line.len() {
+            return false;
         }
     }
 
     false
+}
+
+fn looks_like_regex_open(line: &[u8], slash_idx: usize) -> bool {
+    let prev = line[..slash_idx]
+        .iter()
+        .rfind(|&&byte| !byte.is_ascii_whitespace())
+        .copied();
+
+    !matches!(
+        prev,
+        Some(
+            b'a'..=b'z'
+            | b'A'..=b'Z'
+            | b'0'..=b'9'
+            | b'_'
+            | b')'
+            | b']'
+            | b'}'
+            | b'"'
+            | b'\''
+            | b'/',
+        )
+    )
+}
+
+fn contains_non_utf8_hex_escape(bytes: &[u8]) -> bool {
+    if bytes.len() < 4 {
+        return false;
+    }
+
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        if bytes[i] == b'\\' && bytes[i + 1] == b'x' {
+            let (high, low) = (bytes[i + 2], bytes[i + 3]);
+            if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() {
+                let byte = hex_pair_to_byte(high, low);
+                if byte >= 0x80 {
+                    let mut sequence = vec![byte];
+                    let mut j = i + 4;
+                    while j + 3 < bytes.len()
+                        && bytes[j] == b'\\'
+                        && bytes[j + 1] == b'x'
+                        && bytes[j + 2].is_ascii_hexdigit()
+                        && bytes[j + 3].is_ascii_hexdigit()
+                    {
+                        let next = hex_pair_to_byte(bytes[j + 2], bytes[j + 3]);
+                        if next < 0x80 {
+                            break;
+                        }
+                        sequence.push(next);
+                        j += 4;
+                    }
+                    if std::str::from_utf8(&sequence).is_err() {
+                        return true;
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn hex_pair_to_byte(high: u8, low: u8) -> u8 {
+    hex_digit_val(high) * 16 + hex_digit_val(low)
+}
+
+fn hex_digit_val(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => 0,
+    }
 }
 
 /// Check if a block corresponds to Parser's `:block` type (not `:itblock` or `:numblock`).
