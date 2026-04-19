@@ -2,6 +2,7 @@ use std::cell::RefCell;
 
 use regex::Regex;
 
+use crate::cop::shared::method_dispatch_predicates;
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{
     CALL_AND_WRITE_NODE, CALL_NODE, CALL_OPERATOR_WRITE_NODE, CALL_OR_WRITE_NODE, CASE_MATCH_NODE,
@@ -84,6 +85,14 @@ const ASSIGN_TO_CONDITION_MSG: &str = "Assign variables inside of conditionals."
 /// suppressed in full files even though RuboCop still flagged them.
 /// RuboCop also measures the resulting line length in characters, not UTF-8
 /// bytes, so multibyte branch text like `…` must not inflate the guard.
+///
+/// FN/FP fix (2026-04-19): RuboCop's whitespace-flexible assignment regex
+/// treats `inner=...`, `row+=...`, and aligned forms like `foo    = ...` as
+/// the same assignment LHS when checking line-length safety. Rust's
+/// `regex::escape` does not escape spaces, so nitrocop's earlier translation
+/// accidentally required exact spacing and suppressed real offenses. RuboCop
+/// also treats `===` like the other comparison sends here, but it does not
+/// treat safe-navigation (`&.` / `csend`) calls as assignment-like.
 ///
 /// Variant fix (2026-04-16): for `EnforcedStyle=assign_inside_condition`,
 /// `SingleLineConditionsOnly` uses RuboCop's raw branch deconstruction. That
@@ -776,6 +785,9 @@ fn get_assignment_value<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism:
     }
     // Call nodes: setter methods, []=, <<, comparisons
     if let Some(call) = node.as_call_node() {
+        if method_dispatch_predicates::is_safe_navigation(&call) {
+            return None;
+        }
         if is_assignment_type_call(call.name().as_slice()) {
             let args = call.arguments()?;
             return args.arguments().iter().last();
@@ -1232,6 +1244,9 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
     // RuboCop also treats shovel and comparison/operator sends as
     // assignment-like here.
     if let Some(call) = node.as_call_node() {
+        if method_dispatch_predicates::is_safe_navigation(&call) {
+            return None;
+        }
         let method = call.name().as_slice();
         // Check []= BEFORE is_setter_method — is_setter_method matches any
         // name ending with `=`, which includes `[]=`.  The generic setter path
@@ -1266,7 +1281,7 @@ fn get_assignment_info(node: &ruby_prism::Node<'_>) -> Option<AssignInfo> {
         // RuboCop's assignment_type? treats these as assignment-like.
         if matches!(
             method,
-            b"==" | b"!=" | b"<=" | b">=" | b"=~" | b"!~" | b"<=>" | b"<" | b">"
+            b"==" | b"===" | b"!=" | b"<=" | b">=" | b"=~" | b"!~" | b"<=>" | b"<" | b">"
         ) {
             let recv_src = receiver_source(call.receiver());
             let method_str = String::from_utf8_lossy(method);
@@ -1476,7 +1491,7 @@ fn exceeds_line_limit(
         Ok(s) => s,
         Err(_) => return false,
     };
-    let assignment_pattern = format!(r"\s*{}", regex::escape(lhs_text).replace(r"\ ", r"\s*"));
+    let assignment_pattern = format!(r"\s*{}", flexible_whitespace_regex(lhs_text));
     let assignment_regex = match Regex::new(&assignment_pattern) {
         Ok(regex) => regex,
         Err(_) => return false,
@@ -1493,6 +1508,29 @@ fn exceeds_line_limit(
         }
     }
     lhs_text.chars().count() + max_remaining > max_line_length
+}
+
+fn flexible_whitespace_regex(text: &str) -> String {
+    let mut pattern = String::new();
+    let mut saw_whitespace = false;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            saw_whitespace = true;
+            continue;
+        }
+        if saw_whitespace {
+            pattern.push_str(r"\s*");
+            saw_whitespace = false;
+        }
+        pattern.push_str(&regex::escape(&ch.to_string()));
+    }
+
+    if saw_whitespace {
+        pattern.push_str(r"\s*");
+    }
+
+    pattern
 }
 
 #[cfg(test)]

@@ -96,3 +96,8 @@ end
 
 # ternary with assignment whose correction would exceed line length should not be flagged
 (t.empty? || t == "y" || t == "yes" || t == "yeah") ? conf["env"]["testmode_enabled"] = true : conf["env"]["testmode_enabled"] = false
+
+# safe-navigation comparisons in ternary branches are not assignment-like for this cop
+def custom_start?
+  increment_by&.<(0) ? start_with&.!=(max_value) : start_with&.!=(min_value)
+end
