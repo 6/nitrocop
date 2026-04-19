@@ -350,3 +350,55 @@ end
 
 exec_resp = PWN::Plugins::MSR206.exec(
 ^ Lint/UselessAssignment: Useless assignment to variable - `exec_resp`.
+
+# Unused rescue capture in a complete rescue chain.
+def rescue_capture_unused
+  begin
+    work
+  rescue Timeout::Error => e
+                           ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+    handle_timeout
+  rescue StandardError => e
+    puts e.message
+  end
+end
+
+# Condition-only assignment is useless when the variable is not read in the body.
+def if_condition_assignment_only
+  if v = @options[:ban_except]
+     ^ Lint/UselessAssignment: Useless assignment to variable - `v`.
+    do_something
+  end
+end
+
+# FN fix: a normal `if` condition assignment overwrites the initializer before
+# any later read can consume it.
+def if_condition_overwrites_initializer(input)
+  origin = nil
+  ^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `origin`.
+  if origin = input
+    puts origin
+  end
+end
+
+# FN fix: `unless` condition assignments behave the same way.
+def unless_condition_overwrites_initializer
+  r = nil
+  ^ Lint/UselessAssignment: Useless assignment to variable - `r`.
+  unless r = @info[:db]
+    puts "fallback"
+  end
+  puts r
+end
+
+# FN fix: the initializer stays dead across later predicate assignments in an
+# `if`/`elsif` chain.
+def if_elsif_condition_overwrites_initializer(command)
+  output = ""
+  ^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `output`.
+  if (output = roll_tables(command, TABLES))
+    return output
+  elsif (output = roll_tables(command, A2Z_TABLES))
+    return output
+  end
+end

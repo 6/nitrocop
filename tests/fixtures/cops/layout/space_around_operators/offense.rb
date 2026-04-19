@@ -220,3 +220,17 @@ if justNameCharacters(params["first_names"]) and
                                               ^^^ Layout/SpaceAroundOperators: Operator `and` should be surrounded by a single space.
     municipalities.include?(params["occupancy_county"])
 end
+
+# Comparison operators in modifier conditions must not align with later operators on neighbor lines
+def finalize!
+  @become              = false                    if @become              != true
+                                                                          ^^ Layout/SpaceAroundOperators: Operator `!=` should be surrounded by a single space.
+  @become_user         = nil                      if @become_user         == UNSET_VALUE
+                                                                          ^^ Layout/SpaceAroundOperators: Operator `==` should be surrounded by a single space.
+end
+
+def retries_exceeded?
+  max_retries  = Setting.get_with_default('queue.max_retries', 0).to_i
+  max_retries  > 0 && self.retries >= max_retries
+               ^ Layout/SpaceAroundOperators: Operator `>` should be surrounded by a single space.
+end
