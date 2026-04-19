@@ -409,6 +409,16 @@ use crate::parse::source::SourceFile;
 ///   `rescue; (puts $!; nil)`, and `(v.close; true) if cond` stay accepted, while top-level and
 ///   method-body forms like `(1; 2)` and `def x; (foo; bar); end` still report. nitrocop had
 ///   approximated this from the last expression, which produced the remaining corpus FPs.
+///
+/// ## Investigation findings (2026-04-19)
+///
+/// ### FP root causes fixed:
+/// - **Multi-statement groups in non-begin ancestors:** RuboCop accepts grouped statement
+///   arguments like `%( (foo; bar) )` and `Namespaces.new((SP!; namespace), ...)` because
+///   `allowed_multiple_expression?` keys off the first real ancestor, not the first inner
+///   statement. nitrocop still fell through to method-call detection for these shapes. The
+///   multi-statement path now mirrors that ancestor check, while still rejecting top-level,
+///   `begin`, `def`, `block`, and nested-parentheses forms like `m ((0; 1))`.
 pub struct RedundantParentheses;
 
 impl Cop for RedundantParentheses {
@@ -504,6 +514,7 @@ struct ParentInfo {
     kind: ParentKind,
     multiline: bool,
     single_child: bool,
+    is_begin_node: bool,
     is_statements_node: bool,
     is_interpolated_string_node: bool,
     is_interpolated_regexp_node: bool,
@@ -595,7 +606,8 @@ impl RedundantParensVisitor<'_> {
                 self.add_offense(node, msg);
             } else if let Some(msg) = self.check_nested_multiple_statement_parens(&inner_nodes) {
                 self.add_offense(node, msg);
-            } else if !begins_its_line(self.source, node.location().start_offset())
+            } else if self.has_allowed_multiple_expression_ancestor()
+                || !begins_its_line(self.source, node.location().start_offset())
                 || self.has_ternary_ancestor()
                 || self.is_parent_statements_conditional_body()
                 || inner_nodes.first().is_some_and(|first| {
@@ -1242,6 +1254,28 @@ impl RedundantParensVisitor<'_> {
         false
     }
 
+    /// RuboCop's `allowed_multiple_expression?` allows multi-statement parens when the
+    /// first real ancestor is not a `begin`, `def`, or `block`. Prism inserts extra
+    /// `StatementsNode` wrappers, so skip those while keeping outer parentheses as the
+    /// equivalent of Parser's `begin` ancestor.
+    fn has_allowed_multiple_expression_ancestor(&self) -> bool {
+        for i in (0..self.parent_stack.len().saturating_sub(1)).rev() {
+            let info = &self.parent_stack[i];
+
+            if info.is_statements_node {
+                continue;
+            }
+
+            if info.is_parentheses_node || info.is_begin_node {
+                return false;
+            }
+
+            return !matches!(info.kind, ParentKind::Def | ParentKind::Block);
+        }
+
+        false
+    }
+
     fn is_endless_def_body_parent(&self) -> bool {
         if self.parent_stack.len() < 3 {
             return false;
@@ -1673,6 +1707,7 @@ impl RedundantParensVisitor<'_> {
             kind,
             multiline: false,
             single_child: false,
+            is_begin_node: false,
             is_statements_node: false,
             is_interpolated_string_node: false,
             is_interpolated_regexp_node: false,
@@ -2559,6 +2594,13 @@ impl<'pr> Visit<'pr> for RedundantParensVisitor<'_> {
         self.check_parens(node);
         // enter already pushed; leave will pop
         ruby_prism::visit_parentheses_node(self, node);
+    }
+
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        if let Some(top) = self.parent_stack.last_mut() {
+            top.is_begin_node = true;
+        }
+        ruby_prism::visit_begin_node(self, node);
     }
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
