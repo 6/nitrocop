@@ -1054,9 +1054,19 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let location = node.location();
         let parent_id = Self::branch_parent_id(&location);
         // `case` targets are always evaluated before any clause runs, so
-        // assignments inside them are unbranched like RuboCop's target branch.
+        // assignments inside them are unbranched for liveness purposes. Bump
+        // branch_depth without a context so ShadowedArgument's
+        // `current_shadowing_in_branch` still treats a predicate assignment
+        // like `case value = super` as conditional.
         if let Some(pred) = node.predicate() {
+            let pred_has_write = predicate_has_lvar_write(&pred);
+            if pred_has_write {
+                self.branch_depth += 1;
+            }
             self.visit(&pred);
+            if pred_has_write {
+                self.branch_depth -= 1;
+            }
         }
         self.branch_depth += 1;
         for (i, condition) in node.conditions().iter().enumerate() {
@@ -1103,7 +1113,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let location = node.location();
         let parent_id = Self::branch_parent_id(&location);
         if let Some(pred) = node.predicate() {
+            let pred_has_write = predicate_has_lvar_write(&pred);
+            if pred_has_write {
+                self.branch_depth += 1;
+            }
             self.visit(&pred);
+            if pred_has_write {
+                self.branch_depth -= 1;
+            }
         }
         self.branch_depth += 1;
         for (i, condition) in node.conditions().iter().enumerate() {
