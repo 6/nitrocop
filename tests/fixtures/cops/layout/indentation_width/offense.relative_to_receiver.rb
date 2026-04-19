@@ -1,4 +1,4 @@
-# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable
+# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable, DefEndAlignmentStyle: def
 module Wrapper
   def language_link(language, label = nil)
     language = if language.respond_to? :map
@@ -47,4 +47,15 @@ end
 class ::Class
     public :include
 ^^^^ Layout/IndentationWidth: Use 1 (not 2) tabs for indentation.
+end
+
+# Adjacent defs with non-access modifiers still use the def column under tabs
+# style, so the first body line is checked instead of being dropped.
+class Example
+	private_class_method def self.method_added(method_name)
+		if method_name == :view_template
+^^ Layout/IndentationWidth: Use 1 (not 0) tabs for indentation.
+			body
+		end
+	end
 end

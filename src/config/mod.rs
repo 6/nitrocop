@@ -2356,6 +2356,7 @@ impl ResolvedConfig {
             name,
             "Style/IfUnlessModifier"
                 | "Style/WhileUntilModifier"
+                | "Style/ConditionalAssignment"
                 | "Style/GuardClause"
                 | "Style/SoleNestedConditional"
                 | "Style/MultilineMethodSignature"
@@ -2474,6 +2475,16 @@ impl ResolvedConfig {
                 .options
                 .entry("IndentationStyleEnforced".to_string())
                 .or_insert_with(|| Value::String(indentation_style.to_string()));
+
+            let def_end_alignment_config = self.cop_configs.get("Layout/DefEndAlignment");
+            let def_end_alignment_style = def_end_alignment_config
+                .and_then(|cc| cc.options.get("EnforcedStyleAlignWith"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("start_of_line");
+            config
+                .options
+                .entry("DefEndAlignmentStyle".to_string())
+                .or_insert_with(|| Value::String(def_end_alignment_style.to_string()));
         }
         // Inject Layout/SpaceInsideHashLiteralBraces EnforcedStyle for Layout/SpaceAfterComma
         // (mirrors RuboCop's `space_forbidden_before_rcurly?` which reads the sibling cop's style)
@@ -3411,6 +3422,27 @@ mod tests {
         let cc = config.cop_config("Layout/LineLength");
         assert_eq!(cc.options.get("Max").and_then(|v| v.as_u64()), Some(120));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn conditional_assignment_inherits_layout_line_length_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            temp_dir.path(),
+            "Layout/LineLength:\n  Enabled: false\n  Max: 140\n",
+        );
+        let config = load_config(Some(&path), None, None).unwrap();
+        let cc = config.cop_config("Style/ConditionalAssignment");
+        assert_eq!(
+            cc.options.get("MaxLineLength").and_then(|v| v.as_u64()),
+            Some(140)
+        );
+        assert_eq!(
+            cc.options
+                .get("LineLengthEnabled")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]

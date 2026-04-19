@@ -227,3 +227,61 @@ module ScumblrTask
     end
   end
 end
+
+# FN: local variable assignment without spaces around `=` should still be flagged
+def to_debug_string
+  t=super+(as_list.named? ? "named":"")
+  if @payload.named?
+  ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+    inner="{"+@payload.size.times.map {|i| "#{@payload.names[i]}=#{@payload.data[i].to_debug_string}"}.join(",")+"}"
+  else
+    inner="{"+@payload.size.times.map {|i| "#{@payload.data[i].to_debug_string}"}.join(",")+"}"
+  end
+  t+inner
+end
+
+# FN: operator writes with no surrounding spaces should still be flagged
+def report_building
+  @ds.fields.each do |f|
+    row=["#{@ds[f].name}(#{f})"]
+    if sid[f]
+    ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+      row+= [sprintf("%0.5f",sid[f][:mean]), sprintf("%0.5f",sid[f][:variance_sample]), sprintf("%0.5f",sid[f][:sds])]
+    else
+      row+=%w{- - -}
+    end
+  end
+end
+
+# FN: `===` comparisons inside if branches should be treated as assignment-like
+def find(opts = {})
+  warnings.select do |w|
+    opts.all? do |k,v|
+      if k == :relative_path
+      ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+        v === w.file.relative
+      else
+        v === w.send(k)
+      end
+    end
+  end
+end
+
+# FN: ternary branches using `===` should also be flagged
+def internal_receive
+  rules_matcher  = Or[*@behaviour.map(&:first)]
+  matcher        = -> m { m.is_a?(Ask) ? rules_matcher === m.message : rules_matcher === m }
+                          ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+end
+
+# FN: multiline single-statement branch assignments should still be flagged
+def to_hash(for_app_config=false)
+  if for_app_config
+  ^ Style/ConditionalAssignment: Use the return of the conditional for variable assignment and comparison.
+    slave_data = active_slave_weights.map {|db, weight| {"host" => db.to_s, "weight" => weight}}
+  else
+    slave_data =  active_slave_weights.map {|db, weight| {"host" => db.to_s, "weight" => weight, "role" => "ACTIVE_SLAVE"}} +
+                  standby_slaves.map {|db| {"host" => db.to_s, "role" => "STANDBY_SLAVE"}} +
+                  backup_slaves.map {|db| {"host" => db.to_s, "role" => "BACKUP_SLAVE"}}
+  end
+end

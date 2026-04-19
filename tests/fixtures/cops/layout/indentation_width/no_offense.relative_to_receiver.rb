@@ -1,4 +1,4 @@
-# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable
+# nitrocop-config: EnforcedStyleAlignWith: relative_to_receiver, IndentationStyleEnforced: tabs, IndentationConsistencyStyle: indented_internal_methods, AccessModifierIndentationStyle: outdent, EndAlignmentStyle: variable, DefEndAlignmentStyle: def
 class Manager
 
     private :load, :available
@@ -45,6 +45,16 @@ process((if ready?
            fallback_value
          end))
 
+# `if` expressions used as hash-pair values are dropped under tabs style when
+# RuboCop crashes while computing the offense range.
+OT.ld 'x', {
+  source: if env_key
+  'ENV'
+  else
+  (config_key ? 'config' : 'none')
+  end,
+}
+
 # RuboCop skips indented_internal_methods handling for class_eval blocks nested
 # inside a method body.
 def wrapper(base)
@@ -78,4 +88,48 @@ module Authentication
       body
     end
   end
+end
+
+# RuboCop does not apply indented_internal_methods handling when a class/module
+# body is wrapped in a top-level rescue node.
+module Outer
+  module WithJson
+    def json
+      json!
+    rescue StandardError
+      nil
+    end
+
+    private
+
+    def raw_text
+      body
+    end
+  rescue StandardError
+    []
+  end
+end
+
+# Adjacent-def modifiers use `Layout/DefEndAlignment: def` as their base.
+class Highlight
+  private_class_method def self.parse_cgi(str)
+        pairs = URI.decode_www_form(str).map { |k, v| [k.to_sym, v] }
+        Hash[pairs]
+      end
+end
+
+class Cli
+  private_class_method def self.normalize_syntax(argv)
+      out = []
+      argv.each do |arg|
+        case arg
+        when /^(--\w+)=(.*)$/
+          out << $1 << $2
+        when /^(-\w)(.+)$/
+          out << $1 << $2
+        else
+          out << arg
+        end
+      end
+    end
 end
