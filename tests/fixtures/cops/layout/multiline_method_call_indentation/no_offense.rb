@@ -53,6 +53,23 @@ expect(subject)
   .to receive(:method)
   .and_return(value)
 
+# Trailing-dot matcher chain inside a non-parenthesized argument keeps the
+# outer expectation indentation, not the inner `receive(...).with(...)` chain.
+before do
+  expect_any_instance_of(Postmark::ApiClient).
+    to receive(:get_template).with(message.template_alias).
+    and_return(template_response)
+end
+
+# Trailing-dot matcher chain with nested `and change` clauses keeps the
+# outer `expect { ... }.` indentation across matcher arguments.
+it 'works' do
+  expect { rendering }.
+    to change { message.subject }.to(render_response[:subject][:rendered_content]).
+    and change { message.body_text }.to(render_response[:text_body][:rendered_content]).
+    and change { message.body_html }.to(render_response[:html_body][:rendered_content])
+end
+
 result =
   Foo
   .where(active: true)

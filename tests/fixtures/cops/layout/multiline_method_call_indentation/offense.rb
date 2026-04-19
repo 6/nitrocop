@@ -116,3 +116,12 @@ before do
                                               .and_return(76_561_198_307_874_162)
                                               ^^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 44) spaces for indentation of a chained method call.
 end
+
+# A later continuation should not reuse an earlier column that was only valid
+# because its receiver had a single-line block.
+def household_size_options
+  (0..10).map { |i| i }
+         .unshift([t('common.prefer_not_to_answer'), -1])
+         .unshift([nil, nil])
+         ^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 7) spaces for indentation of a chained method call.
+end
