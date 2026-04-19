@@ -391,15 +391,15 @@ impl ShadowingContext {
         if let Some(block_branch) = block_branch {
             if !is_nested_in_expression && !has_block_boundary {
                 if let Some((outer_cond, outer_branch)) = outer_info.conditional_branch {
-                    if outer_cond == block_branch.0 && outer_branch != block_branch.1 {
-                        if block_single_stmt
+                    if outer_cond == block_branch.0
+                        && outer_branch != block_branch.1
+                        && (block_single_stmt
                             || self.innermost_block_is_statement_level_child_of_cond(
                                 param_offset,
                                 outer_cond,
-                            )
-                        {
-                            return true;
-                        }
+                            ))
+                    {
+                        return true;
                     }
                 }
             }
