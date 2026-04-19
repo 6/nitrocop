@@ -286,6 +286,18 @@ use ruby_prism::Visit;
 /// - plain regexp literals on the left side of `=~` are also accepted without
 ///   spacing (`assert(/Fred/=~xml)`), but RuboCop still flags `/.../!~expr`
 ///   and interpolated regexp receivers like `/#{foo}/=~x`.
+///
+/// ## Corpus fix (2026-04-19, rational literals and `$=`)
+///
+/// Two more false-positive buckets required narrower matching:
+/// - RuboCop only exempts structural `(int) / (rational)` sends such as
+///   `5 / 3r`; generic expressions like `a * b / 42r` still follow the
+///   configured rational-literal style. The previous byte-based check treated
+///   every `/ ...r` as a rational literal and diverged on integer/rational
+///   literal forms.
+/// - The predefined global `$=` is a variable name, not an operator token.
+///   The text scanner was interpreting the `=` inside `$=` as a standalone
+///   operator and reporting missing-space offenses on reads and writes.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -584,6 +596,12 @@ impl Cop for SpaceAroundOperators {
                 // Skip ==
                 if i + 1 < len && bytes[i + 1] == b'=' {
                     i += 2;
+                    continue;
+                }
+                // Skip the predefined global variable `$=` — the `=` is part of
+                // the variable name, not an operator token.
+                if i > 0 && bytes[i - 1] == b'$' {
+                    i += 1;
                     continue;
                 }
                 // Skip if preceded by !, <, >, =, +, -, *, /, %, &, |, ^, ~
@@ -1324,7 +1342,7 @@ fn find_assignment_aligned_in_direction(
                     relevant_indent_at_level = true;
                     let abs_start = line_starts[check_idx];
                     if let Some(first_end_col) =
-                        first_assignment_operator_end_char_col(line_bytes, abs_start, code_map)
+                        first_assignment_alignment_end_char_col(line_bytes, abs_start, code_map)
                     {
                         return Some(first_end_col == char_end_col);
                     }
@@ -1399,6 +1417,24 @@ fn first_assignment_operator_end_char_col(
         return Some(bytes_to_char_col(line, i + 1));
     }
     None
+}
+
+/// Return the character end column of the first alignment token on a line that
+/// also contains a plain/compound assignment `=` token somewhere on that line.
+///
+/// RuboCop's plain-assignment alignment first filters candidate neighbor lines
+/// through `assignment_tokens` (lines that contain an equal-sign assignment),
+/// then checks alignment against the first eligible alignment token on that
+/// line via `aligned_equals_operator?`, which can be `<<` as well as `=`, `==`,
+/// `+=`, etc.
+fn first_assignment_alignment_end_char_col(
+    line: &[u8],
+    line_abs_start: usize,
+    code_map: &CodeMap,
+) -> Option<usize> {
+    first_assignment_operator_end_char_col(line, line_abs_start, code_map)?;
+    first_alignment_token_on_line(line, line_abs_start, code_map)
+        .map(|(_, end_char_col)| end_char_col)
 }
 
 fn is_aligned_rhs_standalone(source: &SourceFile, start: usize, token_match: bool) -> bool {
@@ -1627,15 +1663,6 @@ impl OperatorChecker<'_> {
             return;
         }
 
-        // Skip / for rational literals when rational style is no_space
-        // (rational no-space offenses handled separately)
-        if op_str == "/" && self.rational_no_space {
-            // Check if the right operand is a rational literal (ends with 'r')
-            if self.is_rational_division(end) {
-                return;
-            }
-        }
-
         let has_space_before = is_operator_at_line_start(bytes, start)
             || (start > 0 && (bytes[start - 1] == b' ' || bytes[start - 1] == b'\t'));
         let has_space_after = end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t');
@@ -1644,10 +1671,8 @@ impl OperatorChecker<'_> {
         // Accept tabs as spacing (RuboCop: "accepts operator surrounded by tabs")
         if has_space_before && (has_space_after || newline_after) {
             // Check for multiple spaces (extra whitespace before or after operator)
-            let multi_space_before =
-                start >= 2 && bytes[start - 1] == b' ' && bytes[start - 2] == b' ';
-            let multi_space_after =
-                end + 1 < bytes.len() && bytes[end] == b' ' && bytes[end + 1] == b' ';
+            let multi_space_before = has_excessive_leading_space(bytes, start);
+            let multi_space_after = has_excessive_trailing_space(bytes, end);
 
             if multi_space_before || multi_space_after {
                 self.check_extra_space(
@@ -1868,24 +1893,25 @@ impl OperatorChecker<'_> {
         }
     }
 
-    /// Check if the bytes after a `/` operator indicate a rational literal
-    /// (a number immediately followed by 'r').
-    fn is_rational_division(&self, slash_end: usize) -> bool {
-        let bytes = self.source.as_bytes();
-        let mut i = slash_end;
-        // Skip spaces after /
-        while i < bytes.len() && bytes[i] == b' ' {
-            i += 1;
-        }
-        // Look for digits followed by 'r'
-        let digit_start = i;
-        while i < bytes.len() && bytes[i].is_ascii_digit() {
-            i += 1;
-        }
-        if i > digit_start && i < bytes.len() && bytes[i] == b'r' {
-            return true;
-        }
-        false
+    fn slash_has_rational_argument(&self, node: &ruby_prism::CallNode<'_>) -> bool {
+        let Some(arguments) = node.arguments() else {
+            return false;
+        };
+        let mut args = arguments.arguments().iter();
+        let Some(first) = args.next() else {
+            return false;
+        };
+        first.as_rational_node().is_some() && args.next().is_none()
+    }
+
+    /// RuboCop's `RationalLiteral` mixin only exempts structural `(int) / (rational)`
+    /// sends from normal operator spacing checks.
+    fn is_rational_literal_call(&self, node: &ruby_prism::CallNode<'_>) -> bool {
+        node.name().as_slice() == b"/"
+            && node
+                .receiver()
+                .is_some_and(|receiver| receiver.as_integer_node().is_some())
+            && self.slash_has_rational_argument(node)
     }
 }
 
@@ -1917,6 +1943,11 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
 
         let name = node.name().as_slice();
 
+        if self.is_rational_literal_call(node) {
+            ruby_prism::visit_call_node(self, node);
+            return;
+        }
+
         if name == b"=~"
             && node
                 .receiver()
@@ -1940,7 +1971,7 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                 let should_have_no_space = (op_bytes == b"**" && self.exponent_no_space)
                     || (op_bytes == b"/"
                         && self.rational_no_space
-                        && self.is_rational_division(msg_loc.end_offset()));
+                        && self.slash_has_rational_argument(node));
                 if should_have_no_space {
                     self.check_no_space_operator(&msg_loc);
                 } else {
