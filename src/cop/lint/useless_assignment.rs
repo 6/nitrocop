@@ -49,16 +49,16 @@ use crate::parse::source::SourceFile;
 /// useless. Fixed by collecting all pattern match target offsets from the
 /// AST and skipping those offsets during offense emission.
 ///
-/// ## FP fix: rescue body assignments read in handlers (2026-04-11)
+/// ## FN fix: stale rescue-body suppression removed (2026-04-19)
 ///
-/// Assignments in begin/rescue/ensure bodies are not useless when the variable
-/// is read in the rescue or ensure handler — if a later overwrite raises, the
-/// handler reads the earlier value. The previous suppression required
-/// `captured_by_block` to be true, which missed the common case of a plain
-/// variable (no block capture) read in a rescue/ensure handler (e.g.,
-/// `code = X; code = Y; rescue; Result.new(code:); end`). Fixed by making the
-/// suppression name-aware: collect variable names read in rescue/ensure handlers
-/// and suppress body writes for those names, regardless of block capture.
+/// Before the rescue/ensure branch model landed in VariableForce, this wrapper
+/// kept begin-body writes alive whenever a rescue or ensure handler mentioned
+/// the same variable name. After the engine started modeling those branches
+/// directly, the wrapper became too broad and hid real offenses where the
+/// handler immediately redefined the variable before any read, e.g.
+/// `line = __LINE__; raise; rescue => err; file, line = err.source; ...`.
+/// The post-filter is gone now; rescue/ensure liveness comes from the engine's
+/// branch metadata instead of a name-only fallback.
 ///
 /// ## FN fix: live branch contexts during traversal (2026-04-16)
 ///
@@ -115,7 +115,6 @@ impl Cop for UselessAssignment {
         let pattern_match_offsets = collect_pattern_match_target_offsets(parse_result);
         let or_condition_offsets = collect_or_condition_write_offsets(parse_result);
         let do_while_body_offsets = collect_do_while_body_write_offsets(parse_result);
-        let rescue_body_write_offsets = collect_rescue_body_write_offsets(parse_result);
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
         let mut rescue_modifier_offsets = rescue_modifier_collector.offsets;
@@ -136,19 +135,10 @@ impl Cop for UselessAssignment {
             let emit = if conditional_operator_offsets.contains(&candidate.node_offset) {
                 true
             } else if !candidate.engine_used {
-                // Suppress if inside rescue body and variable is read in
-                // rescue/ensure handler: RuboCop's VF branch model makes
-                // rescue-body references reach earlier assignments, keeping
-                // them alive. Our VF engine doesn't model rescue branches,
-                // so we suppress these in post-processing.
-                if rescue_body_write_offsets.contains(&candidate.node_offset) {
-                    false
-                } else {
-                    !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
-                        && !or_condition_offsets.contains(&candidate.node_offset)
-                        && !do_while_body_offsets.contains(&candidate.node_offset)
-                        && !rescue_modifier_offsets.contains(&candidate.node_offset)
-                }
+                !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
+                    && !or_condition_offsets.contains(&candidate.node_offset)
+                    && !do_while_body_offsets.contains(&candidate.node_offset)
+                    && !rescue_modifier_offsets.contains(&candidate.node_offset)
             } else {
                 false
             };
@@ -697,146 +687,6 @@ impl<'pr> Visit<'pr> for DoWhileBodyWriteCollector {
             node.is_begin_modifier(),
         );
         ruby_prism::visit_while_node(self, node);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FP suppression: assignments inside begin/rescue bodies
-// ---------------------------------------------------------------------------
-//
-// RuboCop's VF branch model creates branches for begin/rescue, making the
-// reference walk reach earlier assignments in the rescue-able body. Our VF
-// engine treats the body as unbranched, so assignments overwritten before the
-// rescue handler look dead even though the handler could read the earlier value.
-//
-// We suppress rescue-body writes when the same variable is read in the
-// rescue/ensure handlers of the same begin block. This matches RuboCop's
-// implicit reachability across the begin/rescue branch boundary.
-
-struct RescueBodyInfo {
-    /// Variable names (with offsets) of writes in the begin body.
-    write_names: Vec<(Vec<u8>, usize)>,
-    /// Variable names read in rescue/ensure handlers.
-    handler_read_names: HashSet<Vec<u8>>,
-}
-
-fn collect_rescue_body_write_offsets(parse_result: &ruby_prism::ParseResult<'_>) -> HashSet<usize> {
-    let mut collector = RescueBodyWriteCollector::default();
-    collector.visit(&parse_result.node());
-
-    // Build the final offset set: only include writes for variables that
-    // are actually read in the rescue/ensure handlers of the same begin block.
-    let mut offsets = HashSet::new();
-    for info in &collector.begin_blocks {
-        for (name, offset) in &info.write_names {
-            if info.handler_read_names.contains(name) {
-                offsets.insert(*offset);
-            }
-        }
-    }
-    offsets
-}
-
-#[derive(Default)]
-struct RescueBodyWriteCollector {
-    begin_blocks: Vec<RescueBodyInfo>,
-    in_rescue_body: bool,
-    in_handler: bool,
-    current_begin_idx: Option<usize>,
-}
-
-impl<'pr> Visit<'pr> for RescueBodyWriteCollector {
-    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
-        if node.rescue_clause().is_some() || node.ensure_clause().is_some() {
-            let idx = self.begin_blocks.len();
-            self.begin_blocks.push(RescueBodyInfo {
-                write_names: Vec::new(),
-                handler_read_names: HashSet::new(),
-            });
-
-            // Visit body as rescue-able
-            let prev_body = self.in_rescue_body;
-            let prev_idx = self.current_begin_idx;
-            self.in_rescue_body = true;
-            self.current_begin_idx = Some(idx);
-            if let Some(stmts) = node.statements() {
-                for stmt in stmts.body().iter() {
-                    self.visit(&stmt);
-                }
-            }
-            self.in_rescue_body = prev_body;
-
-            // Visit rescue/else/ensure as handler context
-            let prev_handler = self.in_handler;
-            self.in_handler = true;
-            let mut current_rescue = node.rescue_clause();
-            while let Some(rescue) = current_rescue {
-                for exception in rescue.exceptions().iter() {
-                    self.visit(&exception);
-                }
-                if let Some(reference) = rescue.reference() {
-                    self.visit(&reference);
-                }
-                if let Some(stmts) = rescue.statements() {
-                    for stmt in stmts.body().iter() {
-                        self.visit(&stmt);
-                    }
-                }
-                current_rescue = rescue.subsequent();
-            }
-            if let Some(else_clause) = node.else_clause() {
-                if let Some(stmts) = else_clause.statements() {
-                    for stmt in stmts.body().iter() {
-                        self.visit(&stmt);
-                    }
-                }
-            }
-            if let Some(ensure) = node.ensure_clause() {
-                if let Some(stmts) = ensure.statements() {
-                    for stmt in stmts.body().iter() {
-                        self.visit(&stmt);
-                    }
-                }
-            }
-            self.in_handler = prev_handler;
-            self.current_begin_idx = prev_idx;
-        } else {
-            ruby_prism::visit_begin_node(self, node);
-        }
-    }
-
-    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
-        if self.in_rescue_body {
-            if let Some(idx) = self.current_begin_idx {
-                let offset = node.location().start_offset();
-                let name = node.name().as_slice().to_vec();
-                self.begin_blocks[idx].write_names.push((name, offset));
-            }
-        }
-        ruby_prism::visit_local_variable_write_node(self, node);
-    }
-
-    fn visit_local_variable_target_node(
-        &mut self,
-        node: &ruby_prism::LocalVariableTargetNode<'pr>,
-    ) {
-        if self.in_rescue_body {
-            if let Some(idx) = self.current_begin_idx {
-                let offset = node.location().start_offset();
-                let name = node.name().as_slice().to_vec();
-                self.begin_blocks[idx].write_names.push((name, offset));
-            }
-        }
-    }
-
-    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
-        if self.in_handler {
-            if let Some(idx) = self.current_begin_idx {
-                self.begin_blocks[idx]
-                    .handler_read_names
-                    .insert(node.name().as_slice().to_vec());
-            }
-        }
     }
 }
 
