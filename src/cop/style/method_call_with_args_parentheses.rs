@@ -255,6 +255,25 @@ use crate::parse::source::SourceFile;
 /// `AlchemyCMS/alchemy_cms/app/components/alchemy/admin/tags_list.rb:26`
 /// (FN) and a simple `foo.bar { baz(x) }` (must flag baz) before changing
 /// parent tracking.
+///
+/// ## Variant fix (2026-04-17)
+///
+/// The remaining `omit_parentheses` false positives came from two narrow
+/// Parser-vs-Prism parent mismatches:
+///
+/// 1. Nested calls inside `super(...)` arguments were still treated as plain
+///    top-level calls because Prism's `SuperNode` children were not visited
+///    with any omit-parentheses parent context. RuboCop sees the direct parent
+///    as `super`, which makes calls like `errors.local_attribute(attribute)` a
+///    legitimate parenthesized argument.
+///
+/// 2. `call_in_argument_with_block?` depends on a DIRECT `block` parent whose
+///    own parent is call-like. Prism traversal was only tracking the enclosing
+///    call parent, so it still flagged parenthesized calls in single-statement
+///    block bodies such as `run_callbacks(:execute) do execute end` when that
+///    block expression was used as a setter RHS or chained receiver. Fixed by
+///    modeling only the direct single-statement block body parent, which keeps
+///    `foo.bar { baz(x) }` as an offense while allowing `foo.bar { baz(x) }.qux`.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -339,10 +358,13 @@ enum ParentKind {
     When,
     WhenBody,
     MatchPattern,
+    Super,
+    CallAssignedRhs,
     Assignment,
     Conditional,
     ConditionalBody,
     ClassConstructor,
+    CallLikeBlockBody,
     ConstantPath,
     Grouped,
     FlowControl,
@@ -447,6 +469,25 @@ impl ParenVisitor<'_> {
         self.parent_stack.last().copied()
     }
 
+    fn direct_call_like_parent(&self) -> bool {
+        matches!(
+            self.immediate_parent(),
+            Some(ParentKind::Call | ParentKind::ClassConstructor | ParentKind::Super)
+        )
+    }
+
+    fn block_parent_is_call_like(&self) -> bool {
+        matches!(
+            self.immediate_parent(),
+            Some(
+                ParentKind::Call
+                    | ParentKind::ClassConstructor
+                    | ParentKind::Super
+                    | ParentKind::CallAssignedRhs
+            )
+        )
+    }
+
     fn in_non_last_expression(&self) -> bool {
         self.non_last_expression_depth > 0
     }
@@ -468,6 +509,7 @@ impl ParenVisitor<'_> {
                 kind,
                 ParentKind::TernaryBranch
                     | ParentKind::ClassConstructor
+                    | ParentKind::CallLikeBlockBody
                     | ParentKind::Grouped
                     | ParentKind::ConditionalBody
                     | ParentKind::WhenBody
@@ -505,6 +547,22 @@ impl ParenVisitor<'_> {
             if is_not_last {
                 self.non_last_expression_depth -= 1;
             }
+        }
+    }
+
+    fn visit_node_with_parent<'pr>(
+        &mut self,
+        node: &ruby_prism::Node<'pr>,
+        parent_kind: ParentKind,
+    ) {
+        if let Some(stmts) = node.as_statements_node() {
+            self.visit_statements_with_parent(&stmts, parent_kind);
+        } else if node.as_begin_node().is_none() {
+            self.parent_stack.push(parent_kind);
+            self.visit(node);
+            self.parent_stack.pop();
+        } else {
+            self.visit(node);
         }
     }
 
@@ -797,11 +855,15 @@ impl ParenVisitor<'_> {
     }
 
     fn call_in_argument_with_block(&self, _call: &ruby_prism::CallNode<'_>) -> bool {
-        false
+        (self.immediate_parent() == Some(ParentKind::CallLikeBlockBody) && _call.block().is_none())
+            || (_call
+                .block()
+                .is_some_and(|block| block.as_block_node().is_some())
+                && self.block_parent_is_call_like())
     }
 
     fn call_as_argument_or_chain(&self) -> bool {
-        matches!(self.immediate_parent(), Some(ParentKind::Call))
+        self.direct_call_like_parent()
     }
 
     fn call_has_block_pass(&self, call: &ruby_prism::CallNode<'_>) -> bool {
@@ -915,7 +977,7 @@ impl ParenVisitor<'_> {
         if self.parent_stack.len() >= 2 {
             let parent = self.parent_stack[self.parent_stack.len() - 1];
             let grandparent = self.parent_stack[self.parent_stack.len() - 2];
-            if parent == ParentKind::Assignment
+            if matches!(parent, ParentKind::Assignment | ParentKind::CallAssignedRhs)
                 && matches!(
                     grandparent,
                     ParentKind::Conditional
@@ -1174,7 +1236,14 @@ fn call_child_parent_kind(
 ) -> ParentKind {
     if let Some(equal_loc) = call.equal_loc() {
         if child_start_offset > equal_loc.start_offset() {
-            return ParentKind::Assignment;
+            return if matches!(
+                default_parent,
+                ParentKind::Call | ParentKind::ClassConstructor
+            ) {
+                ParentKind::CallAssignedRhs
+            } else {
+                ParentKind::Assignment
+            };
         }
     }
 
@@ -1365,7 +1434,16 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     // ordinary call-attached blocks only keep macro scope when
                     // the whole block expression is itself in macro scope.
                     let child_scope = self.call_block_child_scope();
-                    let leaked_parent = if self.immediate_parent() == Some(ParentKind::Call) {
+                    let block_parent_is_call_like = self.block_parent_is_call_like();
+                    let leaked_parent = if matches!(
+                        self.immediate_parent(),
+                        Some(
+                            ParentKind::Call
+                                | ParentKind::ClassConstructor
+                                | ParentKind::CallAssignedRhs
+                                | ParentKind::Super
+                        )
+                    ) {
                         self.parent_stack.pop()
                     } else {
                         None
@@ -1375,7 +1453,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                         self.visit(&params);
                     }
                     if let Some(body) = block_node.body() {
-                        self.visit(&body);
+                        if block_parent_is_call_like {
+                            self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
+                        } else {
+                            self.visit(&body);
+                        }
                     }
                     self.pop_scope();
                     if let Some(parent) = leaked_parent {
@@ -1465,7 +1547,16 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // (`expect do ... end.to ...`), the surrounding `Call` would
         // otherwise leak into the body and make inner calls look like chained
         // arguments.
-        let leaked_parent = if self.immediate_parent() == Some(ParentKind::Call) {
+        let block_parent_is_call_like = self.block_parent_is_call_like();
+        let leaked_parent = if matches!(
+            self.immediate_parent(),
+            Some(
+                ParentKind::Call
+                    | ParentKind::ClassConstructor
+                    | ParentKind::CallAssignedRhs
+                    | ParentKind::Super
+            )
+        ) {
             self.parent_stack.pop()
         } else {
             None
@@ -1477,7 +1568,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.visit(&params);
         }
         if let Some(body) = node.body() {
-            self.visit(&body);
+            if block_parent_is_call_like {
+                self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
+            } else {
+                self.visit(&body);
+            }
         }
         self.pop_scope();
 
@@ -1519,6 +1614,57 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                 self.visit(&arg);
             }
             self.parent_stack.pop();
+        }
+    }
+
+    fn visit_super_node(&mut self, node: &ruby_prism::SuperNode<'pr>) {
+        if let Some(args) = node.arguments() {
+            self.parent_stack.push(ParentKind::Super);
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+            self.parent_stack.pop();
+        }
+
+        if let Some(block) = node.block() {
+            if let Some(block_node) = block.as_block_node() {
+                let child_scope = self.call_block_child_scope();
+                let block_parent_is_call_like = self.block_parent_is_call_like();
+                let leaked_parent = if matches!(
+                    self.immediate_parent(),
+                    Some(
+                        ParentKind::Call
+                            | ParentKind::ClassConstructor
+                            | ParentKind::CallAssignedRhs
+                            | ParentKind::Super
+                    )
+                ) {
+                    self.parent_stack.pop()
+                } else {
+                    None
+                };
+
+                self.push_macro_scope(child_scope);
+                if let Some(params) = block_node.parameters() {
+                    self.visit(&params);
+                }
+                if let Some(body) = block_node.body() {
+                    if block_parent_is_call_like {
+                        self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
+                    } else {
+                        self.visit(&body);
+                    }
+                }
+                self.pop_scope();
+
+                if let Some(parent) = leaked_parent {
+                    self.parent_stack.push(parent);
+                }
+            } else {
+                self.parent_stack.push(ParentKind::Super);
+                self.visit(&block);
+                self.parent_stack.pop();
+            }
         }
     }
 
@@ -2459,6 +2605,63 @@ mod tests {
         let source = b"foo(1) { 2 }\n";
         let diags = run_cop_full_with_config(&MethodCallWithArgsParentheses, source, config);
         assert!(diags.is_empty(), "Should allow parens with braced block");
+    }
+
+    #[test]
+    fn omit_accepts_parens_for_single_statement_block_body_in_chained_block() {
+        let source = b"foo.bar { |x| baz(x) }.qux\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when the direct block parent is chained into another call"
+        );
+    }
+
+    #[test]
+    fn omit_flags_parens_for_single_statement_block_body_without_outer_call() {
+        let source = b"foo.bar { |x| baz(x) }\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should still flag parens when the block itself has no direct outer call parent"
+        );
+    }
+
+    #[test]
+    fn omit_accepts_parens_for_super_arguments() {
+        let source = b"super(errors.local_attribute(attribute))\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Should allow parens for calls nested in super arguments"
+        );
+    }
+
+    #[test]
+    fn omit_accepts_parens_for_call_with_block_used_as_setter_rhs() {
+        let source = b"self.result = run_callbacks(:execute) do\n  execute\nend\n";
+        let diags = run_cop_full_with_config(
+            &MethodCallWithArgsParentheses,
+            source,
+            omit_parentheses_config(),
+        );
+        assert!(
+            diags.is_empty(),
+            "Should allow parens when a call-with-block is the RHS of a setter call"
+        );
     }
 
     #[test]
