@@ -142,37 +142,89 @@ def test_relevant_repos_with_variant_covered_filter():
     assert "canary-uncovered" not in result
 
 
+def test_relevant_repos_filters_main_activity_set_by_variant_coverage():
+    """Variant check must not sample cop-active repos outside oracle coverage.
+
+    Before the fix the filter only touched canaries; high-activity repos
+    beyond --max-variant-repos still went into the main sample, which made
+    --style CI runs compare a real nc/rc divergence against a zero baseline
+    and flag it as a regression even though the oracle never tested that
+    repo for variants.
+    """
+    data = {
+        "cop_activity_repos": {
+            "Style/Foo": ["covered-active", "uncovered-active"],
+        },
+        "by_repo_cop": {
+            "uncovered-diverging": {
+                "Style/Foo": {"matches": 0, "fp": 1, "fn": 0},
+            },
+        },
+        "by_repo": [],
+    }
+    result = check_cop.relevant_repos_for_cop(
+        "Style/Foo", data,
+        variant_covered_repos={"covered-active"},
+    )
+    assert result == {"covered-active"}
+
+
+def test_relevant_repos_empty_without_variant_filter_still_skips_for_no_coverage():
+    """An empty activity set with variant filter shouldn't fall back to all repos."""
+    data = {
+        "cop_activity_repos": {"Style/Foo": ["uncovered"]},
+        "by_repo_cop": {},
+        "by_repo": [],
+    }
+    result = check_cop.relevant_repos_for_cop(
+        "Style/Foo", data,
+        variant_covered_repos={"some-other-repo"},
+    )
+    assert result == set()
+
+
 def test_variant_covered_repos_returns_none_for_no_run_id():
     assert check_cop.variant_covered_repos(None) is None
 
 
-def test_variant_covered_repos_parses_variant_baselines(tmp_path, monkeypatch):
-    """Loads variant-covered repo IDs from the oracle artifact."""
+def test_variant_covered_repos_uses_manifest_prefix(tmp_path, monkeypatch):
+    """Returns the first N manifest repos based on the oracle's total_repos.
+
+    The oracle runs variants on the first --max-variant-repos entries in
+    manifest order, so the covered set is that prefix — not just the repos
+    that diverged. Perfect-match repos inside the prefix must be covered so
+    that new regressions on them are still caught.
+    """
     variant_path = tmp_path / "style-variant-results-42.json"
     variant_path.write_text(json.dumps({
         "batches": [
-            {"name": "variant_batch_1", "by_repo_cop": {
-                "repo-in-batch1": {"Style/Foo": {"fp": 1, "fn": 0}},
-                "repo-in-both": {"Style/Foo": {"fp": 0, "fn": 1}},
+            {"name": "variant_batch_1", "total_repos": 2, "by_repo_cop": {
+                "diverging-only": {"Style/Foo": {"fp": 1, "fn": 0}},
             }},
-            {"name": "variant_batch_2", "by_repo_cop": {
-                "repo-in-batch2": {"Style/Bar": {"fp": 0, "fn": 1}},
-                "repo-in-both": {"Style/Foo": {"fp": 0, "fn": 1}},
-            }},
+            {"name": "variant_batch_2", "total_repos": 3, "by_repo_cop": {}},
         ],
     }))
+    manifest_path = tmp_path / "manifest.jsonl"
+    manifest_path.write_text("\n".join(
+        json.dumps({"id": repo_id, "repo_url": "u", "sha": "s"})
+        for repo_id in ("first-covered", "second-covered", "third-covered",
+                        "fourth-beyond-limit")
+    ) + "\n")
 
     def fake_path(run_id):
         return variant_path if run_id == 42 else None
 
-    # Patch the module-level resolver used inside variant_covered_repos
+    # Patch the module-level resolver and the manifest path.
     import sys as _sys
     fake_mod = type(_sys)("shared.corpus_artifacts")
     fake_mod.get_variant_results_path = fake_path
     monkeypatch.setitem(_sys.modules, "shared.corpus_artifacts", fake_mod)
+    monkeypatch.setattr(check_cop, "MANIFEST_PATH", manifest_path)
 
     covered = check_cop.variant_covered_repos(42)
-    assert covered == {"repo-in-batch1", "repo-in-batch2", "repo-in-both"}
+    # Largest total_repos across batches is 3 → first three manifest repos.
+    # Includes perfect-match repos the oracle tested, not just by_repo_cop.
+    assert covered == {"first-covered", "second-covered", "third-covered"}
 
 
 def test_relevant_repos_with_sample_includes_canaries():

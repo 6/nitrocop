@@ -402,3 +402,24 @@ def if_elsif_condition_overwrites_initializer(command)
     return output
   end
 end
+
+# Rescue handlers that redefine the same local before reading it must not keep
+# the begin-body assignment alive.
+def rescue_handler_redefines_value
+  line = __LINE__; raise "My message"
+  ^^^^ Lint/UselessAssignment: Useless assignment to variable - `line`.
+rescue => err
+  file, line = err.source
+  expect(file).to eql __FILE__
+  expect(line).to eql line
+end
+
+# Standalone rescue capture remains an offense.
+def trailing_rescue_capture_unused
+  begin
+    work
+  rescue Timeout::Error => e
+                           ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+    handle_timeout
+  end
+end
