@@ -151,6 +151,13 @@ use crate::parse::source::SourceFile;
 /// consecutive paren tokens; wider whitespace runs are ignored entirely.
 /// Tightening the compact collapse path to that exact byte match fixes those
 /// variant FPs without weakening the legitimate single-space detections.
+///
+/// `compact` also under-reported when the final token before the outer `)` came
+/// from a wrapped inner call, for example a trailing block-pass
+/// `&method( ... )` or final keyword pair `value: helper( ... )`. RuboCop's
+/// token walk still sees consecutive right-paren tokens in those cases, so we
+/// must unwrap Prism's wrapper nodes before comparing inner/outer close-paren
+/// offsets.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -840,7 +847,54 @@ fn compact_allows_consecutive_close_paren(
         return false;
     };
 
-    paren_offsets(&last_inner, bytes).is_some_and(|(_, _, inner_close)| inner_close == prev_code)
+    trailing_close_paren_offset(&last_inner, bytes) == Some(prev_code)
+}
+
+fn trailing_close_paren_offset(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<usize> {
+    if let Some((_, _, close)) = paren_offsets(node, bytes) {
+        return Some(close);
+    }
+
+    if let Some(block_arg) = node.as_block_argument_node() {
+        return block_arg
+            .expression()
+            .and_then(|expr| trailing_close_paren_offset(&expr, bytes));
+    }
+
+    if let Some(assoc) = node.as_assoc_node() {
+        return trailing_close_paren_offset(&assoc.value(), bytes);
+    }
+
+    if let Some(kw_hash) = node.as_keyword_hash_node() {
+        let last = kw_hash.elements().iter().last()?;
+        if let Some(assoc) = last.as_assoc_node() {
+            return trailing_close_paren_offset(&assoc.value(), bytes);
+        }
+        if let Some(splat) = last.as_assoc_splat_node() {
+            return splat
+                .value()
+                .and_then(|expr| trailing_close_paren_offset(&expr, bytes));
+        }
+        return None;
+    }
+
+    if let Some(implicit) = node.as_implicit_node() {
+        return trailing_close_paren_offset(&implicit.value(), bytes);
+    }
+
+    if let Some(splat) = node.as_splat_node() {
+        return splat
+            .expression()
+            .and_then(|expr| trailing_close_paren_offset(&expr, bytes));
+    }
+
+    if let Some(splat) = node.as_assoc_splat_node() {
+        return splat
+            .value()
+            .and_then(|expr| trailing_close_paren_offset(&expr, bytes));
+    }
+
+    None
 }
 
 fn is_single_ascii_space(bytes: &[u8], start: usize, end: usize) -> bool {
@@ -881,6 +935,12 @@ fn last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'
     }
 
     if let Some(call) = node.as_call_node() {
+        if let Some(block_arg) = call
+            .block()
+            .and_then(|block| block.as_block_argument_node())
+        {
+            return Some(block_arg.as_node());
+        }
         return call
             .arguments()
             .and_then(|args| args.arguments().iter().last());
@@ -893,6 +953,12 @@ fn last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'
     }
 
     if let Some(super_node) = node.as_super_node() {
+        if let Some(block_arg) = super_node
+            .block()
+            .and_then(|block| block.as_block_argument_node())
+        {
+            return Some(block_arg.as_node());
+        }
         return super_node
             .arguments()
             .and_then(|args| args.arguments().iter().last());

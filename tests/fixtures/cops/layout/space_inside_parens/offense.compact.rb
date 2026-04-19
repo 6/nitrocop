@@ -20,3 +20,12 @@ in Point(*, 1, *a)
                  ^ Layout/SpaceInsideParens: No space inside parentheses detected.
   a
 end
+
+http.get( url, &method( :check_and_log ) )
+                                        ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
+xml.input( name: replace_nulls( k ), value: replace_nulls( v ) )
+                                                              ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
+auditor.with_browser( options, &Submittable.prepare_callback( &block ) )
+                                                                      ^ Layout/SpaceInsideParens: Space inside parentheses detected.
