@@ -1,7 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::shared::access_modifier_predicates::MacroScope;
-use crate::cop::shared::method_identifier_predicates;
+use crate::cop::shared::{method_dispatch_predicates, method_identifier_predicates};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -284,6 +284,17 @@ use crate::parse::source::SourceFile;
 /// `FactoryBot.create(:project, inactive:, main_language: language)` must
 /// still fire when the last pair is a regular `k: v` even though an
 /// earlier pair uses the shorthand.
+///
+/// ## Variant fix (2026-04-19, unary descendants)
+///
+/// RuboCop treats unary operator descendants as ambiguous in
+/// `omit_parentheses`, so outer-call parens are allowed for cases like
+/// `some_helper(..., readonly: !editable?)`,
+/// `fold!(current_user.id, !was_folded)`, and
+/// `update(folded: !@node.folded)`. Prism models those as unary call nodes,
+/// but nitrocop only handled signed numerics and `+@`/`-@`, so it still
+/// flagged the outer call. Match RuboCop by treating any Prism unary
+/// operation descendant as ambiguous.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -1306,13 +1317,9 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
         }
     }
 
-    // Unary operation on non-numeric (e.g., `+""`, `-""`)
+    // Unary operation on non-numeric (e.g., `!foo`, `+""`, `-""`, `~bar`)
     if let Some(call) = node.as_call_node() {
-        let name = call.name().as_slice();
-        if (name == b"+@" || name == b"-@")
-            && call.receiver().is_some()
-            && call.arguments().is_none()
-        {
+        if method_dispatch_predicates::is_unary_operation(&call) {
             return true;
         }
     }
