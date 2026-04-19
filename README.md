@@ -15,10 +15,10 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 **Features**
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
-- Tested on [**5,588 open-source repos**](docs/corpus.md):
-  - **903 of 915** cops match RuboCop exactly with default config
-  - **897 of 915** match across all `EnforcedStyle` variants
-  - Across **28.38M** offenses compared, **28.37M** (99.97%) match exactly with default config
+- Tested on [**1 open-source repos**](docs/corpus.md):
+  - **284 of 915** cops match RuboCop exactly with default config
+  - **282 of 915** match across all `EnforcedStyle` variants
+  - Across **8.34K** offenses compared, **8.33K** (99.95%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -55,60 +55,60 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 ## Cops
 
 <!-- corpus-cops:start -->
-Compared with RuboCop on [**5,588 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
+Compared with RuboCop on [**1 open-source repos**](docs/corpus.md) (0k Ruby files, 8.3K offenses compared).
 
 **Default** = default RuboCop config. **All variants** = every supported `EnforcedStyle` (e.g. `EnforcedStyle: comma`).
 
 **[rubocop](https://github.com/rubocop/rubocop)** `1.84.2` (588 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| Layout | 100 | 96 | 92 |
-| Lint | 148 | 146 | 146 |
-| Style | 287 | 285 | 283 |
-| Metrics | 10 | **10 ✓** | **10 ✓** |
-| Naming | 19 | **19 ✓** | **19 ✓** |
-| Security | 6 | **6 ✓** | **6 ✓** |
-| Bundler | 7 | **7 ✓** | **7 ✓** |
-| Gemspec | 10 | **10 ✓** | **10 ✓** |
-| Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **580 (98.6%)** | **574 (97.6%)** |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| Layout | 100 | 44 | 44 | 55 |
+| Lint | 148 | 35 | 35 | 112 |
+| Style | 287 | 106 | 104 | 180 |
+| Metrics | 10 | 6 | 6 | 4 |
+| Naming | 19 | 8 | 8 | 11 |
+| Security | 6 | 0 | 0 | 6 |
+| Bundler | 7 | 3 | 3 | 4 |
+| Gemspec | 10 | 3 | 3 | 7 |
+| Migration | 1 | 0 | 0 | 1 |
+| **Total** | **588** | **205 (34.8%)** | **203 (34.5%)** | **380** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| Rails | 138 | 134 | 134 |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| Rails | 138 | 58 | 58 | 80 |
 
 **[rubocop-performance](https://github.com/rubocop/rubocop-performance)** `1.26.1` (52 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| Performance | 52 | **52 ✓** | **52 ✓** |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| Performance | 52 | 11 | 11 | 41 |
 
 **[rubocop-rspec](https://github.com/rubocop/rubocop-rspec)** `3.9.0` (113 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| RSpec | 113 | **113 ✓** | **113 ✓** |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| RSpec | 113 | 8 | 8 | 105 |
 
 **[rubocop-rspec_rails](https://github.com/rubocop/rubocop-rspec_rails)** `2.32.0` (8 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| RSpecRails | 8 | **8 ✓** | **8 ✓** |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| RSpecRails | 8 | 1 | 1 | 7 |
 
 **[rubocop-factory_bot](https://github.com/rubocop/rubocop-factory_bot)** `2.28.0` (11 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| FactoryBot | 11 | **11 ✓** | **11 ✓** |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| FactoryBot | 11 | 1 | 1 | 10 |
 
 **[rubocop-rake](https://github.com/rubocop/rubocop-rake)** `0.7.1` (5 cops)
 
-| Department | Cops | Exact match (default) | Exact match (all variants) |
-|------------|-----:|----------------------:|---------------------------:|
-| Rake | 5 | **5 ✓** | **5 ✓** |
+| Department | Cops | Exact match (default) | Exact match (all variants) | No data |
+|------------|-----:|----------------------:|---------------------------:|--------:|
+| Rake | 5 | 0 | 0 | 5 |
 
 See [docs/corpus.md](docs/corpus.md) for the full corpus breakdown.
 <!-- corpus-cops:end -->
