@@ -78,6 +78,11 @@ pub struct Engine<'a> {
     next_branch_id: usize,
     /// Stack of active branch context IDs. The top is the current branch.
     branch_stack: Vec<usize>,
+    /// Offsets of local-variable write nodes whose direct AST parent is a
+    /// modifier-form if/unless/while/until (`x = 1 if cond`). Matches
+    /// RuboCop's `Variable#in_modifier_conditional?` check. Populated once
+    /// at the start of `run()`.
+    in_modifier_conditional_offsets: std::collections::HashSet<usize>,
 }
 
 impl<'a> Engine<'a> {
@@ -92,7 +97,12 @@ impl<'a> Engine<'a> {
             branch_contexts: Vec::new(),
             next_branch_id: 0,
             branch_stack: Vec::new(),
+            in_modifier_conditional_offsets: std::collections::HashSet::new(),
         }
+    }
+
+    fn is_in_modifier_conditional(&self, offset: usize) -> bool {
+        self.in_modifier_conditional_offsets.contains(&offset)
     }
 
     fn next_sequence(&mut self) -> usize {
@@ -264,6 +274,7 @@ impl<'a> Engine<'a> {
             Some(p) => p,
             None => return,
         };
+        self.in_modifier_conditional_offsets = collect_modifier_conditional_child_offsets(&root);
         let loc = program.location();
         self.table
             .push_scope(ScopeKind::TopLevel, loc.start_offset(), loc.end_offset());
@@ -563,6 +574,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
         let name = node.name().as_slice().to_vec();
         let offset = node.location().start_offset();
+        let in_modifier_conditional = self.is_in_modifier_conditional(offset);
         if !self.table.variable_exists(&name) {
             self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
         }
@@ -593,6 +605,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         assign.branch_path = self.current_branch_path();
         let val = node.value();
         assign.value_range = Some((val.location().start_offset(), val.location().end_offset()));
+        assign.in_modifier_conditional = in_modifier_conditional;
         self.table.assign_to_variable(&name, assign);
     }
 
@@ -613,6 +626,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     ) {
         let name = node.name().as_slice().to_vec();
         let offset = node.location().start_offset();
+        let in_modifier_conditional = self.is_in_modifier_conditional(offset);
         if !self.table.variable_exists(&name) {
             self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
         }
@@ -632,6 +646,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
         a.branch_path = self.current_branch_path();
+        a.in_modifier_conditional = in_modifier_conditional;
         self.table.assign_to_variable(&name, a);
     }
 
@@ -641,6 +656,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     ) {
         let name = node.name().as_slice().to_vec();
         let offset = node.location().start_offset();
+        let in_modifier_conditional = self.is_in_modifier_conditional(offset);
         if !self.table.variable_exists(&name) {
             self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
         }
@@ -660,6 +676,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
         a.branch_path = self.current_branch_path();
+        a.in_modifier_conditional = in_modifier_conditional;
         self.table.assign_to_variable(&name, a);
     }
 
@@ -669,6 +686,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     ) {
         let name = node.name().as_slice().to_vec();
         let offset = node.location().start_offset();
+        let in_modifier_conditional = self.is_in_modifier_conditional(offset);
         if !self.table.variable_exists(&name) {
             self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
         }
@@ -688,6 +706,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.shadowing_in_branch = self.current_shadowing_in_branch();
         a.branch_id = self.current_branch_id();
         a.branch_path = self.current_branch_path();
+        a.in_modifier_conditional = in_modifier_conditional;
         self.table.assign_to_variable(&name, a);
     }
 
@@ -1486,6 +1505,97 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             self.visit(&block);
         }
     }
+}
+
+/// Collect byte offsets of local-variable write nodes whose direct AST parent
+/// is a modifier-form `if`, `unless`, `while`, or `until` (e.g. the `x = 1` in
+/// `x = 1 if cond`). Matches RuboCop's `Variable#in_modifier_conditional?`.
+///
+/// Nested descendants — such as the inner `x -= 1` in
+/// `x = (x -= 1) if cond` — are NOT included: their direct parent is the
+/// outer write/op-asgn, not the conditional.
+fn collect_modifier_conditional_child_offsets(
+    root: &ruby_prism::Node<'_>,
+) -> std::collections::HashSet<usize> {
+    use ruby_prism::{Node, Visit};
+
+    #[derive(Default)]
+    struct Collector {
+        offsets: std::collections::HashSet<usize>,
+    }
+
+    impl Collector {
+        fn record_direct_child(&mut self, child: Option<Node<'_>>) {
+            let Some(child) = child else { return };
+            if let Some(n) = child.as_local_variable_write_node() {
+                self.offsets.insert(n.location().start_offset());
+            } else if let Some(n) = child.as_local_variable_operator_write_node() {
+                self.offsets.insert(n.location().start_offset());
+            } else if let Some(n) = child.as_local_variable_or_write_node() {
+                self.offsets.insert(n.location().start_offset());
+            } else if let Some(n) = child.as_local_variable_and_write_node() {
+                self.offsets.insert(n.location().start_offset());
+            }
+        }
+    }
+
+    impl<'pr> Visit<'pr> for Collector {
+        fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
+            let is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
+            if is_modifier {
+                if let Some(stmts) = node.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.record_direct_child(Some(stmt));
+                    }
+                }
+            }
+            ruby_prism::visit_if_node(self, node);
+        }
+
+        fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
+            let is_modifier = node.end_keyword_loc().is_none();
+            if is_modifier {
+                if let Some(stmts) = node.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.record_direct_child(Some(stmt));
+                    }
+                }
+            }
+            ruby_prism::visit_unless_node(self, node);
+        }
+
+        fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
+            let is_modifier = node.do_keyword_loc().is_none()
+                && node.closing_loc().is_none()
+                && !node.is_begin_modifier();
+            if is_modifier {
+                if let Some(stmts) = node.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.record_direct_child(Some(stmt));
+                    }
+                }
+            }
+            ruby_prism::visit_while_node(self, node);
+        }
+
+        fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
+            let is_modifier = node.do_keyword_loc().is_none()
+                && node.closing_loc().is_none()
+                && !node.is_begin_modifier();
+            if is_modifier {
+                if let Some(stmts) = node.statements() {
+                    for stmt in stmts.body().iter() {
+                        self.record_direct_child(Some(stmt));
+                    }
+                }
+            }
+            ruby_prism::visit_until_node(self, node);
+        }
+    }
+
+    let mut collector = Collector::default();
+    collector.visit(root);
+    collector.offsets
 }
 
 /// Check if a predicate expression contains a local variable write.

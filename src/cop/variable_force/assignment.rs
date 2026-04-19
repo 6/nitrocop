@@ -48,6 +48,12 @@ pub struct Assignment {
     /// which unwraps to the send node inside the block).
     /// `None` for parameter declarations and other non-value assignments.
     pub value_range: Option<(usize, usize)>,
+    /// Whether this assignment's direct parent AST node is a modifier-form
+    /// if/unless/while/until (e.g. `x = 1 if cond`). Matches RuboCop's
+    /// `Variable#in_modifier_conditional?` check: when walking references in
+    /// reverse, these assignments do not stop the walk, so earlier
+    /// assignments to the same variable stay visible to the reference.
+    pub in_modifier_conditional: bool,
 }
 
 impl Assignment {
@@ -65,6 +71,7 @@ impl Assignment {
             branch_id: None,
             branch_path: Vec::new(),
             value_range: None,
+            in_modifier_conditional: false,
         }
     }
 

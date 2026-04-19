@@ -649,3 +649,13 @@ def nested_rescue_reraise
     e.cause == e1
   end
 end
+
+# Modifier-if body re-assigns the same variable both in an inner operator-write
+# and in an outer write on the same line. RuboCop's reference walk continues
+# past a write whose direct parent is a modifier conditional, keeping earlier
+# sibling writes in the same body alive.
+# https://github.com/AndyObtiva/glimmer-dsl-swt (lib/glimmer/swt/custom/shape.rb)
+def modifier_if_nested_write(recursive:)
+  recursive = [recursive -= 1, 0].max if recursive.is_a?(Integer)
+  recursive
+end
