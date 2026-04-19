@@ -231,6 +231,12 @@ enum MsgStyle {
     ReceiverRelative,
 }
 
+#[derive(Clone, Copy)]
+struct AlignedExpectationOptions {
+    allow_previous_continuation: bool,
+    allow_block_chain_alignment: bool,
+}
+
 struct ChainVisitor<'a> {
     cop: &'a MultilineMethodCallIndentation,
     source: &'a SourceFile,
@@ -397,8 +403,10 @@ impl ChainVisitor<'_> {
             rhs_line,
             rhs_col,
             is_trailing_dot,
-            true,
-            true,
+            AlignedExpectationOptions {
+                allow_previous_continuation: true,
+                allow_block_chain_alignment: true,
+            },
         )
     }
 
@@ -409,8 +417,7 @@ impl ChainVisitor<'_> {
         rhs_line: usize,
         rhs_col: usize,
         is_trailing_dot: bool,
-        allow_previous_continuation: bool,
-        allow_block_chain_alignment: bool,
+        options: AlignedExpectationOptions,
     ) -> Option<usize> {
         if self.in_hash_value {
             return self.expected_aligned_hash_pair(
@@ -424,7 +431,7 @@ impl ChainVisitor<'_> {
 
         // Try block chain continuation — when receiver is a call with a
         // single-line block, align with the block-bearing call's dot.
-        if allow_block_chain_alignment {
+        if options.allow_block_chain_alignment {
             if let Some(col) = find_block_chain_alignment(self.source, call_node, rhs_line) {
                 return Some(col);
             }
@@ -475,7 +482,7 @@ impl ChainVisitor<'_> {
             return Some(col);
         }
 
-        if allow_previous_continuation && !is_trailing_dot {
+        if options.allow_previous_continuation && !is_trailing_dot {
             // Try previous continuation dot alignment — when there's a
             // continuation dot on a previous line in the chain, align with it.
             if let Some(anchor) =
@@ -519,9 +526,17 @@ impl ChainVisitor<'_> {
             None => return false,
         };
         let (rhs_line, rhs_col) = self.source.offset_to_line_col(dot_loc.start_offset());
-        let expected = match self
-            .expected_aligned_impl(call_node, &receiver, rhs_line, rhs_col, false, false, false)
-        {
+        let expected = match self.expected_aligned_impl(
+            call_node,
+            &receiver,
+            rhs_line,
+            rhs_col,
+            false,
+            AlignedExpectationOptions {
+                allow_previous_continuation: false,
+                allow_block_chain_alignment: false,
+            },
+        ) {
             Some(col) => col,
             None => self.expected_indented(call_node, &receiver),
         };
