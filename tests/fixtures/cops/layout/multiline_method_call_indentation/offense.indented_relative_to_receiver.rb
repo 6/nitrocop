@@ -61,3 +61,10 @@ end
 # nitrocop-expect: 52:1 Layout/MultilineMethodCallIndentation: Indent `.(` 2 spaces more than `a` on line 51.
 a
  .(args)
+
+# Trailing-dot setter call: still indented relative to the receiver
+# nitrocop-expect: 57:6 Layout/MultilineMethodCallIndentation: Indent `nonce_name=` 2 spaces more than `described_class` on line 56.
+trigger = proc do
+  described_class.new(url: url, inputs: { name: 'value' }).
+      nonce_name = 'stuff'
+end

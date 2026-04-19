@@ -36,3 +36,14 @@ end
 ]
 # Mixed: real array + %w — only left side is multi-dim
 [[ 1, 2 ], %w[a b] ]
+# Comment lines ending with ] are not adjacent array brackets
+items = [
+  :real_entry,
+  # [ CommentedOut, :entry ]
+]
+# %[] literals are not real bracket arrays for compact collapsing
+items = [
+  %[
+    foo
+  ]
+]

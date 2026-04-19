@@ -519,7 +519,7 @@ impl<'pr> Visit<'pr> for MacroScopeChecker {
     );
 }
 
-fn is_block_in_macro_scope(
+pub(crate) fn is_block_in_macro_scope(
     parse_result: &ruby_prism::ParseResult<'_>,
     block_start: usize,
     block_end: usize,

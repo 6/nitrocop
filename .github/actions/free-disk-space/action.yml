@@ -1,29 +1,16 @@
 name: Free Disk Space
 description: Remove pre-installed tools from GitHub-hosted runners to reclaim disk space
 
-inputs:
-  verbose:
-    description: Show before/after disk usage
-    default: 'false'
-
 runs:
   using: composite
   steps:
     - name: Free disk space
       shell: bash
       run: |
-        if [ "${{ inputs.verbose }}" = "true" ]; then
-          echo "=== Before cleanup ==="
-          df -h / | tail -1
-          echo "=== Cleanup targets ==="
-          sudo du -sh /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
-            /usr/share/miniconda /usr/share/az_* /usr/share/gradle-* \
-          /usr/share/kotlinc /opt/az /opt/microsoft 2>/dev/null || true
-        fi
+        echo "=== Disk before cleanup ==="
+        df -h /
         sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift \
           /usr/share/miniconda /usr/share/az_* /usr/share/gradle-* \
           /usr/share/kotlinc /opt/az /opt/microsoft
-        if [ "${{ inputs.verbose }}" = "true" ]; then
-          echo "=== After cleanup ==="
-          df -h / | tail -1
-        fi
+        echo "=== Disk after cleanup ==="
+        df -h /

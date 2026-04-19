@@ -1,7 +1,3 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-
 use crate::cop::shared::node_type::{CALL_NODE, CALL_OPERATOR_WRITE_NODE};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::{Diagnostic, Severity};
@@ -18,11 +14,10 @@ use crate::parse::source::SourceFile;
 /// This cop now visits `CALL_OPERATOR_WRITE_NODE` and checks only
 /// `self.ignored_columns += <literal array>` to match RuboCop's `on_op_asgn`.
 ///
-/// Corpus runs also invoke nitrocop with overlay configs that can place
-/// `config_dir()` outside the target repo. When that happens, the global schema
-/// singleton is unset because `db/schema.rb` is looked up in the wrong directory.
-/// This cop now falls back to loading `db/schema.rb` relative to the current source
-/// file's repo root when the global schema is unavailable.
+/// RuboCop's schema lookup is rooted at the active config, so an external
+/// `--config` can leave `db/schema.rb` unresolved even when the source file lives
+/// under a Rails app. nitrocop must not fall back to the source file's repo root
+/// in that case, or corpus baseline runs start reporting offenses RuboCop skips.
 ///
 /// ## Synthetic corpus note
 /// RuboCop's SchemaLoader crashes on `t.timestamps` (no arguments) in
@@ -31,39 +26,6 @@ use crate::parse::source::SourceFile;
 /// and nitrocop silently skip schema-dependent cops. The synthetic schema was
 /// fixed to use explicit `t.datetime "created_at"` columns instead.
 pub struct UnusedIgnoredColumns;
-
-fn schema_for_source(source: &SourceFile) -> Option<&'static crate::schema::Schema> {
-    if let Some(schema) = crate::schema::get() {
-        return Some(schema);
-    }
-
-    static FALLBACK_SCHEMAS: OnceLock<
-        Mutex<HashMap<PathBuf, Option<&'static crate::schema::Schema>>>,
-    > = OnceLock::new();
-
-    let repo_root = source
-        .path
-        .ancestors()
-        .find(|path| path.join("db/schema.rb").is_file())?
-        .to_path_buf();
-
-    let mut cache = FALLBACK_SCHEMAS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .ok()?;
-
-    if let Some(schema) = cache.get(&repo_root).copied() {
-        return schema;
-    }
-
-    let schema = std::fs::read(repo_root.join("db/schema.rb"))
-        .ok()
-        .and_then(|bytes| crate::schema::Schema::parse(&bytes))
-        .map(|schema| Box::leak(Box::new(schema)) as &'static crate::schema::Schema);
-
-    cache.insert(repo_root, schema);
-    schema
-}
 
 impl Cop for UnusedIgnoredColumns {
     fn name(&self) -> &'static str {
@@ -95,7 +57,7 @@ impl Cop for UnusedIgnoredColumns {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let schema = match schema_for_source(source) {
+        let schema = match crate::schema::get() {
             Some(s) => s,
             None => return,
         };
@@ -194,6 +156,8 @@ impl Cop for UnusedIgnoredColumns {
 mod tests {
     use super::*;
     use crate::schema::Schema;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn setup_schema() {
         let schema_bytes =
@@ -221,6 +185,42 @@ mod tests {
                 "../../../tests/fixtures/cops/rails/unused_ignored_columns/no_offense.rb"
             ),
         );
+        crate::schema::set_test_schema(None);
+    }
+
+    #[test]
+    fn does_not_load_schema_from_source_path_when_global_schema_is_missing() {
+        crate::schema::set_test_schema(None);
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let repo_root =
+            std::env::temp_dir().join(format!("nitrocop_unused_ignored_columns_{unique}"));
+        let model_path = repo_root.join("app/models/edition.rb");
+        let schema_path = repo_root.join("db/schema.rb");
+        let source = b"class Edition < ApplicationRecord\n  self.ignored_columns += %w[news_article_type_id]\nend\n";
+        let schema = b"ActiveRecord::Schema.define(version: 2020_02_02_075409) do\n  create_table \"editions\", force: :cascade do |t|\n    t.string \"title\"\n  end\nend\n";
+
+        fs::create_dir_all(model_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(schema_path.parent().unwrap()).unwrap();
+        fs::write(&model_path, source).unwrap();
+        fs::write(&schema_path, schema).unwrap();
+
+        let diagnostics = crate::testutil::run_cop_full_internal(
+            &UnusedIgnoredColumns,
+            source,
+            CopConfig::default(),
+            model_path.to_str().unwrap(),
+        );
+
+        assert!(
+            diagnostics.is_empty(),
+            "expected no diagnostics when schema::get() is unavailable, got: {diagnostics:?}"
+        );
+
+        fs::remove_dir_all(repo_root).ok();
         crate::schema::set_test_schema(None);
     }
 }

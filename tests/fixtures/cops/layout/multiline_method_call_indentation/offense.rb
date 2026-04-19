@@ -73,3 +73,28 @@ def foo
     ^^ Layout/MultilineMethodCallIndentation: Align `.select` with `.all` on line 58.
     .map { |e| e.name }
 end
+
+# Block-pass receiver: RuboCop does not treat `&:strip` as a block for alignment
+def ignored_organisations_string=(organisations_string)
+  self.ignored_organisations = (organisations_string || "")
+    .split(",")
+    ^^^^^^ Layout/MultilineMethodCallIndentation: Align `.split` with `(organisations_string || "")` on line 65.
+    .collect(&:strip)
+    ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.collect` with `(organisations_string || "")` on line 65.
+      .compact
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.compact` with `(organisations_string || "")` on line 65.
+end
+
+# []= receiver: square brackets are not parenthesized arg lists
+def prepare_headers
+  headers['Cookie'] = final_cookies_hash.
+    map { |k, v| "#{Cookie.encode(k)}=#{Cookie.encode(v)}" }.join(';')
+    ^^^ Layout/MultilineMethodCallIndentation: Align `map` with `final_cookies_hash` on line 73.
+end
+
+# Trailing-dot setter call: RuboCop checks setter methods like ordinary chains
+trigger = proc do
+  described_class.new(url: url, inputs: { name: 'value' }).
+      nonce_name = 'stuff'
+      ^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
+end

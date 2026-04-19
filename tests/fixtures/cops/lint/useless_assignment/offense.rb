@@ -255,9 +255,82 @@ def rescue_chain_read_in_else(flag)
       ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `score`.
     rescue OtherError
       score = 99
+      ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `score`.
     end
   else
     puts score
+  end
+end
+
+# Earlier rescue clauses in the same chain are separate sibling branches.
+def multi_rescue_self_reference(sock_obj)
+  begin
+    work
+  rescue Errno::ECONNRESET
+    sock_obj = disconnect(sock_obj) unless sock_obj.nil?
+    ^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `sock_obj`.
+  rescue StandardError
+    sock_obj = disconnect(sock_obj) unless sock_obj.nil?
+    ^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `sock_obj`.
+  end
+end
+
+# Outer rescue branches must not leak into nested proc-local variable scopes.
+def proc_locals_inside_begin(chat)
+  begin
+    checker = proc {
+      test_request = nil
+      ^^^^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `test_request`.
+      test_response = nil
+      ^^^^^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `test_response`.
+
+      ref_request = chat.copyRequest
+      request, ref_response = doRequest(ref_request, :default => true)
+      ^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `request`.
+
+      test_request = chat.copyRequest
+
+      test_request.setMethod 'POST'
+      test_request.removeHeader 'Connection'
+      test_request.setHeader 'Content-Type', 'application/x-www-form-urlencoded'
+      test_request.setHeader 'Transfer-Encoding', 'chunked'
+
+      smuggle = "GET /fourOfour.txt HTTP/1.1\r\nHost: localhost\r\n\r\n"
+      body = "0\r\n" + smuggle
+
+      test_request.setHeader 'Content-Length', "#{body.length}"
+      test_request.setBody body
+
+      te_index = test_request.index { |h| h =~ /Transfer\-Encoding/ }
+      cl_index = test_request.index { |h| h =~ /Content\-Length/ }
+
+      if te_index < cl_index
+        dummy = test_request[te_index]
+        test_request[te_index] = test_request[cl_index]
+        test_request[cl_index] = dummy
+      end
+
+      test_request, test_response = doRequest(
+        test_request,
+        :no_connection_close => true,
+        :update_contentlength => false
+      )
+
+      if test_response.status_code != ref_response.status_code then
+        addFinding(
+          test_request,
+          test_response,
+          :check_pattern => "#{body}",
+          :proof_pattern => "#{test_response.status_code}",
+          :chat => chat,
+          :title => '[ HRS ]'
+        )
+      end
+      [test_request, test_response]
+    }
+    yield checker
+  rescue => bang
+    puts bang
   end
 end
 
@@ -277,3 +350,55 @@ end
 
 exec_resp = PWN::Plugins::MSR206.exec(
 ^ Lint/UselessAssignment: Useless assignment to variable - `exec_resp`.
+
+# Unused rescue capture in a complete rescue chain.
+def rescue_capture_unused
+  begin
+    work
+  rescue Timeout::Error => e
+                           ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+    handle_timeout
+  rescue StandardError => e
+    puts e.message
+  end
+end
+
+# Condition-only assignment is useless when the variable is not read in the body.
+def if_condition_assignment_only
+  if v = @options[:ban_except]
+     ^ Lint/UselessAssignment: Useless assignment to variable - `v`.
+    do_something
+  end
+end
+
+# FN fix: a normal `if` condition assignment overwrites the initializer before
+# any later read can consume it.
+def if_condition_overwrites_initializer(input)
+  origin = nil
+  ^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `origin`.
+  if origin = input
+    puts origin
+  end
+end
+
+# FN fix: `unless` condition assignments behave the same way.
+def unless_condition_overwrites_initializer
+  r = nil
+  ^ Lint/UselessAssignment: Useless assignment to variable - `r`.
+  unless r = @info[:db]
+    puts "fallback"
+  end
+  puts r
+end
+
+# FN fix: the initializer stays dead across later predicate assignments in an
+# `if`/`elsif` chain.
+def if_elsif_condition_overwrites_initializer(command)
+  output = ""
+  ^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `output`.
+  if (output = roll_tables(command, TABLES))
+    return output
+  elsif (output = roll_tables(command, A2Z_TABLES))
+    return output
+  end
+end

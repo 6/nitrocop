@@ -5507,6 +5507,44 @@ fn ignore_disable_comments_skips_redundant_disable_check() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn three_state_boolean_column_respects_dynamic_change_column_null_in_cli() {
+    let dir = temp_dir("three_state_boolean_column_dynamic_table");
+    fs::create_dir_all(dir.join("db/migrate")).unwrap();
+    fs::write(
+        dir.join("db/migrate/20250101010101_query_flags.rb"),
+        "# frozen_string_literal: true\n\
+class QueryFlags < ActiveRecord::Migration[7.0]\n\
+  def change\n\
+    table = :queries\n\
+    create_table table do |t|\n\
+      t.boolean :starred\n\
+    end\n\
+    change_column_null table, :starred, false\n\
+  end\n\
+end\n",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args([
+            "--preview",
+            "--only",
+            "Rails/ThreeStateBooleanColumn",
+            "--no-cache",
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute nitrocop");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Rails/ThreeStateBooleanColumn"),
+        "Dynamic table expressions with matching change_column_null should not register offenses: {stdout}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 // ---------- --force-default-config CLI tests ----------
 
 #[test]

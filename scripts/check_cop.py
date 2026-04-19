@@ -1231,8 +1231,15 @@ def _run_rubocop_for_variant(
         repo_dir,
     ]
     try:
+        # Run from within the repo so RuboCop's make_excludes_absolute
+        # prefixes relative cop Exclude patterns (e.g., `**/*.gemspec`) with
+        # the repo path. Without cwd=repo_dir, RuboCop prefixes with the
+        # caller's cwd, the pattern no longer matches the target files, and
+        # patterns like Rails/TimeZone's `Exclude: ['**/*.gemspec']` silently
+        # stop excluding — producing spurious FNs vs the corpus oracle.
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=env)
+            cmd, capture_output=True, text=True, timeout=timeout, env=env,
+            cwd=repo_dir)
         data = json.loads(result.stdout)
         # Filter to only the requested cop and deduplicate by (path, line),
         # matching the deduplication that run_nitrocop applies on the NC side.

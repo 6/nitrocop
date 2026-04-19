@@ -1591,7 +1591,7 @@ renamed:
         fs::write(&file, "get :show, :id => 12\n").unwrap();
         fs::write(
             &config_path,
-            "AllCops:\n  TargetRailsVersion: 7.0\nRails/HttpPositionalArguments:\n  Enabled: true\n  Include:\n    - 'test/**/*'\n",
+            "AllCops:\n  TargetRailsVersion: 7.0\nRails/HttpPositionalArguments:\n  Enabled: true\n  Include:\n    - 'test/**/*'\n  __RailtiesInLockfile: true\n  __RailtiesVersion: 7.0\n",
         )
         .unwrap();
 

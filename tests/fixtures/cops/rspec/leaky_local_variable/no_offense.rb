@@ -613,4 +613,20 @@ describe SomeClass do
   end
 end
 
+# Rightward pattern-match assignment (`expr => pattern`) binds locals.
+# RuboCop's VariableForce declares these vars without creating assignments,
+# so LeakyLocalVariable has no assignment to flag.
+RSpec.describe NumberFormatHelper do
+  describe "#number_with_limit" do
+    [
+      { input: 10, opts: {}, result: "10" }
+    ].each do |test_case|
+      test_case => { input:, opts:, result: }
+
+      it "renders #{input} with #{opts} as #{result}" do
+        expect(number_with_limit(input, opts)).to eq(result)
+      end
+    end
+  end
+end
 

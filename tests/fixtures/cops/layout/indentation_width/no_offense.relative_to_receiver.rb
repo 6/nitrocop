@@ -36,3 +36,46 @@ content = label || if ready?
                    else
                      fallback_value
                    end
+
+# Parenthesized multiline conditionals used as the last call argument are
+# ignored by RuboCop's CheckAssignment path.
+process((if ready?
+           primary_value
+         else
+           fallback_value
+         end))
+
+# RuboCop skips indented_internal_methods handling for class_eval blocks nested
+# inside a method body.
+def wrapper(base)
+  base.class_eval do
+    undef :before if method_defined? :before
+    def before
+      body
+    end
+
+    private
+
+    def helper
+      body
+    end
+  end
+end
+
+# Constant assignment breaks RuboCop's macro-scope chain for arbitrary DSL
+# blocks, so `private` here is not an indented_internal_methods divider.
+module Authentication
+  Authenticate = CommandClass.new(inputs: %i[a]) do
+    def call
+      body
+    rescue => e
+      raise e
+    end
+
+    private
+
+    def authenticator
+      body
+    end
+  end
+end

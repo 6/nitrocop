@@ -94,6 +94,17 @@ result = foo \
 x = a \
     || b
 
+# Operator at start of line with no indentation is also accepted
+a = 1 + 1 \
++ 1
+"a"
+-
+"b"
+%
+?\C-a
+%
+?\M-a
+
 # Compound assignments with proper spacing
 x += 1
 y -= 2
@@ -144,6 +155,15 @@ x == 0 ? 1 : 2
 result = condition ? true_val : false_val
 nested = a ? (b ? c : d) : e
 
+# Keyword logical operators with proper spacing
+MODIFIERS[key.to_sym] or raise ArgumentError.new("Unknown modifier key: #{key}")
+
+if justNameCharacters(params["signature"]["firstnames"]) and
+   justNameCharacters(params["signature"]["lastname"]) and
+   municipalities.include?(params["signature"]["occupancy_county"]) and
+   params["signature"]["vow"] == "1"
+end
+
 # Rational literal (no_space style default for /)
 x = 2/3r
 
@@ -183,6 +203,22 @@ status      ||= 0
 # Trailing spaces after = are allowed when the right-hand sides align
 email =  "Susan_foo@gmail.com"
 password = "Susan_foo"
+
+# Trailing spaces after = are allowed when a continued multiline RHS aligns
+describe "errors" do
+  describe WebMock::NetConnectNotAllowedError do
+    describe "message" do
+      it "accepts aligned continued strings" do
+        expected =  \
+          "Real HTTP connections are disabled. Unregistered request: #{request_signature}" \
+          "\n\nYou can stub this request with the following snippet:" \
+          "\n\n#{stub_result}" \
+          "\n\n============================================================"
+        expect(WebMock::NetConnectNotAllowedError.new(request_signature).message).to eq(expected)
+      end
+    end
+  end
+end
 
 # Hash with multi-byte UTF-8 keys aligned by => (curly quotes are 3 bytes each)
 # Must not flag any of these as "extra space" around =>
@@ -258,6 +294,10 @@ loop do
   data, inetAddr  = @ClientSocket.recvfrom_nonblock(READ_SIZE)
   break
 end
+
+# Extra spaces after an operator are accepted when the line ends there
+foo +            
+  bar
 
 # Standalone nested assignment is accepted when there is no later assignment group
 SetUIDBit = ReadBit  = 4
