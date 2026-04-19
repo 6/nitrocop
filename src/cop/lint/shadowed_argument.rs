@@ -86,6 +86,16 @@
 /// case (and case-match) predicates in branch context when they contain
 /// local variable writes, matching the existing `if`/`unless` handling.
 ///
+/// FP fix (4 corpus, 2026-04-19): assignments in statement-form `if`/`unless`
+/// predicates were still treated as unconditional because VariableForce only
+/// wrapped modifier-form predicates in branch context. RuboCop's
+/// `conditional_assignment?` walks ancestor nodes, so writes anywhere under an
+/// `if`/`unless` predicate are conditional for this cop, including `and`-chain
+/// writes like `if win = current_window and tab = ...`. Fixed by bumping
+/// predicate `branch_depth` for statement-form `if`/`unless` predicates that
+/// contain local-variable writes, matching the existing `case` predicate quirk
+/// without hiding later unconditional reassignments.
+///
 /// ## Migration to VariableForce
 ///
 /// This cop was migrated from a 687-line standalone AST visitor to use the shared
