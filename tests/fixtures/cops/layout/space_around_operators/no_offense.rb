@@ -251,6 +251,11 @@ params = {
   'DateCreatedBefore' =>  Twilio.serialize_iso8601_datetime(date_created_before),
 }
 
+# Hash rocket values aligned across adjacent method-call lines are accepted
+expect([a == 100]).to have_solution(x => false)
+expect([a == 200]).to have_solution(x =>  true)
+expect([a == 300]).to have_solution(x =>  true)
+
 # Extra leading space before = on standalone assignments (no subsequent assignment neighbor)
 # RuboCop does not flag these because there's no subsequent assignment to misalign with
 x  = 1

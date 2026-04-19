@@ -298,6 +298,24 @@ use ruby_prism::Visit;
 /// - The predefined global `$=` is a variable name, not an operator token.
 ///   The text scanner was interpreting the `=` inside `$=` as a standalone
 ///   operator and reporting missing-space offenses on reads and writes.
+///
+/// ## Corpus fix (2026-04-19, repeated `=>` call arguments)
+///
+/// RuboCop accepts extra trailing space after `=>` when the pair lines up with
+/// an adjacent pair in one of two ways:
+/// - normal hash-pair alignment at the pair start (space/non-space boundary),
+/// - or an exact same-column pair-source match, which is what repeated call
+///   arguments like `have_solution(x =>  true)` and repeated
+///   `where(:to_org_id =>  Org...)` pairs rely on.
+///
+/// The previous implementation only checked the boundary case for `AssocNode`,
+/// so it still flagged repeated call-argument pairs that RuboCop accepts. Keep
+/// the boundary check for multiline hash alignment, and also allow an exact
+/// full-pair match at the same column for `AssocNode` trailing-space checks.
+///
+/// A tempting isolated FN fixture, `tree1      = BTree[...]`, was also checked
+/// during this investigation. RuboCop accepts that line in isolation, so it is
+/// not modeled as a standalone offense here.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -793,7 +811,7 @@ fn check_text_scanner_extra_space(
 
             if !is_index_write_eq {
                 if let Some(rhs_start) = util::first_non_space_on_line(bytes, op_end) {
-                    if is_aligned_rhs_standalone(source, rhs_start, true) {
+                    if is_aligned_rhs_standalone(source, rhs_start, true, None) {
                         multi_after = false;
                     }
                 }
@@ -1437,7 +1455,12 @@ fn first_assignment_alignment_end_char_col(
         .map(|(_, end_char_col)| end_char_col)
 }
 
-fn is_aligned_rhs_standalone(source: &SourceFile, start: usize, token_match: bool) -> bool {
+fn is_aligned_rhs_standalone(
+    source: &SourceFile,
+    start: usize,
+    token_match: bool,
+    exact_token: Option<&[u8]>,
+) -> bool {
     let bytes = source.as_bytes();
     let mut ls = start;
     while ls > 0 && bytes[ls - 1] != b'\n' {
@@ -1459,7 +1482,7 @@ fn is_aligned_rhs_standalone(source: &SourceFile, start: usize, token_match: boo
         None
     };
 
-    if check_rhs_alignment_standalone(&lines, line_idx, char_col, None, current_line) {
+    if check_rhs_alignment_standalone(&lines, line_idx, char_col, None, current_line, exact_token) {
         return true;
     }
 
@@ -1467,7 +1490,14 @@ fn is_aligned_rhs_standalone(source: &SourceFile, start: usize, token_match: boo
         .iter()
         .position(|&b| b != b' ' && b != b'\t')
         .unwrap_or(0);
-    check_rhs_alignment_standalone(&lines, line_idx, char_col, Some(my_indent), current_line)
+    check_rhs_alignment_standalone(
+        &lines,
+        line_idx,
+        char_col,
+        Some(my_indent),
+        current_line,
+        exact_token,
+    )
 }
 
 fn check_rhs_alignment_standalone(
@@ -1476,6 +1506,7 @@ fn check_rhs_alignment_standalone(
     char_col: usize,
     indent_filter: Option<usize>,
     current_line: Option<&[u8]>,
+    exact_token: Option<&[u8]>,
 ) -> bool {
     for up in [true, false] {
         let mut check_idx = if up {
@@ -1513,7 +1544,12 @@ fn check_rhs_alignment_standalone(
                         }
                     }
 
-                    if line_has_aligned_rhs_at_char_col(line_bytes, char_col, current_line) {
+                    if line_has_aligned_rhs_at_char_col(
+                        line_bytes,
+                        char_col,
+                        current_line,
+                        exact_token,
+                    ) {
                         return true;
                     }
                     break;
@@ -1542,6 +1578,7 @@ fn line_has_aligned_rhs_at_char_col(
     line: &[u8],
     target_char_col: usize,
     current_line: Option<&[u8]>,
+    exact_token: Option<&[u8]>,
 ) -> bool {
     let Some(byte_col) = char_col_to_bytes(line, target_char_col) else {
         return false;
@@ -1560,6 +1597,13 @@ fn line_has_aligned_rhs_at_char_col(
     // Check 2: exact token match at the same column (RuboCop: token == line[left_edge, len])
     // Only applied when current_line is provided (disabled for trailing_anchor
     // paths where the anchor is a hash key, not the RHS value).
+    if let Some(token) = exact_token {
+        if byte_col + token.len() <= line.len() {
+            return line[byte_col..byte_col + token.len()] == *token;
+        }
+        return false;
+    }
+
     let Some(cur_line) = current_line else {
         return false;
     };
@@ -1590,10 +1634,22 @@ const BINARY_OPERATORS: &[&[u8]] = &[
 /// Additional operators detected via CallNode (match operators, ===)
 const MATCH_OPERATORS: &[&[u8]] = &[b"=~", b"!~", b"==="];
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct TrailingAnchor {
     offset: usize,
     token_match: bool,
+    exact_token: Option<Vec<u8>>,
+}
+
+impl TrailingAnchor {
+    fn is_aligned(&self, source: &SourceFile) -> bool {
+        is_aligned_rhs_standalone(
+            source,
+            self.offset,
+            self.token_match,
+            self.exact_token.as_deref(),
+        )
+    }
 }
 
 struct OperatorChecker<'a> {
@@ -1641,6 +1697,7 @@ impl OperatorChecker<'_> {
             Some(TrailingAnchor {
                 offset: value.location().start_offset(),
                 token_match: true,
+                exact_token: None,
             }),
             true,
         );
@@ -1779,11 +1836,11 @@ impl OperatorChecker<'_> {
                 multi_space_after = false;
             } else if self.allow_for_alignment {
                 if let Some(anchor) = trailing_anchor {
-                    if is_aligned_rhs_standalone(self.source, anchor.offset, anchor.token_match) {
+                    if anchor.is_aligned(self.source) {
                         multi_space_after = false;
                     }
                 } else if let Some(rhs_start) = util::first_non_space_on_line(bytes, end) {
-                    if is_aligned_rhs_standalone(self.source, rhs_start, true) {
+                    if is_aligned_rhs_standalone(self.source, rhs_start, true, None) {
                         multi_space_after = false;
                     }
                 }
@@ -1932,6 +1989,7 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                     trailing_anchor.map(|offset| TrailingAnchor {
                         offset,
                         token_match: true,
+                        exact_token: None,
                     }),
                     false,
                 );
@@ -2240,6 +2298,7 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                     Some(TrailingAnchor {
                         offset: node.location().start_offset(),
                         token_match: false,
+                        exact_token: Some(node.location().as_slice().to_vec()),
                     }),
                     false,
                 );
