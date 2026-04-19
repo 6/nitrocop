@@ -410,6 +410,7 @@ impl ChainVisitor<'_> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn expected_aligned_impl(
         &self,
         call_node: &ruby_prism::CallNode<'_>,
