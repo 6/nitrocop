@@ -18,3 +18,20 @@ master.job_queue << -> do
   progress = master.work_done_progress(typecheck_guid)
   master.start_type_check(last_request: nil, progress: progress, include_unchanged: true, report_progress_threshold: 0, needs_response: true)
 end
+
+RSpec.describe Foo do
+  example { expect(call(<<-CODE)).to eq "1\n" }
+          ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for procedural blocks.
+  1
+  CODE
+
+  example { expect(call(<<-CODE)).to eq "1\n" }
+  2
+  CODE
+end
+
+def view_template
+  a(href: " javascript:alert(1)") { "XSS" }
+                                  ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for procedural blocks.
+  a(href: "j avascript:alert(1)") { "XSS" }
+end

@@ -60,3 +60,37 @@ def build_dest(rels, ret)
   dest = rels.inject(ret) { |h, rel| h[rel] ||= {} }["columns"] ||= []
   dest
 end
+
+def one_of(parsers)
+  parsers.each do |parser|
+    return backtrack { parser.call }
+  rescue Error
+    next
+  end
+end
+
+items.each do
+  next Array(s).map { |a| a + n } if n.is_a?(String)
+end
+
+items.each do
+  break output { t(".redacted") } if cond
+end
+
+def initialize(hooks = Hash.new { |h, k| h[k] = [] })
+  @hooks = hooks
+end
+
+defined?(not_a_method { 1 }).should == "expression"
+
+describe "on constrained types" do
+  it "passes coerced value if it doesn't meet constraints" do
+    called = false
+    type.("15") do |coerced|
+      called = true
+      expect(coerced).to be(15)
+    end
+
+    expect(called).to be(true)
+  end
+end

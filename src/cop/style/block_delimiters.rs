@@ -76,6 +76,23 @@ use std::collections::HashSet;
 ///   bails out on some non-UTF-8 files with high `\xHH` escapes (for example
 ///   `# encoding:windows-1252` with `\xdf` regex escapes), so nitrocop now
 ///   skips this cop on those parser-incompatible files too
+///
+/// ## Fix (2026-04-19): keep semantic wrappers narrow and stop over-skipping `always_braces`
+///
+/// The remaining variant-only mismatches came from four Prism-specific gaps:
+///
+/// - `return`, `next`, `break`, `defined?`, and optional-parameter default values
+///   wrap the block's call in Parser AST, so RuboCop treats the inner block as
+///   functional via `parent.children.last == node`
+/// - `obj.(...) do ... end` has no `message_loc` in Prism, so reusing
+///   `location().start_offset()` collided with the receiver's key and falsely
+///   marked the outer block as `rv_used`
+/// - our structural tail-match shortcut stripped all whitespace and ignored
+///   heredoc bodies outside `location()`, so `" javascript"`/`"j avascript"`
+///   and repeated `<<-CODE` blocks could be misclassified as identical tails
+/// - `always_braces` was skipping on any Prism parse error, but RuboCop still
+///   checks recoverable files such as builder templates with top-level `yield`;
+///   only the non-UTF-8 high-`\xHH` parser crash still needs the skip
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -94,8 +111,7 @@ impl Cop for BlockDelimiters {
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
         if enforced_style == "always_braces"
-            && (parse_result.errors().next().is_some()
-                || has_non_utf8_encoding_with_parser_incompatible_content(source.as_bytes()))
+            && has_non_utf8_encoding_with_parser_incompatible_content(source.as_bytes())
         {
             return;
         }
@@ -535,6 +551,51 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         ruby_prism::visit_yield_node(self, node);
     }
 
+    fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'_>) {
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_return_node(self, node);
+    }
+
+    fn visit_break_node(&mut self, node: &ruby_prism::BreakNode<'_>) {
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_break_node(self, node);
+    }
+
+    fn visit_next_node(&mut self, node: &ruby_prism::NextNode<'_>) {
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_next_node(self, node);
+    }
+
+    fn visit_defined_node(&mut self, node: &ruby_prism::DefinedNode<'_>) {
+        mark_rv_of_scope_on_node(&node.value(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_defined_node(self, node);
+    }
+
+    fn visit_optional_parameter_node(&mut self, node: &ruby_prism::OptionalParameterNode<'_>) {
+        mark_rv_of_scope_on_node(&node.value(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_optional_parameter_node(self, node);
+    }
+
+    fn visit_optional_keyword_parameter_node(
+        &mut self,
+        node: &ruby_prism::OptionalKeywordParameterNode<'_>,
+    ) {
+        mark_rv_of_scope_on_node(&node.value(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_optional_keyword_parameter_node(self, node);
+    }
+
     // --- Context tracking for semantic & braces_for_chaining styles ---
 
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'_>) {
@@ -969,8 +1030,15 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 /// receiver), so using start_offset would mark ALL calls in a chain as
 /// rv_used when only the receiver is. The method name is unique per call.
 fn call_node_key(call: &ruby_prism::CallNode<'_>) -> usize {
-    call.message_loc()
-        .map_or_else(|| call.location().start_offset(), |loc| loc.start_offset())
+    if let Some(loc) = call.message_loc() {
+        loc.start_offset()
+    } else if let Some(loc) = call.opening_loc() {
+        loc.start_offset()
+    } else if let Some(loc) = call.call_operator_loc() {
+        loc.start_offset()
+    } else {
+        call.location().start_offset()
+    }
 }
 
 fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize>) {
@@ -1120,14 +1188,23 @@ fn block_calls_match_scope_tail(
         return false;
     }
 
-    normalized_non_whitespace(
+    let candidate_receiver = candidate.receiver();
+    let candidate_args = candidate.arguments().map(|args| args.as_node());
+    let last_receiver = last.receiver();
+    let last_args = last.arguments().map(|args| args.as_node());
+
+    semantic_range_source(
         source,
         candidate.location().start_offset(),
         candidate_block.opening_loc().start_offset(),
-    ) == normalized_non_whitespace(
+        candidate_receiver.as_ref(),
+        candidate_args.as_ref(),
+    ) == semantic_range_source(
         source,
         last.location().start_offset(),
         last_block.opening_loc().start_offset(),
+        last_receiver.as_ref(),
+        last_args.as_ref(),
     ) && optional_node_source_matches(
         candidate_block.parameters(),
         last_block.parameters(),
@@ -1143,27 +1220,102 @@ fn optional_node_source_matches(
     match (candidate, last) {
         (None, None) => true,
         (Some(candidate_node), Some(last_node)) => {
-            let candidate_loc = candidate_node.location();
-            let last_loc = last_node.location();
-            normalized_non_whitespace(
-                source,
-                candidate_loc.start_offset(),
-                candidate_loc.end_offset(),
-            ) == normalized_non_whitespace(source, last_loc.start_offset(), last_loc.end_offset())
+            semantic_node_source(source, &candidate_node)
+                == semantic_node_source(source, &last_node)
         }
         _ => false,
     }
 }
 
-fn normalized_non_whitespace(source: &SourceFile, start: usize, end: usize) -> Vec<u8> {
-    source
-        .as_bytes()
-        .get(start..end)
-        .unwrap_or(&[])
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect()
+fn semantic_node_source(source: &SourceFile, node: &ruby_prism::Node<'_>) -> Vec<u8> {
+    let loc = node.location();
+    semantic_range_source(
+        source,
+        loc.start_offset(),
+        loc.end_offset(),
+        Some(node),
+        None,
+    )
+}
+
+fn semantic_range_source(
+    source: &SourceFile,
+    start: usize,
+    end: usize,
+    root: Option<&ruby_prism::Node<'_>>,
+    extra_root: Option<&ruby_prism::Node<'_>>,
+) -> Vec<u8> {
+    let mut bytes = source.as_bytes().get(start..end).unwrap_or(&[]).to_vec();
+    let mut extras = Vec::new();
+    if let Some(node) = root {
+        collect_external_string_ranges(node, start, end, &mut extras);
+    }
+    if let Some(node) = extra_root {
+        collect_external_string_ranges(node, start, end, &mut extras);
+    }
+    extras.sort_unstable();
+    extras.dedup();
+    for (extra_start, extra_end) in extras {
+        bytes.push(0);
+        bytes.extend_from_slice(source.as_bytes().get(extra_start..extra_end).unwrap_or(&[]));
+    }
+    bytes
+}
+
+fn collect_external_string_ranges(
+    node: &ruby_prism::Node<'_>,
+    start: usize,
+    end: usize,
+    ranges: &mut Vec<(usize, usize)>,
+) {
+    let mut collector = ExternalStringRangeCollector { start, end, ranges };
+    collector.visit(node);
+}
+
+struct ExternalStringRangeCollector<'a> {
+    start: usize,
+    end: usize,
+    ranges: &'a mut Vec<(usize, usize)>,
+}
+
+impl<'pr> Visit<'pr> for ExternalStringRangeCollector<'_> {
+    fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'pr>) {
+        if let Some(opening) = node.opening_loc() {
+            let opening_bytes = opening.as_slice();
+            if opening_bytes.starts_with(b"<<") {
+                self.push_range(
+                    node.content_loc().start_offset(),
+                    node.content_loc().end_offset(),
+                );
+                if let Some(closing) = node.closing_loc() {
+                    self.push_range(closing.start_offset(), closing.end_offset());
+                }
+            }
+        }
+    }
+
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'pr>) {
+        if let Some(opening) = node.opening_loc() {
+            let opening_bytes = opening.as_slice();
+            if opening_bytes.starts_with(b"<<") {
+                if let Some(closing) = node.closing_loc() {
+                    self.push_range(closing.start_offset(), closing.end_offset());
+                }
+            }
+        }
+        ruby_prism::visit_interpolated_string_node(self, node);
+    }
+}
+
+impl ExternalStringRangeCollector<'_> {
+    fn push_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        if start < self.start || end > self.end {
+            self.ranges.push((start, end));
+        }
+    }
 }
 
 fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool {
@@ -1219,7 +1371,7 @@ fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool 
                 }
 
                 if !enc_name.is_empty() {
-                    return bytes.iter().any(|&byte| byte >= 0x80) || has_high_hex_escapes(bytes);
+                    return has_high_hex_escapes(bytes);
                 }
             }
         }
