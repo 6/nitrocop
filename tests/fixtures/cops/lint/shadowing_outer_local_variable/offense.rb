@@ -856,3 +856,47 @@ def yomiage_process(last)
     end
   end
 end
+
+# FN fix: outer-block else-branch ownership must not suppress expression-nested inner block
+def build(typename)
+  if typename.to_s.include?('monthly')
+    post_process_replace do |res|
+      res
+    end
+  else
+    post_process_replace do |res|
+      {
+        'gcm' => res.map { |res| [res['gcm'], res['annualData'].first] }.to_h
+                            ^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `res`.
+      }
+    end
+  end
+end
+
+# FN fix: nested File.open block in same else branch still shadows outer block param
+def pack(file)
+  if cond
+    ok
+  else
+    Zip::File.open(path('output.zip'), Zip::File::CREATE) do |z|
+      z.file.open(file, "wb") { |f| f.write File.open(path(file), 'rb') {|f| f.read} }
+                                                                          ^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `f`.
+    end
+  end
+end
+
+# FN fix: multi-statement else branch should not suppress call-arg nested block
+def build(args, target)
+  args.map do |modname|
+    if modname.type == :hash && modname.children.all? { |pair| pair.children.first.type == :prop }
+      if modname.children.length == 1
+        pair = modname.children.first
+        use(pair)
+      else
+        pair = modname.children.first
+        s(:hash, *modname.children.map { |pair| pair })
+                                          ^^^^ Lint/ShadowingOuterLocalVariable: Shadowing outer local variable - `pair`.
+      end
+    end
+  end
+end

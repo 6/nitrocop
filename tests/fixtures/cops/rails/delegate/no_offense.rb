@@ -319,6 +319,23 @@ if tracker_class
   end
 end
 
+# private inside the same conditional branch should suppress branch-local delegations.
+module Octopus
+  module Migrator
+    if Octopus.atleast_rails52?
+      private
+
+      def connection
+        ActiveRecord::Base.connection
+      end
+    else
+      def migrate_with_octopus(&block)
+        migrate_without_octopus(&block)
+      end
+    end
+  end
+end
+
 # Heredoc text containing `do not` should not look like a Ruby `do` block opener
 # and cancel the enclosing private section for later methods.
 class InteractiveIgnorer
@@ -346,4 +363,15 @@ q - Quit, do not update ignored warnings
   def unignore(warning)
     @ignore_config.unignore warning
   end
+end
+
+# `end if cond` modifier-if wrapping a def inside a block body where
+# `module_function` is a sibling. The IfNode shares its start offset with
+# the DefNode in Prism, so the visibility check must recurse through the
+# IfNode to see the `module_function` sibling.
+DidYouMean::JaroWinkler.module_eval do
+  module_function
+  def distance(str1, str2)
+    ::JaroWinkler.distance(str1, str2)
+  end if RUBY_ENGINE != 'jruby'
 end
