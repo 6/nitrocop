@@ -113,6 +113,15 @@ impl Variable {
                 assignment.reference(ref_offset);
             }
 
+            // Modifier-form conditionals (`body if cond`) do not stop the walk.
+            // The conditional may not execute, so earlier assignments to the
+            // same variable must stay visible to this reference. Matches
+            // RuboCop's `Variable#in_modifier_conditional?` special case in
+            // `reference!`.
+            if assignment.in_modifier_conditional {
+                continue;
+            }
+
             // Stop at the first unbranched assignment or same-branch assignment
             if assignment_branch_path.is_empty() || assignment_branch_path == ref_branch_path {
                 break;
