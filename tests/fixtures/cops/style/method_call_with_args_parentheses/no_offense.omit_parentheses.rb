@@ -17,3 +17,8 @@ end
 
 # inner calls used as super arguments keep parentheses
 super(errors.local_attribute(attribute))
+
+# unary descendant arguments keep the outer call parentheses
+def input_field
+  some_helper(form_field_name, value, id: form_field_id, readonly: !editable?)
+end
