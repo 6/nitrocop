@@ -180,3 +180,46 @@ class AddNewFieldsToOrganization < ActiveRecord::Migration
     end
   end
 end
+
+class AddFieldsToUsers < ActiveRecord::Migration
+  def change
+    add_column :users, :locale, :string, default: I18n.default_locale
+    ^ Rails/BulkChangeTable: You can use `change_table :users, bulk: true` to combine alter queries.
+    add_column :users, :notifications, :boolean, default: true
+  end
+end
+
+class RemoveDeprecatedAttributesFromPosts < ActiveRecord::Migration
+  def change
+    remove_column :posts, :permanent
+    ^ Rails/BulkChangeTable: You can use `change_table :posts, bulk: true` to combine alter queries.
+    remove_column :posts, :joinable
+    remove_column :posts, :global
+  end
+end
+
+class MakeTermsTranslatable < ActiveRecord::Migration[6.1]
+  def up
+    add_column :documents, :title_translations, :jsonb, default: {}, null: false
+    ^ Rails/BulkChangeTable: You can use `change_table :documents, bulk: true` to combine alter queries.
+    add_column :documents, :content_translations, :jsonb, default: {}, null: false
+    Document.find_each do |doc|
+      doc.update_columns(title_translations: { es: doc[:title] }, content_translations: { es: doc[:content] })
+    end
+    remove_column :documents, :title
+    ^ Rails/BulkChangeTable: You can use `change_table :documents, bulk: true` to combine alter queries.
+    remove_column :documents, :content
+  end
+
+  def down
+    add_column :documents, :title, :text
+    ^ Rails/BulkChangeTable: You can use `change_table :documents, bulk: true` to combine alter queries.
+    add_column :documents, :content, :text
+    Document.find_each do |doc|
+      doc.update_columns(title: doc.title_translations["es"], content: doc.content_translations["es"])
+    end
+    remove_column :documents, :title_translations
+    ^ Rails/BulkChangeTable: You can use `change_table :documents, bulk: true` to combine alter queries.
+    remove_column :documents, :content_translations
+  end
+end

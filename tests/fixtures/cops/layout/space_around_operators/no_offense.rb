@@ -204,6 +204,22 @@ status      ||= 0
 email =  "Susan_foo@gmail.com"
 password = "Susan_foo"
 
+# Trailing spaces after = are allowed when a continued multiline RHS aligns
+describe "errors" do
+  describe WebMock::NetConnectNotAllowedError do
+    describe "message" do
+      it "accepts aligned continued strings" do
+        expected =  \
+          "Real HTTP connections are disabled. Unregistered request: #{request_signature}" \
+          "\n\nYou can stub this request with the following snippet:" \
+          "\n\n#{stub_result}" \
+          "\n\n============================================================"
+        expect(WebMock::NetConnectNotAllowedError.new(request_signature).message).to eq(expected)
+      end
+    end
+  end
+end
+
 # Hash with multi-byte UTF-8 keys aligned by => (curly quotes are 3 bytes each)
 # Must not flag any of these as "extra space" around =>
 rewrites = {
