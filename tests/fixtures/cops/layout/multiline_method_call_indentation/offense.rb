@@ -98,3 +98,21 @@ trigger = proc do
       nonce_name = 'stuff'
       ^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
 end
+
+# Repeated continuation dots should not inherit a bad column from the first one
+def self.pull_request_filter
+  where("contributions.user_id = aggregation_filters.user_id")
+  .where("contributions.title ILIKE aggregation_filters.title_pattern")
+  ^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+  .arel.exists.not
+  ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+end
+
+# RSpec stub chain: later dots still use the chain indent when the first continuation is wrong
+before do
+  allow(SteamCondenser::Community::SteamId).to receive(:steam_id_to_community_id)
+                                              .with("STEAM_0:0:173804217")
+                                              ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 44) spaces for indentation of a chained method call.
+                                              .and_return(76_561_198_307_874_162)
+                                              ^^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 44) spaces for indentation of a chained method call.
+end
