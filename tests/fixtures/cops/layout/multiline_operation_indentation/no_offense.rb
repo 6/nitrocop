@@ -66,16 +66,8 @@ data = {
             oauth.info.try(:[], 'headline')
 }
 
-# Same-column chained + without assignment (accepted for operator calls
-# because we can't distinguish from method-call-arg context without AST parents)
-def lyrics
-  "hello".capitalize +
-  "world" +
-  "foo"
-end
-
 # Chained + inside method call args (no parens) — RuboCop accepts via
-# argument_in_method_call; we accept via left-alignment fallback
+# argument_in_method_call; we keep same-column alignment only for that context
 def from_string(str)
   raise Exception,
   "Unrecognizable input. " +

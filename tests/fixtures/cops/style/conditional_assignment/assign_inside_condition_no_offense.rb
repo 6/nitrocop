@@ -65,3 +65,41 @@ trunc = lambda { |s| s = s.length > 10 ? s : s[0..10]; s }
   path = windows ? c_chef_dir : other_dir
   clean(path)
 end
+
+# FP fix: RuboCop's autocorrect crashes when an elsif/else keyword is
+# less indented than the assignment LHS. RuboCop drops the offense in
+# that case (Shopify/krane pattern).
+def refute_resource_exists(type, name)
+  client = if %w(daemonset deployment replicaset statefulset).include?(type)
+    apps_v1_kubeclient
+ elsif %w(ingress networkpolicy).include?(type)
+   networking_v1_kubeclient
+  else
+    kubeclient
+  end
+end
+
+# FP fix: RuboCop's autocorrect crashes on an empty elsif body (calls
+# `tail(nil)`). Offense is dropped (brianmario/mysql2 pattern).
+dll_path = if ENV['RUBY_MYSQL2_LIBMYSQL_DLL']
+  ENV['RUBY_MYSQL2_LIBMYSQL_DLL']
+elsif File.exist?('vendor/libmysql.dll')
+  'vendor/libmysql.dll'
+elsif defined?(RubyInstaller)
+  # RubyInstaller-2.4+ native build doesn't need DLL preloading
+else
+  'libmysql.dll'
+end
+
+# FP fix: chained assignment where the inner assignment's column is
+# greater than the `else`/`end` column so `column - node_column` goes
+# negative in RuboCop's autocorrect (feedbin pattern).
+def show
+  if saved_search.present?
+    per_page = params[:per_page] = if params[:include_entries] == "true"
+      100
+    else
+      limit
+    end
+  end
+end
