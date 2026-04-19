@@ -17,9 +17,7 @@ use crate::parse::source::SourceFile;
 /// were in the safe methods list but are NOT in RuboCop's ACCEPTED_METHODS, causing
 /// `Time.now.getutc` etc. to be incorrectly exempted. Removed these methods.
 ///
-/// **Remaining gaps:**
-/// - Strict mode does not check GOOD_METHODS chain (e.g., `Time.now.zone` is
-///   flagged in strict mode but shouldn't be). Requires AST parent walking.
+/// **Remaining gaps (historical note):**
 /// - Byte-level chain scanner vs RuboCop's AST parent walking: the scanner works
 ///   correctly for most cases because `call.location().end_offset()` ends at the
 ///   closing paren of arguments, so `foo(Time.now).utc` correctly sees `)` (not
@@ -235,6 +233,19 @@ use crate::parse::source::SourceFile;
 /// The cop only handled `CALL_NODE`. Fix: added `CALL_OPERATOR_WRITE_NODE` to
 /// `interested_node_types` and handling for `read_name()` == dangerous method with
 /// `Time` receiver.
+///
+/// ## Investigation (2026-04-17): strict variant FP=35, FN=0
+///
+/// **Strict mode GOOD_METHODS chain (35 FP — FIXED):**
+/// RuboCop's strict style still treats GOOD_METHODS (`zone`, `zone_default`,
+/// `find_zone`, `find_zone!`) as neutralizing methods in the extracted parent chain.
+/// Nitrocop only applied chain/enclosing-call safety checks in flexible mode, so
+/// strict-mode patterns like `Time.now.zone`, `"#{Time.now.zone}"`,
+/// `Time.to_mongo(Time.local(...)).zone`, and `Time.new(...).zone` were falsely
+/// flagged. Fix: made the chain scanner, enclosing-call walker, and dangerous-context
+/// suppression style-aware so strict mode accepts ONLY GOOD_METHODS while flexible
+/// mode retains the broader ACCEPTED_METHODS behavior. This keeps `Time.now.to_i`
+/// flagged in strict mode while matching RuboCop on `.zone` chains.
 pub struct TimeZone;
 
 impl Cop for TimeZone {
@@ -360,6 +371,9 @@ impl Cop for TimeZone {
             return;
         }
 
+        let style = config.get_str("EnforcedStyle", "flexible");
+        let strict = style == "strict";
+
         // Non-dangerous method on Time (e.g., Time.days_in_month) — check if it's
         // inside a dangerous enclosing Time call. RuboCop's extract_method_chain walks
         // up through ALL parents, and method_from_time_class? adds the enclosing method
@@ -384,7 +398,6 @@ impl Cop for TimeZone {
             // RuboCop's good_methods in flexible mode includes GOOD_METHODS + [:current]
             // + ACCEPTED_METHODS. If the inner method is one of these, not_danger_chain?
             // returns true and the offense is suppressed.
-            let style = config.get_str("EnforcedStyle", "flexible");
             if style == "flexible"
                 && matches!(
                     method,
@@ -408,7 +421,7 @@ impl Cop for TimeZone {
             let bytes = source.as_bytes();
             let start = call.location().start_offset();
             if let Some((dangerous_method, msg_loc)) =
-                in_dangerous_time_context(bytes, start, source)
+                in_dangerous_time_context(bytes, start, source, strict)
             {
                 let (line, column) = source.offset_to_line_col(msg_loc);
                 diagnostics.push(self.diagnostic(
@@ -469,31 +482,22 @@ impl Cop for TimeZone {
             }
         }
 
-        let style = config.get_str("EnforcedStyle", "flexible");
+        // RuboCop treats a dangerous method as safe when the parent chain contains
+        // any style-allowed good method. In flexible mode this includes
+        // ACCEPTED_METHODS; in strict mode it is limited to GOOD_METHODS like `.zone`.
+        let bytes = source.as_bytes();
+        let end = call.location().end_offset();
+        if chain_contains_tz_safe_method(bytes, end, strict) {
+            return;
+        }
 
-        if style == "flexible" {
-            // In flexible mode, Time.now (and others) are acceptable if ANY method
-            // in the subsequent chain is timezone-safe (e.g., .utc, .in_time_zone).
-            // RuboCop walks up the AST via node.parent; we scan forward through the
-            // source bytes following the method chain.
-            // Example: Time.at(x).to_datetime.in_time_zone(...) — the chain after
-            // Time.at(x) is ".to_datetime.in_time_zone(...)" and in_time_zone is safe.
-            let bytes = source.as_bytes();
-            let end = call.location().end_offset();
-            if chain_contains_tz_safe_method(bytes, end) {
-                return;
-            }
-
-            // RuboCop also walks UP via node.parent, which means it considers the
-            // enclosing call context. For `Time.utc(Time.now.year - 1, ...)`, the
-            // chain becomes [now, year, -, utc] and `utc` makes it safe.
-            //
-            // Detect this by checking if `Time.now` is an immediate argument to a
-            // safe method: scan backwards from Time.now's start for `safe_method(`.
-            let start = call.location().start_offset();
-            if enclosing_call_is_safe(bytes, start) {
-                return;
-            }
+        // RuboCop also walks UP via node.parent, which means it considers the
+        // enclosing call context. For `Time.utc(Time.now.year - 1, ...)`, the
+        // chain becomes [now, year, -, utc] and `utc` makes it safe in flexible mode.
+        // In strict mode, only GOOD_METHODS like `.zone` should suppress.
+        let start = call.location().start_offset();
+        if enclosing_call_is_safe(bytes, start, strict) {
+            return;
         }
 
         let loc = call.message_loc().unwrap_or(call.location());
@@ -593,6 +597,42 @@ fn has_timezone_specifier(bytes: &[u8]) -> bool {
     false
 }
 
+fn is_good_method(method: &[u8]) -> bool {
+    matches!(
+        method,
+        b"zone" | b"zone_default" | b"find_zone" | b"find_zone!"
+    )
+}
+
+fn is_style_safe_method(method: &[u8], has_args: bool, strict: bool) -> bool {
+    if is_good_method(method) {
+        return true;
+    }
+
+    if strict {
+        return false;
+    }
+
+    if matches!(
+        method,
+        b"utc"
+            | b"getlocal"
+            | b"in_time_zone"
+            | b"iso8601"
+            | b"xmlschema"
+            | b"jisx0301"
+            | b"rfc3339"
+            | b"httpdate"
+            | b"to_i"
+            | b"to_f"
+            | b"current"
+    ) {
+        return true;
+    }
+
+    method == b"localtime" && has_args
+}
+
 /// Check if the byte at `start` (beginning of `Time.now` etc.) is immediately
 /// inside the argument list of a timezone-safe method call.
 ///
@@ -603,31 +643,20 @@ fn has_timezone_specifier(bytes: &[u8]) -> bool {
 ///
 /// This matches RuboCop's behavior where `not_danger_chain?` returns true when
 /// the parent-chain (now, year, -, utc) includes an ACCEPTED_METHOD.
-fn enclosing_call_is_safe(bytes: &[u8], start: usize) -> bool {
+fn enclosing_call_is_safe(bytes: &[u8], start: usize, strict: bool) -> bool {
     // Check up to 3 levels of nesting to handle cases like:
     // Time.parse(helper_method(Time.now)).utc
     // Level 1: helper_method( — not safe, chain after ) is ) — not safe
     // Level 2: Time.parse( — not safe itself, but chain after ) is .utc — safe!
-    enclosing_call_is_safe_recursive(bytes, start, 3)
+    enclosing_call_is_safe_recursive(bytes, start, 3, strict)
 }
 
-fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -> bool {
-    const SAFE_METHODS: &[&[u8]] = &[
-        b"utc",
-        b"getlocal",
-        b"in_time_zone",
-        b"localtime",
-        b"iso8601",
-        b"xmlschema",
-        b"jisx0301",
-        b"rfc3339",
-        b"httpdate",
-        b"to_i",
-        b"to_f",
-        b"zone",
-        b"current",
-    ];
-
+fn enclosing_call_is_safe_recursive(
+    bytes: &[u8],
+    start: usize,
+    max_depth: u8,
+    strict: bool,
+) -> bool {
     if start == 0 || max_depth == 0 {
         return false;
     }
@@ -737,7 +766,7 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
     // is Duration, not Time). But `Time.utc(Time.now)` IS suppressed.
     let receiver_is_time = receiver_traces_to_time(bytes, method_start);
 
-    if receiver_is_time && SAFE_METHODS.contains(&method_name) {
+    if receiver_is_time && is_style_safe_method(method_name, true, strict) {
         return true;
     }
 
@@ -755,7 +784,7 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
     if receiver_is_time && !is_spaced_paren {
         let closing_paren = find_matching_close_paren(bytes, paren_pos);
         if let Some(close_pos) = closing_paren {
-            if chain_contains_tz_safe_method(bytes, close_pos + 1) {
+            if chain_contains_tz_safe_method(bytes, close_pos + 1, strict) {
                 return true;
             }
         }
@@ -765,7 +794,7 @@ fn enclosing_call_is_safe_recursive(bytes: &[u8], start: usize, max_depth: u8) -
     // E.g., Time.parse(helper_method(Time.now)).utc
     // At level 1: helper_method( is not safe, chain after helper_method(...) is ) — not safe
     // At level 2: Time.parse( is checked, chain after Time.parse(...) is .utc — safe!
-    enclosing_call_is_safe_recursive(bytes, paren_pos, max_depth - 1)
+    enclosing_call_is_safe_recursive(bytes, paren_pos, max_depth - 1, strict)
 }
 
 /// Find the opening `(` that encloses the position `pos` in the source.
@@ -857,6 +886,7 @@ fn in_dangerous_time_context(
     bytes: &[u8],
     start: usize,
     source: &SourceFile,
+    strict: bool,
 ) -> Option<(String, usize)> {
     const DANGEROUS_METHODS: &[&[u8]] = &[b"now", b"parse", b"at", b"new", b"local"];
 
@@ -915,7 +945,7 @@ fn in_dangerous_time_context(
     // If it does, suppress (e.g., Time.zone.local(..., Time.days_in_month(month)).utc)
     let closing_paren = find_matching_close_paren(bytes, paren_pos);
     if let Some(close_pos) = closing_paren {
-        if chain_contains_tz_safe_method(bytes, close_pos + 1) {
+        if chain_contains_tz_safe_method(bytes, close_pos + 1, strict) {
             return None;
         }
     }
@@ -1033,25 +1063,7 @@ fn receiver_traces_to_time(bytes: &[u8], method_start: usize) -> bool {
 /// Scan forward through a method chain starting at `pos` in `bytes`, returning
 /// true if any method in the chain is a timezone-safe method. Handles chains
 /// like `.to_datetime.in_time_zone(...)` by following `.method(args)` segments.
-fn chain_contains_tz_safe_method(bytes: &[u8], start: usize) -> bool {
-    // Matches RuboCop's ACCEPTED_METHODS + GOOD_METHODS + [:current] for flexible mode.
-    // Notably excludes getutc, rfc2822, rfc822, to_r which are NOT in RuboCop's lists.
-    // `localtime` is handled specially below: only safe WITH arguments.
-    const SAFE_METHODS: &[&[u8]] = &[
-        b"utc",
-        b"getlocal",
-        b"in_time_zone",
-        b"iso8601",
-        b"xmlschema",
-        b"jisx0301",
-        b"rfc3339",
-        b"httpdate",
-        b"to_i",
-        b"to_f",
-        b"zone",
-        b"current",
-    ];
-
+fn chain_contains_tz_safe_method(bytes: &[u8], start: usize, strict: bool) -> bool {
     let mut pos = start;
     loop {
         // Skip whitespace (including newlines for multi-line chains)
@@ -1150,13 +1162,7 @@ fn chain_contains_tz_safe_method(bytes: &[u8], start: usize) -> bool {
             false
         };
 
-        // Check if this method is timezone-safe
-        if SAFE_METHODS.contains(&method) {
-            return true;
-        }
-        // `localtime` is only safe when called WITH arguments (timezone offset).
-        // Without arguments, it converts to local system time — not timezone-safe.
-        if method == b"localtime" && has_args {
+        if is_style_safe_method(method, has_args, strict) {
             return true;
         }
 
@@ -1169,23 +1175,26 @@ mod tests {
     use super::*;
     crate::cop_fixture_tests!(TimeZone, "cops/rails/time_zone");
 
-    #[test]
-    fn to_time_flagged_in_strict_mode() {
-        use crate::cop::CopConfig;
+    fn strict_config() -> CopConfig {
         use std::collections::HashMap;
+
         let mut options = HashMap::new();
         options.insert(
             "EnforcedStyle".to_string(),
             serde_yml::Value::String("strict".to_string()),
         );
-        let config = CopConfig {
+        CopConfig {
             options,
             ..CopConfig::default()
-        };
+        }
+    }
+
+    #[test]
+    fn to_time_flagged_in_strict_mode() {
         // In strict mode, string literal receivers are flagged.
         // Non-string receivers (date_str.to_time) are NOT flagged — RuboCop requires str_type?.
         let fixture = b"\"2005-02-27 23:50\".to_time\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n\"2005-02-27 23:50\".to_time(:utc)\n                   ^^^^^^^ Rails/TimeZone: Do not use `String#to_time` without zone. Use `Time.zone.parse` instead.\n";
-        crate::testutil::assert_cop_offenses_full_with_config(&TimeZone, fixture, config);
+        crate::testutil::assert_cop_offenses_full_with_config(&TimeZone, fixture, strict_config());
     }
 
     #[test]
@@ -1201,5 +1210,21 @@ mod tests {
         // RuboCop only flags string literal receivers, not variable.to_time
         let source = b"date_str.to_time\nmy_var.to_time\nto_time\n";
         crate::testutil::assert_cop_no_offenses_full(&TimeZone, source);
+    }
+
+    #[test]
+    fn strict_mode_zone_chain_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &TimeZone,
+            include_bytes!("../../../tests/fixtures/cops/rails/time_zone/no_offense.strict.rb"),
+            strict_config(),
+        );
+    }
+
+    #[test]
+    fn strict_mode_still_flags_accepted_methods() {
+        let fixture =
+            b"Time.now.to_i\n     ^^^ Rails/TimeZone: Use `Time.zone.now` instead of `Time.now`.\n";
+        crate::testutil::assert_cop_offenses_full_with_config(&TimeZone, fixture, strict_config());
     }
 }

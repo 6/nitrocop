@@ -65,6 +65,18 @@
 /// (no receiver, no arguments) in `RefCollector` as implicit references, gated
 /// by the `IgnoreImplicitReferences` config like `ForwardingSuperNode`.
 ///
+/// FN fix (1 corpus, 2026-04-17): a def (or block/lambda) nested inside an
+/// outer begin/ensure body inherited the outer branch context because
+/// `visit_def_node`/`visit_block_node`/`visit_lambda_node` saved and reset
+/// `branch_depth` but left `branch_stack` populated with the outer begin
+/// branch. When an `&&` short-circuit was pushed inside the def, the
+/// `current_shadowing_in_branch` scan walked the stack, found the outer
+/// non-short-circuit begin branch, and incorrectly marked the def's own
+/// shadowing assignment as conditional (seeing_is_believing compatibility.rb
+/// line 15 `char && block = lambda { |c| char }`). Fixed by also saving
+/// and clearing `branch_stack` on scope entry so inner scope branch checks
+/// only see branches pushed after scope entry.
+///
 /// FP fix (5 corpus, 2026-04-03): assignments in `case` predicates
 /// (e.g., `case value = super`) were treated as unconditional because the
 /// VariableForce engine visited the case predicate before incrementing
@@ -205,7 +217,7 @@ fn check_variable(
         }
 
         // This is a shadowing-style assignment (non-operator, doesn't use param on RHS).
-        if asgn.in_branch {
+        if asgn.shadowing_in_branch {
             // Inside a conditional — can't tell if it executes.
             // Mark location as unknown and continue looking.
             location_known = false;

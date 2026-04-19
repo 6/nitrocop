@@ -12,9 +12,12 @@ use crate::parse::source::SourceFile;
 /// `.active_storage`), then camelizing. For example,
 /// `db/migrate/20220101_create_users.rb` expects `CreateUsers`.
 ///
-/// All `ActiveRecord::Migration` subclasses in the file are checked, including
-/// nested ones (which appear in real migration files that bundle multiple
-/// sub-migrations, e.g. `add_rpush.rb` containing `CreateRapnsNotifications`).
+/// RuboCop only checks classes whose superclass is a versioned
+/// `ActiveRecord::Migration[...]` send. Unversioned legacy migrations like
+/// `class CreateNewsArticle < ActiveRecord::Migration` are ignored, including
+/// nested legacy sub-migrations inside wrapper migrations such as `add_rpush.rb`.
+/// nitrocop mirrors that quirk to avoid false positives while still checking
+/// nested versioned migration classes.
 ///
 /// Comparison is case-insensitive (matching RuboCop's `casecmp`) to tolerate
 /// ActiveSupport inflection differences like `OAuth` vs `Oauth`.
@@ -57,10 +60,7 @@ impl Cop for MigrationClassName {
             None => return,
         };
 
-        let super_loc = superclass.location();
-        let super_bytes = &source.as_bytes()[super_loc.start_offset()..super_loc.end_offset()];
-
-        if !super_bytes.starts_with(b"ActiveRecord::Migration") {
+        if !is_versioned_migration_superclass(superclass) {
             return;
         }
 
@@ -87,6 +87,63 @@ impl Cop for MigrationClassName {
             format!("Replace with `{}` that matches the file name.", expected),
         ));
     }
+}
+
+fn is_versioned_migration_superclass(node: ruby_prism::Node<'_>) -> bool {
+    let Some(call) = node.as_call_node() else {
+        return false;
+    };
+
+    if call.name().as_slice() != b"[]" {
+        return false;
+    }
+
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    if !is_active_record_migration_const(receiver) {
+        return false;
+    }
+
+    let Some(arguments) = call.arguments() else {
+        return false;
+    };
+
+    let args = arguments.arguments();
+    args.len() == 1
+        && args
+            .iter()
+            .next()
+            .is_some_and(|argument| argument.as_float_node().is_some())
+}
+
+fn is_active_record_migration_const(node: ruby_prism::Node<'_>) -> bool {
+    let Some(migration) = node.as_constant_path_node() else {
+        return false;
+    };
+
+    if migration
+        .name()
+        .is_none_or(|name| name.as_slice() != b"Migration")
+    {
+        return false;
+    }
+
+    let Some(parent) = migration.parent() else {
+        return false;
+    };
+
+    if let Some(active_record) = parent.as_constant_read_node() {
+        return active_record.name().as_slice() == b"ActiveRecord";
+    }
+
+    parent.as_constant_path_node().is_some_and(|active_record| {
+        active_record
+            .name()
+            .is_some_and(|name| name.as_slice() == b"ActiveRecord")
+            && active_record.parent().is_none()
+    })
 }
 
 /// Extract the expected CamelCase class name from a migration file path.
@@ -180,5 +237,12 @@ mod tests {
         assert_eq!(strip_timestamp_prefix("20220101_add_users"), "add_users");
         assert_eq!(strip_timestamp_prefix("add_users"), "add_users");
         assert_eq!(strip_timestamp_prefix("123_foo"), "foo");
+    }
+
+    #[test]
+    fn ignores_unversioned_top_level_migrations() {
+        let source = b"# nitrocop-filename: db/migrate/007_news_article.rb\nclass CreateNewsArticle < ActiveRecord::Migration\nend\n";
+
+        crate::testutil::assert_cop_no_offenses_full(&MigrationClassName, source);
     }
 }

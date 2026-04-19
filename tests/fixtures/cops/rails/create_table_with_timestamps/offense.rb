@@ -16,6 +16,12 @@ create_table :comments do |t|
   t.text :content
 end
 
+create_table :audit_logs
+^^^^^^^^^^^^^^^^^^^^^^^^ Rails/CreateTableWithTimestamps: Add `t.timestamps` to `create_table` block.
+
+create_table :events, &:extension_columns
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Rails/CreateTableWithTimestamps: Add `t.timestamps` to `create_table` block.
+
 class ActsAsTaggableOnMigration < ActiveRecord::Migration[4.2]
   def self.up
     create_table :tags do |t|

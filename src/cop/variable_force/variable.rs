@@ -47,10 +47,18 @@ impl Variable {
     /// only if it is in the same branch (or both are unbranched). Assignments
     /// in exclusive branches (e.g., if-then vs if-else) are NOT marked as
     /// reassigned because only one branch executes.
-    pub fn assign(&mut self, assignment: Assignment) {
+    pub fn assign(
+        &mut self,
+        assignment: Assignment,
+        branch_contexts: &[super::engine::BranchContext],
+    ) {
+        let assignment_branch_path =
+            relevant_branch_path(&assignment.branch_path, self.scope_index, branch_contexts);
         if !self.captured_by_block {
             if let Some(prev) = self.assignments.last() {
-                if assignment.branch_id == prev.branch_id {
+                let prev_branch_path =
+                    relevant_branch_path(&prev.branch_path, self.scope_index, branch_contexts);
+                if assignment_branch_path == prev_branch_path {
                     let prev_mut = self.assignments.last_mut().unwrap();
                     prev_mut.reassign();
                 }
@@ -78,30 +86,40 @@ impl Variable {
         ref_node: Reference,
         branch_contexts: &[super::engine::BranchContext],
     ) {
-        let ref_branch_id = ref_node.branch_id;
+        let ref_branch_path =
+            relevant_branch_path(&ref_node.branch_path, self.scope_index, branch_contexts);
         let ref_offset = ref_node.node_offset;
-        let mut consumed_branch_ids: Vec<usize> = Vec::new();
+        let mut consumed_branch_paths: Vec<Vec<usize>> = Vec::new();
 
         for assignment in self.assignments.iter_mut().rev() {
-            // Skip assignments whose branch we've already processed
-            if let Some(a_bid) = assignment.branch_id {
-                if consumed_branch_ids.contains(&a_bid) {
-                    continue;
-                }
+            let assignment_branch_path =
+                relevant_branch_path(&assignment.branch_path, self.scope_index, branch_contexts);
+            let assignment_context = assignment_branch_path
+                .last()
+                .and_then(|&id| branch_contexts.get(id));
+
+            if !assignment_branch_path.is_empty()
+                && consumed_branch_paths.contains(&assignment_branch_path)
+            {
+                continue;
             }
 
-            let exclusive = is_exclusive(assignment.branch_id, ref_branch_id, branch_contexts);
+            let exclusive = assignment_exclusive_with_reference(
+                &assignment_branch_path,
+                &ref_branch_path,
+                branch_contexts,
+            );
             if !exclusive {
                 assignment.reference(ref_offset);
             }
 
             // Stop at the first unbranched assignment or same-branch assignment
-            if assignment.branch_id.is_none() || assignment.branch_id == ref_branch_id {
+            if assignment_branch_path.is_empty() || assignment_branch_path == ref_branch_path {
                 break;
             }
 
-            if let Some(bid) = assignment.branch_id {
-                consumed_branch_ids.push(bid);
+            if assignment_context.is_some_and(|context| !context.may_run_incompletely) {
+                consumed_branch_paths.push(assignment_branch_path);
             }
         }
         self.references.push(ref_node);
@@ -146,29 +164,60 @@ impl Variable {
     }
 }
 
-/// Check if two branch IDs represent exclusive branches (same parent,
-/// different child index).
-fn is_exclusive(
-    a: Option<usize>,
-    b: Option<usize>,
+/// Check whether the assignment's branch runs exclusively with the reference's
+/// branch, following RuboCop's directed branch walk.
+fn assignment_exclusive_with_reference(
+    assignment_path: &[usize],
+    reference_path: &[usize],
     branch_contexts: &[super::engine::BranchContext],
 ) -> bool {
-    let (a_id, b_id) = match (a, b) {
-        (Some(a), Some(b)) => (a, b),
-        _ => return false,
-    };
-    if a_id == b_id {
-        return false;
+    for &assignment_id in assignment_path.iter().rev() {
+        let Some(assignment_context) = branch_contexts.get(assignment_id) else {
+            continue;
+        };
+
+        if assignment_context.may_jump_to_other_branch {
+            return false;
+        }
+
+        for &reference_id in reference_path.iter().rev() {
+            let Some(reference_context) = branch_contexts.get(reference_id) else {
+                continue;
+            };
+
+            if assignment_context.parent_id != reference_context.parent_id {
+                continue;
+            }
+
+            if assignment_context.predicate_context || reference_context.predicate_context {
+                break;
+            }
+
+            return assignment_context.child_index != reference_context.child_index;
+        }
     }
-    if a_id >= branch_contexts.len() || b_id >= branch_contexts.len() {
-        return false;
+
+    false
+}
+
+fn relevant_branch_path(
+    branch_path: &[usize],
+    variable_scope_index: usize,
+    branch_contexts: &[super::engine::BranchContext],
+) -> Vec<usize> {
+    if branch_contexts.is_empty() {
+        return branch_path.to_vec();
     }
-    let a_ctx = &branch_contexts[a_id];
-    let b_ctx = &branch_contexts[b_id];
-    if a_ctx.predicate_context || b_ctx.predicate_context {
-        return false;
-    }
-    a_ctx.parent_id == b_ctx.parent_id && a_ctx.child_index != b_ctx.child_index
+
+    branch_path
+        .iter()
+        .copied()
+        .filter(|&id| {
+            branch_contexts
+                .get(id)
+                .is_some_and(|context| context.scope_index >= variable_scope_index)
+        })
+        .collect()
 }
 
 /// How a variable was first declared.

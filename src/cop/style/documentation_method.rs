@@ -95,9 +95,10 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 ///
 /// Root cause of some remaining FNs: comment lines with an inline `# rubocop:disable`
 /// directive (e.g., `# Some doc # rubocop:disable Layout/LineLength`) were treated as
-/// documentation by nitrocop but RuboCop's `DirectiveComment` matches `# rubocop:` anywhere
-/// in the comment text, treating the entire line as a directive. Fix: check for
-/// `# rubocop:` as a substring in the comment text.
+/// documentation by nitrocop but RuboCop's `DirectiveComment` matches actual inline
+/// `# rubocop:disable` / `# rubocop:enable` / `# rubocop:todo` / `# rubocop:push` /
+/// `# rubocop:pop` directives anywhere in the comment text, treating the entire line as a
+/// directive. nitrocop approximated this too broadly as a raw `# rubocop:` substring check.
 ///
 /// **Investigation (2026-04-10):** 41 FP, 52 FN.
 /// Two root causes addressed:
@@ -160,6 +161,30 @@ const PUBLIC_MODIFIERS: &[&[u8]] = &[b"module_function ", b"ruby2_keywords "];
 /// explicit `begin ... rescue` blocks and implicit class/module rescue bodies were
 /// incorrectly treated as public. Fix: reuse the normal statement-list visitor for
 /// rescue-wrapped bodies while still masking preceding comments only for the first child.
+///
+/// **Investigation (2026-04-17):** The remaining 3 FPs came from two over-broad comment
+/// scanners in `has_method_documentation_comment()`:
+/// 1. Comments that merely mention the incomplete marker `` `# rubocop:` `` (for example in
+///    RuboCop's own `DirectiveComment` docs) were treated as directives because nitrocop
+///    matched a raw `# rubocop:` substring. RuboCop only suppresses documentation when the
+///    comment contains a full directive header with a real mode (`disable`, `enable`,
+///    `todo`, `push`, `pop`), even if that directive appears inline later in the comment.
+/// 2. Any preceding line starting with `#{` was treated as an interpolation opener. That is
+///    only correct inside Prism `EmbeddedStatementsNode` bodies such as Opal `%x{ #{ ... } }`
+///    interpolations; in normal Ruby code a line like `#{1 => 2}` is just a comment and can
+///    document the following method.
+///
+/// Fix: parse full RuboCop directive headers instead of raw `# rubocop:` substrings, and
+/// only treat `#{` as a documentation boundary while visiting embedded interpolation bodies.
+///
+/// **Investigation (2026-04-17, receiver wrappers):** 1 remaining FN came from defs used as
+/// call receivers, e.g. `# [TEMP] To be removed; def test_ids_reserved; end<1`.
+/// RuboCop does not associate the preceding comment with the inner `def` because the method is
+/// wrapped by the outer send expression, but nitrocop's raw line scan still counted it as
+/// documentation.
+///
+/// Fix: treat receiver-wrapped defs like other comment-stealing wrappers by incrementing
+/// `wrapped_comment_depth` while visiting the receiver subtree.
 pub struct DocumentationMethod;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -310,6 +335,11 @@ fn inline_non_public_call(call: &ruby_prism::CallNode<'_>, arg: &ruby_prism::Nod
         && arg.as_def_node().is_some()
 }
 
+fn receiver_wrapped_def(call: &ruby_prism::CallNode<'_>) -> bool {
+    call.receiver()
+        .is_some_and(|receiver| receiver.as_def_node().is_some())
+}
+
 fn single_hash_comment_text(comment: &str) -> Option<&str> {
     let trimmed = comment.trim_start();
     let rest = trimmed.strip_prefix('#')?;
@@ -318,6 +348,61 @@ fn single_hash_comment_text(comment: &str) -> Option<&str> {
     }
 
     Some(rest.trim())
+}
+
+fn rubocop_directive_mode_end(bytes: &[u8], mut idx: usize) -> Option<usize> {
+    const MODES: [&[u8]; 5] = [b"disable", b"enable", b"todo", b"push", b"pop"];
+
+    while matches!(bytes.get(idx), Some(b' ' | b'\t')) {
+        idx += 1;
+    }
+
+    if !bytes.get(idx..)?.starts_with(b"rubocop") {
+        return None;
+    }
+    idx += b"rubocop".len();
+
+    while matches!(bytes.get(idx), Some(b' ' | b'\t')) {
+        idx += 1;
+    }
+
+    if !matches!(bytes.get(idx), Some(b':')) {
+        return None;
+    }
+    idx += 1;
+
+    while matches!(bytes.get(idx), Some(b' ' | b'\t')) {
+        idx += 1;
+    }
+
+    for mode in MODES {
+        if bytes.get(idx..)?.starts_with(mode) {
+            let end = idx + mode.len();
+            let has_boundary = match bytes.get(end) {
+                None => true,
+                Some(b) => !matches!(b, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_'),
+            };
+            if has_boundary {
+                return Some(end);
+            }
+        }
+    }
+
+    None
+}
+
+fn starts_with_rubocop_directive(text: &str) -> bool {
+    rubocop_directive_mode_end(text.as_bytes(), 0).is_some()
+}
+
+fn contains_inline_rubocop_directive(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    for (idx, byte) in bytes.iter().enumerate() {
+        if *byte == b'#' && rubocop_directive_mode_end(bytes, idx + 1).is_some() {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn is_annotation_or_directive_case_insensitive(comment: &str) -> bool {
@@ -330,15 +415,14 @@ pub fn is_annotation_or_directive_case_insensitive(comment: &str) -> bool {
         || text.starts_with("coding:")
         || text.starts_with("warn_indent:")
         || text.starts_with("shareable_constant_value:")
-        || text.starts_with("rubocop:")
+        || starts_with_rubocop_directive(text)
     {
         return true;
     }
 
-    // RuboCop's DirectiveComment matches `# rubocop:` anywhere in the comment text,
-    // so a doc comment with an inline rubocop:disable (e.g., `# Some doc # rubocop:disable X`)
-    // is treated as a directive, not documentation.
-    if text.contains("# rubocop:") {
+    // RuboCop's DirectiveComment also matches full inline directives later in the
+    // comment text (e.g., `# Some doc # rubocop:disable Layout/LineLength`).
+    if contains_inline_rubocop_directive(text) {
         return true;
     }
 
@@ -452,7 +536,11 @@ fn until_is_postfix_modifier(node: &ruby_prism::UntilNode<'_>) -> bool {
         })
 }
 
-fn has_method_documentation_comment(source: &SourceFile, keyword_offset: usize) -> bool {
+fn has_method_documentation_comment(
+    source: &SourceFile,
+    keyword_offset: usize,
+    treat_interpolation_opener_as_code: bool,
+) -> bool {
     let (node_line, _) = source.offset_to_line_col(keyword_offset);
     if node_line <= 1 {
         return false;
@@ -481,7 +569,9 @@ fn has_method_documentation_comment(source: &SourceFile, keyword_offset: usize) 
             break;
         }
 
-        if is_interpolation_opener_line(trimmed) || !trimmed.starts_with(b"#") {
+        if (treat_interpolation_opener_as_code && is_interpolation_opener_line(trimmed))
+            || !trimmed.starts_with(b"#")
+        {
             if !found_doc_comment {
                 if let Some(comment_text) = inline_body_opener_comment(line) {
                     if !is_annotation_or_directive_case_insensitive(comment_text) {
@@ -517,6 +607,7 @@ struct DocumentationMethodVisitor<'a> {
     pending_visibility: HashMap<usize, Option<MethodVisibility>>,
     wrapped_comment_depth: usize,
     inline_non_public_depth: usize,
+    embedded_statements_depth: usize,
     rescue_begin_first_child: bool,
 }
 
@@ -641,7 +732,11 @@ impl DocumentationMethodVisitor<'_> {
         if self.wrapped_comment_depth == 0
             && !prefix_steals_comments
             && !self.rescue_begin_first_child
-            && has_method_documentation_comment(self.source, def_offset)
+            && has_method_documentation_comment(
+                self.source,
+                def_offset,
+                self.embedded_statements_depth > 0,
+            )
         {
             return;
         }
@@ -734,7 +829,13 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
 
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if let Some(receiver) = node.receiver() {
+            if receiver_wrapped_def(node) {
+                self.wrapped_comment_depth += 1;
+            }
             self.visit(&receiver);
+            if receiver_wrapped_def(node) {
+                self.wrapped_comment_depth -= 1;
+            }
         }
 
         if let Some(args) = node.arguments() {
@@ -764,9 +865,11 @@ impl<'pr> Visit<'pr> for DocumentationMethodVisitor<'_> {
     }
 
     fn visit_embedded_statements_node(&mut self, node: &ruby_prism::EmbeddedStatementsNode<'pr>) {
+        self.embedded_statements_depth += 1;
         if let Some(statements) = node.statements() {
             self.visit_statements_node(&statements);
         }
+        self.embedded_statements_depth -= 1;
     }
 
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
@@ -872,6 +975,7 @@ impl Cop for DocumentationMethod {
             pending_visibility: HashMap::new(),
             wrapped_comment_depth: 0,
             inline_non_public_depth: 0,
+            embedded_statements_depth: 0,
             rescue_begin_first_child: false,
         };
         visitor.visit(&parse_result.node());

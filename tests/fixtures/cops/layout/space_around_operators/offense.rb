@@ -181,3 +181,56 @@ SetUIDBit = ReadBit  = 4
                      ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
 SetGIDBit = WriteBit = 2
 StickyBit = ExecBit  = 1
+
+# Extra space before => in varied hash value contexts
+MORE_HASH_ROCKETS = {
+  'environ'  => proc do |response|
+             ^^ Layout/SpaceAroundOperators: Operator `=>` should be surrounded by a single space.
+    response
+  end,
+  :watermark  => [:watermark, :text],
+              ^^ Layout/SpaceAroundOperators: Operator `=>` should be surrounded by a single space.
+  :user   => User.first || User.create!,
+          ^^ Layout/SpaceAroundOperators: Operator `=>` should be surrounded by a single space.
+}
+
+# Keyword operator: extra leading space before `or`
+def fetch_modifier(key)
+  MODIFIERS[key.to_sym]  or raise ArgumentError.new("Unknown modifier key: #{key}")
+                         ^^ Layout/SpaceAroundOperators: Operator `or` should be surrounded by a single space.
+end
+
+# Keyword operator: extra leading space before `and` in modifier return
+def redirect_back
+  redirect_to :action => :show, :controller => :choices,
+    :question_id => params[:question_id], :id => params[:id]  and return
+                                                              ^^^ Layout/SpaceAroundOperators: Operator `and` should be surrounded by a single space.
+end
+
+# Keyword operator: extra leading space before `and` in a continued condition
+if justNameCharacters(params["signature"]["firstnames"]) and
+    justNameCharacters(params["signature"]["lastname"])   and
+                                                          ^^^ Layout/SpaceAroundOperators: Operator `and` should be surrounded by a single space.
+    municipalities.include?(params["signature"]["occupancy_county"]) and
+    params["signature"]["vow"] == "1"
+end
+
+if justNameCharacters(params["first_names"]) and
+    justNameCharacters(params["last_name"])   and
+                                              ^^^ Layout/SpaceAroundOperators: Operator `and` should be surrounded by a single space.
+    municipalities.include?(params["occupancy_county"])
+end
+
+# Comparison operators in modifier conditions must not align with later operators on neighbor lines
+def finalize!
+  @become              = false                    if @become              != true
+                                                                          ^^ Layout/SpaceAroundOperators: Operator `!=` should be surrounded by a single space.
+  @become_user         = nil                      if @become_user         == UNSET_VALUE
+                                                                          ^^ Layout/SpaceAroundOperators: Operator `==` should be surrounded by a single space.
+end
+
+def retries_exceeded?
+  max_retries  = Setting.get_with_default('queue.max_retries', 0).to_i
+  max_retries  > 0 && self.retries >= max_retries
+               ^ Layout/SpaceAroundOperators: Operator `>` should be surrounded by a single space.
+end

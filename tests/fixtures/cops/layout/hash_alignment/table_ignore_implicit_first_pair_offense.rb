@@ -8,3 +8,10 @@ def format_route(rails_route, args)
     ^^^^^^^^^^^^^^^^^^^^ Layout/HashAlignment: Align the keys and values of a hash literal if they span more than one line.
     :options => args[:options] }
 end
+
+hash = {
+  "aaa" =>
+  ^^^^^^^^ Layout/HashAlignment: Align the keys and values of a hash literal if they span more than one line.
+    1,
+  "bb"  => 2
+}
