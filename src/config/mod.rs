@@ -2356,6 +2356,7 @@ impl ResolvedConfig {
             name,
             "Style/IfUnlessModifier"
                 | "Style/WhileUntilModifier"
+                | "Style/ConditionalAssignment"
                 | "Style/GuardClause"
                 | "Style/SoleNestedConditional"
                 | "Style/MultilineMethodSignature"
@@ -3421,6 +3422,27 @@ mod tests {
         let cc = config.cop_config("Layout/LineLength");
         assert_eq!(cc.options.get("Max").and_then(|v| v.as_u64()), Some(120));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn conditional_assignment_inherits_layout_line_length_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = write_config(
+            temp_dir.path(),
+            "Layout/LineLength:\n  Enabled: false\n  Max: 140\n",
+        );
+        let config = load_config(Some(&path), None, None).unwrap();
+        let cc = config.cop_config("Style/ConditionalAssignment");
+        assert_eq!(
+            cc.options.get("MaxLineLength").and_then(|v| v.as_u64()),
+            Some(140)
+        );
+        assert_eq!(
+            cc.options
+                .get("LineLengthEnabled")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]
