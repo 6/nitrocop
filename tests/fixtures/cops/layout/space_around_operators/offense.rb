@@ -234,18 +234,3 @@ def retries_exceeded?
   max_retries  > 0 && self.retries >= max_retries
                ^ Layout/SpaceAroundOperators: Operator `>` should be surrounded by a single space.
 end
-
-hash['medline']  	= ui
-^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
-
-s.name    	= 'rack-jekyll'
-^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
-
-default['zabbix']['agent']['timeout']       	= '3'
-^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
-
-@sessions << @drizzle_session    = proposals(:drizzle_session)
-^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
-
-@sessions << @cloud_session      = proposals(:cloud_session)
-^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
