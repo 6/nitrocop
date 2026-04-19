@@ -224,6 +224,14 @@ use ruby_prism::Visit;
 /// - Matched RuboCop 1.84.2's tabs-style crash for `if` expressions used as
 ///   hash-pair values. Under batch 1 RuboCop drops those checks entirely, so
 ///   nitrocop now suppresses only that narrow context.
+///
+/// 2026-04-19:
+/// - Fixed the last `relative_to_receiver` false negative for tabs-style
+///   adjacent defs like `private_class_method def self.method_added`. RuboCop's
+///   tabs path counts only the tabs/spaces that appear before the base range on
+///   the line; it does not treat the modifier text itself as extra indentation.
+///   The previous port forced raw-column math for all same-line modifier defs,
+///   which turned real offenses into negative-indent crash suppressions.
 pub struct IndentationWidth;
 
 /// Check if a node is a bare access modifier call (for example `private` with no
@@ -344,58 +352,6 @@ fn def_modifier_base_offset(source: &SourceFile, kw_offset: usize) -> Option<usi
     }
 }
 
-fn def_has_same_line_bare_access_modifier(source: &SourceFile, kw_offset: usize) -> bool {
-    if kw_offset == 0 {
-        return false;
-    }
-
-    let bytes = source.as_bytes();
-    let line_start = line_start_offset(source, kw_offset);
-    let mut first_non_ws = line_start;
-    while first_non_ws < bytes.len()
-        && (bytes[first_non_ws] == b' ' || bytes[first_non_ws] == b'\t')
-    {
-        first_non_ws += 1;
-    }
-    if first_non_ws == kw_offset {
-        return false;
-    }
-
-    let mut modifier_end = kw_offset;
-    while modifier_end > line_start
-        && (bytes[modifier_end - 1] == b' ' || bytes[modifier_end - 1] == b'\t')
-    {
-        modifier_end -= 1;
-    }
-    if modifier_end <= first_non_ws {
-        return false;
-    }
-
-    matches!(
-        &bytes[first_non_ws..modifier_end],
-        b"private" | b"protected" | b"public"
-    )
-}
-
-fn body_first_statement_uses_tabs(source: &SourceFile, body: &ruby_prism::Node<'_>) -> bool {
-    let first_offset = if let Some(stmts) = body.as_statements_node() {
-        stmts
-            .body()
-            .iter()
-            .next()
-            .map(|node| node.location().start_offset())
-    } else if let Some(begin_node) = body.as_begin_node() {
-        begin_node
-            .statements()
-            .and_then(|stmts| stmts.body().iter().next())
-            .map(|node| node.location().start_offset())
-    } else {
-        None
-    };
-
-    first_offset.is_some_and(|offset| line_uses_tab_indentation(source, offset))
-}
-
 fn body_members(body: ruby_prism::Node<'_>) -> Vec<ruby_prism::Node<'_>> {
     if let Some(stmts) = body.as_statements_node() {
         stmts.body().iter().collect()
@@ -457,8 +413,8 @@ fn line_uses_tab_indentation(source: &SourceFile, offset: usize) -> bool {
 }
 
 /// Compute RuboCop's tabs-style indentation width at `offset`.
-/// For leading indentation, RuboCop counts each tab as exactly `tab_width`
-/// columns and each space as 1 column; it does not expand tabs to tab stops.
+/// RuboCop counts only tabs/spaces that appear before the range column on the
+/// line, ignoring any modifier/call text that may also precede the base range.
 fn visual_column_at(source: &SourceFile, offset: usize, tab_width: usize) -> usize {
     let bytes = source.as_bytes();
     let mut pos = line_start_offset(source, offset);
@@ -472,7 +428,8 @@ fn visual_column_at(source: &SourceFile, offset: usize, tab_width: usize) -> usi
     while pos < offset {
         match bytes[pos] {
             b'\t' => width += tab_width,
-            _ => width += 1,
+            b' ' => width += 1,
+            _ => {}
         }
         pos += 1;
     }
@@ -738,7 +695,6 @@ struct MemberStyles<'a> {
 struct IndentationOptions {
     width: usize,
     tabs_style: bool,
-    raw_tabs_columns: bool,
 }
 
 impl IndentationWidth {
@@ -779,7 +735,6 @@ impl IndentationWidth {
         options: IndentationOptions,
     ) -> isize {
         if options.tabs_style
-            && !options.raw_tabs_columns
             && (line_uses_tab_indentation(source, base_offset)
                 || line_uses_tab_indentation(source, target_offset))
         {
@@ -1444,7 +1399,6 @@ impl Cop for IndentationWidth {
         let options = IndentationOptions {
             width,
             tabs_style: indentation_style == "tabs",
-            raw_tabs_columns: false,
         };
         let allowed_patterns = config
             .get_string_array("AllowedPatterns")
@@ -1592,32 +1546,19 @@ impl Cop for IndentationWidth {
                 def_modifier_base_offset(source, kw_offset)
             };
             let def_end_alignment_style = config.get_str("DefEndAlignmentStyle", "start_of_line");
-            let same_line_bare_access_modifier =
-                def_has_same_line_bare_access_modifier(source, kw_offset);
-            let def_options = IndentationOptions {
-                raw_tabs_columns: options.tabs_style && modifier_offset.is_some(),
-                ..options
-            };
             if let Some(body) = def_node.body() {
-                let tabs_style_modifier_quirk = same_line_bare_access_modifier
-                    && def_options.tabs_style
-                    && body_first_statement_uses_tabs(source, &body);
                 let use_def_keyword_base = align_style == "keyword"
-                    || (modifier_offset.is_some()
-                        && def_end_alignment_style == "def"
-                        && !tabs_style_modifier_quirk);
+                    || (modifier_offset.is_some() && def_end_alignment_style == "def");
                 let (base_offset, base_col) = if use_def_keyword_base {
                     // EnforcedStyleAlignWith: keyword — indent relative to the `def`
                     // keyword column. RuboCop also does this for adjacent-def
-                    // modifiers when `Layout/DefEndAlignment: def` is active,
-                    // except for the tabs-style `private def` quirk above.
+                    // modifiers when `Layout/DefEndAlignment: def` is active.
                     (kw_offset, source.offset_to_line_col(kw_offset).1)
                 } else {
                     // EnforcedStyleAlignWith: start_of_line (default).
                     // RuboCop's on_def always uses node.loc.keyword (def column).
                     // For modifier-decorated defs handled via on_send, use the
-                    // leftmost modifier column instead. This also matches the
-                    // tabs-style `private def` quirk in the variant corpus.
+                    // leftmost modifier column instead.
                     if let Some(modifier_offset) = modifier_offset {
                         (
                             modifier_offset,
@@ -1637,10 +1578,10 @@ impl Cop for IndentationWidth {
                         (base_offset, base_col),
                         None,
                         begin_node.statements(),
-                        def_options,
+                        options,
                     ));
                     // Check rescue/ensure/else clauses.
-                    self.check_begin_clauses(source, &begin_node, def_options, diagnostics);
+                    self.check_begin_clauses(source, &begin_node, options, diagnostics);
                 } else {
                     // Regular def body (StatementsNode).
                     diagnostics.extend(self.check_body_indentation(
@@ -1649,7 +1590,7 @@ impl Cop for IndentationWidth {
                         base_offset,
                         base_col,
                         Some(body),
-                        def_options,
+                        options,
                     ));
                 }
             }
