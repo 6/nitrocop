@@ -26,6 +26,13 @@ x = ( a || ( b ) )
 y = ( a && !b.end_with?( foo ) )
                               ^ Layout/SpaceInsideParens: Space inside parentheses detected.
 
+run( inner( value ) ) do |result|
+                   ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+end
+
+( foo( a ) - bar( b ) )
+                     ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
 case p
 in Point(*, 1, *a)
          ^ Layout/SpaceInsideParens: No space inside parentheses detected.

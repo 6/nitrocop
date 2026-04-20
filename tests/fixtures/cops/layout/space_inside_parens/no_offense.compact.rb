@@ -21,6 +21,11 @@ end
 
 handler = ->( callback = build_callback( value )) { callback }
 
+run( inner( value )) do |result|
+end
+
+( foo( a ) - bar( b ))
+
 case p
 in Point( *, 1, *a )
   a

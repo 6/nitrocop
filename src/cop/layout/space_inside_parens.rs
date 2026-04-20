@@ -178,11 +178,17 @@ use crate::parse::source::SourceFile;
 ///    container node.
 /// 4. Grouped expressions can also end in `)` through intermediate wrapper
 ///    nodes like `&&`, `||`, and unary `!call(...)`.
+/// 5. A call-attached block starts after the outer `)`, so `run( inner(...) )`
+///    must still key off the last argument rather than the block body. Infix
+///    operator sends without their own parens also still end in a nested `)`
+///    through the trailing argument, e.g. `(left(...) - right(...) )`.
 ///
 /// Fix: compact close-side detection now walks through trailing wrapper nodes
-/// to find a nested paren token, including parameter defaults and logical /
-/// unary wrappers, and both compact open/close collapse paths now require the
-/// gap to be exactly `" "`.
+/// to find a nested paren token, including parameter defaults, logical /
+/// unary wrappers, and operator-call trailing arguments. Parenthesized calls
+/// followed by blocks now still use their last argument for compact close-side
+/// detection, and both compact open/close collapse paths require the gap to be
+/// exactly `" "`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -889,7 +895,9 @@ fn compact_last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism
 
     if let Some(call) = node.as_call_node() {
         if let Some(block) = call.block() {
-            return Some(block);
+            if block.as_block_argument_node().is_some() {
+                return Some(block);
+            }
         }
         return call
             .arguments()
@@ -974,6 +982,11 @@ fn trailing_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::No
     if let Some(call) = node.as_call_node() {
         if is_unary_operation(&call) && call.block().is_none() {
             return call.receiver();
+        }
+        if call.block().is_none() {
+            return call
+                .arguments()
+                .and_then(|args| args.arguments().iter().last());
         }
     }
 
@@ -1384,8 +1397,68 @@ mod tests {
             .iter()
             .rposition(|&b| b == b')')
             .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
 
-        assert_eq!(trailing_close, outer_close - 1);
+        assert_eq!(trailing_close, inner_close);
+    }
+
+    #[test]
+    fn compact_style_tracks_nested_close_parens_through_call_with_block() {
+        let src = b"run( inner( value ) ) do |result|\n  result\nend\n";
+        let parse_result = crate::parse::parse_source(src);
+        let root = parse_result.node();
+        let program = root.as_program_node().unwrap();
+        let node = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("expected outer call");
+
+        let last_inner = compact_last_inner_node(&node).expect("expected last inner node");
+        let trailing_close =
+            trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
+        let outer_close = src
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
+
+        assert_eq!(trailing_close, inner_close);
+    }
+
+    #[test]
+    fn compact_style_tracks_nested_close_parens_through_operator_call() {
+        let src = b"(foo( a ) - bar( b ) )\n";
+        let parse_result = crate::parse::parse_source(src);
+        let root = parse_result.node();
+        let program = root.as_program_node().unwrap();
+        let node = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("expected outer parens");
+
+        let last_inner = compact_last_inner_node(&node).expect("expected last inner node");
+        let trailing_close =
+            trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
+        let outer_close = src
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
+
+        assert_eq!(trailing_close, inner_close);
     }
 
     #[test]
