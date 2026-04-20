@@ -56,6 +56,11 @@ pub struct BranchContext {
     /// reportable for ShadowedArgument even though VF must model them as
     /// branches for assignment liveness.
     pub short_circuit: bool,
+    /// Whether loop back-edge accounting should treat assignments in this
+    /// context like RuboCop's `BRANCH_NODES` (`if`/`case`/`case_match`/`rescue`).
+    /// Plain loop bodies deliberately stay `false` so sequential writes in a
+    /// loop are not all kept alive.
+    pub loop_back_edge_branch: bool,
 }
 
 /// The VariableForce engine. Walks the Prism AST and builds a complete
@@ -127,6 +132,7 @@ impl<'a> Engine<'a> {
             false,
             false,
             false,
+            true,
         );
     }
 
@@ -140,6 +146,7 @@ impl<'a> Engine<'a> {
         may_jump_to_other_branch: bool,
         may_run_incompletely: bool,
         short_circuit: bool,
+        loop_back_edge_branch: bool,
     ) {
         let id = self.next_branch_id;
         self.next_branch_id += 1;
@@ -153,6 +160,7 @@ impl<'a> Engine<'a> {
             may_jump_to_other_branch,
             may_run_incompletely,
             short_circuit,
+            loop_back_edge_branch,
         };
         self.branch_contexts.push(context.clone());
         // Keep the live VariableTable copy in sync so reference tracking can
@@ -219,8 +227,10 @@ impl<'a> Engine<'a> {
     /// reference within the loop's offset range, mark the last such
     /// assignment as referenced (the next iteration may use it).
     ///
-    /// Also marks branched assignments within the loop as referenced, since
-    /// branches inside a loop may execute in a different iteration.
+    /// Also marks assignments inside RuboCop-style branch nodes (`if`, `case`,
+    /// `case in`, `rescue`) as referenced, since those alternative paths may
+    /// execute in a different iteration. Plain sequential writes in the loop
+    /// body are intentionally excluded.
     fn mark_loop_back_edges(&mut self, loop_start: usize, loop_end: usize) {
         // Collect variable names that are referenced within the loop range.
         let mut referenced_names: Vec<Vec<u8>> = Vec::new();
@@ -252,9 +262,16 @@ impl<'a> Engine<'a> {
                     continue;
                 }
 
-                // Mark branched assignments in the loop as referenced
+                // Match RuboCop's `assignment.node.each_ancestor(*BRANCH_NODES)`.
+                // The loop body itself is not such a branch, but nested
+                // `if`/`case`/`rescue` paths are.
                 for &idx in &loop_assignments {
-                    if var.assignments[idx].in_branch {
+                    if var.assignments[idx]
+                        .branch_path
+                        .iter()
+                        .filter_map(|&id| self.branch_contexts.get(id))
+                        .any(|context| context.loop_back_edge_branch)
+                    {
                         var.assignments[idx].referenced = true;
                     }
                 }
@@ -981,7 +998,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         if pred_has_write {
             self.branch_depth += 1;
             if is_modifier {
-                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+                self.push_branch_with_flags(
+                    parent_id,
+                    0,
+                    true,
+                    is_modifier,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
             }
         }
         self.visit(&node.predicate());
@@ -1020,7 +1046,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         if pred_has_write {
             self.branch_depth += 1;
             if is_modifier {
-                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+                self.push_branch_with_flags(
+                    parent_id,
+                    0,
+                    true,
+                    is_modifier,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
             }
         }
         self.visit(&node.predicate());
@@ -1040,7 +1075,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         if let Some(else_clause) = node.else_clause() {
-            self.push_branch(parent_id, body_child, false);
+            self.push_branch_with_flags(
+                parent_id, body_child, false, false, false, false, false, true,
+            );
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1063,7 +1100,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let parent_id = Self::branch_parent_id(&location);
         self.visit(&node.left());
         self.branch_depth += 1;
-        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true);
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
         self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
@@ -1074,7 +1111,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let parent_id = Self::branch_parent_id(&location);
         self.visit(&node.left());
         self.branch_depth += 1;
-        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true);
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
         self.visit(&node.right());
         self.pop_branch();
         self.branch_depth -= 1;
@@ -1182,7 +1219,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             // body before condition for while_post/until_post nodes.
             let body_child = 0;
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child, false);
+            self.push_branch_with_flags(
+                parent_id, body_child, false, false, false, false, false, false,
+            );
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1198,7 +1237,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
             if pred_has_write && is_modifier {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+                self.push_branch_with_flags(
+                    parent_id,
+                    0,
+                    true,
+                    is_modifier,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
             }
             self.visit(&node.predicate());
             if pred_has_write && is_modifier {
@@ -1208,7 +1256,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child, false);
+            self.push_branch_with_flags(
+                parent_id, body_child, false, false, false, false, false, false,
+            );
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1231,7 +1281,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             // then condition. Matches RuboCop's VariableForce.
             let body_child = 0;
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child, false);
+            self.push_branch_with_flags(
+                parent_id, body_child, false, false, false, false, false, false,
+            );
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1247,7 +1299,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
             if pred_has_write && is_modifier {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, true, is_modifier, false, false, false);
+                self.push_branch_with_flags(
+                    parent_id,
+                    0,
+                    true,
+                    is_modifier,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
             }
             self.visit(&node.predicate());
             if pred_has_write && is_modifier {
@@ -1257,7 +1318,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child, false);
+            self.push_branch_with_flags(
+                parent_id, body_child, false, false, false, false, false, false,
+            );
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1328,7 +1391,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             if let Some(stmts) = node.statements() {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false);
+                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false, true);
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
@@ -1366,7 +1429,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
                 let location = node.location();
                 let parent_id = Self::branch_parent_id(&location);
                 self.branch_depth += 1;
-                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false);
+                self.push_branch_with_flags(parent_id, 0, false, false, true, true, false, false);
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
                 }
@@ -2436,6 +2499,28 @@ end
         assert!(
             x.assignments[0].referenced,
             "loop assignment should be referenced via back-edge or direct read"
+        );
+    }
+
+    #[test]
+    fn test_loop_back_edge_skips_overwritten_sequential_write() {
+        let scopes = run_engine(
+            "def foo(cond)\n  while cond\n    pulls = []\n    pulls = fetch\n    break if pulls.count == 0\n  end\nend\n",
+        );
+        let def_scope = &scopes[0];
+        let pulls = &def_scope.vars["pulls"];
+
+        assert!(
+            pulls.assignments[0].reassigned,
+            "first loop write should be overwritten before any read"
+        );
+        assert!(
+            !pulls.assignments[0].referenced,
+            "loop back-edge should not keep an earlier sequential write alive"
+        );
+        assert!(
+            pulls.assignments[1].referenced,
+            "the last value in the loop still feeds the later read/back-edge"
         );
     }
 

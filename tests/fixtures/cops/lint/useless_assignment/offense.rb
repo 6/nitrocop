@@ -139,6 +139,18 @@ def useless_in_loop
   end
 end
 
+# FN fix: loop back-edge liveness should only keep the final value that can
+# reach the next iteration, not an earlier write overwritten before the first
+# read in the same loop body.
+def loop_overwrite_before_read(cond)
+  while cond
+    pulls = []
+    ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `pulls`.
+    pulls = fetch
+    break if pulls.count == 0
+  end
+end
+
 # Reassigned in same branch — first is useless
 def reassigned_same_branch(flag)
   if flag
@@ -423,3 +435,12 @@ def trailing_rescue_capture_unused
     handle_timeout
   end
 end
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+ ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+ ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+ ^ Lint/UselessAssignment: Useless assignment to variable - `e`.

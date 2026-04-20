@@ -81,6 +81,16 @@ use crate::parse::source::SourceFile;
 /// Fixed in VariableForce by matching RuboCop's branch model: normal predicate
 /// assignments are unbranched, while modifier-form predicates keep a dedicated
 /// context so earlier assignments stay visible on the left side of the keyword.
+///
+/// ## FN fix: sequential loop writes before first read (2026-04-20)
+///
+/// RuboCop only gives loop back-edge credit to the last assignment in a plain
+/// loop body, plus assignments nested under real branch nodes like `if`,
+/// `case`, and `rescue`. nitrocop had treated the loop body itself as a branch,
+/// which kept overwritten writes like `pulls = []; pulls = fetch; break if
+/// pulls.count == 0` alive and missed real offenses. VariableForce now tracks
+/// which branch contexts participate in RuboCop's loop back-edge logic so
+/// sequential loop-body overwrites remain reportable.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
