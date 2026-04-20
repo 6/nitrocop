@@ -258,6 +258,21 @@ use crate::parse::source::SourceFile;
 ///   `assert_equal(..., obj.call(-> { ... }))` were incorrectly flagged even
 ///   though `Layout/SingleLineBlockChain` should take precedence.
 ///
+/// ## Fixes applied (2026-04-20)
+/// - **Phase 2 ternary predicates**: backslash-continued predicates inside
+///   multiline `?:` expressions are now measured against just the predicate
+///   span instead of being blocked by the enclosing ternary's unsafe range.
+///   The text fallback also anchors those reports at the first non-whitespace
+///   column and keeps the `foo \n && bar` / `foo \n || bar` skip disabled only
+///   for ternary predicates. This recovers FNs like
+///   `o.col_type.nil? \ && ... \ ? ... : ...` without broadening ordinary
+///   multiline `&&` / `||` handling.
+/// - **Config-sensitive safe-navigation contexts**: corpus examples like
+///   `!current_course_user&.\n  email_unsubscriptions...` only reproduce when
+///   `Layout/LineLength` is wide enough for the indented chain to collapse.
+///   Keep those in config-specific tests rather than the default fixture so
+///   shared fixtures do not encode repo-specific line-length settings.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -298,10 +313,12 @@ impl Cop for RedundantLineBreak {
         let mut unsafe_collector = UnsafeRangeCollector {
             ranges: Vec::new(),
             group_blocking_ranges: Vec::new(),
+            ternary_ranges: Vec::new(),
         };
         unsafe_collector.visit(&parse_result.node());
         let unsafe_ranges = unsafe_collector.ranges;
         let group_blocking_ranges = unsafe_collector.group_blocking_ranges;
+        let ternary_ranges = unsafe_collector.ternary_ranges;
 
         // Pre-collect block ranges (for InspectBlocks: false check)
         let mut block_collector = BlockRangeCollector {
@@ -358,6 +375,7 @@ impl Cop for RedundantLineBreak {
             &reported_starts,
             &unsafe_ranges,
             &group_blocking_ranges,
+            &ternary_ranges,
             &checked_chain_ranges,
             &block_ranges,
             &comment_lines,
@@ -383,6 +401,9 @@ struct UnsafeRangeCollector {
     /// Expression ranges that should also suppress Phase 2 backslash groups
     /// when they cover the whole group.
     group_blocking_ranges: Vec<(usize, usize)>,
+    /// Ternary (`?:`) IfNode ranges. These stay unsafe for enclosing
+    /// expressions, but Phase 2 sometimes needs to judge just the predicate.
+    ternary_ranges: Vec<(usize, usize)>,
 }
 
 impl<'pr> Visit<'pr> for UnsafeRangeCollector {
@@ -391,6 +412,10 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         self.ranges.push((loc.start_offset(), loc.end_offset()));
         self.group_blocking_ranges
             .push((loc.start_offset(), loc.end_offset()));
+        if node.if_keyword_loc().is_none() {
+            self.ternary_ranges
+                .push((loc.start_offset(), loc.end_offset()));
+        }
         // Recurse into children so nested unsafe constructs (strings, regexps,
         // inner ifs) inside the if body are also collected. The if itself is
         // unsafe for its parent, but children may need their own unsafe ranges
@@ -1399,6 +1424,7 @@ fn check_backslash_continuations(
     already_reported: &HashSet<usize>,
     unsafe_ranges: &[(usize, usize)],
     group_blocking_ranges: &[(usize, usize)],
+    ternary_ranges: &[(usize, usize)],
     checked_chain_ranges: &[(usize, usize)],
     block_ranges: &[(usize, usize, bool)],
     comment_lines: &HashSet<usize>,
@@ -1476,6 +1502,11 @@ fn check_backslash_continuations(
             continue;
         }
 
+        let ternary_then_idx = (group_start + 1..=final_line_idx).find(|&idx| {
+            let trimmed = trim_leading_whitespace(trim_trailing_whitespace(lines[idx]));
+            trimmed.starts_with(b"?")
+        });
+
         // Phase 2 starts from explicit backslash continuations, but the Ruby
         // expression can keep going across later comma-terminated lines:
         //
@@ -1485,7 +1516,7 @@ fn check_backslash_continuations(
         //     :baz
         //
         // RuboCop measures the full continued call here, not just `attr_reader :foo,`.
-        let mut expression_end_idx = final_line_idx;
+        let mut expression_end_idx = ternary_then_idx.map_or(final_line_idx, |idx| idx - 1);
         while expression_end_idx + 1 < lines.len() {
             let current = trim_trailing_whitespace(lines[expression_end_idx]);
             if current.is_empty() || !current.ends_with(b",") {
@@ -1502,8 +1533,10 @@ fn check_backslash_continuations(
         }
 
         let report_line = group_start + 1; // 1-indexed
+        let report_col = leading_whitespace_len(lines[group_start]);
+        let group_code_start = line_starts[group_start] + report_col;
         if already_reported.contains(&report_line) {
-            i = expression_end_idx + 1;
+            i = final_line_idx + 1;
             continue;
         }
 
@@ -1526,9 +1559,18 @@ fn check_backslash_continuations(
         // We intentionally don't check for unsafe ranges that merely CONTAIN
         // the group (like def bodies) — those are legitimate contexts for
         // backslash continuation offenses.
-        let has_unsafe = unsafe_ranges
-            .iter()
-            .any(|&(us, _ue)| us >= group_byte_start && us < group_byte_end);
+        let has_unsafe = unsafe_ranges.iter().any(|&(us, ue)| {
+            if us < group_byte_start || us >= group_byte_end {
+                return false;
+            }
+            if ternary_then_idx.is_some()
+                && us == group_code_start
+                && ternary_ranges.iter().any(|&(ts, te)| ts == us && te == ue)
+            {
+                return false;
+            }
+            true
+        });
         if has_unsafe {
             i = final_line_idx + 1;
             continue;
@@ -1539,11 +1581,17 @@ fn check_backslash_continuations(
         // - `class Foo < \` newline `Bar`
         // - backslash groups nested inside a larger multiline `CallNode`
         //   that the AST phase already judged as a whole.
-        let blocked_by_enclosing_range = group_blocking_ranges
-            .iter()
-            .any(|&(bs, be)| bs <= group_byte_start && be >= group_byte_end);
+        let blocked_by_enclosing_range = group_blocking_ranges.iter().any(|&(bs, be)| {
+            if ternary_then_idx.is_some()
+                && bs == group_code_start
+                && ternary_ranges.iter().any(|&(ts, te)| ts == bs && te == be)
+            {
+                return false;
+            }
+            bs <= group_byte_start && be >= group_byte_end
+        });
         if blocked_by_enclosing_range {
-            i = expression_end_idx + 1;
+            i = final_line_idx + 1;
             continue;
         }
 
@@ -1553,7 +1601,7 @@ fn check_backslash_continuations(
                 && (cs < group_byte_start || ce > group_byte_end)
         });
         if covered_by_checked_chain {
-            i = expression_end_idx + 1;
+            i = final_line_idx + 1;
             continue;
         }
 
@@ -1574,7 +1622,7 @@ fn check_backslash_continuations(
         let has_comment = ((group_start + 1)..=(expression_end_idx + 1))
             .any(|line_num| comment_lines.contains(&line_num));
         if has_comment {
-            i = expression_end_idx + 1;
+            i = final_line_idx + 1;
             continue;
         }
 
@@ -1604,29 +1652,31 @@ fn check_backslash_continuations(
         }
 
         if utf8_char_count(&combined) > max_line_length {
-            i = expression_end_idx + 1;
+            i = final_line_idx + 1;
             continue;
         }
 
         let next_content = trim_leading_whitespace(lines[group_start + 1]);
-        if next_content.starts_with(b"&&") || next_content.starts_with(b"||") {
-            i = expression_end_idx + 1;
+        if ternary_then_idx.is_none()
+            && (next_content.starts_with(b"&&") || next_content.starts_with(b"||"))
+        {
+            i = final_line_idx + 1;
             continue;
         }
 
         if is_string_concat_continuation(&lines, group_start, group_end) {
-            i = expression_end_idx + 1;
+            i = final_line_idx + 1;
             continue;
         }
 
         diagnostics.push(cop.diagnostic(
             source,
             report_line,
-            0,
+            report_col,
             "Redundant line break detected.".to_string(),
         ));
 
-        i = expression_end_idx + 1;
+        i = final_line_idx + 1;
     }
 }
 
@@ -1823,6 +1873,25 @@ mod tests {
     }
 
     #[test]
+    fn safe_navigation_chain_inside_method_body_uses_configured_line_length() {
+        let source = b"module Course::Forum::ControllerHelper\n  def email_setting_enabled(component, setting)\n    current_course.email_enabled(component, setting)\n  end\n\n  def email_subscription_enabled_current_course_user(component, setting)\n    !current_course_user&.\n      email_unsubscriptions&.\n      where(course_settings_email_id: email_setting_enabled(component, setting).id)&.exists?\n  end\nend\n";
+        let config = CopConfig {
+            options: HashMap::from([(
+                "MaxLineLength".to_string(),
+                serde_yml::Value::Number(serde_yml::Number::from(140)),
+            )]),
+            ..CopConfig::default()
+        };
+
+        let diagnostics =
+            crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, config);
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 7);
+        assert_eq!(diagnostics[0].location.column, 5);
+    }
+
+    #[test]
     fn reports_single_line_block_chains_when_single_line_block_chain_is_disabled() {
         let source = b"e.select { |i| i.cond? }\n  .join\n";
         let config = CopConfig {
@@ -1885,5 +1954,65 @@ mod tests {
         let diagnostics =
             crate::testutil::run_cop_full_with_config(&RedundantLineBreak, source, enabled);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    }
+
+    #[test]
+    fn reports_multiline_call_inside_singleton_method_body() {
+        let source = b"module WinRM\n  module PSRP\n    class MessageFactory\n      class << self\n        def session_capability_message(runspace_pool_id)\n          Message.new(\n            runspace_pool_id,\n            Message::MESSAGE_TYPES[:session_capability],\n            render('session_capability')\n          )\n        end\n      end\n    end\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 6);
+        assert_eq!(diagnostics[0].location.column, 10);
+    }
+
+    #[test]
+    fn reports_multiline_rspec_chain_inside_block_body() {
+        let source = b"describe WinRM::PSRP::ReceiveResponseReader do\n  before do\n    allow(transport).to receive(:send_request).and_return(\n      REXML::Document.new(test_data_xml_template.result(binding))\n    )\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 3);
+        assert_eq!(diagnostics[0].location.column, 4);
+    }
+
+    #[test]
+    fn reports_multiline_command_call_with_old_hash_rocket_keywords() {
+        let source = b"class CommentsController < ApplicationController\n  def edit\n    if !((comment = find_comment) && comment.is_editable_by_user?(@user))\n      return render :text => \"can't find comment\", :status => 400\n    end\n\n    render :partial => \"commentbox\", :layout => false,\n      :content_type => \"text/html\", :locals => { :comment => comment }\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 7);
+        assert_eq!(diagnostics[0].location.column, 4);
+    }
+
+    #[test]
+    fn reports_backslash_continued_ternary_predicate() {
+        let source = b"module ArelExtensions\n  module Visitors\n    class Arel::Visitors::MySQL\n      def visit_ArelExtensions_Nodes_Format o, collector\n        first = o.expressions[0]\n        type =\n          o.col_type.nil? \\\n            && (first.respond_to?(:return_type) && !first&.return_type.nil?) \\\n          ? first&.return_type \\\n          : o.col_type\n      end\n    end\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 7);
+        assert_eq!(diagnostics[0].location.column, 10);
     }
 }
