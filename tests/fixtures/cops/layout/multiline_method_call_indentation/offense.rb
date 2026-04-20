@@ -175,3 +175,13 @@ if mixpanel_mapping && mixpanel_mapping
     ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `mixpanel_mapping && mixpanel_mapping` on line 136.
     .size > 0
 end
+
+# Nested matcher chain in a non-parenthesized argument falls back to outer indentation
+it 'enqueues SetPointsCountryIdsJob for points without country_id' do
+  expect { described_class.perform_now }.to \
+    have_enqueued_job(DataMigrations::SetPointsCountryIdsJob)
+      .with(point_without_country1.id)
+      ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
+      .and have_enqueued_job(DataMigrations::SetPointsCountryIdsJob)
+      .with(point_without_country2.id)
+end
