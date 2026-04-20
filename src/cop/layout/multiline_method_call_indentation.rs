@@ -238,6 +238,24 @@ use crate::parse::source::SourceFile;
 /// inner-chain indentation. The fix only climbs parent send nodes for the
 /// indented fallback path, and the variant fixtures pin both sides of that
 /// boundary.
+///
+/// ## Corpus fix (2026-04-20)
+///
+/// The default `aligned` style still had one missing fallback-indentation case
+/// in nested matcher chains passed as non-parenthesized arguments:
+///
+/// ```ruby
+/// expect { work }.to \
+///   have_enqueued_job(Job)
+///     .with(id)
+///     .and have_enqueued_job(Job)
+/// ```
+///
+/// RuboCop computes the fallback indentation from `left_hand_side`, which
+/// walks up parent send nodes to the outer `.to` call before applying the
+/// usual visual-chain indentation. nitrocop was only using the immediate
+/// multiline chain start (`have_enqueued_job(...)`), so it missed `.with` and
+/// `.and` offenses indented four spaces too far.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -298,6 +316,25 @@ struct ChainVisitor<'a> {
 }
 
 impl ChainVisitor<'_> {
+    fn indented_base_line(&self, call_node: &ruby_prism::CallNode<'_>) -> usize {
+        if self.style == "aligned" {
+            if uses_outer_aligned_fallback_base(call_node, &self.ancestors) {
+                let lhs_start = left_hand_side_start_offset(call_node, &self.ancestors);
+                let (lhs_line, _) = self.source.offset_to_line_col(lhs_start);
+                find_visual_chain_base_line(self.source, lhs_line)
+            } else {
+                let (call_start_line, _) = self
+                    .source
+                    .offset_to_line_col(call_node.location().start_offset());
+                find_visual_chain_base_line(self.source, call_start_line)
+            }
+        } else {
+            let lhs_start = left_hand_side_start_offset(call_node, &self.ancestors);
+            let (lhs_line, _) = self.source.offset_to_line_col(lhs_start);
+            find_leading_continuation_ancestor_line(self.source, lhs_line)
+        }
+    }
+
     fn check_call(&mut self, call_node: &ruby_prism::CallNode<'_>) {
         // Must have a receiver (chained call)
         let receiver = match call_node.receiver() {
@@ -395,16 +432,7 @@ impl ChainVisitor<'_> {
         call_node: &ruby_prism::CallNode<'_>,
         _receiver: &ruby_prism::Node<'_>,
     ) -> usize {
-        let base_line = if self.style == "aligned" {
-            let (call_start_line, _) = self
-                .source
-                .offset_to_line_col(call_node.location().start_offset());
-            find_visual_chain_base_line(self.source, call_start_line)
-        } else {
-            let lhs_start = left_hand_side_start_offset(call_node, &self.ancestors);
-            let (lhs_line, _) = self.source.offset_to_line_col(lhs_start);
-            find_leading_continuation_ancestor_line(self.source, lhs_line)
-        };
+        let base_line = self.indented_base_line(call_node);
         let base_line_bytes = self.source.lines().nth(base_line - 1).unwrap_or(b"");
         let base_indent = indentation_of(base_line_bytes);
         let kw_extra = keyword_extra_indent(self.source, call_node, self.width);
@@ -657,16 +685,7 @@ impl ChainVisitor<'_> {
         _receiver: &ruby_prism::Node<'_>,
         rhs_col: usize,
     ) -> String {
-        let base_line = if self.style == "aligned" {
-            let (call_start_line, _) = self
-                .source
-                .offset_to_line_col(call_node.location().start_offset());
-            find_visual_chain_base_line(self.source, call_start_line)
-        } else {
-            let lhs_start = left_hand_side_start_offset(call_node, &self.ancestors);
-            let (lhs_line, _) = self.source.offset_to_line_col(lhs_start);
-            find_leading_continuation_ancestor_line(self.source, lhs_line)
-        };
+        let base_line = self.indented_base_line(call_node);
         let chain_line_bytes = self.source.lines().nth(base_line - 1).unwrap_or(b"");
         let chain_indent = indentation_of(chain_line_bytes);
         let _ = call_node;
@@ -1231,6 +1250,49 @@ fn left_hand_side_start_offset(
     }
 
     lhs_start
+}
+
+fn uses_outer_aligned_fallback_base(
+    call_node: &ruby_prism::CallNode<'_>,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> bool {
+    let Some(receiver_call) = call_node
+        .receiver()
+        .and_then(|receiver| receiver.as_call_node())
+    else {
+        return false;
+    };
+
+    if receiver_call.call_operator_loc().is_some() {
+        return false;
+    }
+
+    let current_loc = call_node.location();
+    let mut started = false;
+
+    for ancestor in ancestors.iter().rev() {
+        if !started {
+            if ancestor.as_call_node().is_some_and(|call| {
+                let loc = call.location();
+                loc.start_offset() == current_loc.start_offset()
+                    && loc.end_offset() == current_loc.end_offset()
+            }) {
+                started = true;
+            }
+            continue;
+        }
+
+        if ancestor.as_arguments_node().is_some() {
+            continue;
+        }
+
+        return ancestor.as_call_node().is_some_and(|call| {
+            call.call_operator_loc().is_some()
+                && !method_identifier_predicates::is_assignment_method(call.name().as_slice())
+        });
+    }
+
+    false
 }
 
 impl<'pr> Visit<'pr> for ChainVisitor<'pr> {
