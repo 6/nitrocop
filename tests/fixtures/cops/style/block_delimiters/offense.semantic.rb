@@ -30,3 +30,18 @@ def view_template
                                   ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for procedural blocks.
   a(href: "javascript :alert(1)") { "XSS" }
 end
+
+outer do
+  example { expect(call(<<~CODE)).to eq("1\n") }
+          ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for procedural blocks.
+  1
+
+  # ~> 2
+  CODE
+
+  example { expect(call(<<~CODE)).to eq("1\n") }
+  1 # ~> error
+
+  # ~> error again
+  CODE
+end
