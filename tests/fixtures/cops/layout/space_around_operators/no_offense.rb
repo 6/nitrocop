@@ -91,6 +91,14 @@ x ||  # fallback
   y
 a &&  # condition check
   b
+x+# fallback
+  y
+x  + # comment
+  y
+maybe { block and checkNewline }|| # {x=1;x} todo
+  maybe { statement and end_expression }
+data = [image_type].pack('C')  +    # Win32
+  [image_type].pack('C')
 
 # Operator at start of line (continuation) — indentation, not extra spacing
 result = foo \
@@ -321,3 +329,6 @@ foo +
 
 # Standalone nested assignment is accepted when there is no later assignment group
 SetUIDBit = ReadBit  = 4
+
+# Full-file FN in the corpus, but RuboCop accepts the isolated snippet
+tree1      = BTree[value: 1, left: Tip, right: Tip]

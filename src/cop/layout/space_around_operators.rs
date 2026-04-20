@@ -316,6 +316,17 @@ use ruby_prism::Visit;
 /// A tempting isolated FN fixture, `tree1      = BTree[...]`, was also checked
 /// during this investigation. RuboCop accepts that line in isolation, so it is
 /// not modeled as a standalone offense here.
+///
+/// ## Corpus fix (2026-04-20)
+///
+/// RuboCop skips this cop entirely when an operator is followed on the same
+/// line by optional horizontal whitespace and then a trailing `#` comment.
+/// That exemption is broader than the existing spec wording: it accepts
+/// `x+# comment`, `x  + # comment`, multiline concatenations like
+/// `data = foo  +    # note`, and continued logical chains like
+/// `maybe { ... }|| # comment`. Match that behavior by short-circuiting both
+/// the AST path and the text scanner before missing-space or extra-space checks
+/// whenever the operator is followed only by spaces/tabs and then `#`.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -536,6 +547,10 @@ impl Cop for SpaceAroundOperators {
                     }
 
                     let op_str = std::str::from_utf8(two).unwrap_or("??");
+                    if followed_only_by_space_then_comment(bytes, i + 2) {
+                        i += 2;
+                        continue;
+                    }
                     let space_before = is_operator_at_line_start(bytes, i)
                         || (i > 0 && (bytes[i - 1] == b' ' || bytes[i - 1] == b'\t'));
                     let space_after =
@@ -670,6 +685,11 @@ impl Cop for SpaceAroundOperators {
                 // Do NOT skip regular index assignments like `hash[:key]= value`
                 // — RuboCop checks those via on_setter_method.
                 if i >= 3 && bytes[i - 1] == b']' && bytes[i - 2] == b'[' && bytes[i - 3] == b'.' {
+                    i += 1;
+                    continue;
+                }
+
+                if followed_only_by_space_then_comment(bytes, i + 1) {
                     i += 1;
                     continue;
                 }
@@ -920,6 +940,14 @@ fn followed_only_by_space_then_newline(bytes: &[u8], offset: usize) -> bool {
         pos += 1;
     }
     pos >= bytes.len() || bytes[pos] == b'\n' || bytes[pos] == b'\r'
+}
+
+fn followed_only_by_space_then_comment(bytes: &[u8], offset: usize) -> bool {
+    let mut pos = offset;
+    while pos < bytes.len() && matches!(bytes[pos], b' ' | b'\t') {
+        pos += 1;
+    }
+    pos < bytes.len() && bytes[pos] == b'#'
 }
 
 /// Count UTF-8 codepoints from the start of `line` up to `byte_col` bytes.
@@ -1720,6 +1748,10 @@ impl OperatorChecker<'_> {
             return;
         }
 
+        if followed_only_by_space_then_comment(bytes, end) {
+            return;
+        }
+
         let has_space_before = is_operator_at_line_start(bytes, start)
             || (start > 0 && (bytes[start - 1] == b' ' || bytes[start - 1] == b'\t'));
         let has_space_after = end < bytes.len() && (bytes[end] == b' ' || bytes[end] == b'\t');
@@ -1902,6 +1934,10 @@ impl OperatorChecker<'_> {
         let end = op_loc.end_offset();
         let bytes = self.source.as_bytes();
         let op_str = std::str::from_utf8(op_loc.as_slice()).unwrap_or("??");
+
+        if followed_only_by_space_then_comment(bytes, end) {
+            return;
+        }
 
         let space_before = start > 0 && bytes[start - 1] == b' ';
         let space_after = end < bytes.len() && bytes[end] == b' ';
