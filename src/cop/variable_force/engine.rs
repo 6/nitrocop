@@ -1516,16 +1516,13 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
         let offset = node.location().start_offset();
         let si = self.table.current_scope_index();
-        let branch_id = self.current_branch_id();
-        let branch_path = self.current_branch_path();
         // Bare `super` forwards the enclosing method's arguments, not block params.
-        // Only mark method-scope arguments as implicitly referenced.
-        for var in self.table.enclosing_method_arguments_mut() {
-            let mut reference = Reference::implicit(offset, si);
-            reference.branch_id = branch_id;
-            reference.branch_path = branch_path.clone();
-            var.reference(reference);
-        }
+        // Record those references with branch-aware liveness so writes in
+        // sibling branches remain live when any of them can flow into `super`.
+        let mut reference = Reference::implicit(offset, si);
+        reference.branch_id = self.current_branch_id();
+        reference.branch_path = self.current_branch_path();
+        self.table.reference_enclosing_method_arguments(reference);
         // Visit the block child so that `super do |x| ... end` declares
         // block params and visits the block body.
         if let Some(block) = node.block() {

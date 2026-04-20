@@ -91,6 +91,16 @@ use crate::parse::source::SourceFile;
 /// pulls.count == 0` alive and missed real offenses. VariableForce now tracks
 /// which branch contexts participate in RuboCop's loop back-edge logic so
 /// sequential loop-body overwrites remain reportable.
+///
+/// ## FP fix: branch-sensitive bare `super` forwarding (2026-04-20)
+///
+/// Bare `super` implicitly references the enclosing method arguments, but
+/// nitrocop had recorded that as a plain "last assignment wins" reference.
+/// In branchy rewrites like `case field.type; when :integer then value =
+/// value.to_i; when :float then value = value.to_f; end; super`, that kept
+/// only the final sibling assignment alive and falsely flagged the others.
+/// VariableForce now feeds bare-`super` argument references through the same
+/// branch-aware reference walk as normal local reads, matching RuboCop.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
