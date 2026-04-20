@@ -5,17 +5,17 @@ use ruby_prism::Visit;
 
 /// Matches RuboCop's `Rails/RedundantTravelBack` for Rails 5.2+ test files.
 ///
-/// Corpus fixes for this cop fell into three buckets:
+/// The remaining corpus false positives came from two RuboCop quirks:
 ///
-/// - The fallback include list has to cover both `spec/**/*.rb` and
-///   `test/**/*.rb`, because RuboCop's default config includes both.
-/// - `after` matching must allow receivers such as `config.after`, because
-///   RuboCop treats any block method named `after` as eligible.
-/// - The Rails version gate must still go through `rails_version_at_least(5.2)`,
-///   not `target_rails_version()` directly. RuboCop's
-///   `minimum_target_rails_version 5.2` also implies `requires_gem 'railties'`,
-///   so repos with `TargetRailsVersion` set but no `railties` in `Gemfile.lock`
-///   must be skipped. Bypassing that gate caused the reported false positives.
+/// - The cop's default `Include` is exactly `spec/**/*.rb` and `test/**/*.rb`.
+///   Broadening that to `**/spec/**/*.rb` wrongly linted nested engine/module
+///   specs such as `modules/**/spec/**`.
+/// - `minimum_target_rails_version 5.2` also depends on the actual `railties`
+///   gem version. A corpus overlay can force `TargetRailsVersion: 7.0`, but
+///   Rails 4.2 repos must still be skipped.
+///
+/// It also intentionally matches any block method named `after`, including
+/// receiver forms such as `config.after`, because that is what RuboCop does.
 ///
 pub struct RedundantTravelBack;
 
@@ -29,7 +29,7 @@ impl Cop for RedundantTravelBack {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        &["**/spec/**/*.rb", "**/test/**/*.rb"]
+        &["spec/**/*.rb", "test/**/*.rb"]
     }
 
     fn check_source(
@@ -43,6 +43,12 @@ impl Cop for RedundantTravelBack {
     ) {
         // minimum_target_rails_version 5.2
         if !config.rails_version_at_least(5.2) {
+            return;
+        }
+        if config
+            .railties_version()
+            .is_some_and(|version| version < 5.2)
+        {
             return;
         }
 
@@ -126,10 +132,146 @@ impl<'a, 'pr> Visit<'pr> for TravelBackVisitor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Args;
     use crate::cop::CopConfig;
+    use crate::cop::autocorrect_allowlist::AutocorrectAllowlist;
+    use crate::cop::registry::CopRegistry;
+    use crate::cop::tiers::TierMap;
+    use crate::parse::source::SourceFile;
+    use clap::Parser;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
     crate::cop_rails_fixture_tests!(RedundantTravelBack, "cops/rails/redundant_travel_back", 5.2);
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "nitrocop_test_redundant_travel_back_{name}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(root: &Path, rel: &str, contents: &[u8]) -> PathBuf {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn args_for_repo(repo: &Path) -> Args {
+        Args::parse_from([
+            "nitrocop",
+            repo.to_str().unwrap(),
+            "--preview",
+            "--no-cache",
+            "--only",
+            "Rails/RedundantTravelBack",
+        ])
+    }
+
+    fn lint_repo_file(repo: &Path, file_path: &Path) -> crate::linter::LintResult {
+        let config = crate::config::load_config(None, Some(repo), None).unwrap();
+        let registry = CopRegistry::default_registry();
+        let tier_map = TierMap::load();
+        let args = args_for_repo(repo);
+        let allowlist = AutocorrectAllowlist::load();
+        let source = SourceFile::from_path(file_path).unwrap();
+
+        crate::linter::lint_source(&source, &config, &registry, &args, &tier_map, &allowlist)
+    }
+
+    #[test]
+    fn flags_top_level_spec_files() {
+        let dir = temp_dir("top_level_spec");
+        write_file(
+            &dir,
+            ".rubocop.yml",
+            b"AllCops:\n  TargetRailsVersion: 7.0\nRails/RedundantTravelBack:\n  Enabled: true\n",
+        );
+        write_file(
+            &dir,
+            "Gemfile.lock",
+            b"GEM\n  specs:\n    railties (7.0.0)\n",
+        );
+        let file = write_file(
+            &dir,
+            "spec/example_spec.rb",
+            b"after do\n  travel_back\nend\n",
+        );
+
+        let result = lint_repo_file(&dir, &file);
+
+        assert_eq!(
+            result.diagnostics.len(),
+            1,
+            "diagnostics: {:?}",
+            result.diagnostics
+        );
+        assert_eq!(result.diagnostics[0].cop_name, "Rails/RedundantTravelBack");
+        assert_eq!(result.diagnostics[0].location.line, 2);
+    }
+
+    #[test]
+    fn skips_nested_module_spec_files() {
+        let dir = temp_dir("nested_module_spec");
+        write_file(
+            &dir,
+            ".rubocop.yml",
+            b"AllCops:\n  TargetRailsVersion: 7.0\nRails/RedundantTravelBack:\n  Enabled: true\n",
+        );
+        write_file(
+            &dir,
+            "Gemfile.lock",
+            b"GEM\n  specs:\n    railties (7.0.0)\n",
+        );
+        let file = write_file(
+            &dir,
+            "modules/foo/spec/example_spec.rb",
+            b"after do\n  travel_back\nend\n",
+        );
+
+        let result = lint_repo_file(&dir, &file);
+
+        assert!(
+            result.diagnostics.is_empty(),
+            "nested modules/**/spec/** path should not match RuboCop's default Include: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn skipped_when_actual_railties_version_is_below_minimum() {
+        let dir = temp_dir("old_railties");
+        write_file(
+            &dir,
+            ".rubocop.yml",
+            b"AllCops:\n  TargetRailsVersion: 7.0\nRails/RedundantTravelBack:\n  Enabled: true\n",
+        );
+        write_file(
+            &dir,
+            "Gemfile.lock",
+            b"GEM\n  specs:\n    railties (4.2.3)\n",
+        );
+        let file = write_file(
+            &dir,
+            "spec/example_spec.rb",
+            b"after do\n  travel_back\nend\n",
+        );
+
+        let result = lint_repo_file(&dir, &file);
+
+        assert!(
+            result.diagnostics.is_empty(),
+            "Should not fire when actual railties version is below 5.2: {:?}",
+            result.diagnostics
+        );
+    }
 
     #[test]
     fn skipped_when_railties_not_in_lockfile() {
