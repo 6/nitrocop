@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates::is_unary_operation;
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
     FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
@@ -172,10 +173,16 @@ use crate::parse::source::SourceFile;
 /// 2. RuboCop only removes an exact single ASCII space between consecutive
 ///    paren tokens. It intentionally ignores `((`/`))` separated by two spaces
 ///    or tabs.
+/// 3. Parameter-list parens (`def foo(x: build(...))`, `->(x = build(...))`)
+///    still key off the last parameter token, not the `def` / block-params
+///    container node.
+/// 4. Grouped expressions can also end in `)` through intermediate wrapper
+///    nodes like `&&`, `||`, and unary `!call(...)`.
 ///
 /// Fix: compact close-side detection now walks through trailing wrapper nodes
-/// to find a nested paren token, and both compact open/close collapse paths now
-/// require the gap to be exactly `" "`.
+/// to find a nested paren token, including parameter defaults and logical /
+/// unary wrappers, and both compact open/close collapse paths now require the
+/// gap to be exactly `" "`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -889,6 +896,14 @@ fn compact_last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism
             .and_then(|args| args.arguments().iter().last());
     }
 
+    if let Some(def_node) = node.as_def_node() {
+        return def_node.parameters().and_then(last_parameter_node);
+    }
+
+    if let Some(block_params) = node.as_block_parameters_node() {
+        return block_params.parameters().and_then(last_parameter_node);
+    }
+
     if let Some(yield_node) = node.as_yield_node() {
         return yield_node
             .arguments()
@@ -912,6 +927,20 @@ fn compact_last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism
     None
 }
 
+fn last_parameter_node<'a>(params: ruby_prism::ParametersNode<'a>) -> Option<ruby_prism::Node<'a>> {
+    if params.block().is_some() {
+        return None;
+    }
+
+    params
+        .keyword_rest()
+        .or_else(|| params.keywords().iter().last())
+        .or_else(|| params.posts().iter().last())
+        .or_else(|| params.rest())
+        .or_else(|| params.optionals().iter().last())
+        .or_else(|| params.requireds().iter().last())
+}
+
 fn trailing_paren_close_offset(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<usize> {
     if let Some((_, _, close_start)) = paren_offsets(node, bytes) {
         return Some(close_start);
@@ -924,6 +953,28 @@ fn trailing_paren_close_offset(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Opt
 fn trailing_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
     if let Some(block_arg) = node.as_block_argument_node() {
         return block_arg.expression();
+    }
+
+    if let Some(optional_param) = node.as_optional_parameter_node() {
+        return Some(optional_param.value());
+    }
+
+    if let Some(optional_kw_param) = node.as_optional_keyword_parameter_node() {
+        return Some(optional_kw_param.value());
+    }
+
+    if let Some(and_node) = node.as_and_node() {
+        return Some(and_node.right());
+    }
+
+    if let Some(or_node) = node.as_or_node() {
+        return Some(or_node.right());
+    }
+
+    if let Some(call) = node.as_call_node() {
+        if is_unary_operation(&call) && call.block().is_none() {
+            return call.receiver();
+        }
     }
 
     if let Some(keyword_hash) = node.as_keyword_hash_node() {
