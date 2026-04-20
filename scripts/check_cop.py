@@ -1280,24 +1280,33 @@ def _run_rubocop_for_variant(
             cwd=repo_dir)
         data = json.loads(result.stdout)
         # Apply the same in-place symlink normalization that the corpus oracle
-        # runs via bench/corpus/resolve_symlink_paths.py — write the JSON to a
-        # temp file, normalize, and read back. Using the exact same function
-        # keeps gate counts in parity with oracle counts on repos with
-        # internal symlinks (e.g., rabl's fixture directories). An inline
-        # os.path.realpath was not equivalent: if rubocop emits paths that
-        # don't resolve from the caller's cwd, realpath returns the unresolved
-        # path and symlink duplicates stay counted separately.
+        # runs via bench/corpus/resolve_symlink_paths.py. Using the same
+        # function keeps gate counts in parity with oracle counts on repos
+        # with internal symlinks (e.g., rabl's fixture directories).
+        #
+        # resolve_rubocop_json gates realpath on os.path.exists(path). RuboCop
+        # emits paths relative to its invocation cwd (repo_dir here), so we
+        # must chdir to repo_dir while running the resolver — otherwise
+        # os.path.exists returns False for every relative path, no symlink
+        # resolution happens, and duplicate symlink entries stay counted
+        # separately (the +779 FN signal on PR #2301).
         import tempfile
         sys.path.insert(0, str(PROJECT_ROOT / "bench" / "corpus"))
         from resolve_symlink_paths import resolve_rubocop_json
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
             json.dump(data, tf)
             tmp_path = tf.name
+        prev_cwd = os.getcwd()
+        chdir_ok = os.path.isdir(repo_dir)
         try:
+            if chdir_ok:
+                os.chdir(repo_dir)
             resolve_rubocop_json(tmp_path)
             with open(tmp_path) as tf:
                 data = json.load(tf)
         finally:
+            if chdir_ok:
+                os.chdir(prev_cwd)
             os.unlink(tmp_path)
         # Filter to only the requested cop and deduplicate by (path, line),
         # matching the deduplication that run_nitrocop applies on the NC side.
