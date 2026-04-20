@@ -251,3 +251,15 @@ default['zabbix']['agent']['timeout']       	= '3'
 @sessions << @cloud_session      = proposals(:cloud_session)
                                  ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
 @sessions << @business_session   = proposals(:business_session)
+
+# Extra trailing space after = must compare the full RHS, not only the first token
+INT32_MAX  =  2**31 - 1
+           ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+INT32_MIN  = -2**31
+
+# Indented comments keep later assignments relevant across a blank line
+tree1      = BTree[value: 1, left: Tip, right: Tip]
+           ^ Layout/SpaceAroundOperators: Operator `=` should be surrounded by a single space.
+    # => BTree[value: 1, left: Tip, right: Tip]
+
+v, left, right = BTree[value: 1, left: Tip, right: Tip]

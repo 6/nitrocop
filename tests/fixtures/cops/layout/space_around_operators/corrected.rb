@@ -186,3 +186,13 @@ default['zabbix']['agent']['timeout'] = '3'
 
 @sessions << @cloud_session = proposals(:cloud_session)
 @sessions << @business_session   = proposals(:business_session)
+
+# Extra trailing space after = must compare the full RHS, not only the first token
+INT32_MAX  = 2**31 - 1
+INT32_MIN  = -2**31
+
+# Indented comments keep later assignments relevant across a blank line
+tree1 = BTree[value: 1, left: Tip, right: Tip]
+    # => BTree[value: 1, left: Tip, right: Tip]
+
+v, left, right = BTree[value: 1, left: Tip, right: Tip]
