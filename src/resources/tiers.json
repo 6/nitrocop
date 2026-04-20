@@ -663,6 +663,7 @@
     "Style/ComparableBetween": "stable",
     "Style/ComparableClamp": "stable",
     "Style/ConcatArrayLiterals": "stable",
+    "Style/ConditionalAssignment": "stable",
     "Style/ConstantVisibility": "stable",
     "Style/Copyright": "stable",
     "Style/DataInheritance": "stable",
