@@ -1279,11 +1279,31 @@ def _run_rubocop_for_variant(
             cmd, capture_output=True, text=True, timeout=timeout, env=env,
             cwd=repo_dir)
         data = json.loads(result.stdout)
+        # Apply the same in-place symlink normalization that the corpus oracle
+        # runs via bench/corpus/resolve_symlink_paths.py — write the JSON to a
+        # temp file, normalize, and read back. Using the exact same function
+        # keeps gate counts in parity with oracle counts on repos with
+        # internal symlinks (e.g., rabl's fixture directories). An inline
+        # os.path.realpath was not equivalent: if rubocop emits paths that
+        # don't resolve from the caller's cwd, realpath returns the unresolved
+        # path and symlink duplicates stay counted separately.
+        import tempfile
+        sys.path.insert(0, str(PROJECT_ROOT / "bench" / "corpus"))
+        from resolve_symlink_paths import resolve_rubocop_json
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
+            json.dump(data, tf)
+            tmp_path = tf.name
+        try:
+            resolve_rubocop_json(tmp_path)
+            with open(tmp_path) as tf:
+                data = json.load(tf)
+        finally:
+            os.unlink(tmp_path)
         # Filter to only the requested cop and deduplicate by (path, line),
         # matching the deduplication that run_nitrocop applies on the NC side.
         seen: set[tuple[str, int]] = set()
         for f in data.get("files", []):
-            fpath = os.path.realpath(f.get("path", ""))
+            fpath = f.get("path", "")
             for o in f.get("offenses", []):
                 if o.get("cop_name") == cop:
                     seen.add((fpath, o["location"]["line"]))
