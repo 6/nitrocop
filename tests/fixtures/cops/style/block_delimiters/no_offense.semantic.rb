@@ -60,3 +60,30 @@ def build_dest(rels, ret)
   dest = rels.inject(ret) { |h, rel| h[rel] ||= {} }["columns"] ||= []
   dest
 end
+
+parsers.each do |parser|
+  return backtrack { parser.call }
+rescue Error
+  next
+end
+
+options.reduce([""]) do |s, n|
+  next Array(s).map { |a| a + n } if n.is_a?(String)
+
+  Array(s).product(n.every).map(&:join)
+end
+
+def initialize(hooks = Hash.new { |h, k| h[k] = [] })
+  @hooks = hooks
+end
+
+it "passes coerced value if it doesn't meet constraints" do
+  called = false
+
+  type.("15") do |coerced|
+    called = true
+    expect(coerced).to be(15)
+  end
+
+  expect(called).to be(true)
+end
