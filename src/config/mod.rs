@@ -1003,6 +1003,7 @@ pub fn load_config(
     target_dir: Option<&Path>,
     gem_cache: Option<&HashMap<String, PathBuf>>,
 ) -> Result<ResolvedConfig> {
+    let explicit_config_path = path.is_some();
     let start_dir = target_dir
         .map(|p| {
             if p.is_file() {
@@ -1249,8 +1250,17 @@ pub fn load_config(
         }
     }
 
-    // Discover and parse nested .rubocop.yml files for per-directory config layers.
-    let dir_overrides = load_dir_overrides(&config_dir);
+    // RuboCop only considers nested `.rubocop.yml` files when it discovers the
+    // root config itself. When `--config path/to/file.yml` is passed
+    // explicitly, subdirectory configs are ignored even if the file lives
+    // under the same tree. Match that behavior so corpus style-override runs
+    // don't accidentally sweep repo-local overrides from the temp config's
+    // parent directory.
+    let dir_overrides = if explicit_config_path {
+        Vec::new()
+    } else {
+        load_dir_overrides(&config_dir)
+    };
 
     Ok(ResolvedConfig {
         cop_configs: base.cop_configs,
