@@ -209,6 +209,25 @@ use crate::parse::source::SourceFile;
 ///    continuation; accepting later dots just because an earlier continuation
 ///    existed hid multiple real offenses in the same chain.
 ///
+/// ## Corpus fix (2026-04-20)
+///
+/// Later continuation dots in a long leading-dot chain must not become valid
+/// merely because there are multiple earlier continuation lines. RuboCop only
+/// reuses an earlier continuation column when that earlier continuation is
+/// itself a valid anchor, or in the existing multiline-block special case.
+/// Without that check, chains like:
+///
+/// ```ruby
+/// scope do
+///   alive
+///   .where(...)
+///   .joins(...)
+///   .order(...)
+/// end
+/// ```
+///
+/// incorrectly stopped reporting offenses after the first one or two lines.
+///
 /// ## Variant fix (2026-04-19)
 ///
 /// For `EnforcedStyle: indented`, matcher chains nested inside a
@@ -522,8 +541,6 @@ impl ChainVisitor<'_> {
             if let Some(anchor) =
                 find_previous_continuation_dot_anchor(self.source, receiver, rhs_line)
             {
-                let continuation_count =
-                    count_previous_continuation_dots(self.source, receiver, rhs_line);
                 let anchor_receiver_is_post_multiline_block_call = anchor
                     .receiver()
                     .and_then(|receiver| receiver.as_call_node())
@@ -531,8 +548,7 @@ impl ChainVisitor<'_> {
                     .is_some_and(|receiver| {
                         receiver_is_multiline_block_call(self.source, &receiver)
                     });
-                if continuation_count > 1
-                    || anchor_receiver_is_post_multiline_block_call
+                if anchor_receiver_is_post_multiline_block_call
                     || self.previous_continuation_anchor_is_valid(&anchor)
                 {
                     if let Some(dot_loc) = anchor.call_operator_loc() {
@@ -1158,29 +1174,6 @@ fn find_previous_continuation_dot_anchor<'a>(
         }
     }
     None
-}
-
-fn count_previous_continuation_dots(
-    source: &SourceFile,
-    receiver: &ruby_prism::Node<'_>,
-    current_line: usize,
-) -> usize {
-    let Some(call) = receiver.as_call_node() else {
-        return 0;
-    };
-
-    let mut count = if let Some(dot_loc) = call.call_operator_loc() {
-        let (dot_line, _) = source.offset_to_line_col(dot_loc.start_offset());
-        usize::from(dot_line < current_line && is_first_on_line(source, dot_loc.start_offset()))
-    } else {
-        0
-    };
-
-    if let Some(recv) = call.receiver() {
-        count += count_previous_continuation_dots(source, &recv, current_line);
-    }
-
-    count
 }
 
 /// RuboCop's `left_hand_side(node.receiver)` climbs parent send nodes, not just

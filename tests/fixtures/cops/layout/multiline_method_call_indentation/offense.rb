@@ -108,6 +108,19 @@ def self.pull_request_filter
   ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
 end
 
+# Long leading-dot chains: later continuations still use the base indentation
+def organisation_roles(type)
+  @organisation
+  .organisation_roles
+  ^^^^^^^^^^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+  .joins(:role)
+  ^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+  .merge(roles_for_type(type))
+  ^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+  .order(:ordering)
+  ^^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 0) spaces for indentation of a chained method call.
+end
+
 # RSpec stub chain: later dots still use the chain indent when the first continuation is wrong
 before do
   allow(SteamCondenser::Community::SteamId).to receive(:steam_id_to_community_id)
@@ -131,34 +144,34 @@ def make_json_string expr
   Arel.quoted('"') \
   + expr
       .coalesce('')
-      ^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.coalesce` with `expr` on line 108.
+      ^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.coalesce` with `expr` on line 117.
       .replace('\\', '\\\\')
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
       .replace('"', '\"')
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
       .replace("\b", '\b')
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
       .replace("\f", '\f')
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
       .replace("\n", '\n')
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
       .replace("\r", '\r')
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
       .replace("\t", '\t') \
-      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 108.
+      ^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.replace` with `expr` on line 117.
   + '"'
 end
 
 # Keyword condition: align to the full condition expression, not fallback indent
 if stripe_mapping
     .select { |mapping| mapping.split('.')[0] == @model.name }
-    ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `stripe_mapping` on line 121.
+    ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `stripe_mapping` on line 130.
     .size > 0
 end
 
 # Boolean keyword condition keeps the whole condition as the alignment base
 if mixpanel_mapping && mixpanel_mapping
     .select { |mapping| mapping.split('.')[0] == @model.name }
-    ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `mixpanel_mapping && mixpanel_mapping` on line 127.
+    ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.select` with `mixpanel_mapping && mixpanel_mapping` on line 136.
     .size > 0
 end
