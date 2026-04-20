@@ -6,12 +6,14 @@ use crate::parse::source::SourceFile;
 
 /// Rails/ResponseParsedBody
 ///
-/// FN fix: RuboCop's ResponseParsedBody cop does NOT use `requires_gem
-/// 'railties'` — it only checks `minimum_target_rails_version 5.0` via the
-/// `TargetRailsVersion` config setting. We use `target_rails_version()`
-/// directly (not `rails_version_at_least()`) because the latter also
-/// requires `railties` in `Gemfile.lock`, which the corpus lockfile does
-/// not have (it only bundles linter gems, not Rails itself).
+/// FP fix: rubocop-rails 2.34 backs `minimum_target_rails_version 5.0` with
+/// `requires_gem 'railties', '>= 5.0'`, so this cop must stay disabled for
+/// legacy Rails 3.x/4.x repos and repos without `railties` in `Gemfile.lock`
+/// even when external configs force `TargetRailsVersion: 7.0`. Verified
+/// against RuboCop with a throwaway `railties 7.0` lockfile: the same
+/// `JSON.parse(response.body)` inside an RSpec `it do ... end` block is still
+/// an offense there, so the FP bucket was a version-gate mismatch, not a
+/// block-context exception.
 ///
 /// Corpus note: this cop is Include-gated (`spec/controllers/**/*.rb`,
 /// `spec/requests/**/*.rb`, etc.). These patterns come from the
@@ -52,9 +54,10 @@ impl Cop for ResponseParsedBody {
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // minimum_target_rails_version 5.0
-        // Use target_rails_version() directly — RuboCop's cop does NOT use
-        // `requires_gem 'railties'`, only `minimum_target_rails_version 5.0`.
-        if !config.target_rails_version().is_some_and(|v| v >= 5.0) {
+        if !config.rails_version_at_least(5.0) {
+            return;
+        }
+        if config.railties_version().is_some_and(|v| v < 5.0) {
             return;
         }
 
@@ -151,6 +154,7 @@ impl Cop for ResponseParsedBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     crate::cop_rails_fixture_tests!(ResponseParsedBody, "cops/rails/response_parsed_body", 5.0);
 
@@ -164,6 +168,14 @@ mod tests {
         let mut options = std::collections::HashMap::new();
         options.insert(
             "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(5.0)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
             serde_yml::Value::Number(serde_yml::value::Number::from(5.0)),
         );
         let config = crate::cop::CopConfig {
@@ -180,6 +192,14 @@ mod tests {
             "TargetRailsVersion".to_string(),
             serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
         );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.1)),
+        );
         let config = crate::cop::CopConfig {
             options,
             ..crate::cop::CopConfig::default()
@@ -187,5 +207,105 @@ mod tests {
         let diags =
             crate::testutil::run_cop_full_with_config(&ResponseParsedBody, &parsed.source, config);
         assert_eq!(diags.len(), 2, "Nokogiri should fire at Rails 7.1");
+    }
+
+    #[test]
+    fn skipped_without_railties_in_lockfile_when_target_rails_version_is_forced() {
+        let source = b"json = JSON.parse(response.body)\n";
+        let parsed = crate::testutil::parse_fixture(source);
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        let config = crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        };
+        let diags =
+            crate::testutil::run_cop_full_with_config(&ResponseParsedBody, &parsed.source, config);
+        assert!(
+            diags.is_empty(),
+            "Should not fire when railties is not in Gemfile.lock"
+        );
+    }
+
+    #[test]
+    fn skipped_when_actual_railties_version_is_below_minimum() {
+        let source = br#"it "renders json for post" do
+  post "create", post: new_post.attributes, format: :json
+  json = JSON.parse(response.body)
+  json["text"].length.should > 0
+  response.status.should == 201
+end
+"#;
+        let parsed = crate::testutil::parse_fixture(source);
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(4.2)),
+        );
+        let config = crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_internal(
+            &ResponseParsedBody,
+            &parsed.source,
+            config,
+            "spec/controllers/posts_controller_spec.rb",
+        );
+        assert!(
+            diags.is_empty(),
+            "Should not fire when the actual railties version is below 5.0"
+        );
+    }
+
+    #[test]
+    fn still_flags_inside_rspec_block_when_actual_railties_version_meets_minimum() {
+        let source = br#"it "renders json for post" do
+  post "create", post: new_post.attributes, format: :json
+  json = JSON.parse(response.body)
+  json["text"].length.should > 0
+  response.status.should == 201
+end
+"#;
+        let parsed = crate::testutil::parse_fixture(source);
+        let mut options = HashMap::new();
+        options.insert(
+            "TargetRailsVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        options.insert(
+            "__RailtiesInLockfile".to_string(),
+            serde_yml::Value::Bool(true),
+        );
+        options.insert(
+            "__RailtiesVersion".to_string(),
+            serde_yml::Value::Number(serde_yml::value::Number::from(7.0)),
+        );
+        let config = crate::cop::CopConfig {
+            options,
+            ..crate::cop::CopConfig::default()
+        };
+        let diags = crate::testutil::run_cop_full_internal(
+            &ResponseParsedBody,
+            &parsed.source,
+            config,
+            "spec/controllers/posts_controller_spec.rb",
+        );
+        assert_eq!(
+            diags.len(),
+            1,
+            "Should still fire for the RSpec block shape when railties is at least 5.0"
+        );
     }
 }
