@@ -22,3 +22,9 @@ super(errors.local_attribute(attribute))
 def input_field
   some_helper(form_field_name, value, id: form_field_id, readonly: !editable?)
 end
+
+# lambda descendants make the outer call ambiguous enough to keep parens
+options = {
+  tag: :div,
+  tags_formatter: ->(tags) { tags.join(" ") }
+}.merge(options)

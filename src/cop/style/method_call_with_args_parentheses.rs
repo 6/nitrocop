@@ -295,6 +295,24 @@ use crate::parse::source::SourceFile;
 /// but nitrocop only handled signed numerics and `+@`/`-@`, so it still
 /// flagged the outer call. Match RuboCop by treating any Prism unary
 /// operation descendant as ambiguous.
+///
+/// ## Variant fix (2026-04-20)
+///
+/// Two remaining `omit_parentheses` mismatches came from variant-run context:
+///
+/// 1. Outer calls with lambda literals in their receiver/argument tree, such
+///    as `{ tags_formatter: ->(tags) { ... } }.merge(options)`, were still
+///    flagged. RuboCop's descendant scan sees the lambda's underlying `block`
+///    node (`any_block`) and treats the outer call as ambiguous, so the
+///    parentheses stay.
+///
+/// 2. Variant corpus runs use an explicit temporary `--config` file. RuboCop
+///    does NOT apply nested `.rubocop.yml` overrides when a config path is
+///    passed explicitly, but nitrocop was still sweeping subdirectories under
+///    the config file's parent. In CI this temp directory can also contain the
+///    cloned repos, so nested repo overrides leaked into the style-override
+///    run and caused large omit-parentheses FP/FN swings. Matching RuboCop
+///    requires disabling directory overrides for explicit `--config` loads.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -1277,6 +1295,7 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
     if node.as_splat_node().is_some()
         || node.as_assoc_splat_node().is_some()
         || node.as_block_argument_node().is_some()
+        || node.as_lambda_node().is_some()
     {
         return true;
     }
@@ -2362,6 +2381,11 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use crate::config::load_config;
     use crate::cop::CopConfig;
     use crate::testutil::{
         assert_cop_no_offenses_full_with_config, assert_cop_offenses_full_with_config,
@@ -2390,6 +2414,34 @@ mod tests {
         }
     }
 
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "nitrocop_{prefix}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+    }
+
+    fn variant_test_config_yaml(path: &Path) -> String {
+        format!(
+            "inherit_from: {}\n\nStyle/MethodCallWithArgsParentheses:\n  EnforcedStyle: omit_parentheses\n",
+            path.display()
+        )
+    }
+
     #[test]
     fn omit_parentheses_variant_offense_fixture() {
         assert_cop_offenses_full_with_config(
@@ -2410,6 +2462,41 @@ mod tests {
             ),
             omit_parentheses_config(),
         );
+    }
+
+    #[test]
+    fn explicit_config_path_ignores_nested_rubocop_overrides() {
+        let temp_dir = unique_temp_dir("mcwap_explicit_config");
+        let repo_dir = temp_dir.join("repo");
+        let source_path = repo_dir.join("sub/test.rb");
+        let config_path = repo_dir.join("custom.yml");
+        let nested_config_path = repo_dir.join("sub/.rubocop.yml");
+        let baseline =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bench/corpus/baseline_rubocop.yml");
+
+        write_file(
+            &config_path,
+            &variant_test_config_yaml(&baseline.canonicalize().unwrap()),
+        );
+        write_file(
+            &nested_config_path,
+            "Style/MethodCallWithArgsParentheses:\n  AllowParenthesesInMultilineCall: true\n",
+        );
+        write_file(&source_path, "foo(\n  bar: 1\n)\n");
+
+        let config = load_config(Some(&config_path), Some(&source_path), None).unwrap();
+        assert!(
+            !config.has_dir_overrides(),
+            "explicit --config should ignore nested .rubocop.yml overrides"
+        );
+        let cop_config =
+            config.cop_config_for_file("Style/MethodCallWithArgsParentheses", &source_path);
+        assert!(
+            !cop_config.get_bool("AllowParenthesesInMultilineCall", false),
+            "nested override must not leak into an explicit config load"
+        );
+
+        let _ = fs::remove_dir_all(temp_dir);
     }
 
     #[test]
