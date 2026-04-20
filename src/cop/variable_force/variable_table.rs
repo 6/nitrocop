@@ -124,6 +124,46 @@ impl VariableTable {
         // (e.g., from eval or dynamic scope). Silently ignore.
     }
 
+    /// Record a branch-aware implicit reference to all method arguments from
+    /// the nearest enclosing method scope. Used by bare `super`, which
+    /// forwards method arguments even when the current scope is a nested block.
+    pub fn reference_enclosing_method_arguments(&mut self, reference: Reference) {
+        let current_index = self.current_scope_index();
+        let contexts = std::mem::take(&mut self.branch_contexts);
+
+        for scope in self.scope_stack.iter_mut().rev() {
+            match scope.kind {
+                ScopeKind::Block | ScopeKind::SingletonClass => continue,
+                ScopeKind::Def | ScopeKind::Defs => {
+                    for var in scope.variables.values_mut().filter(|v| v.is_argument()) {
+                        if var.scope_index != current_index {
+                            var.captured_by_block = true;
+                        }
+                        var.reference_with_branches(
+                            Reference {
+                                node_offset: reference.node_offset,
+                                scope_index: reference.scope_index,
+                                explicit: reference.explicit,
+                                sequence: reference.sequence,
+                                branch_id: reference.branch_id,
+                                branch_path: reference.branch_path.clone(),
+                            },
+                            &contexts,
+                        );
+                    }
+                    self.branch_contexts = contexts;
+                    return;
+                }
+                _ => {
+                    self.branch_contexts = contexts;
+                    return;
+                }
+            }
+        }
+
+        self.branch_contexts = contexts;
+    }
+
     /// Find a variable by name, walking the scope stack from innermost to
     /// outermost. Stops at hard scope boundaries (def, class, module).
     ///
@@ -202,30 +242,6 @@ impl VariableTable {
             result.extend(scope.variables.values_mut());
             if scope.kind.is_hard() {
                 break;
-            }
-        }
-        result
-    }
-
-    /// Argument variables from the enclosing method scope (Def or Defs),
-    /// skipping intermediate Block scopes. Used for bare `super` which
-    /// forwards the enclosing method's arguments, not block params.
-    pub fn enclosing_method_arguments_mut(&mut self) -> Vec<&mut Variable> {
-        let mut result = Vec::new();
-        for scope in self.scope_stack.iter_mut().rev() {
-            match scope.kind {
-                ScopeKind::Block | ScopeKind::SingletonClass => {
-                    // Skip twisted scopes, continue to enclosing method
-                    continue;
-                }
-                ScopeKind::Def | ScopeKind::Defs => {
-                    result.extend(scope.variables.values_mut().filter(|v| v.is_argument()));
-                    break;
-                }
-                _ => {
-                    // Hard scope (Class, Module, TopLevel) with no method
-                    break;
-                }
             }
         }
         result
