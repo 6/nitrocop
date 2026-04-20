@@ -18,3 +18,15 @@ master.job_queue << -> do
   progress = master.work_done_progress(typecheck_guid)
   master.start_type_check(last_request: nil, progress: progress, include_unchanged: true, report_progress_threshold: 0, needs_response: true)
 end
+
+def examples
+  example { "a b" }
+          ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for procedural blocks.
+  example { "ab" }
+end
+
+def view_template
+  a(href: " javascript:alert(1)") { "XSS" }
+                                  ^ Style/BlockDelimiters: Prefer `do...end` over `{...}` for procedural blocks.
+  a(href: "javascript :alert(1)") { "XSS" }
+end

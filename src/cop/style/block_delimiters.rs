@@ -76,6 +76,26 @@ use std::collections::HashSet;
 ///   bails out on some non-UTF-8 files with high `\xHH` escapes (for example
 ///   `# encoding:windows-1252` with `\xdf` regex escapes), so nitrocop now
 ///   skips this cop on those parser-incompatible files too
+///
+/// ## Fix (2026-04-20): narrow always_braces bail-outs and semantic wrappers
+///
+/// The remaining variant divergence came from four Prism-specific edge cases:
+///
+/// - `always_braces` was skipping the cop on *any* Prism error, which hid real
+///   offenses in builder templates where Prism reports semantic-only `yield`
+///   errors but RuboCop still checks block delimiters
+/// - the non-UTF-8 bailout was too broad: RuboCop still checks ordinary
+///   ISO-8859-1/Windows-1252 files with raw high bytes, and only bails on the
+///   parser-incompatible high `\xHH` escape cases
+/// - semantic style did not forward return-value-of-scope through `return`,
+///   `break`, `next`, or optional-parameter defaults, so blocks in those
+///   wrapper contexts were flagged as procedural
+/// - Prism omits `message_loc` for shorthand `receiver.(...)`, so the old call
+///   key collided with the receiver's start offset and falsely marked the block
+///   call as return-value-used; additionally, the scope-tail equality fallback
+///   stripped all whitespace from source text, so `"a b"` and `"ab"` looked
+///   structurally equal and earlier brace blocks incorrectly inherited
+///   `rv_of_scope`
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -94,8 +114,7 @@ impl Cop for BlockDelimiters {
     ) {
         let enforced_style = config.get_str("EnforcedStyle", "line_count_based");
         if enforced_style == "always_braces"
-            && (parse_result.errors().next().is_some()
-                || has_non_utf8_encoding_with_parser_incompatible_content(source.as_bytes()))
+            && has_non_utf8_encoding_with_parser_incompatible_content(source.as_bytes())
         {
             return;
         }
@@ -586,6 +605,46 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
         ruby_prism::visit_splat_node(self, node);
     }
 
+    fn visit_return_node(&mut self, node: &ruby_prism::ReturnNode<'_>) {
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_return_node(self, node);
+    }
+
+    fn visit_break_node(&mut self, node: &ruby_prism::BreakNode<'_>) {
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_break_node(self, node);
+    }
+
+    fn visit_next_node(&mut self, node: &ruby_prism::NextNode<'_>) {
+        if let Some(args) = node.arguments() {
+            if let Some(last) = args.arguments().last() {
+                mark_rv_of_scope_on_node(&last, &mut self.rv_of_scope_calls);
+            }
+        }
+        ruby_prism::visit_next_node(self, node);
+    }
+
+    fn visit_optional_parameter_node(&mut self, node: &ruby_prism::OptionalParameterNode<'_>) {
+        mark_rv_of_scope_on_node(&node.value(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_optional_parameter_node(self, node);
+    }
+
+    fn visit_optional_keyword_parameter_node(
+        &mut self,
+        node: &ruby_prism::OptionalKeywordParameterNode<'_>,
+    ) {
+        mark_rv_of_scope_on_node(&node.value(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_optional_keyword_parameter_node(self, node);
+    }
+
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'_>) {
         mark_rv_used_on_call(&node.value(), &mut self.rv_used_calls);
         ruby_prism::visit_local_variable_write_node(self, node);
@@ -970,7 +1029,9 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
 /// rv_used when only the receiver is. The method name is unique per call.
 fn call_node_key(call: &ruby_prism::CallNode<'_>) -> usize {
     call.message_loc()
-        .map_or_else(|| call.location().start_offset(), |loc| loc.start_offset())
+        .or_else(|| call.call_operator_loc())
+        .or_else(|| call.opening_loc())
+        .map_or_else(|| call.location().end_offset(), |loc| loc.start_offset())
 }
 
 fn mark_rv_used_on_call(node: &ruby_prism::Node<'_>, rv_used: &mut HashSet<usize>) {
@@ -1120,12 +1181,10 @@ fn block_calls_match_scope_tail(
         return false;
     }
 
-    normalized_non_whitespace(
+    source_slice_matches(
         source,
         candidate.location().start_offset(),
         candidate_block.opening_loc().start_offset(),
-    ) == normalized_non_whitespace(
-        source,
         last.location().start_offset(),
         last_block.opening_loc().start_offset(),
     ) && optional_node_source_matches(
@@ -1145,25 +1204,26 @@ fn optional_node_source_matches(
         (Some(candidate_node), Some(last_node)) => {
             let candidate_loc = candidate_node.location();
             let last_loc = last_node.location();
-            normalized_non_whitespace(
+            source_slice_matches(
                 source,
                 candidate_loc.start_offset(),
                 candidate_loc.end_offset(),
-            ) == normalized_non_whitespace(source, last_loc.start_offset(), last_loc.end_offset())
+                last_loc.start_offset(),
+                last_loc.end_offset(),
+            )
         }
         _ => false,
     }
 }
 
-fn normalized_non_whitespace(source: &SourceFile, start: usize, end: usize) -> Vec<u8> {
-    source
-        .as_bytes()
-        .get(start..end)
-        .unwrap_or(&[])
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect()
+fn source_slice_matches(
+    source: &SourceFile,
+    first_start: usize,
+    first_end: usize,
+    second_start: usize,
+    second_end: usize,
+) -> bool {
+    source.as_bytes().get(first_start..first_end) == source.as_bytes().get(second_start..second_end)
 }
 
 fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool {
@@ -1219,7 +1279,7 @@ fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool 
                 }
 
                 if !enc_name.is_empty() {
-                    return bytes.iter().any(|&byte| byte >= 0x80) || has_high_hex_escapes(bytes);
+                    return has_high_hex_escapes(bytes);
                 }
             }
         }
@@ -1943,6 +2003,32 @@ mod tests {
         let config = config_with_style("always_braces");
         let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
         assert!(diags.is_empty(), "got: {:?}", diags);
+    }
+
+    #[test]
+    fn always_braces_offense_builder_template_with_semantic_parse_error() {
+        let source = b"xml.wrapper do\n  xml << yield\nend\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(
+            diags[0]
+                .message
+                .contains("Prefer `{...}` over `do...end` for blocks.")
+        );
+    }
+
+    #[test]
+    fn always_braces_offense_non_utf8_file_with_plain_high_bytes() {
+        let source = b"# encoding: iso-8859-1\nGiven(/^jeg drikker en \"([^\"]*)\"$/) do |drink|\n  expect(drink).to eq '\xF8l'.force_encoding(\"ISO-8859-1\").encode(\"UTF-8\")\nend\n";
+        let config = config_with_style("always_braces");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert_eq!(diags.len(), 1, "got: {:?}", diags);
+        assert!(
+            diags[0]
+                .message
+                .contains("Prefer `{...}` over `do...end` for blocks.")
+        );
     }
 
     #[test]
