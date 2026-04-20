@@ -6,20 +6,13 @@ use crate::parse::source::SourceFile;
 
 /// Rails/ResponseParsedBody
 ///
-/// FP fix: rubocop-rails 2.34 backs `minimum_target_rails_version 5.0` with
-/// `requires_gem 'railties', '>= 5.0'`, so this cop must stay disabled for
-/// legacy Rails 3.x/4.x repos and repos without `railties` in `Gemfile.lock`
-/// even when external configs force `TargetRailsVersion: 7.0`. Verified
-/// against RuboCop with a throwaway `railties 7.0` lockfile: the same
-/// `JSON.parse(response.body)` inside an RSpec `it do ... end` block is still
-/// an offense there, so the FP bucket was a version-gate mismatch, not a
-/// block-context exception.
+/// Matches `JSON.parse(response.body)` and, on Rails >= 7.1,
+/// `Nokogiri::HTML{,5}.parse(response.body)`.
 ///
-/// Corpus note: this cop is Include-gated (`spec/controllers/**/*.rb`,
-/// `spec/requests/**/*.rb`, etc.). These patterns come from the
-/// rubocop-rails gem config and resolve relative to base_dir (CWD for
-/// non-dotfile configs). Corpus runs must use `--repo-cwd` so that CWD
-/// equals the repo root and the Include patterns match.
+/// FP fix: RuboCop's node pattern only accepts a bare `response.body` send:
+/// the intermediate `response` call must have a nil receiver. nitrocop
+/// previously treated any `*.response.body` chain as a match and falsely
+/// flagged cases like `JSON.parse(error.response.body)` in request specs.
 pub struct ResponseParsedBody;
 
 impl Cop for ResponseParsedBody {
@@ -101,6 +94,9 @@ impl Cop for ResponseParsedBody {
             None => return,
         };
         if body_recv_call.name().as_slice() != b"response" {
+            return;
+        }
+        if body_recv_call.receiver().is_some() {
             return;
         }
 
