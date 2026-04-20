@@ -88,6 +88,18 @@ use ruby_prism::Visit;
 ///    separator/value columns and produced FPs whenever RuboCop would have accepted the
 ///    alignment. Fixed by counting non-continuation bytes (UTF-8 codepoint count) for
 ///    `key_char_len` so it composes with column math.
+///
+/// 9. **Variant-only shared-line + separator quirks (2026-04-20):**
+///    - `table` / `separator` styles use RuboCop AST's `pairs_on_same_line?`, which treats
+///      adjacent pairs as "same line" when a multiline pair's closing line also contains the
+///      next pair (for example `}, :conditions => {`). The previous implementation only looked
+///      at pair start lines, so `table, table, ignore_implicit` incorrectly flagged hashes that
+///      RuboCop marks uncheckable.
+///    - Under `separator` with hash rockets, RuboCop 1.84.2 crashes its autocorrection pass
+///      (`Parser::ClobberingError`) when the first pair's value starts on the next line but
+///      later pairs mix newline and same-line values. The corpus oracle counts that as zero
+///      offenses, so nitrocop now suppresses that exact mixed-value shape to match RuboCop's
+///      observable output.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -184,6 +196,8 @@ struct PairInfo {
     /// Line and column of the key (or kwsplat) start.
     line: usize,
     col: usize,
+    /// Last line touched by the element.
+    last_line: usize,
     /// Whether this element begins its line.
     begins_line: bool,
     /// Whether this is a keyword splat (**foo).
@@ -212,6 +226,7 @@ struct PairInfo {
 
 fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option<PairInfo> {
     let elem_end = elem.location().end_offset();
+    let last_line = source.offset_to_line_col(elem_end.saturating_sub(1)).0;
 
     if let Some(assoc) = elem.as_assoc_node() {
         let key = assoc.key();
@@ -255,6 +270,7 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
             elem_end,
             line,
             col,
+            last_line,
             begins_line,
             is_kwsplat: false,
             is_rocket,
@@ -281,6 +297,7 @@ fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option
             elem_end,
             line,
             col,
+            last_line,
             begins_line,
             is_kwsplat: true,
             is_rocket: false,
@@ -354,6 +371,35 @@ fn should_ignore_last_argument_hash(
 /// Find the first non-kwsplat pair (matching RuboCop's `node.pairs.first`).
 fn first_pair(pairs: &[PairInfo]) -> Option<&PairInfo> {
     pairs.iter().find(|p| !p.is_kwsplat)
+}
+
+fn pairs_share_line(first: &PairInfo, second: &PairInfo) -> bool {
+    first.last_line == second.line || first.line == second.last_line
+}
+
+fn adjacent_pairs_share_line<'a, I>(pairs: I) -> bool
+where
+    I: IntoIterator<Item = &'a PairInfo>,
+{
+    let pairs: Vec<&PairInfo> = pairs.into_iter().collect();
+    pairs
+        .windows(2)
+        .any(|window| pairs_share_line(window[0], window[1]))
+}
+
+fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
+    let Some(first) = first_pair(pairs) else {
+        return false;
+    };
+
+    if !first.is_rocket || !first.value_on_new_line {
+        return false;
+    }
+
+    pairs
+        .iter()
+        .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
+        .any(|pair| !pair.is_value_omission && !pair.value_on_new_line)
 }
 
 /// Check a hash under the "key" alignment style.
@@ -478,6 +524,10 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
         return offenses;
     }
 
+    if separator_style_rubocop_clobber_quirk(pairs) {
+        return offenses;
+    }
+
     let first = match first_pair(pairs) {
         Some(p) => p,
         None => return offenses,
@@ -573,12 +623,9 @@ fn check_table_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOffens
     }
 
     // Check if any pairs are on the same line (table requires each pair on its own line)
-    let mut lines_seen = std::collections::HashSet::new();
-    for p in &non_kwsplat {
-        if !lines_seen.insert(p.line) {
-            // Two pairs on the same line — not checkable for table
-            return offenses;
-        }
+    if adjacent_pairs_share_line(non_kwsplat.iter().copied()) {
+        // Two adjacent pairs share a line — not checkable for table
+        return offenses;
     }
 
     // Calculate max key width and expected positions
@@ -732,14 +779,7 @@ fn is_checkable(style: AlignStyle, pairs: &[PairInfo]) -> bool {
     }
 
     // Check pairs on same line
-    let mut lines_seen = std::collections::HashSet::new();
-    for p in &non_kwsplat {
-        if !lines_seen.insert(p.line) {
-            return false;
-        }
-    }
-
-    true
+    !adjacent_pairs_share_line(non_kwsplat.iter().copied())
 }
 
 /// Check offenses for the given styles and return the best (fewest offenses).
@@ -1244,6 +1284,28 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/hash_alignment/table_multibyte_key_no_offense.rb"
             ),
             variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn table_ignore_implicit_shared_line_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/table_ignore_implicit_shared_line_no_offense.rb"
+            ),
+            variant_config("table", "table", "ignore_implicit"),
+        );
+    }
+
+    #[test]
+    fn separator_always_ignore_mixed_newline_values_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_mixed_newline_values_no_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
         );
     }
 
