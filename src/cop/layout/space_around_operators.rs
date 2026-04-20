@@ -317,6 +317,21 @@ use ruby_prism::Visit;
 /// during this investigation. RuboCop accepts that line in isolation, so it is
 /// not modeled as a standalone offense here.
 ///
+/// ## Corpus fix (2026-04-20, plain `=` full-file FNs)
+///
+/// Two full-file-only plain-assignment mismatches remained:
+/// - trailing-space alignment was comparing only the first RHS token, which
+///   incorrectly accepted `INT32_MAX  =  2**31 - 1` and
+///   `a =  @bignum - 1` when an adjacent line merely shared the same token
+///   prefix at the aligned column;
+/// - assignment-group neighbor scanning skipped comment indentation entirely,
+///   which made blank lines terminate too early after indented comments and
+///   incorrectly accepted `tree1      = ...` before a later assignment.
+///
+/// Fix: use the full RHS source as the exact-token alignment candidate for
+/// AST-backed plain/setter assignments, and let real comment indentation
+/// influence assignment-group scanning while still ignoring fixture `^` lines.
+///
 /// ## Corpus fix (2026-04-20)
 ///
 /// RuboCop skips this cop entirely when an operator is followed on the same
@@ -1378,7 +1393,6 @@ fn find_assignment_aligned_in_direction(
                     break;
                 }
             }
-            Some(fs) if line_bytes[fs] == b'#' => {} // Comment line — skip
             Some(fs) if line_bytes[fs] == b'^' => {} // Annotation line — skip
             Some(indent) => {
                 if indent < my_indent {
@@ -1386,11 +1400,13 @@ fn find_assignment_aligned_in_direction(
                 }
                 if indent == my_indent {
                     relevant_indent_at_level = true;
-                    let abs_start = line_starts[check_idx];
-                    if let Some(first_end_col) =
-                        first_assignment_alignment_end_char_col(line_bytes, abs_start, code_map)
-                    {
-                        return Some(first_end_col == char_end_col);
+                    if line_bytes[indent] != b'#' {
+                        let abs_start = line_starts[check_idx];
+                        if let Some(first_end_col) =
+                            first_assignment_alignment_end_char_col(line_bytes, abs_start, code_map)
+                        {
+                            return Some(first_end_col == char_end_col);
+                        }
                     }
                     // Same-indent non-assignment line — continue searching
                 } else {
@@ -1725,7 +1741,7 @@ impl OperatorChecker<'_> {
             Some(TrailingAnchor {
                 offset: value.location().start_offset(),
                 token_match: true,
-                exact_token: None,
+                exact_token: Some(value.location().as_slice().to_vec()),
             }),
             true,
         );
@@ -2018,14 +2034,19 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
                 let trailing_anchor = node
                     .arguments()
                     .and_then(|args| args.arguments().iter().next())
-                    .map(|arg| arg.location().start_offset());
+                    .map(|arg| {
+                        (
+                            arg.location().start_offset(),
+                            arg.location().as_slice().to_vec(),
+                        )
+                    });
 
                 self.check_operator_spacing_with_trailing_anchor(
                     &equal_loc,
-                    trailing_anchor.map(|offset| TrailingAnchor {
+                    trailing_anchor.map(|(offset, exact_token)| TrailingAnchor {
                         offset,
                         token_match: true,
-                        exact_token: None,
+                        exact_token: Some(exact_token),
                     }),
                     false,
                 );
