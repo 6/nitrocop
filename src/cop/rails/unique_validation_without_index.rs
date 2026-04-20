@@ -28,6 +28,12 @@ use crate::parse::source::SourceFile;
 /// full enclosing model name and pluralizes only the last table-name segment so
 /// it matches RuboCop on namespaced and compound model names.
 ///
+/// Later corpus FPs were not matcher bugs: `--only Rails/UniqueValidationWithoutIndex`
+/// was force-enabling the Rails plugin department even when the target repo's
+/// config never loaded `rubocop-rails`. That behavior now stays limited to
+/// `--force-default-config`, so project-configured runs match RuboCop's
+/// plugin-loading rules.
+///
 /// ## Synthetic corpus note
 /// RuboCop's SchemaLoader crashes on `t.timestamps` (no arguments) in
 /// db/schema.rb because `Column.new` calls `node.first_argument.str_content`

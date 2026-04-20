@@ -5597,6 +5597,44 @@ fn force_default_config_ignores_config_file() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn only_unique_validation_without_index_does_not_enable_unloaded_rails_plugin() {
+    let dir = temp_dir("only_unique_validation_without_index_without_rails_plugin");
+    fs::write(dir.join(".rubocop.yml"), "AllCops:\n  NewCops: enable\n").unwrap();
+    fs::create_dir_all(dir.join("app/models")).unwrap();
+    fs::create_dir_all(dir.join("db")).unwrap();
+    fs::write(
+        dir.join("app/models/user.rb"),
+        "class User < ApplicationRecord\n  validates :account, uniqueness: true\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("db/schema.rb"),
+        "ActiveRecord::Schema.define(version: 2020_02_02_075409) do\n  create_table \"users\", force: :cascade do |t|\n    t.string \"account\", null: false\n  end\nend\n",
+    )
+    .unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args([
+            "--preview",
+            "--only",
+            "Rails/UniqueValidationWithoutIndex",
+            "--no-cache",
+            "--config",
+            dir.join(".rubocop.yml").to_str().unwrap(),
+            dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("Failed to execute nitrocop");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Rails/UniqueValidationWithoutIndex"),
+        "Unloaded rubocop-rails plugin should keep the cop disabled: {stdout}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+}
+
 // ---------- Autocorrect tests ----------
 
 #[test]
