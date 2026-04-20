@@ -96,6 +96,26 @@ use std::collections::HashSet;
 ///   stripped all whitespace from source text, so `"a b"` and `"ab"` looked
 ///   structurally equal and earlier brace blocks incorrectly inherited
 ///   `rv_of_scope`
+///
+/// ## Fix (2026-04-20): match ProgramNode tails, `defined?`, heredocs, and regex-only bail-out
+///
+/// The remaining variant divergence came from four more Prism/Parser gaps:
+///
+/// - top-level semantic tail marking depended on the first visited
+///   `StatementsNode`; in large files, nested block bodies could consume that
+///   "program body" state before the true `ProgramNode` statements were seen,
+///   so final top-level blocks and earlier structurally-equal siblings were
+///   flagged even though RuboCop treats the file body like an implicit `begin`
+/// - `defined?(foo { ... })` is a `DefinedNode` wrapper in Prism, and its value
+///   should count as `return_value_of_scope?` just like RuboCop's parent check
+/// - the structural-equality fallback compared block bodies only by their main
+///   source ranges, but Prism excludes heredoc payload lines from those ranges;
+///   two `example { expect(call(<<~CODE)) ... }` blocks with different heredoc
+///   contents therefore looked equal and the earlier one incorrectly inherited
+///   `rv_of_scope`
+/// - the non-UTF-8 `always_braces` bailout must only mirror RuboCop's
+///   parser-incompatible slash-regex `\xHH` cases; ordinary non-UTF-8 strings
+///   with high `\xHH` escapes are still linted by RuboCop
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -423,6 +443,10 @@ impl<'a> BlockDelimitersVisitor<'a> {
 }
 
 impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
+    fn visit_program_node(&mut self, node: &ruby_prism::ProgramNode<'_>) {
+        self.visit_statements_node(&node.statements());
+    }
+
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'_>) {
         // For non-parenthesized calls with arguments, mark argument blocks
         // as ignored. Changing delimiters on these blocks would change binding
@@ -552,6 +576,13 @@ impl<'a> Visit<'_> for BlockDelimitersVisitor<'a> {
             }
         }
         ruby_prism::visit_yield_node(self, node);
+    }
+
+    fn visit_defined_node(&mut self, node: &ruby_prism::DefinedNode<'_>) {
+        // `defined?(foo { ... })` is a keyword node in Prism, but RuboCop's
+        // semantic parent check still treats its wrapped value as scope-return.
+        mark_rv_of_scope_on_node(&node.value(), &mut self.rv_of_scope_calls);
+        ruby_prism::visit_defined_node(self, node);
     }
 
     // --- Context tracking for semantic & braces_for_chaining styles ---
@@ -1181,7 +1212,7 @@ fn block_calls_match_scope_tail(
         return false;
     }
 
-    source_slice_matches(
+    source_slice_matches_trimmed_end(
         source,
         candidate.location().start_offset(),
         candidate_block.opening_loc().start_offset(),
@@ -1202,18 +1233,26 @@ fn optional_node_source_matches(
     match (candidate, last) {
         (None, None) => true,
         (Some(candidate_node), Some(last_node)) => {
-            let candidate_loc = candidate_node.location();
-            let last_loc = last_node.location();
-            source_slice_matches(
-                source,
-                candidate_loc.start_offset(),
-                candidate_loc.end_offset(),
-                last_loc.start_offset(),
-                last_loc.end_offset(),
-            )
+            node_source_matches_with_heredocs(&candidate_node, &last_node, source)
         }
         _ => false,
     }
+}
+
+fn node_source_matches_with_heredocs(
+    candidate: &ruby_prism::Node<'_>,
+    last: &ruby_prism::Node<'_>,
+    source: &SourceFile,
+) -> bool {
+    let candidate_loc = candidate.location();
+    let last_loc = last.location();
+    source_slice_matches(
+        source,
+        candidate_loc.start_offset(),
+        candidate_loc.end_offset(),
+        last_loc.start_offset(),
+        last_loc.end_offset(),
+    ) && collect_heredoc_signatures(candidate, source) == collect_heredoc_signatures(last, source)
 }
 
 fn source_slice_matches(
@@ -1224,6 +1263,34 @@ fn source_slice_matches(
     second_end: usize,
 ) -> bool {
     source.as_bytes().get(first_start..first_end) == source.as_bytes().get(second_start..second_end)
+}
+
+fn source_slice_matches_trimmed_end(
+    source: &SourceFile,
+    first_start: usize,
+    first_end: usize,
+    second_start: usize,
+    second_end: usize,
+) -> bool {
+    let Some(first) = source.as_bytes().get(first_start..first_end) else {
+        return false;
+    };
+    let Some(second) = source.as_bytes().get(second_start..second_end) else {
+        return false;
+    };
+
+    trim_ascii_whitespace_end(first) == trim_ascii_whitespace_end(second)
+}
+
+fn trim_ascii_whitespace_end(mut slice: &[u8]) -> &[u8] {
+    while let Some(last) = slice.last() {
+        if last.is_ascii_whitespace() {
+            slice = &slice[..slice.len() - 1];
+        } else {
+            break;
+        }
+    }
+    slice
 }
 
 fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool {
@@ -1279,7 +1346,7 @@ fn has_non_utf8_encoding_with_parser_incompatible_content(bytes: &[u8]) -> bool 
                 }
 
                 if !enc_name.is_empty() {
-                    return has_high_hex_escapes(bytes);
+                    return has_regex_high_hex_escapes(bytes);
                 }
             }
         }
@@ -1298,23 +1365,159 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn has_high_hex_escapes(bytes: &[u8]) -> bool {
-    if bytes.len() < 4 {
-        return false;
-    }
+fn has_regex_high_hex_escapes(bytes: &[u8]) -> bool {
+    let mut i = 0;
+    let mut prev_significant: Option<u8> = None;
 
-    for window in bytes.windows(4) {
-        if window[0] == b'\\' && window[1] == b'x' {
-            let high = window[2];
-            let low = window[3];
-            let high_is_8_plus = matches!(high, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F');
-            if high_is_8_plus && low.is_ascii_hexdigit() {
-                return true;
+    while i < bytes.len() {
+        let byte = bytes[i];
+        match byte {
+            b'#' => {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
             }
+            b'"' | b'\'' => {
+                let quote = byte;
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if bytes[i] == quote {
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+            b'/' if is_regex_start_context(prev_significant) => {
+                if slash_regex_contains_high_hex_escape(bytes, i + 1) {
+                    return true;
+                }
+            }
+            b if !b.is_ascii_whitespace() => prev_significant = Some(b),
+            _ => {}
         }
+        i += 1;
     }
 
     false
+}
+
+fn is_regex_start_context(prev_significant: Option<u8>) -> bool {
+    prev_significant.is_none_or(|byte| {
+        matches!(
+            byte,
+            b'(' | b'[' | b'{' | b'=' | b',' | b':' | b';' | b'!' | b'?' | b'~'
+        )
+    })
+}
+
+fn slash_regex_contains_high_hex_escape(bytes: &[u8], mut i: usize) -> bool {
+    let mut escaped = false;
+    let mut in_class = false;
+    let mut saw_high_hex_escape = false;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+        if escaped {
+            if byte == b'x' && i + 2 < bytes.len() {
+                let high = bytes[i + 1];
+                let low = bytes[i + 2];
+                if matches!(high, b'8'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+                    && low.is_ascii_hexdigit()
+                {
+                    saw_high_hex_escape = true;
+                }
+            }
+            escaped = false;
+        } else {
+            match byte {
+                b'\\' => escaped = true,
+                b'[' => in_class = true,
+                b']' if in_class => in_class = false,
+                b'/' if !in_class => return saw_high_hex_escape,
+                b'\n' => return false,
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+
+    false
+}
+
+fn collect_heredoc_signatures(node: &ruby_prism::Node<'_>, source: &SourceFile) -> Vec<Vec<u8>> {
+    let mut collector = HeredocSignatureCollector {
+        source,
+        signatures: Vec::new(),
+    };
+    collector.visit(node);
+    collector.signatures
+}
+
+struct HeredocSignatureCollector<'a> {
+    source: &'a SourceFile,
+    signatures: Vec<Vec<u8>>,
+}
+
+impl<'a> HeredocSignatureCollector<'a> {
+    fn push_interpolated_string(&mut self, node: &ruby_prism::InterpolatedStringNode<'_>) {
+        let Some(opening_loc) = node.opening_loc() else {
+            return;
+        };
+        let Some(closing_loc) = node.closing_loc() else {
+            return;
+        };
+        let Some(opening_slice) = self
+            .source
+            .as_bytes()
+            .get(opening_loc.start_offset()..opening_loc.end_offset())
+        else {
+            return;
+        };
+        if !opening_slice.starts_with(b"<<") {
+            return;
+        }
+
+        let mut signature = Vec::new();
+        append_source_slice(
+            self.source,
+            &mut signature,
+            opening_loc.start_offset(),
+            opening_loc.end_offset(),
+        );
+        for part in node.parts().iter() {
+            let loc = part.location();
+            append_source_slice(
+                self.source,
+                &mut signature,
+                loc.start_offset(),
+                loc.end_offset(),
+            );
+        }
+        append_source_slice(
+            self.source,
+            &mut signature,
+            closing_loc.start_offset(),
+            closing_loc.end_offset(),
+        );
+        self.signatures.push(signature);
+    }
+}
+
+impl Visit<'_> for HeredocSignatureCollector<'_> {
+    fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'_>) {
+        self.push_interpolated_string(node);
+        ruby_prism::visit_interpolated_string_node(self, node);
+    }
+}
+
+fn append_source_slice(source: &SourceFile, out: &mut Vec<u8>, start: usize, end: usize) {
+    if let Some(slice) = source.as_bytes().get(start..end) {
+        out.extend_from_slice(slice);
+    }
 }
 
 /// Check if a block corresponds to Parser's `:block` type (not `:itblock` or `:numblock`).
@@ -2305,6 +2508,19 @@ mod tests {
         assert!(
             diags.is_empty(),
             "standalone .each should not be flagged as functional: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn semantic_no_offense_top_level_structurally_equal_to_last_statement() {
+        let source =
+            b"ARRAY = (1..100).to_a\n\nARRAY.reverse.each { |x| x }\n\nARRAY.reverse.each do |x|\n  x\nend\n";
+        let config = config_with_style("semantic");
+        let diags = crate::testutil::run_cop_full_with_config(&BlockDelimiters, source, config);
+        assert!(
+            diags.is_empty(),
+            "top-level structural tail match should be functional: {:?}",
             diags
         );
     }

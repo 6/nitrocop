@@ -23,6 +23,8 @@ def selected_ids(items)
   }
 end
 
+defined?(not_a_method { 1 }).should == "expression"
+
 def log_error
   do_work
 rescue => e
@@ -87,3 +89,6 @@ it "passes coerced value if it doesn't meet constraints" do
 
   expect(called).to be(true)
 end
+
+helper = 1
+map { _1**2 }
