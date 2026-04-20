@@ -167,6 +167,56 @@ def test_merge_variant_results_without_batches_dir(tmp_path):
     assert "style_label" not in batch["by_cop"][0]
 
 
+def test_merge_variant_results_preserves_cop_activity_repos(tmp_path):
+    """cop_activity_repos must carry through so check_cop.py can use it
+    as the "perfect match" baseline for repos the oracle exercised but
+    didn't record divergence for. Without this, those repos look untested
+    and any count shift becomes a false regression."""
+    batches_dir = tmp_path / "batches"
+    batches_dir.mkdir()
+    (batches_dir / "variant_batch_1.yml").write_text(
+        "inherit_from: ../baseline.yml\n"
+        "Style/Foo:\n"
+        "  EnforcedStyle: bar\n"
+    )
+
+    f1 = tmp_path / "style-variant-variant_batch_1.json"
+    f1.write_text(json.dumps({
+        "summary": {"total_repos": 10},
+        "by_cop": [
+            {"cop": "Style/Foo", "matches": 50, "fp": 2, "fn": 1},
+            {"cop": "Style/Other", "matches": 100, "fp": 0, "fn": 0},
+        ],
+        "cop_activity_repos": {
+            "Style/Foo": ["repo_a__abc", "repo_b__def", "repo_c__ghi"],
+            "Style/Other": ["repo_a__abc", "repo_b__def"],
+        },
+    }))
+
+    result = run_variant_batches.merge_variant_results([f1], batches_dir=batches_dir)
+    batch = result["batches"][0]
+    # Only Style/Foo kept (has override); Style/Other filtered out
+    assert batch["cop_activity_repos"] == {
+        "Style/Foo": ["repo_a__abc", "repo_b__def", "repo_c__ghi"],
+    }
+
+
+def test_merge_variant_results_cop_activity_without_batches_dir(tmp_path):
+    """Without batches_dir, cop_activity_repos pass through unfiltered."""
+    f1 = tmp_path / "style-variant-variant_batch_1.json"
+    f1.write_text(json.dumps({
+        "cop_activity_repos": {
+            "Style/Foo": ["repo_a"],
+            "Style/Other": ["repo_b"],
+        },
+    }))
+    result = run_variant_batches.merge_variant_results([f1])
+    assert result["batches"][0]["cop_activity_repos"] == {
+        "Style/Foo": ["repo_a"],
+        "Style/Other": ["repo_b"],
+    }
+
+
 def test_run_variant_batches_passes_only_flag(tmp_path):
     """Variant runs pass --only with only the cops overridden in that batch."""
     batches_dir = tmp_path / "batches"

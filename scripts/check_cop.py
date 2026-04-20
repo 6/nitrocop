@@ -1036,10 +1036,15 @@ def load_variant_baselines(
 ) -> dict[str, dict]:
     """Load per-style baseline FP/FN from the oracle's style-variant-results.json.
 
-    Returns {style_label: {fp, fn, matches, by_repo: {repo_id: {fp, fn}}}}
-    or empty dict if unavailable.  ``by_repo`` is populated when the oracle
-    artifact contains per-repo divergence data (``by_repo_cop``); older
-    artifacts without this field will have an empty ``by_repo`` dict.
+    Returns {style_label: {fp, fn, matches, by_repo, activity_repos}} or empty
+    dict if unavailable.
+
+    ``by_repo`` maps repo_id -> {fp, fn} for repos with recorded divergence.
+
+    ``activity_repos`` is the set of repos the oracle exercised for this cop
+    but where nitrocop matched rubocop exactly (no divergence). These are
+    critical for the gate: without them, perfect-match repos look "untested"
+    and any post-oracle count shift becomes a false regression.
     """
     if run_id is None:
         return {}
@@ -1065,11 +1070,15 @@ def load_variant_baselines(
                             "fp": stats.get("fp", 0),
                             "fn": stats.get("fn", 0),
                         }
+                activity_repos = set(
+                    batch.get("cop_activity_repos", {}).get(cop_name, [])
+                )
                 baselines[label] = {
                     "fp": cop_entry.get("fp", 0),
                     "fn": cop_entry.get("fn", 0),
                     "matches": cop_entry.get("matches", 0),
                     "by_repo": by_repo,
+                    "activity_repos": activity_repos,
                 }
     return baselines
 
