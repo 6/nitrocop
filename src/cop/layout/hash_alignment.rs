@@ -100,6 +100,10 @@ use ruby_prism::Visit;
 ///      later pairs mix newline and same-line values. The corpus oracle counts that as zero
 ///      offenses, so nitrocop now suppresses that exact mixed-value shape to match RuboCop's
 ///      observable output.
+///    - Under `separator` with colon pairs, RuboCop 1.84.2 also crashes when the first pair
+///      uses Ruby 3.1 value omission (`foo:`) but a later pair has an explicit value. That
+///      shows up in the corpus as no offenses for hashes like `{ token:, uuid: creds[:uuid] }`,
+///      so nitrocop suppresses only that first-omission-plus-later-value shape.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -392,14 +396,25 @@ fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
         return false;
     };
 
-    if !first.is_rocket || !first.value_on_new_line {
-        return false;
+    if first.is_rocket {
+        if !first.value_on_new_line {
+            return false;
+        }
+
+        return pairs
+            .iter()
+            .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
+            .any(|pair| !pair.is_value_omission && !pair.value_on_new_line);
     }
 
-    pairs
-        .iter()
-        .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
-        .any(|pair| !pair.is_value_omission && !pair.value_on_new_line)
+    if first.is_value_omission {
+        return pairs
+            .iter()
+            .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
+            .any(|pair| !pair.is_value_omission);
+    }
+
+    false
 }
 
 /// Check a hash under the "key" alignment style.
@@ -1304,6 +1319,17 @@ mod tests {
             &HashAlignment,
             include_bytes!(
                 "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_mixed_newline_values_no_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn separator_always_ignore_value_omission_first_pair_no_offense_fixture() {
+        crate::testutil::assert_cop_no_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_value_omission_first_pair_no_offense.rb"
             ),
             variant_config("separator", "separator", "always_ignore"),
         );
