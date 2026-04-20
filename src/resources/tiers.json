@@ -568,6 +568,7 @@
     "Rails/RedundantForeignKey": "stable",
     "Rails/RedundantPresenceValidationOnBelongsTo": "stable",
     "Rails/RedundantReceiverInWithOptions": "stable",
+    "Rails/RedundantTravelBack": "stable",
     "Rails/ReflectionClassName": "stable",
     "Rails/RefuteMethods": "stable",
     "Rails/RelativeDateConstant": "stable",
