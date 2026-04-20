@@ -324,9 +324,13 @@ raise "[Xcodeproj] unsupported key `#{key}` " \
  ^ Layout/RedundantLineBreak: Redundant line break detected.
   email_unsubscribed
 
-), public: File.read(
-           ^ Layout/RedundantLineBreak: Redundant line break detected.
-  path
+very_long_helper_name_that_keeps_the_outer_wrapper_from_fitting_on_one_line(
+  some_really_long_argument_name_that_pushes_the_combined_outer_call_past_the_limit,
+  public: File.read(
+          ^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+    path
+  )
+)
 
 Datadog::Tracing::Contrib::Sidekiq::Patcher
 ^ Layout/RedundantLineBreak: Redundant line break detected.
@@ -411,54 +415,29 @@ describe WinRM::PSRP::ReceiveResponseReader do
   end
 end
 
-!current_course_user&.
- ^ Layout/RedundantLineBreak: Redundant line break detected.
-  email_unsubscribed
+module WinRM
+  if ENV['WINRM_LOG'] && ENV['WINRM_LOG'] != ''
+    begin
+      Logging.logger.root.level = ENV['WINRM_LOG']
+      Logging.logger.root.appenders = Logging.appenders.stderr
+    rescue ArgumentError
+      warn "Invalid WINRM_LOG level is set: #{ENV['WINRM_LOG']}"
+      warn ''
+      warn 'Please use one of the standard log levels: ' \
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+        'debug, info, warn, or error'
+    end
+  end
+end
 
-Datadog::Tracing::Contrib::Sidekiq::Patcher
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  .instance_variable_get(:@patch_only_once)
+class CommentsController < ApplicationController
+  def edit
+    if !((comment = find_comment) && comment.is_editable_by_user?(@user))
+      return render :text => "can't find comment", :status => 400
+    end
 
-Datadog::Tracing::Contrib::Sidekiq::Patcher
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  .instance_variable_get(:@patch_only_once)
-
-o.col_type.nil? \
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  foo
-
-warn 'Please use one of the standard log levels: ' \
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  'debug, info, warn, or error'
-
-Message.new(
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  runspace_pool_id,
-  Message::MESSAGE_TYPES[:session_capability],
-  render('session_capability')
-)
-
-allow(transport).to receive(:send_request).and_return(
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  REXML::Document.new(test_data_xml_template.result(binding))
-)
-
-render :partial => "commentbox", :layout => false,
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  :content_type => "text/html", :locals => { :comment => comment }
-
-1 \
-^ Layout/RedundantLineBreak: Redundant line break detected.
-  + 2
-
-!current_course_user&.
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
-Datadog::Tracing::Contrib::Sidekiq::Patcher
-
-Datadog::Tracing::Contrib::Sidekiq::Patcher
-
-o.col_type.nil? \
-^ Layout/RedundantLineBreak: Redundant line break detected.
-
-warn 'Please use one of the standard log levels: ' \
+    render :partial => "commentbox", :layout => false,
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      :content_type => "text/html", :locals => { :comment => comment }
+  end
+end
