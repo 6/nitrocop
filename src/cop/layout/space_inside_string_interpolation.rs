@@ -3,15 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Matches RuboCop's parser-prism quirk for `"... \\\n#{expr}"` continuations.
+/// Matches RuboCop's style-specific handling of `"... \\\n#{expr}"`.
 ///
-/// Under the corpus baseline (`TargetRubyVersion: 4.0`), RuboCop tokenizes an
-/// interpolation that starts immediately after a backslash-newline continuation
-/// without the `#{` token. Its `empty_brackets?` guard then treats the
-/// interpolation like an empty pair and skips it in both styles. nitrocop
-/// previously inspected the raw Prism delimiter locations and reported false
-/// positives for `EnforcedStyle: space`, so we now skip only that exact
-/// continued-string form.
+/// RuboCop ignores the compact `#{expr}` form after a backslash-newline
+/// continuation for the default `no_space` style, but still reports missing
+/// interior spaces for `EnforcedStyle: space`. nitrocop previously skipped that
+/// continued-string interpolation in both styles, which missed the lone corpus
+/// `space` variant offense, so the continuation guard must stay limited to the
+/// no-space branch.
 pub struct SpaceInsideStringInterpolation;
 
 impl Cop for SpaceInsideStringInterpolation {
@@ -37,6 +36,7 @@ impl Cop for SpaceInsideStringInterpolation {
         mut corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let style = config.get_str("EnforcedStyle", "no_space");
+        let require_space = style == "space";
 
         // EmbeddedStatementsNode represents `#{ ... }` inside strings
         let embedded = match node.as_embedded_statements_node() {
@@ -64,15 +64,15 @@ impl Cop for SpaceInsideStringInterpolation {
             return;
         }
 
-        if starts_after_string_line_continuation(bytes, open_loc.start_offset()) {
+        if !require_space && starts_after_string_line_continuation(bytes, open_loc.start_offset()) {
             return;
         }
 
         let space_after_open = bytes.get(open_end) == Some(&b' ');
         let space_before_close = close_start > 0 && bytes.get(close_start - 1) == Some(&b' ');
 
-        match style {
-            "space" => {
+        match require_space {
+            true => {
                 // Require spaces
                 if !space_after_open {
                     let (line, col) = source.offset_to_line_col(open_end);
@@ -115,7 +115,7 @@ impl Cop for SpaceInsideStringInterpolation {
                     diagnostics.push(diag);
                 }
             }
-            _ => {
+            false => {
                 // "no_space" (default) — flag spaces
                 if space_after_open {
                     let (line, col) = source.offset_to_line_col(open_end);
