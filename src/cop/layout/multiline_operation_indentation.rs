@@ -50,6 +50,14 @@ use crate::parse::source::SourceFile;
 /// keep the same-column fallback only when the operator call is genuinely
 /// nested inside a method argument, so `raise Error,\n"..." +` stays accepted
 /// while ordinary method-body chains become offenses again.
+///
+/// Key fix (2026-04-20): that cached method-argument context was still too
+/// permissive in aligned style because operator calls whose left operand started
+/// after earlier method arguments (for example `puts a, 1 +\n  2` or
+/// `UI.warn "..." +\n  rhs`) fell through the generic `left_col > left_indent`
+/// branch and accepted normal `+2` indentation. RuboCop aligns actual method
+/// arguments in this situation, so the method-argument branch now wins first
+/// and only accepts `right_col == left_col`.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -612,6 +620,7 @@ impl MultilineOperationIndentation {
         let assignment_context = assignment_context(source, left_line, left_col);
         let should_align = assignment_context.is_some_and(|ctx| ctx.rhs_begins_line)
             || (style == "aligned" && (keyword_context.is_some() || assignment_context.is_some()));
+        let align_only = should_align || (accept_left_alignment && style == "aligned");
         let expected_indent = left_indent
             + if keyword_context.is_some_and(|ctx| ctx.special_indentation) {
                 2 * width
@@ -619,7 +628,7 @@ impl MultilineOperationIndentation {
                 width
             };
 
-        let is_ok = if should_align {
+        let is_ok = if align_only {
             right_col == left_col
         } else if style == "aligned" && left_col > left_indent {
             // In aligned style without a keyword/assignment context (e.g. boolean
@@ -627,18 +636,12 @@ impl MultilineOperationIndentation {
             // continuations when the left operand is offset from the base indent
             // (genuine alignment, not just same-indent-level chains).
             right_col == expected_indent || right_col == left_col
-        } else if accept_left_alignment && style == "aligned" {
-            // For operator method calls (+, -, etc.) without AST parent info,
-            // we can't detect RuboCop's `argument_in_method_call` context
-            // (e.g. `raise Exception, "a" +\n"b"` or `+` inside if-as-operand).
-            // Accept same-column alignment as a safe fallback to avoid FP.
-            right_col == expected_indent || right_col == left_col
         } else {
             right_col == expected_indent
         };
 
         if !is_ok {
-            let message = if should_align {
+            let message = if align_only {
                 format!(
                     "Align the operands of {} spanning multiple lines.",
                     operation_description(keyword_context, assignment_context)

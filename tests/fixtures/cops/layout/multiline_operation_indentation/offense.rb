@@ -48,3 +48,15 @@ def lyrics
   "bar"
   ^ Layout/MultilineOperationIndentation: Use 2 (not 0) spaces for indenting an expression spanning multiple lines.
 end
+
+# Operator calls used as method arguments must align in `aligned` style.
+puts a, 1 +
+  2
+  ^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
+
+it "should convert " +
+  "a to " +
+  ^^^^^^^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
+  "b" do
+  ^^^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
+end
