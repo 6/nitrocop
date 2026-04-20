@@ -3,6 +3,15 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
+/// Matches RuboCop's parser-prism quirk for `"... \\\n#{expr}"` continuations.
+///
+/// Under the corpus baseline (`TargetRubyVersion: 4.0`), RuboCop tokenizes an
+/// interpolation that starts immediately after a backslash-newline continuation
+/// without the `#{` token. Its `empty_brackets?` guard then treats the
+/// interpolation like an empty pair and skips it in both styles. nitrocop
+/// previously inspected the raw Prism delimiter locations and reported false
+/// positives for `EnforcedStyle: space`, so we now skip only that exact
+/// continued-string form.
 pub struct SpaceInsideStringInterpolation;
 
 impl Cop for SpaceInsideStringInterpolation {
@@ -52,6 +61,10 @@ impl Cop for SpaceInsideStringInterpolation {
 
         // Skip empty interpolation
         if close_start <= open_end {
+            return;
+        }
+
+        if starts_after_string_line_continuation(bytes, open_loc.start_offset()) {
             return;
         }
 
@@ -149,6 +162,14 @@ impl Cop for SpaceInsideStringInterpolation {
     }
 }
 
+fn starts_after_string_line_continuation(bytes: &[u8], open_start: usize) -> bool {
+    matches!(
+        open_start,
+        n if n >= 2 && bytes[n - 2] == b'\\' && bytes[n - 1] == b'\n'
+            || n >= 3 && bytes[n - 3] == b'\\' && bytes[n - 2] == b'\r' && bytes[n - 1] == b'\n'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +177,11 @@ mod tests {
     crate::cop_fixture_tests!(
         SpaceInsideStringInterpolation,
         "cops/layout/space_inside_string_interpolation"
+    );
+    crate::cop_variant_fixture_tests!(
+        SpaceInsideStringInterpolation,
+        "cops/layout/space_inside_string_interpolation",
+        space
     );
     crate::cop_autocorrect_fixture_tests!(
         SpaceInsideStringInterpolation,
