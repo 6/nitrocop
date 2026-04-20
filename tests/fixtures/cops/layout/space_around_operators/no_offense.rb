@@ -46,6 +46,9 @@ end
 # Safe navigation with operator method: &.!=
 table_name&.!= node.left.relation.name
 
+# Safe navigation setter calls are csend nodes in RuboCop and are ignored here
+foo&. bar  =  1
+
 # Method call with dot before operator
 x.== y
 pixels(ball, 1, 300).  == Array.new(300)
@@ -332,3 +335,11 @@ SetUIDBit = ReadBit  = 4
 
 # Full-file FN in the corpus, but RuboCop accepts the isolated snippet
 tree1      = BTree[value: 1, left: Tip, right: Tip]
+
+# Blank-line-separated CRLF assignment groups are covered by a byte-level test
+lionel    =  User.find_by_key!( 'lionel' )
+demo      =  User.find_by_key!( 'demo' )
+
+world   = Event.find_by_key!( 'world.2014' )
+
+pool = Pool.create!( event: world, title: 'Demo', user: lionel, welcome: '' )

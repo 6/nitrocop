@@ -342,6 +342,17 @@ use ruby_prism::Visit;
 /// `maybe { ... }|| # comment`. Match that behavior by short-circuiting both
 /// the AST path and the text scanner before missing-space or extra-space checks
 /// whenever the operator is followed only by spaces/tabs and then `#`.
+///
+/// ## Corpus fix (2026-04-20, CRLF + safe-navigation setters)
+///
+/// Two remaining false positives came from context that RuboCop handles
+/// specially:
+/// - plain `=` alignment scans must treat CRLF blank lines as blank, otherwise
+///   `world   = ...` after a blank line incorrectly sees a later assignment on
+///   the next group and gets flagged;
+/// - safe-navigation setter writes (`foo&. bar  =  1`) are `csend` nodes in
+///   RuboCop, and `Layout/SpaceAroundOperators` does not dispatch `on_csend`,
+///   so the `=` must be ignored entirely here as well.
 pub struct SpaceAroundOperators;
 
 /// Collect byte offsets of `=` signs that are part of parameter defaults,
@@ -920,6 +931,11 @@ fn has_excessive_leading_space(bytes: &[u8], op_start: usize) -> bool {
     op_start.saturating_sub(ws_start) >= 2 && bytes[ws_start] == b' ' && bytes[ws_start + 1] == b' '
 }
 
+fn first_non_indent_byte(line: &[u8]) -> Option<usize> {
+    line.iter()
+        .position(|&b| !matches!(b, b' ' | b'\t' | b'\r'))
+}
+
 fn uses_dot_operator_call_syntax(bytes: &[u8], op_start: usize) -> bool {
     let mut pos = op_start;
     while pos > 0 && matches!(bytes[pos - 1], b' ' | b'\t') {
@@ -1053,10 +1069,7 @@ fn is_aligned_standalone(
         return true;
     }
     // Pass 2: search for same-indentation lines further out
-    let my_indent = lines[line_idx]
-        .iter()
-        .position(|&b| b != b' ' && b != b'\t')
-        .unwrap_or(0);
+    let my_indent = first_non_indent_byte(lines[line_idx]).unwrap_or(0);
     check_alignment_standalone(
         &lines,
         line_idx,
@@ -1091,7 +1104,7 @@ fn check_alignment_standalone(
                 break;
             }
             let line_bytes = lines[check_idx];
-            let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
+            let first_non_ws = first_non_indent_byte(line_bytes);
             match first_non_ws {
                 None => {}                               // Empty line — skip
                 Some(fs) if line_bytes[fs] == b'#' => {} // Comment line — skip
@@ -1314,10 +1327,7 @@ fn should_flag_assignment_extra_leading_space(
     let byte_col = op_start - ls;
     let char_end_col = bytes_to_char_col(lines[line_idx], byte_col) + op_bytes.len();
 
-    let my_indent = lines[line_idx]
-        .iter()
-        .position(|&b| b != b' ' && b != b'\t')
-        .unwrap_or(0);
+    let my_indent = first_non_indent_byte(lines[line_idx]).unwrap_or(0);
 
     let line_starts = compute_line_starts(bytes);
 
@@ -1385,7 +1395,7 @@ fn find_assignment_aligned_in_direction(
             break;
         }
         let line_bytes = lines[check_idx];
-        let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
+        let first_non_ws = first_non_indent_byte(line_bytes);
         match first_non_ws {
             None => {
                 // Blank line: terminates search if last non-blank was at same indent
@@ -1530,10 +1540,7 @@ fn is_aligned_rhs_standalone(
         return true;
     }
 
-    let my_indent = lines[line_idx]
-        .iter()
-        .position(|&b| b != b' ' && b != b'\t')
-        .unwrap_or(0);
+    let my_indent = first_non_indent_byte(lines[line_idx]).unwrap_or(0);
     check_rhs_alignment_standalone(
         &lines,
         line_idx,
@@ -1568,7 +1575,7 @@ fn check_rhs_alignment_standalone(
             }
 
             let line_bytes = lines[check_idx];
-            let first_non_ws = line_bytes.iter().position(|&b| b != b' ' && b != b'\t');
+            let first_non_ws = first_non_indent_byte(line_bytes);
             match first_non_ws {
                 None => {}
                 Some(fs) if line_bytes[fs] == b'#' => {}
@@ -2031,6 +2038,14 @@ impl<'pr> Visit<'pr> for OperatorChecker<'_> {
             if let Some(equal_loc) = node.equal_loc() {
                 self.reported_offsets.insert(equal_loc.start_offset());
 
+                let is_safe_navigation_setter = node
+                    .call_operator_loc()
+                    .is_some_and(|loc| loc.as_slice() == b"&.");
+                if is_safe_navigation_setter {
+                    ruby_prism::visit_call_node(self, node);
+                    return;
+                }
+
                 let trailing_anchor = node
                     .arguments()
                     .and_then(|args| args.arguments().iter().next())
@@ -2431,4 +2446,12 @@ mod tests {
         SpaceAroundOperators,
         "cops/layout/space_around_operators"
     );
+
+    #[test]
+    fn no_offense_for_crlf_blank_line_separated_assignment_group() {
+        crate::testutil::assert_cop_no_offenses_full(
+            &SpaceAroundOperators,
+            b"# encoding: utf-8\r\n\r\nlionel    =  User.find_by_key!( 'lionel' )\r\ndemo      =  User.find_by_key!( 'demo' )\r\n\r\n\r\nworld   = Event.find_by_key!( 'world.2014' )\r\n\r\npool = Pool.create!( event: world, title: 'Demo', user: lionel, welcome: '' )\r\n\r\npool.players << lionel   # also auto add admin as first player\r\npool.players << demo\r\n",
+        );
+    }
 }
