@@ -444,3 +444,27 @@ end
 
 (e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
  ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+(e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
+^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+
+m_over_c   = (statistics.methods / statistics.classes) rescue m_over_c = 0
+^ Lint/UselessAssignment: Useless assignment to variable - `m_over_c`.
+
+loc_over_m = (statistics.code_lines / statistics.methods) - 2 rescue loc_over_m = 0
+^ Lint/UselessAssignment: Useless assignment to variable - `loc_over_m`.
+
+m_over_c   = (statistics.methods / statistics.classes) rescue m_over_c = 0
+^ Lint/UselessAssignment: Useless assignment to variable - `m_over_c`.

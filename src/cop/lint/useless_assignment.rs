@@ -101,6 +101,14 @@ use crate::parse::source::SourceFile;
 /// only the final sibling assignment alive and falsely flagged the others.
 /// VariableForce now feeds bare-`super` argument references through the same
 /// branch-aware reference walk as normal local reads, matching RuboCop.
+///
+/// ## FP fix: dynamic class/module constant paths (2026-04-20)
+///
+/// RuboCop treats `module foo::Baz` and `class foo::Baz` as reads of the
+/// outer-scope local `foo`. VariableForce was opening the new class/module
+/// scope without first visiting the `constant_path`, so these receiver reads
+/// were skipped and nitrocop falsely flagged the initializer. Fixed by
+/// visiting the constant path before entering the hard class/module scope.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
