@@ -272,6 +272,12 @@ use crate::parse::source::SourceFile;
 ///   `Layout/LineLength` is wide enough for the indented chain to collapse.
 ///   Keep those in config-specific tests rather than the default fixture so
 ///   shared fixtures do not encode repo-specific line-length settings.
+/// - **CRLF line endings**: `too_long()` and the backslash fallback now strip
+///   trailing `\r` as well as spaces/tabs. Prism's line slices preserve the
+///   carriage return byte in CRLF files, but RuboCop's `processed_source.lines`
+///   length check does not treat that byte as visible source content. Without
+///   trimming it, expressions that fit exactly at `MaxLineLength` in CRLF files
+///   were measured one character too long per line and incorrectly suppressed.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -1682,7 +1688,7 @@ fn check_backslash_continuations(
 
 fn trim_trailing_whitespace(line: &[u8]) -> &[u8] {
     let mut end = line.len();
-    while end > 0 && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
+    while end > 0 && (line[end - 1] == b' ' || line[end - 1] == b'\t' || line[end - 1] == b'\r') {
         end -= 1;
     }
     &line[..end]
@@ -1999,6 +2005,23 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].location.line, 7);
         assert_eq!(diagnostics[0].location.column, 4);
+    }
+
+    #[test]
+    fn reports_crlf_multiline_calls_that_fit_exactly_at_max_line_length() {
+        let source = b"class CommentsController\r\n  def edit\r\n    render :partial => \"commentbox\", :layout => false,\r\n      :content_type => \"text/html\", :locals => { :comment => comment }\r\n  end\r\n\r\n  def upvote\r\n    begin\r\n      Vote.vote_thusly_on_story_or_comment_for_user_because(1, comment.story_id,\r\n        comment.id, @user.id, params[:reason])\r\n    rescue\r\n      nil\r\n    end\r\n  end\r\nend\r\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 3);
+        assert_eq!(diagnostics[0].location.column, 4);
+        assert_eq!(diagnostics[1].location.line, 9);
+        assert_eq!(diagnostics[1].location.column, 6);
     }
 
     #[test]
