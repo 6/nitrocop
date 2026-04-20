@@ -5,6 +5,12 @@ g( f( x ) )
 g( ( 3 + 5 ) * x )
   ^ Layout/SpaceInsideParens: Space inside parentheses detected.
 
+http.get( url, &method( :check_and_log ) )
+                                        ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
+xml.input( name: replace_nulls( k ), value: replace_nulls( v ) )
+                                                              ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
 warning(%(
         ^ Layout/SpaceInsideParens: No space inside parentheses detected.
   hi
