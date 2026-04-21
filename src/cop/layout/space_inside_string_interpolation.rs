@@ -71,92 +71,89 @@ impl Cop for SpaceInsideStringInterpolation {
         let space_after_open = bytes.get(open_end) == Some(&b' ');
         let space_before_close = close_start > 0 && bytes.get(close_start - 1) == Some(&b' ');
 
-        match require_space {
-            true => {
-                // Require spaces
-                if !space_after_open {
-                    let (line, col) = source.offset_to_line_col(open_end);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        col,
-                        "Missing space inside string interpolation.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: open_end,
-                            end: open_end,
-                            replacement: " ".to_string(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
-                    }
-                    diagnostics.push(diag);
+        if require_space {
+            // Require spaces
+            if !space_after_open {
+                let (line, col) = source.offset_to_line_col(open_end);
+                let mut diag = self.diagnostic(
+                    source,
+                    line,
+                    col,
+                    "Missing space inside string interpolation.".to_string(),
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: open_end,
+                        end: open_end,
+                        replacement: " ".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
                 }
-                if !space_before_close {
-                    let (line, col) = source.offset_to_line_col(close_start);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        col,
-                        "Missing space inside string interpolation.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: close_start,
-                            end: close_start,
-                            replacement: " ".to_string(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
-                    }
-                    diagnostics.push(diag);
-                }
+                diagnostics.push(diag);
             }
-            false => {
-                // "no_space" (default) — flag spaces
-                if space_after_open {
-                    let (line, col) = source.offset_to_line_col(open_end);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        col,
-                        "Space inside string interpolation detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: open_end,
-                            end: open_end + 1,
-                            replacement: String::new(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
-                    }
-                    diagnostics.push(diag);
+            if !space_before_close {
+                let (line, col) = source.offset_to_line_col(close_start);
+                let mut diag = self.diagnostic(
+                    source,
+                    line,
+                    col,
+                    "Missing space inside string interpolation.".to_string(),
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: close_start,
+                        end: close_start,
+                        replacement: " ".to_string(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
                 }
-                if space_before_close {
-                    let (line, col) = source.offset_to_line_col(close_start - 1);
-                    let mut diag = self.diagnostic(
-                        source,
-                        line,
-                        col,
-                        "Space inside string interpolation detected.".to_string(),
-                    );
-                    if let Some(ref mut corr) = corrections {
-                        corr.push(crate::correction::Correction {
-                            start: close_start - 1,
-                            end: close_start,
-                            replacement: String::new(),
-                            cop_name: self.name(),
-                            cop_index: 0,
-                        });
-                        diag.corrected = true;
-                    }
-                    diagnostics.push(diag);
+                diagnostics.push(diag);
+            }
+        } else {
+            // "no_space" (default) — flag spaces
+            if space_after_open {
+                let (line, col) = source.offset_to_line_col(open_end);
+                let mut diag = self.diagnostic(
+                    source,
+                    line,
+                    col,
+                    "Space inside string interpolation detected.".to_string(),
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: open_end,
+                        end: open_end + 1,
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
                 }
+                diagnostics.push(diag);
+            }
+            if space_before_close {
+                let (line, col) = source.offset_to_line_col(close_start - 1);
+                let mut diag = self.diagnostic(
+                    source,
+                    line,
+                    col,
+                    "Space inside string interpolation detected.".to_string(),
+                );
+                if let Some(ref mut corr) = corrections {
+                    corr.push(crate::correction::Correction {
+                        start: close_start - 1,
+                        end: close_start,
+                        replacement: String::new(),
+                        cop_name: self.name(),
+                        cop_index: 0,
+                    });
+                    diag.corrected = true;
+                }
+                diagnostics.push(diag);
             }
         }
     }
