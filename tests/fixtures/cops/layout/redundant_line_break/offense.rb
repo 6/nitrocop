@@ -441,3 +441,56 @@ class CommentsController < ApplicationController
       :content_type => "text/html", :locals => { :comment => comment }
   end
 end
+
+module SidekiqServerExpectations
+  def expect_in_sidekiq_server
+    expect_in_fork do
+      Datadog::Tracing::Contrib::Sidekiq::Patcher
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+        .instance_variable_get(:@patch_only_once)
+        &.send(:reset_ran_once_state_for_tests)
+    end
+  end
+end
+
+module PublishingApi::PayloadBuilder
+  class ConfigurableDocumentLinks
+    def self.organisations(item)
+      primary_publishing_organisation = item.edition_organisations.select(&:lead?)
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+        .min_by(&:lead_ordering)
+        &.organisation&.content_id
+    end
+  end
+end
+
+class SchemaValidator
+  def presence_validation_properties
+    (@document["schema"]["validations"] || {})
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      &.select { |key, _| key == "presence" }
+      &.values
+      &.flat_map { |validator| validator["attributes"] }
+  end
+end
+
+class StripePayoutProcessor
+  def self.instantly_payable_amount_cents_on_stripe(user)
+    balance.try(:instant_available)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      &.first
+      &.try(:net_available)
+      &.find { _1["destination"] == active_bank_account.stripe_bank_account_id }
+      &.[]("amount") || 0
+  end
+end
+
+class Helper
+  def self.setup(options)
+    if options[:username] && options[:server_ip] && \
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      (options[:password] || options[:password_base64])
+      creds = options
+    end
+  end
+end

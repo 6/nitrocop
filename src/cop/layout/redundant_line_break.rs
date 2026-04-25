@@ -279,6 +279,25 @@ use crate::parse::source::SourceFile;
 ///   trimming it, expressions that fit exactly at `MaxLineLength` in CRLF files
 ///   were measured one character too long per line and incorrectly suppressed.
 ///
+/// ## Fixes applied (2026-04-25)
+/// - **Safe-navigation chain boundary with trailing blocks**: outer `&.` calls
+///   that own a trailing block (for example `receiver&.select { ... }&.values`)
+///   still form a safe-navigation boundary for the immediately nested send even
+///   though `checked_chain_ranges` truncates the outer range before the block
+///   body. Nitrocop now keys that boundary check off the nearest ancestor call
+///   start, which recovers FNs like
+///   `(@document[...] || {})\n  &.select { ... }\n  &.values` without
+///   unsuppressing earlier plain-send segments in the same chain.
+/// - **Backslash `if`/`unless` condition anchoring**: the text fallback now
+///   reports backslash-continued `if`/`unless` conditions from the condition
+///   expression, not from the keyword indentation. This matches RuboCop for
+///   cases like `if foo && \` newline `bar`.
+/// - **Full-line suitability measurement**: even when RuboCop reports an inner
+///   call that starts mid-line (for example the RHS of an assignment), its
+///   `too_long?` check still joins the full physical lines in the span. Keep
+///   nitrocop aligned with that behavior; slicing the start/end columns causes
+///   false positives on long regex-heavy chains that RuboCop accepts.
+///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
 pub struct RedundantLineBreak;
@@ -917,8 +936,46 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 && end_offset <= ce
                 && (start_offset > cs || end_offset < ce)
                 && !self.inside_block_body_within_chain(start_offset, end_offset, cs, ce)
+                && !self.immediately_nested_under_safe_navigation_call(cs, ce)
                 && !self.is_nested_in_data_structure()
         })
+    }
+
+    /// RuboCop's `on_send` walk-up follows plain parent sends until it reaches
+    /// the first safe-navigation `csend` parent. Only the call directly below
+    /// that `&.` boundary is checked independently; deeper plain-send segments
+    /// still walk up to the nearest plain-send ancestor first.
+    ///
+    /// `checked_chain_ranges` intentionally truncates chains before non-owned
+    /// block bodies. A safe-navigation ancestor can therefore extend past the
+    /// recorded chain end when it owns a trailing block, so look at the
+    /// nearest ancestor call start rather than requiring the full location to
+    /// fit inside the range.
+    fn immediately_nested_under_safe_navigation_call(
+        &self,
+        chain_start: usize,
+        chain_end: usize,
+    ) -> bool {
+        if self.ancestors.len() < 2 {
+            return false;
+        }
+
+        for i in (0..self.ancestors.len() - 1).rev() {
+            let ancestor = &self.ancestors[i];
+            if ancestor.as_arguments_node().is_some() {
+                continue;
+            }
+            if let Some(call) = ancestor.as_call_node() {
+                let loc = call.location();
+                if loc.start_offset() < chain_start || loc.start_offset() >= chain_end {
+                    return false;
+                }
+                return Self::is_safe_navigation_call(&call);
+            }
+            return false;
+        }
+
+        false
     }
 
     /// Returns true if the current call is nested inside a data structure (hash, array,
@@ -978,7 +1035,14 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
         for i in (0..self.ancestors.len() - 1).rev() {
             let ancestor = &self.ancestors[i];
 
-            if ancestor.as_call_node().is_some() || ancestor.as_arguments_node().is_some() {
+            if let Some(call) = ancestor.as_call_node() {
+                if Self::is_safe_navigation_call(&call) {
+                    break;
+                }
+                continue;
+            }
+
+            if ancestor.as_arguments_node().is_some() {
                 continue;
             }
 
@@ -1046,12 +1110,16 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
     }
 
     fn receiver_chain_contains_safe_navigation(&self, node: &ruby_prism::CallNode<'pr>) -> bool {
-        node.call_operator_loc()
-            .is_some_and(|loc| loc.as_slice() == b"&.")
+        Self::is_safe_navigation_call(node)
             || node
                 .receiver()
                 .and_then(|receiver| receiver.as_call_node())
                 .is_some_and(|receiver| self.receiver_chain_contains_safe_navigation(&receiver))
+    }
+
+    fn is_safe_navigation_call(node: &ruby_prism::CallNode<'_>) -> bool {
+        node.call_operator_loc()
+            .is_some_and(|loc| loc.as_slice() == b"&.")
     }
 }
 
@@ -1538,9 +1606,22 @@ fn check_backslash_continuations(
             expression_end_idx += 1;
         }
 
+        let group_trimmed_start =
+            trim_leading_whitespace(trim_trailing_whitespace(lines[group_start]));
+        let leading_ws = leading_whitespace_len(lines[group_start]);
+        let keyword_prefix_len =
+            if group_trimmed_start.starts_with(b"if ") || group_trimmed_start.starts_with(b"if(") {
+                3
+            } else if group_trimmed_start.starts_with(b"unless ")
+                || group_trimmed_start.starts_with(b"unless(")
+            {
+                7
+            } else {
+                0
+            };
         let report_line = group_start + 1; // 1-indexed
-        let report_col = leading_whitespace_len(lines[group_start]);
-        let group_code_start = line_starts[group_start] + report_col;
+        let report_col = leading_ws + keyword_prefix_len;
+        let group_statement_start = line_starts[group_start] + leading_ws;
         if already_reported.contains(&report_line) {
             i = final_line_idx + 1;
             continue;
@@ -1570,8 +1651,16 @@ fn check_backslash_continuations(
                 return false;
             }
             if ternary_then_idx.is_some()
-                && us == group_code_start
+                && us == group_statement_start
                 && ternary_ranges.iter().any(|&(ts, te)| ts == us && te == ue)
+            {
+                return false;
+            }
+            if us == group_statement_start
+                && (group_trimmed_start.starts_with(b"if ")
+                    || group_trimmed_start.starts_with(b"if(")
+                    || group_trimmed_start.starts_with(b"unless ")
+                    || group_trimmed_start.starts_with(b"unless("))
             {
                 return false;
             }
@@ -1589,7 +1678,7 @@ fn check_backslash_continuations(
         //   that the AST phase already judged as a whole.
         let blocked_by_enclosing_range = group_blocking_ranges.iter().any(|&(bs, be)| {
             if ternary_then_idx.is_some()
-                && bs == group_code_start
+                && bs == group_statement_start
                 && ternary_ranges.iter().any(|&(ts, te)| ts == bs && te == be)
             {
                 return false;
@@ -1858,6 +1947,11 @@ mod tests {
     use std::collections::HashMap;
 
     crate::cop_fixture_tests!(RedundantLineBreak, "cops/layout/redundant_line_break");
+    crate::cop_variant_fixture_tests!(
+        RedundantLineBreak,
+        "cops/layout/redundant_line_break",
+        max_line_length_130
+    );
 
     #[test]
     fn safe_navigation_chain_with_trailing_operator_uses_exact_joined_length() {
@@ -1993,6 +2087,81 @@ mod tests {
     }
 
     #[test]
+    fn reports_constant_path_chain_inside_block_body() {
+        let source = b"module SidekiqServerExpectations\n  def expect_in_sidekiq_server\n    expect_in_fork do\n      Datadog::Tracing::Contrib::Sidekiq::Patcher\n        .instance_variable_get(:@patch_only_once)\n        &.send(:reset_ran_once_state_for_tests)\n    end\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 4);
+        assert_eq!(diagnostics[0].location.column, 6);
+    }
+
+    #[test]
+    fn reports_assignment_rhs_chain_when_full_assignment_is_too_long() {
+        let source = b"module PublishingApi::PayloadBuilder\n  class ConfigurableDocumentLinks\n    def self.organisations(item)\n      primary_publishing_organisation = item.edition_organisations.select(&:lead?)\n        .min_by(&:lead_ordering)\n        &.organisation&.content_id\n    end\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 4);
+        assert_eq!(diagnostics[0].location.column, 40);
+    }
+
+    #[test]
+    fn reports_safe_navigation_chain_with_single_line_block() {
+        let source = b"class SchemaValidator\n  def presence_validation_properties\n    (@document[\"schema\"][\"validations\"] || {})\n      &.select { |key, _| key == \"presence\" }\n      &.values\n      &.flat_map { |validator| validator[\"attributes\"] }\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 3);
+        assert_eq!(diagnostics[0].location.column, 4);
+    }
+
+    #[test]
+    fn reports_safe_navigation_chain_with_numbered_block() {
+        let source = b"class StripePayoutProcessor\n  def self.instantly_payable_amount_cents_on_stripe(user)\n    balance.try(:instant_available)\n      &.first\n      &.try(:net_available)\n      &.find { _1[\"destination\"] == active_bank_account.stripe_bank_account_id }\n      &.[](\"amount\") || 0\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 3);
+        assert_eq!(diagnostics[0].location.column, 4);
+    }
+
+    #[test]
+    fn reports_backslash_continued_if_condition() {
+        let source = b"class Helper\n  def self.setup(options)\n    if options[:username] && options[:server_ip] && \\\n      (options[:password] || options[:password_base64])\n      creds = options\n    end\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 3);
+        assert_eq!(diagnostics[0].location.column, 7);
+    }
+
+    #[test]
     fn reports_multiline_command_call_with_old_hash_rocket_keywords() {
         let source = b"class CommentsController < ApplicationController\n  def edit\n    if !((comment = find_comment) && comment.is_editable_by_user?(@user))\n      return render :text => \"can't find comment\", :status => 400\n    end\n\n    render :partial => \"commentbox\", :layout => false,\n      :content_type => \"text/html\", :locals => { :comment => comment }\n  end\nend\n";
 
@@ -2005,6 +2174,23 @@ mod tests {
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
         assert_eq!(diagnostics[0].location.line, 7);
         assert_eq!(diagnostics[0].location.column, 4);
+    }
+
+    #[test]
+    fn old_hash_rocket_command_does_not_suppress_later_multiline_calls() {
+        let source = b"class CommentsController < ApplicationController\n  def edit\n    render :partial => \"commentbox\", :layout => false,\n      :content_type => \"text/html\", :locals => { :comment => comment }\n  end\nend\n\nclass StripePayoutProcessor\n  def self.instantly_payable_amount_cents_on_stripe(user)\n    balance.try(:instant_available)\n      &.first\n      &.try(:net_available)\n      &.find { _1[\"destination\"] == active_bank_account.stripe_bank_account_id }\n      &.[](\"amount\") || 0\n  end\nend\n";
+
+        let diagnostics = crate::testutil::run_cop_full_with_config(
+            &RedundantLineBreak,
+            source,
+            CopConfig::default(),
+        );
+
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
+        assert_eq!(diagnostics[0].location.line, 3);
+        assert_eq!(diagnostics[0].location.column, 4);
+        assert_eq!(diagnostics[1].location.line, 10);
+        assert_eq!(diagnostics[1].location.column, 4);
     }
 
     #[test]
