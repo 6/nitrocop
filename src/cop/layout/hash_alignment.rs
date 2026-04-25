@@ -109,13 +109,20 @@ use ruby_prism::Visit;
 ///      colon/rocket pairs and same-length keys do not crash.
 ///
 /// 10. **Separator-style colon crash with mixed newline values (2026-04-25):**
-///     RuboCop 1.84.2 also aborts `separator`-style checking for colon pairs when the first
-///     non-kwsplat pair's value starts on the next line but a later non-omission pair keeps
-///     its value on the same line. The cop already matched RuboCop's equivalent hash-rocket
-///     crash, but still reported offenses for colon hashes like:
-///     `{ cover_url:\n    if attached?\n      url\n    end,\n  title: name }`.
-///     Fixed by extending the same narrow mixed-newline suppression to colon pairs, while
-///     still checking all-multiline hashes and cases where the first pair stays on one line.
+///     RuboCop 1.84.2 aborts `separator`-style checking for colon pairs when the first
+///     non-kwsplat pair's value starts on the next line, a later non-omission pair keeps
+///     its value on the same line, AND that later pair's key is strictly shorter than the
+///     first pair's. The crash comes from RuboCop's right-align corrector trying to pad
+///     the shorter key with leading spaces, whose remove-range overlaps with the separator
+///     and value ranges. When all later keys are equal-length or longer, RuboCop emits
+///     offenses normally, so the suppression must be gated on `pair.key < first.key`.
+///     A previous fix (PR #2350, fix/layout-hash_alignment-24934704082) extended the
+///     rocket suppression to colon pairs unconditionally, which eliminated 196 FPs but
+///     introduced ~39 FNs on hashes like `{ user: current_user,\n contributions: contributions }`
+///     where the first pair's value is on the same line. The current rule keeps the rocket
+///     behavior unchanged (which works on the existing rocket fixture even with first-key
+///     shorter, because RuboCop also clobbers when the rockets are pre-aligned), but limits
+///     the colon suppression to the crash-triggering shape.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -415,7 +422,22 @@ fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
     pairs
         .iter()
         .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
-        .any(|pair| !pair.is_value_omission && !pair.value_on_new_line)
+        .any(|pair| {
+            if pair.is_value_omission || pair.value_on_new_line {
+                return false;
+            }
+            // Rocket-style triggers the clobber whenever the first pair's value
+            // is on a new line and a later pair keeps its value on the same
+            // line; the corrector's separator/value range overlaps regardless
+            // of key length.
+            //
+            // Colon-style only crashes when RuboCop's right-aligned key
+            // correction needs to pad a strictly shorter key. When the later
+            // pair's key is the same length or longer than the first pair's,
+            // RuboCop emits offenses normally — suppressing those produces
+            // FNs in the corpus.
+            first.is_rocket || pair.key_char_len < first.key_char_len
+        })
 }
 
 /// RuboCop 1.84.2 crashes when checking a colon-style pair whose key is strictly shorter
@@ -1336,6 +1358,17 @@ mod tests {
             &HashAlignment,
             include_bytes!(
                 "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_mixed_newline_values_no_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn separator_always_ignore_first_value_newline_equal_key_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_first_value_newline_equal_key_offense.rb"
             ),
             variant_config("separator", "separator", "always_ignore"),
         );
