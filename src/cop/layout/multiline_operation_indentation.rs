@@ -60,6 +60,13 @@ use crate::parse::source::SourceFile;
 /// branch and accepted normal `+2` indentation. RuboCop aligns actual method
 /// arguments in this situation, so the method-argument branch now wins first
 /// and only accepts `right_col == left_col`.
+///
+/// Key fix (2026-04-25): boolean operators inside method-call arguments use
+/// RuboCop's same argument-alignment rule as operator method calls, while
+/// assignment context is now derived from AST ancestors instead of only from a
+/// same-line `=`. This catches RSpec keyword-argument conditions and case-branch
+/// concatenations assigned to a variable, and removes the broad left-column
+/// fallback that hid over-indented block-body boolean chains.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -81,6 +88,10 @@ struct OperatorContext {
     /// detection (mirrors RuboCop's `disqualified_rhs?` block-body rule and
     /// the UNALIGNED_RHS_TYPES list).
     block_disqualifies_assignment: bool,
+    /// Start offset of the AST-detected assignment RHS containing the operator.
+    /// Used to mirror RuboCop's `part_of_assignment_rhs` without parent links
+    /// during the actual node check.
+    assignment_rhs_start: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -273,6 +284,7 @@ fn build_context(
     let mut method_argument_locked = false;
     let mut keyword: Option<KeywordCtx> = None;
     let mut block_disqualifies_assignment = false;
+    let mut assignment_rhs_start = None;
     let mut assignment_resolved = false;
 
     for ancestor in ancestors.iter().rev() {
@@ -281,14 +293,18 @@ fn build_context(
             if is_block_like(ancestor) {
                 method_argument_locked = true;
             } else if let Some(call) = ancestor.as_call_node() {
-                if !method_identifier_predicates::is_setter_method(call.name().as_slice())
-                    && call.arguments().is_some_and(|args| {
+                if !method_identifier_predicates::is_setter_method(call.name().as_slice()) {
+                    let arg_context = call.arguments().and_then(|args| {
                         args.arguments()
                             .iter()
-                            .any(|arg| node_within_node(current, &arg))
-                    })
-                {
-                    method_argument = true;
+                            .find(|arg| node_within_node(current, arg))
+                    });
+                    if let Some(arg) = arg_context {
+                        method_argument = arg.as_def_node().is_none();
+                        method_argument_locked = true;
+                    }
+                }
+                if method_argument {
                     method_argument_locked = true;
                 }
             }
@@ -307,10 +323,11 @@ fn build_context(
                 // outer assignment can be reached.
                 block_disqualifies_assignment = true;
                 assignment_resolved = true;
-            } else if is_assignment_node(ancestor) {
-                // Assignment ancestor reached: lexical assignment-context detection
-                // is allowed to fire.
-                assignment_resolved = true;
+            } else if let Some(rhs) = assignment_rhs_node(ancestor) {
+                if node_within_node(current, &rhs) {
+                    assignment_rhs_start = Some(rhs.location().start_offset());
+                    assignment_resolved = true;
+                }
             }
         }
 
@@ -325,52 +342,116 @@ fn build_context(
         method_argument,
         keyword,
         block_disqualifies_assignment,
+        assignment_rhs_start,
     }
 }
 
-/// True if `node` is an assignment-like ancestor that can host an RHS
-/// containing the operator. Mirrors RuboCop's `Node#assignment?` plus
-/// setter calls (`obj.foo = bar`).
-fn is_assignment_node(node: &ruby_prism::Node<'_>) -> bool {
-    if node.as_local_variable_write_node().is_some()
-        || node.as_local_variable_operator_write_node().is_some()
-        || node.as_local_variable_and_write_node().is_some()
-        || node.as_local_variable_or_write_node().is_some()
-        || node.as_instance_variable_write_node().is_some()
-        || node.as_instance_variable_operator_write_node().is_some()
-        || node.as_instance_variable_and_write_node().is_some()
-        || node.as_instance_variable_or_write_node().is_some()
-        || node.as_class_variable_write_node().is_some()
-        || node.as_class_variable_operator_write_node().is_some()
-        || node.as_class_variable_and_write_node().is_some()
-        || node.as_class_variable_or_write_node().is_some()
-        || node.as_global_variable_write_node().is_some()
-        || node.as_global_variable_operator_write_node().is_some()
-        || node.as_global_variable_and_write_node().is_some()
-        || node.as_global_variable_or_write_node().is_some()
-        || node.as_constant_write_node().is_some()
-        || node.as_constant_operator_write_node().is_some()
-        || node.as_constant_and_write_node().is_some()
-        || node.as_constant_or_write_node().is_some()
-        || node.as_constant_path_write_node().is_some()
-        || node.as_constant_path_operator_write_node().is_some()
-        || node.as_constant_path_and_write_node().is_some()
-        || node.as_constant_path_or_write_node().is_some()
-        || node.as_index_operator_write_node().is_some()
-        || node.as_index_and_write_node().is_some()
-        || node.as_index_or_write_node().is_some()
-        || node.as_call_operator_write_node().is_some()
-        || node.as_call_and_write_node().is_some()
-        || node.as_call_or_write_node().is_some()
-        || node.as_multi_write_node().is_some()
-        || node.as_match_write_node().is_some()
-    {
-        return true;
+/// Returns the RHS for assignment-like ancestors. Mirrors RuboCop's
+/// `assignment_rhs`: assignment nodes use their value/expression, while setter
+/// calls (`obj.foo = bar`) use the last argument.
+fn assignment_rhs_node<'pr>(node: &ruby_prism::Node<'pr>) -> Option<ruby_prism::Node<'pr>> {
+    if let Some(n) = node.as_local_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_local_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_local_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_local_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_index_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_index_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_index_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_call_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_call_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_call_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_multi_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_match_write_node() {
+        return Some(n.call().as_node());
     }
     if let Some(call) = node.as_call_node() {
-        return method_identifier_predicates::is_setter_method(call.name().as_slice());
+        if method_identifier_predicates::is_setter_method(call.name().as_slice()) {
+            return call.arguments().and_then(|args| args.arguments().last());
+        }
     }
-    false
+    None
 }
 
 fn operator_context(
@@ -455,9 +536,8 @@ impl Cop for MultilineOperationIndentation {
 
             let ctx = operator_context(parse_result, source, node);
             let first_arg = &args[0];
-            diagnostics.extend(
-                self.check_binary_node(source, &receiver, first_arg, config, style, ctx, true),
-            );
+            diagnostics
+                .extend(self.check_binary_node(source, &receiver, first_arg, config, style, ctx));
             return;
         }
 
@@ -476,7 +556,6 @@ impl Cop for MultilineOperationIndentation {
                 config,
                 style,
                 ctx,
-                false,
             ));
             return;
         }
@@ -495,7 +574,6 @@ impl Cop for MultilineOperationIndentation {
                 config,
                 style,
                 ctx,
-                false,
             ));
         }
     }
@@ -790,7 +868,6 @@ fn operation_description(
 }
 
 impl MultilineOperationIndentation {
-    #[allow(clippy::too_many_arguments)]
     fn check_binary_node(
         &self,
         source: &SourceFile,
@@ -799,7 +876,6 @@ impl MultilineOperationIndentation {
         config: &CopConfig,
         style: &str,
         ctx: OperatorContext,
-        accept_left_alignment: bool,
     ) -> Vec<Diagnostic> {
         let (left_line, left_col) = source.offset_to_line_col(left.location().start_offset());
         let (left_end_line, _) = source.offset_to_line_col(left.location().end_offset());
@@ -838,6 +914,9 @@ impl MultilineOperationIndentation {
             })
         });
         let lexical_assignment = assignment_context(source, left_line, left_col);
+        let ast_assignment = ctx.assignment_rhs_start.map(|start| AssignmentContext {
+            rhs_begins_line: begins_its_line(source, start),
+        });
         // Block-body or UNALIGNED_RHS_TYPES ancestors disqualify the lexical `=`
         // detection from being treated as the operator's own assignment context
         // — mirrors RuboCop's `disqualified_rhs?` (`block_type? && part_of_block_body?`
@@ -845,12 +924,11 @@ impl MultilineOperationIndentation {
         let assignment_context = if ctx.block_disqualifies_assignment {
             None
         } else {
-            lexical_assignment
+            ast_assignment.or(lexical_assignment)
         };
         let should_align = assignment_context.is_some_and(|c| c.rhs_begins_line)
             || (style == "aligned" && (keyword_context.is_some() || assignment_context.is_some()));
-        let align_only =
-            should_align || (accept_left_alignment && ctx.method_argument && style == "aligned");
+        let align_only = should_align || (ctx.method_argument && style == "aligned");
         let expected_indent = left_indent
             + if keyword_context.is_some_and(|c| c.special_indentation) {
                 2 * width
@@ -860,12 +938,6 @@ impl MultilineOperationIndentation {
 
         let is_ok = if align_only {
             right_col == left_col
-        } else if style == "aligned" && left_col > left_indent {
-            // In aligned style without a keyword/assignment context (e.g. boolean
-            // chains in hash values or method args), accept operand-aligned
-            // continuations when the left operand is offset from the base indent
-            // (genuine alignment, not just same-indent-level chains).
-            right_col == expected_indent || right_col == left_col
         } else {
             right_col == expected_indent
         };

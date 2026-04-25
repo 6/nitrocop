@@ -60,3 +60,31 @@ it "should convert " +
   "b" do
   ^^^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
 end
+
+# Boolean operation inside a block body with over-indented operands.
+values = fields.map { |attrs| attrs.value }
+               .reject { |v| v.empty? ||
+                             v == "updatedns" ||
+                             ^ Layout/MultilineOperationIndentation: Use 2 (not 14) spaces for indenting an expression spanning multiple lines.
+                             v == "Submit"
+                             ^ Layout/MultilineOperationIndentation: Use 2 (not 14) spaces for indenting an expression spanning multiple lines.
+                       }
+
+# Boolean chains passed as keyword arguments in method calls align to argument start.
+it "reports errors", if: RUBY_VERSION < "2.6" ||
+  PlatformHelpers.truffleruby? || PlatformHelpers.jruby? &&
+  ^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
+    Gem::Version.new(RUBY_ENGINE_VERSION) >= "9.3.7.0" do
+    ^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
+end
+
+# Operator inside a case expression that is an assignment RHS still uses
+# assignment alignment in aligned style.
+def get_date_filter(operator)
+  filter = case operator
+    when OPERATOR_TODAY
+      "BETWEEN" +
+        "AND"
+        ^ Layout/MultilineOperationIndentation: Align the operands of an expression in an assignment spanning multiple lines.
+    end
+end
