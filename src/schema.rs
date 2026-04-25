@@ -18,15 +18,29 @@ thread_local! {
     static TEST_SCHEMA: std::cell::RefCell<Option<Schema>> = const { std::cell::RefCell::new(None) };
 }
 
-/// Initialize the global schema from `db/schema.rb` relative to `project_root`.
+/// Initialize the global schema by walking up from `cwd` looking for
+/// `db/schema.rb`, mirroring RuboCop's `RuboCop::Rails::SchemaLoader#db_schema_path`
+/// which starts at `Pathname.pwd` and walks toward the filesystem root.
 ///
-/// Safe to call multiple times — only the first call takes effect.
-pub fn init(project_root: Option<&Path>) {
+/// Safe to call multiple times — only the first call takes effect. The
+/// `_legacy_root` argument is preserved for call-site compatibility but
+/// ignored; schema discovery is anchored to the current working directory
+/// to match RuboCop. Pinning to `cwd` is important for corpus runs where
+/// the user invokes nitrocop from outside the repo (e.g., `cwd=/tmp`):
+/// RuboCop returns no schema in that case and the cop skips, so nitrocop
+/// must skip too rather than walking up from each source file.
+pub fn init(_legacy_root: Option<&Path>) {
     SCHEMA.get_or_init(|| {
-        let root = project_root?;
-        let schema_path = root.join("db/schema.rb");
-        let bytes = std::fs::read(&schema_path).ok()?;
-        Schema::parse(&bytes)
+        let cwd = std::env::current_dir().ok()?;
+        let mut path = cwd.as_path();
+        loop {
+            let candidate = path.join("db/schema.rb");
+            if candidate.is_file() {
+                let bytes = std::fs::read(&candidate).ok()?;
+                return Schema::parse(&bytes);
+            }
+            path = path.parent()?;
+        }
     });
 }
 
