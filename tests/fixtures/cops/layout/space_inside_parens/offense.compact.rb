@@ -33,6 +33,9 @@ end
 ( foo( a ) - bar( b ) )
                      ^ Layout/SpaceInsideParens: Space inside parentheses detected.
 
+foo { | ( x , ( y , w ) ) , z | }
+                       ^ Layout/SpaceInsideParens: Space inside parentheses detected.
+
 case p
 in Point(*, 1, *a)
          ^ Layout/SpaceInsideParens: No space inside parentheses detected.
