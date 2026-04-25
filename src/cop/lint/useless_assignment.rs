@@ -109,6 +109,16 @@ use crate::parse::source::SourceFile;
 /// scope without first visiting the `constant_path`, so these receiver reads
 /// were skipped and nitrocop falsely flagged the initializer. Fixed by
 /// visiting the constant path before entering the hard class/module scope.
+///
+/// ## FP fix: modifier while/until post-condition reads (2026-04-25)
+///
+/// Ruby statement modifiers like `foo = bar while foo != baz` and
+/// `foo = bar until foo` are post-condition loops, so the body assignment
+/// feeds the next predicate check. VariableForce still walks modifier
+/// `while`/`until` predicates before their bodies, which means a predicate
+/// read of a local first introduced by the body is ignored as "undefined" and
+/// the body write looks dead. Match RuboCop by suppressing only those body
+/// writes whose enclosing post-condition loop predicate reads the same local.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
@@ -142,7 +152,8 @@ impl Cop for UselessAssignment {
         let conditional_operator_offsets = collect_conditional_operator_write_offsets(parse_result);
         let pattern_match_offsets = collect_pattern_match_target_offsets(parse_result);
         let or_condition_offsets = collect_or_condition_write_offsets(parse_result);
-        let do_while_body_offsets = collect_do_while_body_write_offsets(parse_result);
+        let post_condition_loop_body_offsets =
+            collect_post_condition_loop_body_write_offsets(parse_result);
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
         let mut rescue_modifier_offsets = rescue_modifier_collector.offsets;
@@ -165,7 +176,7 @@ impl Cop for UselessAssignment {
             } else if !candidate.engine_used {
                 !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
                     && !or_condition_offsets.contains(&candidate.node_offset)
-                    && !do_while_body_offsets.contains(&candidate.node_offset)
+                    && !post_condition_loop_body_offsets.contains(&candidate.node_offset)
                     && !rescue_modifier_offsets.contains(&candidate.node_offset)
             } else {
                 false
@@ -636,24 +647,24 @@ impl<'pr> Visit<'pr> for OrConditionWriteCollector {
 }
 
 // ---------------------------------------------------------------------------
-// FP suppression: assignments inside begin/end until or begin/end while loops
+// FP suppression: assignments inside post-condition while/until loops
 // ---------------------------------------------------------------------------
 //
-// `begin ... end until cond` is a do-while loop: the body executes at least
-// once before the condition is checked. The VF engine may flag a write inside
-// the body as unused if the only read is in the loop condition, because it
-// processes the condition before the body.
+// `begin ... end until cond` and `foo = bar while foo` both execute the body
+// before checking the condition. The VF engine may flag a write inside the
+// body as unused if the only read is in the loop condition, because it
+// processes modifier `while`/`until` conditions before their bodies.
 
-fn collect_do_while_body_write_offsets(
+fn collect_post_condition_loop_body_write_offsets(
     parse_result: &ruby_prism::ParseResult<'_>,
 ) -> HashSet<usize> {
-    let mut collector = DoWhileBodyWriteCollector::default();
+    let mut collector = PostConditionLoopBodyWriteCollector::default();
     collector.visit(&parse_result.node());
     collector.offsets
 }
 
 #[derive(Default)]
-struct DoWhileBodyWriteCollector {
+struct PostConditionLoopBodyWriteCollector {
     offsets: HashSet<usize>,
 }
 
@@ -669,14 +680,14 @@ impl<'pr> Visit<'pr> for LvarReadSubtreeCollector {
     }
 }
 
-impl DoWhileBodyWriteCollector {
+impl PostConditionLoopBodyWriteCollector {
     fn process_loop(
         &mut self,
         predicate: &ruby_prism::Node<'_>,
         body: Option<ruby_prism::StatementsNode<'_>>,
-        is_begin_modifier: bool,
+        is_post_condition_loop: bool,
     ) {
-        if !is_begin_modifier {
+        if !is_post_condition_loop {
             return;
         }
         let mut cond_reader = LvarReadSubtreeCollector::default();
@@ -698,12 +709,13 @@ impl DoWhileBodyWriteCollector {
     }
 }
 
-impl<'pr> Visit<'pr> for DoWhileBodyWriteCollector {
+impl<'pr> Visit<'pr> for PostConditionLoopBodyWriteCollector {
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         self.process_loop(
             &node.predicate(),
             node.statements(),
-            node.is_begin_modifier(),
+            node.is_begin_modifier()
+                || (node.do_keyword_loc().is_none() && node.closing_loc().is_none()),
         );
         ruby_prism::visit_until_node(self, node);
     }
@@ -712,7 +724,8 @@ impl<'pr> Visit<'pr> for DoWhileBodyWriteCollector {
         self.process_loop(
             &node.predicate(),
             node.statements(),
-            node.is_begin_modifier(),
+            node.is_begin_modifier()
+                || (node.do_keyword_loc().is_none() && node.closing_loc().is_none()),
         );
         ruby_prism::visit_while_node(self, node);
     }
@@ -780,7 +793,12 @@ struct RescueModifierPrecedingWriteCollector<'a> {
 
 impl<'pr> Visit<'pr> for RescueModifierPrecedingWriteCollector<'_> {
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
-        if self.names.contains(node.name().as_slice()) {
+        // Keep separate fallback initializers like `err = nil` suppressed, but
+        // do not suppress the outer write in `x = expr rescue x = fallback`:
+        // RuboCop still reports that left-hand assignment as useless.
+        if self.names.contains(node.name().as_slice())
+            && node.value().as_rescue_modifier_node().is_none()
+        {
             self.offsets.insert(node.location().start_offset());
         }
         ruby_prism::visit_local_variable_write_node(self, node);
