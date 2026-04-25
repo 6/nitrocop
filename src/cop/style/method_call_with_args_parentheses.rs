@@ -313,6 +313,46 @@ use crate::parse::source::SourceFile;
 ///    cloned repos, so nested repo overrides leaked into the style-override
 ///    run and caused large omit-parentheses FP/FN swings. Matching RuboCop
 ///    requires disabling directory overrides for explicit `--config` loads.
+///
+/// ## Variant fix (2026-04-25, oracle: 1,997 FP / 15,958 FN)
+///
+/// Three independent issues were leaking through the omit_parentheses variant
+/// even after the previous fixes:
+///
+/// 1. **Block-body parent leakage.** When a block body contained an
+///    assignment, `visit_*_write_node` pushed `Assignment` and the *outer*
+///    expression's parent (e.g., `ConditionalBody`, another `Assignment`)
+///    leaked through as the assignment's grandparent. `assignment_in_condition`
+///    then incorrectly returned true for calls like `name = foo(...)` and
+///    `value = foo(...)` inside `.map do ... end` blocks. Similarly, the
+///    `CallLikeBlockBody` marker pushed for an outer call's block body
+///    propagated into a *nested* call's block body, so `link_to(...)` inside
+///    `content_tag(...) do ... end` inside `sorted_tags.map do ... end.join`
+///    was treated as the outer block's argument context. Fixed by pushing a
+///    new `ParentKind::Block` boundary marker at the entry of every
+///    block/lambda body. `assignment_in_condition?` now sees `Block` as the
+///    grandparent and returns false; `effective_parent()` skips the marker
+///    for `call_in_literals?` / `call_in_logical_operators?` so the
+///    block-pair-or-array-or-logical-op shape is preserved.
+///
+/// 2. **Lambda-as-call-argument body.** `visit_lambda_node` did not pop the
+///    enclosing `Call`/`CallAssignedRhs` parent or push `CallLikeBlockBody`,
+///    so calls inside `options[:converter] = ->(x) { ObjectThing.converter(x) }`
+///    were flagged even though RuboCop sees the lambda's parent (in Parser
+///    AST: a `block` whose own parent is the `[]=` send) as a call and exempts
+///    inner calls via `call_in_argument_with_block?`. Aligned `visit_lambda_node`
+///    with `visit_block_node`'s call-like-parent handling.
+///
+/// 3. **Ambiguous descendants behind ranges and interpolation.** RuboCop uses
+///    `node.descendants.any?` over the full subtree, so signed numerics inside
+///    range bounds (`vectors[1..-1]`, `Concurrent::Array.new(names[0...-1])`)
+///    and ternaries inside `#{...}` interpolation (`order("name #{cond ? "DESC" : "ASC"}")`)
+///    keep outer parentheses. nitrocop's hand-rolled descendant recursion
+///    only walked specific compound types (call args/recv, array elements,
+///    hash pairs), missing range bounds and interpolation parts. Replaced
+///    with a Prism `Visit`-based traversal that visits every node in the
+///    subtree and runs the per-node ambiguity predicate, matching RuboCop's
+///    `descendants.any?` semantics exactly.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -408,6 +448,12 @@ enum ParentKind {
     Grouped,
     FlowControl,
     Interpolation,
+    /// Boundary marker pushed at the entry of every block/lambda body. Prevents
+    /// outer parents (Assignment, ConditionalBody, etc.) from leaking into the
+    /// block body's statements. RuboCop's parent walks stop at the block node,
+    /// so callers nested inside the block must not see the surrounding
+    /// expression's parent as their grandparent.
+    Block,
 }
 
 impl Cop for MethodCallWithArgsParentheses {
@@ -508,6 +554,28 @@ impl ParenVisitor<'_> {
         self.parent_stack.last().copied()
     }
 
+    /// Mirrors RuboCop's
+    /// `parent = node.parent&.any_block_type? ? node.parent.parent : node.parent`.
+    /// Several `omit_parentheses` checks (`call_in_literals?`,
+    /// `call_in_logical_operators?`) look "through" a block parent to the
+    /// expression that actually wraps it. Since `Block` is a synthetic
+    /// boundary marker we always push at block/lambda body entry, skip it so
+    /// the check sees the enclosing Pair/Array/LogicalOp/etc.
+    fn effective_parent(&self) -> Option<ParentKind> {
+        let mut idx = self.parent_stack.len();
+        if idx == 0 {
+            return None;
+        }
+        idx -= 1;
+        if matches!(self.parent_stack[idx], ParentKind::Block) {
+            if idx == 0 {
+                return None;
+            }
+            idx -= 1;
+        }
+        Some(self.parent_stack[idx])
+    }
+
     fn direct_call_like_parent(&self) -> bool {
         matches!(
             self.immediate_parent(),
@@ -552,6 +620,7 @@ impl ParenVisitor<'_> {
                     | ParentKind::Grouped
                     | ParentKind::ConditionalBody
                     | ParentKind::WhenBody
+                    | ParentKind::Block
             )
         })
     }
@@ -821,10 +890,11 @@ impl ParenVisitor<'_> {
     }
 
     fn call_in_literals(&self) -> bool {
-        // Check if the immediate parent is array, pair, range, splat, ternary
-        if let Some(p) = self.parent_stack.last() {
-            matches!(
-                p,
+        // RuboCop's `call_in_literals?` walks through a block parent before
+        // checking the literal context, so look through any Block boundary too.
+        matches!(
+            self.effective_parent(),
+            Some(
                 ParentKind::Array
                     | ParentKind::Pair
                     | ParentKind::Range
@@ -834,13 +904,11 @@ impl ParenVisitor<'_> {
                     | ParentKind::TernaryBranch
                     | ParentKind::TernaryPredicate
             )
-        } else {
-            false
-        }
+        )
     }
 
     fn call_in_logical_operators(&self) -> bool {
-        self.immediate_parent() == Some(ParentKind::LogicalOp)
+        self.effective_parent() == Some(ParentKind::LogicalOp)
     }
 
     fn call_in_optional_arguments(&self) -> bool {
@@ -1284,18 +1352,19 @@ fn call_child_parent_kind(
     default_parent
 }
 
-/// Recursively check if a node or its descendants are ambiguous in omit_parentheses style.
-/// This covers: splats, ternary, regex, unary, forwarded args, logical operators, blocks.
-fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
-    if let Some(unwrapped) = unwrap_parenthesized_node(node) {
-        return is_ambiguous_descendant(&unwrapped, source);
-    }
-
-    // Direct checks on this node
+/// Check whether a single node is ambiguous in omit_parentheses style. This
+/// mirrors RuboCop's per-node check inside `call_with_ambiguous_arguments?`
+/// (`ambiguous_literal?`, `logical_operator?`, `:forwarded_args`, `:any_block`,
+/// plus the lambda/splat/block-pass shortcuts on the immediate argument).
+fn is_ambiguous_node(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
     if node.as_splat_node().is_some()
         || node.as_assoc_splat_node().is_some()
         || node.as_block_argument_node().is_some()
         || node.as_lambda_node().is_some()
+        || node.as_block_node().is_some()
+        || node.as_forwarding_arguments_node().is_some()
+        || node.as_and_node().is_some()
+        || node.as_or_node().is_some()
     {
         return true;
     }
@@ -1307,7 +1376,7 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
         }
     }
 
-    // Regex slash literal
+    // Regex slash literal (RuboCop's regexp_slash_literal? — opens with `/`)
     if let Some(regex) = node.as_regular_expression_node() {
         let bytes = source.as_bytes();
         let open = regex.opening_loc();
@@ -1323,7 +1392,7 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
         }
     }
 
-    // Unary literal: negative/positive numbers
+    // Numeric with sign (RuboCop's `numeric_type? && sign?`)
     if node.as_integer_node().is_some()
         || node.as_float_node().is_some()
         || node.as_rational_node().is_some()
@@ -1341,71 +1410,59 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
         if method_dispatch_predicates::is_unary_operation(&call) {
             return true;
         }
-    }
-
-    // Forwarded args
-    if node.as_forwarding_arguments_node().is_some() {
-        return true;
-    }
-
-    // Logical operators
-    if node.as_and_node().is_some() || node.as_or_node().is_some() {
-        return true;
-    }
-
-    // Block node
-    if node.as_block_node().is_some() {
-        return true;
-    }
-
-    // Recurse into children of certain compound node types
-    if let Some(call) = node.as_call_node() {
+        // RuboCop's `node.descendants.any? { type?(:any_block) }` matches calls
+        // that carry a block literal (a `block` node attached to a send).
         if call.block().is_some() {
-            return true;
-        }
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                if is_ambiguous_descendant(&arg, source) {
-                    return true;
-                }
-            }
-        }
-        if let Some(recv) = call.receiver() {
-            if is_ambiguous_descendant(&recv, source) {
-                return true;
-            }
-        }
-    }
-    // Recurse into array elements
-    if let Some(array) = node.as_array_node() {
-        for elem in array.elements().iter() {
-            if is_ambiguous_descendant(&elem, source) {
-                return true;
-            }
-        }
-    }
-    // Recurse into hash pairs
-    if let Some(hash) = node.as_hash_node() {
-        for elem in hash.elements().iter() {
-            if is_ambiguous_descendant(&elem, source) {
-                return true;
-            }
-        }
-    }
-    if let Some(kw_hash) = node.as_keyword_hash_node() {
-        for elem in kw_hash.elements().iter() {
-            if is_ambiguous_descendant(&elem, source) {
-                return true;
-            }
-        }
-    }
-    if let Some(assoc) = node.as_assoc_node() {
-        if is_ambiguous_descendant(&assoc.value(), source) {
             return true;
         }
     }
 
     false
+}
+
+struct AmbiguousDescendantVisitor<'a> {
+    source: &'a SourceFile,
+    found: bool,
+}
+
+impl<'pr, 'a> Visit<'pr> for AmbiguousDescendantVisitor<'a> {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        if self.found {
+            return;
+        }
+        if is_ambiguous_node(&node, self.source) {
+            self.found = true;
+        }
+    }
+
+    fn visit_leaf_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        if self.found {
+            return;
+        }
+        if is_ambiguous_node(&node, self.source) {
+            self.found = true;
+        }
+    }
+}
+
+/// Return true if `node` or any of its descendants matches RuboCop's
+/// ambiguous-content rule for `omit_parentheses`. Walks the entire subtree via
+/// the Prism `Visit` trait so that descendants reachable through ranges,
+/// interpolated strings/symbols/regexes, paren-grouping, etc. are all
+/// considered — matching `node.descendants.any?` in rubocop-ast.
+fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
+    if let Some(unwrapped) = unwrap_parenthesized_node(node) {
+        return is_ambiguous_descendant(&unwrapped, source);
+    }
+    if is_ambiguous_node(node, source) {
+        return true;
+    }
+    let mut visitor = AmbiguousDescendantVisitor {
+        source,
+        found: false,
+    };
+    visitor.visit(node);
+    visitor.found
 }
 
 impl<'pr> Visit<'pr> for ParenVisitor<'_> {
@@ -1479,6 +1536,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     } else {
                         None
                     };
+                    self.parent_stack.push(ParentKind::Block);
                     self.push_macro_scope(child_scope);
                     if let Some(params) = block_node.parameters() {
                         self.visit(&params);
@@ -1491,6 +1549,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                         }
                     }
                     self.pop_scope();
+                    self.parent_stack.pop();
                     if let Some(parent) = leaked_parent {
                         self.parent_stack.push(parent);
                     }
@@ -1593,6 +1652,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             None
         };
 
+        self.parent_stack.push(ParentKind::Block);
         let child_scope = self.wrapper_child_scope();
         self.push_macro_scope(child_scope);
         if let Some(params) = node.parameters() {
@@ -1606,6 +1666,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             }
         }
         self.pop_scope();
+        self.parent_stack.pop();
 
         if let Some(parent) = leaked_parent {
             self.parent_stack.push(parent);
@@ -1623,12 +1684,45 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // as arguments (`scope :x, -> { where ... }`) break macro scope,
         // while lambdas inside wrapper blocks (`subject { -> { get :idx } }`)
         // preserve it.
+        //
+        // For omit_parentheses, lambdas mirror block-on-call semantics: when
+        // the lambda is a direct argument of a call/super/yield (the lambda's
+        // Parser parent is a `block` whose own parent is the call), inner
+        // calls in the lambda body fall under RuboCop's
+        // `call_in_argument_with_block?` and keep their parentheses. Pop the
+        // surrounding call-like parent and mark the body with
+        // `CallLikeBlockBody` for that case, matching `visit_block_node`.
         let child_scope = self.call_block_child_scope();
+        let block_parent_is_call_like = self.block_parent_is_call_like();
+        let leaked_parent = if matches!(
+            self.immediate_parent(),
+            Some(
+                ParentKind::Call
+                    | ParentKind::ClassConstructor
+                    | ParentKind::CallAssignedRhs
+                    | ParentKind::Super
+            )
+        ) {
+            self.parent_stack.pop()
+        } else {
+            None
+        };
+
+        self.parent_stack.push(ParentKind::Block);
         self.push_macro_scope(child_scope);
         if let Some(body) = node.body() {
-            self.visit(&body);
+            if block_parent_is_call_like {
+                self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
+            } else {
+                self.visit(&body);
+            }
         }
         self.pop_scope();
+        self.parent_stack.pop();
+
+        if let Some(parent) = leaked_parent {
+            self.parent_stack.push(parent);
+        }
     }
 
     fn visit_yield_node(&mut self, node: &ruby_prism::YieldNode<'pr>) {
@@ -1675,6 +1769,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     None
                 };
 
+                self.parent_stack.push(ParentKind::Block);
                 self.push_macro_scope(child_scope);
                 if let Some(params) = block_node.parameters() {
                     self.visit(&params);
@@ -1687,6 +1782,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     }
                 }
                 self.pop_scope();
+                self.parent_stack.pop();
 
                 if let Some(parent) = leaked_parent {
                     self.parent_stack.push(parent);
