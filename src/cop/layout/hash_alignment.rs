@@ -111,18 +111,14 @@ use ruby_prism::Visit;
 /// 10. **Separator-style colon crash with mixed newline values (2026-04-25):**
 ///     RuboCop 1.84.2 aborts `separator`-style checking for colon pairs when the first
 ///     non-kwsplat pair's value starts on the next line, a later non-omission pair keeps
-///     its value on the same line, AND that later pair's key is strictly shorter than the
-///     first pair's. The crash comes from RuboCop's right-align corrector trying to pad
-///     the shorter key with leading spaces, whose remove-range overlaps with the separator
-///     and value ranges. When all later keys are equal-length or longer, RuboCop emits
-///     offenses normally, so the suppression must be gated on `pair.key < first.key`.
-///     A previous fix (PR #2350, fix/layout-hash_alignment-24934704082) extended the
-///     rocket suppression to colon pairs unconditionally, which eliminated 196 FPs but
-///     introduced ~39 FNs on hashes like `{ user: current_user,\n contributions: contributions }`
-///     where the first pair's value is on the same line. The current rule keeps the rocket
-///     behavior unchanged (which works on the existing rocket fixture even with first-key
-///     shorter, because RuboCop also clobbers when the rockets are pre-aligned), but limits
-///     the colon suppression to the crash-triggering shape.
+///     its value on the same line, AND that later pair's key is strictly shorter than
+///     the first pair's. The crash comes from RuboCop's right-align corrector trying to
+///     pad the shorter key with leading spaces, whose remove-range overlaps with the
+///     separator and value ranges. When all later keys are equal-length or longer,
+///     RuboCop emits offenses normally, so the colon suppression is gated on
+///     `pair.key_char_len < first.key_char_len`. The rocket suppression is unconditional
+///     because RuboCop also clobbers rocket pairs that are already separator-aligned
+///     (where key length doesn't matter) — see the `"xml" =>`/`"uiinput" =>` fixture.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
