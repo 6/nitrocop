@@ -5597,6 +5597,67 @@ fn force_default_config_ignores_config_file() {
     fs::remove_dir_all(&dir).ok();
 }
 
+#[test]
+fn unique_validation_without_index_only_loads_schema_relative_to_cwd() {
+    // RuboCop's SchemaLoader walks up from `Pathname.pwd` to find db/schema.rb
+    // and returns nil if none is found. Nitrocop must mirror that, otherwise
+    // corpus runs (cwd outside the repo) flag offenses RuboCop never emits.
+    let dir = temp_dir("unique_validation_schema_relative_to_cwd");
+    let outside_cwd = std::env::temp_dir().join("nitrocop_uvi_outside_cwd");
+    fs::create_dir_all(&outside_cwd).unwrap();
+    fs::create_dir_all(dir.join("app/models")).unwrap();
+    fs::create_dir_all(dir.join("db")).unwrap();
+    fs::write(
+        dir.join("app/models/label.rb"),
+        "class Label < ApplicationRecord\n  validates :name, uniqueness: true\nend\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("db/schema.rb"),
+        "ActiveRecord::Schema.define(version: 1) do\n  create_table \"labels\", force: :cascade do |t|\n    t.string \"name\"\n  end\nend\n",
+    )
+    .unwrap();
+
+    let from_outside = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args([
+            "--preview",
+            "--force-default-config",
+            "--only",
+            "Rails/UniqueValidationWithoutIndex",
+            "--no-cache",
+            dir.to_str().unwrap(),
+        ])
+        .current_dir(&outside_cwd)
+        .output()
+        .expect("Failed to execute nitrocop");
+    let stdout_outside = String::from_utf8_lossy(&from_outside.stdout);
+    assert!(
+        !stdout_outside.contains("Rails/UniqueValidationWithoutIndex"),
+        "Schema must not be discovered when cwd has no db/schema.rb in any ancestor: {stdout_outside}"
+    );
+
+    let from_repo = std::process::Command::new(env!("CARGO_BIN_EXE_nitrocop"))
+        .args([
+            "--preview",
+            "--force-default-config",
+            "--only",
+            "Rails/UniqueValidationWithoutIndex",
+            "--no-cache",
+            dir.to_str().unwrap(),
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("Failed to execute nitrocop");
+    let stdout_repo = String::from_utf8_lossy(&from_repo.stdout);
+    assert!(
+        stdout_repo.contains("Rails/UniqueValidationWithoutIndex"),
+        "When cwd is the repo root, schema is loaded and the cop fires: {stdout_repo}"
+    );
+
+    fs::remove_dir_all(&dir).ok();
+    fs::remove_dir_all(&outside_cwd).ok();
+}
+
 // ---------- Autocorrect tests ----------
 
 #[test]

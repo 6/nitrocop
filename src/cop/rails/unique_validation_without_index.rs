@@ -1,7 +1,3 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-
 use ruby_prism::Visit;
 
 use crate::cop::shared::node_type::CALL_NODE;
@@ -14,11 +10,14 @@ use crate::parse::source::SourceFile;
 /// Checks that uniqueness validations have a corresponding unique index
 /// on the database column(s). Requires schema analysis (db/schema.rb).
 ///
-/// Corpus runs invoke nitrocop with overlay configs that can place
-/// `config_dir()` outside the target repo. When that happens, the global schema
-/// singleton is unset because `db/schema.rb` is looked up in the wrong directory.
-/// This cop falls back to loading `db/schema.rb` relative to the current source
-/// file's repo root when the global schema is unavailable.
+/// Schema discovery must mirror RuboCop's `SchemaLoader#db_schema_path`,
+/// which walks up from `Pathname.pwd` and returns nil if no `db/schema.rb`
+/// is found before the filesystem root. Anchoring on the source file's
+/// directory instead overshoots: corpus runs invoke nitrocop from outside
+/// the repo (e.g., `cwd=/tmp`), where RuboCop loads no schema and the cop
+/// skips. A previous fallback that walked up from each source file caused
+/// 610 corpus FPs because nitrocop loaded the repo's schema in cases where
+/// RuboCop did not — see `crate::schema::init` for the matching walk.
 ///
 /// Corpus mismatches also showed two model-resolution gaps:
 /// nested model classes inside modules/classes were resolved as only the
@@ -35,41 +34,6 @@ use crate::parse::source::SourceFile;
 /// and nitrocop silently skip schema-dependent cops. The synthetic schema was
 /// fixed to use explicit `t.datetime "created_at"` columns instead.
 pub struct UniqueValidationWithoutIndex;
-
-/// Fallback schema loader that finds db/schema.rb relative to the source file's
-/// repo root when the global schema is unavailable.
-fn schema_for_source(source: &SourceFile) -> Option<&'static crate::schema::Schema> {
-    if let Some(schema) = crate::schema::get() {
-        return Some(schema);
-    }
-
-    static FALLBACK_SCHEMAS: OnceLock<
-        Mutex<HashMap<PathBuf, Option<&'static crate::schema::Schema>>>,
-    > = OnceLock::new();
-
-    let repo_root = source
-        .path
-        .ancestors()
-        .find(|path| path.join("db/schema.rb").is_file())?
-        .to_path_buf();
-
-    let mut cache = FALLBACK_SCHEMAS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .ok()?;
-
-    if let Some(schema) = cache.get(&repo_root).copied() {
-        return schema;
-    }
-
-    let schema = std::fs::read(repo_root.join("db/schema.rb"))
-        .ok()
-        .and_then(|bytes| crate::schema::Schema::parse(&bytes))
-        .map(|schema| Box::leak(Box::new(schema)) as &'static crate::schema::Schema);
-
-    cache.insert(repo_root, schema);
-    schema
-}
 
 const MSG: &str = "Uniqueness validation should have a unique index on the database column.";
 
@@ -99,7 +63,7 @@ impl Cop for UniqueValidationWithoutIndex {
         diagnostics: &mut Vec<Diagnostic>,
         _corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
-        let schema = match schema_for_source(source) {
+        let schema = match crate::schema::get() {
             Some(s) => s,
             None => return,
         };
