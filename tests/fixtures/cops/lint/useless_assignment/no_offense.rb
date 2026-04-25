@@ -303,6 +303,16 @@ def modifier_condition
   puts a if (a = 123)
 end
 
+# Modifier while/until are post-condition loops; the body assignment feeds the
+# next condition check, so it is not useless.
+def modifier_while_reads_body_assignment(baz)
+  foo = bar while foo != baz
+end
+
+def modifier_until_reads_body_assignment
+  foo = bar until foo
+end
+
 # Variable used in loop condition (while)
 def while_condition
   line = gets
