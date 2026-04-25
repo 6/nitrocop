@@ -516,10 +516,16 @@ fn lint_file(
 }
 
 /// Check whether the first two lines of the file contain a Ruby encoding
-/// magic comment (e.g., `# encoding: iso-8859-1`, `# -*- coding: euc-jp -*-`,
-/// `# vim: fileencoding=shift_jis`). The check is byte-level (no UTF-8
-/// decoding required) and only looks at the first two lines (or three if
-/// the first line is a shebang).
+/// magic comment (e.g., `# encoding: iso-8859-1`, `# -*- coding: euc-jp -*-`).
+/// The check is byte-level (no UTF-8 decoding required) and only looks at
+/// the first two lines (or three if the first line is a shebang).
+///
+/// Mirrors Parser gem's `ENCODING_RE = /[\s#](en)?coding\s*[:=]\s*<value>/`.
+/// Matches `(en)?coding` only as a complete word preceded by whitespace or
+/// `#`, followed by `:` or `=` and a value. Vim-style modelines like
+/// `# vim: set fileencoding=shift_jis` are intentionally NOT recognized:
+/// Parser/Prism don't recognize them either, so on files with invalid UTF-8
+/// RuboCop emits a fatal Lint/Syntax and runs no cops. nitrocop must match.
 fn has_encoding_magic_comment(bytes: &[u8]) -> bool {
     // Scan up to 3 lines (shebang + encoding comment + safety margin)
     let mut start = 0;
@@ -538,9 +544,7 @@ fn has_encoding_magic_comment(bytes: &[u8]) -> bool {
             .collect::<Vec<u8>>();
         if trimmed.starts_with(b"#") {
             let lower: Vec<u8> = trimmed.iter().map(|b| b.to_ascii_lowercase()).collect();
-            // Look for encoding/coding keywords in the comment
-            if contains_subsequence(&lower, b"encoding") || contains_subsequence(&lower, b"coding")
-            {
+            if matches_parser_encoding_re(&lower) {
                 return true;
             }
         }
@@ -552,10 +556,43 @@ fn has_encoding_magic_comment(bytes: &[u8]) -> bool {
     false
 }
 
-fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+/// Match Parser's `ENCODING_RE = /[\s#](en)?coding\s*[:=]\s*<value>/`.
+/// Looks for `(en)?coding` preceded by whitespace or `#`, followed by
+/// optional whitespace, then `:` or `=`, then optional whitespace, then
+/// at least one value character (alphanumeric, `_`, or `-`).
+fn matches_parser_encoding_re(line: &[u8]) -> bool {
+    for i in 0..line.len() {
+        if !matches!(line[i], b' ' | b'\t' | b'#') {
+            continue;
+        }
+        let after = i + 1;
+        let kw_end = if line[after..].starts_with(b"encoding") {
+            after + 8
+        } else if line[after..].starts_with(b"coding") {
+            after + 6
+        } else {
+            continue;
+        };
+        let mut j = kw_end;
+        while j < line.len() && matches!(line[j], b' ' | b'\t') {
+            j += 1;
+        }
+        if j >= line.len() || !matches!(line[j], b':' | b'=') {
+            continue;
+        }
+        j += 1;
+        while j < line.len() && matches!(line[j], b' ' | b'\t') {
+            j += 1;
+        }
+        if j < line.len() && is_encoding_name_byte(line[j]) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_encoding_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
 }
 
 /// Name of the redundant cop disable directive cop.
@@ -1549,10 +1586,29 @@ renamed:
     }
 
     #[test]
-    fn encoding_comment_vim_style() {
-        assert!(has_encoding_magic_comment(
+    fn encoding_comment_vim_style_not_recognized() {
+        // Vim-style modelines (`fileencoding=...`) are NOT a Ruby encoding
+        // magic comment per Parser/Prism — neither recognizes them, so on
+        // invalid-UTF-8 files RuboCop emits a fatal Lint/Syntax. nitrocop
+        // must mirror that, so vim modelines must NOT mark the file as
+        // having an encoding declaration.
+        assert!(!has_encoding_magic_comment(
+            b"# vim: set fileencoding=shift_jis\nx = 1\n"
+        ));
+        assert!(!has_encoding_magic_comment(
             b"# vim: fileencoding=shift_jis\nx = 1\n"
         ));
+        assert!(!has_encoding_magic_comment(
+            b"# fileencoding=shift_jis\nx = 1\n"
+        ));
+    }
+
+    #[test]
+    fn encoding_comment_requires_value() {
+        // Per Parser's ENCODING_RE, the keyword must be followed by `:` or
+        // `=` and a value char. `# coding:` alone (no value) does not count.
+        assert!(!has_encoding_magic_comment(b"# coding:\nx = 1\n"));
+        assert!(!has_encoding_magic_comment(b"# encoding\nx = 1\n"));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::cop::shared::method_dispatch_predicates::is_unary_operation;
 use crate::cop::shared::node_type::{
     ARRAY_PATTERN_NODE, BLOCK_PARAMETERS_NODE, CALL_NODE, DEF_NODE, DEFINED_NODE,
     FIND_PATTERN_NODE, HASH_PATTERN_NODE, MULTI_TARGET_NODE, MULTI_WRITE_NODE, PARENTHESES_NODE,
@@ -158,6 +159,36 @@ use crate::parse::source::SourceFile;
 ///
 /// Fix: restrict the exemption to double-quoted strings whose interior
 /// contains only line-continuation newlines.
+///
+/// ## Corpus investigation (2026-04-20)
+///
+/// The remaining `compact` variant drift came from two token-pair quirks in
+/// RuboCop's implementation:
+///
+/// 1. Consecutive close-paren handling is based on the last token, not the
+///    immediate AST child. Wrapper nodes like `&method(...)`, keyword hashes,
+///    `=>` pairs, and `||=` writes still end in a nested `)`, so forms like
+///    `http.get( url, &method(...) )` and `wrap( outer: inner(...))` must use
+///    the `))` compact rule.
+/// 2. RuboCop only removes an exact single ASCII space between consecutive
+///    paren tokens. It intentionally ignores `((`/`))` separated by two spaces
+///    or tabs.
+/// 3. Parameter-list parens (`def foo(x: build(...))`, `->(x = build(...))`)
+///    still key off the last parameter token, not the `def` / block-params
+///    container node.
+/// 4. Grouped expressions can also end in `)` through intermediate wrapper
+///    nodes like `&&`, `||`, and unary `!call(...)`.
+/// 5. A call-attached block starts after the outer `)`, so `run( inner(...) )`
+///    must still key off the last argument rather than the block body. Infix
+///    operator sends without their own parens also still end in a nested `)`
+///    through the trailing argument, e.g. `(left(...) - right(...) )`.
+///
+/// Fix: compact close-side detection now walks through trailing wrapper nodes
+/// to find a nested paren token, including parameter defaults, logical /
+/// unary wrappers, and operator-call trailing arguments. Parenthesized calls
+/// followed by blocks now still use their last argument for compact close-side
+/// detection, and both compact open/close collapse paths require the gap to be
+/// exactly `" "`.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -716,6 +747,9 @@ fn check_compact_open_space(
         if code_start == open_end {
             return;
         }
+        if !has_single_ascii_space(bytes, open_end, code_start) {
+            return;
+        }
 
         push_remove_offense(
             cop,
@@ -803,6 +837,9 @@ fn check_compact_close_space(
         if prev_code + 1 == close_start {
             return;
         }
+        if !has_single_ascii_space(bytes, prev_code + 1, close_start) {
+            return;
+        }
 
         push_remove_offense(
             cop,
@@ -835,11 +872,265 @@ fn compact_allows_consecutive_close_paren(
     bytes: &[u8],
     prev_code: usize,
 ) -> bool {
-    let Some(last_inner) = last_inner_node(node) else {
+    let Some(last_inner) = compact_last_inner_node(node) else {
         return false;
     };
 
-    paren_offsets(&last_inner, bytes).is_some_and(|(_, _, inner_close)| inner_close == prev_code)
+    trailing_paren_close_offset(&last_inner, bytes)
+        .is_some_and(|inner_close| inner_close == prev_code)
+}
+
+fn has_single_ascii_space(bytes: &[u8], start: usize, end: usize) -> bool {
+    start < end && &bytes[start..end] == b" "
+}
+
+fn compact_last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    if let Some(paren) = node.as_parentheses_node() {
+        let body = paren.body()?;
+        if let Some(stmts) = body.as_statements_node() {
+            return stmts.body().iter().last();
+        }
+        return Some(body);
+    }
+
+    if let Some(call) = node.as_call_node() {
+        if let Some(block) = call.block() {
+            if block.as_block_argument_node().is_some() {
+                return Some(block);
+            }
+        }
+        return call
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(def_node) = node.as_def_node() {
+        return def_node.parameters().and_then(last_parameter_node);
+    }
+
+    if let Some(block_params) = node.as_block_parameters_node() {
+        return block_params.parameters().and_then(last_parameter_node);
+    }
+
+    if let Some(yield_node) = node.as_yield_node() {
+        return yield_node
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(super_node) = node.as_super_node() {
+        return super_node
+            .arguments()
+            .and_then(|args| args.arguments().iter().last());
+    }
+
+    if let Some(pinned) = node.as_pinned_expression_node() {
+        return Some(pinned.expression());
+    }
+
+    if let Some(defined) = node.as_defined_node() {
+        return Some(defined.value());
+    }
+
+    None
+}
+
+fn last_parameter_node<'a>(params: ruby_prism::ParametersNode<'a>) -> Option<ruby_prism::Node<'a>> {
+    if params.block().is_some() {
+        return None;
+    }
+
+    params
+        .keyword_rest()
+        .or_else(|| params.keywords().iter().last())
+        .or_else(|| params.posts().iter().last())
+        .or_else(|| params.rest())
+        .or_else(|| params.optionals().iter().last())
+        .or_else(|| params.requireds().iter().last())
+}
+
+fn trailing_paren_close_offset(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<usize> {
+    if let Some((_, _, close_start)) = paren_offsets(node, bytes) {
+        return Some(close_start);
+    }
+
+    let next = trailing_inner_node(node)?;
+    trailing_paren_close_offset(&next, bytes)
+}
+
+fn trailing_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    if let Some(block_arg) = node.as_block_argument_node() {
+        return block_arg.expression();
+    }
+
+    if let Some(optional_param) = node.as_optional_parameter_node() {
+        return Some(optional_param.value());
+    }
+
+    if let Some(optional_kw_param) = node.as_optional_keyword_parameter_node() {
+        return Some(optional_kw_param.value());
+    }
+
+    if let Some(and_node) = node.as_and_node() {
+        return Some(and_node.right());
+    }
+
+    if let Some(or_node) = node.as_or_node() {
+        return Some(or_node.right());
+    }
+
+    if let Some(call) = node.as_call_node() {
+        if is_unary_operation(&call) && call.block().is_none() {
+            return call.receiver();
+        }
+        if call.block().is_none() {
+            return call
+                .arguments()
+                .and_then(|args| args.arguments().iter().last());
+        }
+    }
+
+    if let Some(keyword_hash) = node.as_keyword_hash_node() {
+        return keyword_hash.elements().iter().last();
+    }
+
+    if let Some(hash) = node.as_hash_node() {
+        return hash.elements().iter().last();
+    }
+
+    if let Some(assoc) = node.as_assoc_node() {
+        return Some(assoc.value());
+    }
+
+    if let Some(assoc_splat) = node.as_assoc_splat_node() {
+        return assoc_splat.value();
+    }
+
+    if let Some(splat) = node.as_splat_node() {
+        return splat.expression();
+    }
+
+    if let Some(write) = node.as_local_variable_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_instance_variable_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_class_variable_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_global_variable_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_path_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_local_variable_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_local_variable_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_local_variable_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_instance_variable_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_instance_variable_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_instance_variable_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_class_variable_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_class_variable_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_class_variable_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_global_variable_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_global_variable_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_global_variable_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_path_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_path_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_constant_path_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_index_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_index_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_index_operator_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_call_or_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_call_and_write_node() {
+        return Some(write.value());
+    }
+
+    if let Some(write) = node.as_call_operator_write_node() {
+        return Some(write.value());
+    }
+
+    None
 }
 
 fn ignores_close_side_for_multiline_plain_string(
@@ -1084,6 +1375,90 @@ mod tests {
         assert_eq!(diags[0].location.line, 1);
         assert_eq!(diags[0].location.column, 7);
         assert!(diags[0].message.contains("No space"));
+    }
+
+    #[test]
+    fn compact_style_tracks_nested_close_parens_through_multiline_keyword_hash() {
+        let src = b"wrap( outer: inner(\n  value\n))\n";
+        let parse_result = crate::parse::parse_source(src);
+        let root = parse_result.node();
+        let program = root.as_program_node().unwrap();
+        let node = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("expected outer call");
+
+        let last_inner = compact_last_inner_node(&node).expect("expected last inner node");
+        let trailing_close =
+            trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
+        let outer_close = src
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
+
+        assert_eq!(trailing_close, inner_close);
+    }
+
+    #[test]
+    fn compact_style_tracks_nested_close_parens_through_call_with_block() {
+        let src = b"run( inner( value ) ) do |result|\n  result\nend\n";
+        let parse_result = crate::parse::parse_source(src);
+        let root = parse_result.node();
+        let program = root.as_program_node().unwrap();
+        let node = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("expected outer call");
+
+        let last_inner = compact_last_inner_node(&node).expect("expected last inner node");
+        let trailing_close =
+            trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
+        let outer_close = src
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
+
+        assert_eq!(trailing_close, inner_close);
+    }
+
+    #[test]
+    fn compact_style_tracks_nested_close_parens_through_operator_call() {
+        let src = b"(foo( a ) - bar( b ) )\n";
+        let parse_result = crate::parse::parse_source(src);
+        let root = parse_result.node();
+        let program = root.as_program_node().unwrap();
+        let node = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .expect("expected outer parens");
+
+        let last_inner = compact_last_inner_node(&node).expect("expected last inner node");
+        let trailing_close =
+            trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
+        let outer_close = src
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
+
+        assert_eq!(trailing_close, inner_close);
     }
 
     #[test]
