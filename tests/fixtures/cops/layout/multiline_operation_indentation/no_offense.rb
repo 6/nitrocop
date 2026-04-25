@@ -82,3 +82,26 @@ def find_key
     use_key(key_id, signature)
   end
 end
+
+# Operator inside lambda body — block ancestor disqualifies the outer
+# `=` from being treated as the operator's assignment context.
+config.ssl_options = { redirect: { exclude: ->(request) { request.path == "/foo" ||
+  request.path == "/bar" } } }
+
+# Operator inside a regular block body — same disqualification.
+list.each do |item|
+  process(item) ||
+    skip(item)
+end
+
+# Keyword condition split across multiple lines: the `unless` is on a previous
+# line followed by a continuation indented condition. RuboCop's AST walk finds
+# the keyword ancestor and aligns operands at the leftmost-operand column.
+def main_sidebar_items
+  return [] unless
+    current_course_user.present? &&
+    current_component_host[:component] &&
+    current_course.settings(:component).key.present?
+
+  student_sidebar_items + staff_sidebar_items
+end
