@@ -494,3 +494,50 @@ class Helper
     end
   end
 end
+
+@autoscaling_groups = @scaling_activities =
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  @launch_configurations = nil
+
+def sqs_message(*body)
+  body =
+  ^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+    case body
+    in []
+      nil
+    in [::String]
+      body.first
+    else
+      jsonl(*body)
+    end
+end
+
+def chef_client?(p)
+  p.name == :chef_client || \
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  p.type == :chef_client
+end
+
+def list_comprehension
+  assert_equal([0, 1, 2],
+  ^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+               Yadriggy::Py::run { [for i in range(0,3) do i end] })
+  assert_equal([0, 1, 2],
+  ^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+               Yadriggy::Py::run { [for i in 0..3 do i end] })
+end
+
+if issuer
+elsif !annotations.nil? && \
+      ^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      !annotations["#{Issuer::DYNAMIC_ANNOTATION_PREFIX}issuer"].nil?
+
+  message = "The dynamic variable is not in the correct path"
+end
+
+def number_format(national, format)
+  (format[:leading].nil? || \
+   ^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+      national.match?(cr("x"))) && \
+    national.match(cr("y"))
+end
