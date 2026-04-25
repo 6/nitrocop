@@ -5,7 +5,9 @@ use ruby_prism::Visit;
 
 use crate::cop::shared::method_identifier_predicates;
 use crate::cop::shared::node_type::{AND_NODE, CALL_NODE, OR_NODE};
-use crate::cop::shared::util::{begins_its_line, indentation_of};
+use crate::cop::shared::util::{
+    begins_its_line, indentation_of, is_modifier_if, is_modifier_unless,
+};
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -66,12 +68,31 @@ const OPERATOR_METHODS: &[&[u8]] = &[
 ];
 
 #[derive(Clone, Copy, Default)]
-struct OperatorCallContext {
+struct OperatorContext {
+    /// The operator is a method-call argument (no block in between). Used as a
+    /// fallback to accept same-column alignment in aligned style.
     method_argument: bool,
+    /// AST-detected keyword ancestor where the operator sits inside the
+    /// keyword's indented expression (predicate/return value/for collection).
+    /// Walks across blocks like RuboCop's `kw_node_with_special_indentation`.
+    keyword: Option<KeywordCtx>,
+    /// True when an enclosing block body sits between the operator and any
+    /// outer assignment ancestor — disqualifies lexical assignment-context
+    /// detection (mirrors RuboCop's `disqualified_rhs?` block-body rule and
+    /// the UNALIGNED_RHS_TYPES list).
+    block_disqualifies_assignment: bool,
+}
+
+#[derive(Clone, Copy)]
+struct KeywordCtx {
+    keyword: &'static str,
+    /// True for postfix conditionals (`expr if cond`); RuboCop uses
+    /// `width` (not `2 * width`) in that case.
+    postfix: bool,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct CallKey {
+struct OpKey {
     start: usize,
     end: usize,
 }
@@ -84,16 +105,16 @@ struct CacheKey {
 }
 
 thread_local! {
-    static OPERATOR_CALL_CONTEXT_CACHE: RefCell<Option<(CacheKey, HashMap<CallKey, OperatorCallContext>)>> =
+    static OPERATOR_CONTEXT_CACHE: RefCell<Option<(CacheKey, HashMap<OpKey, OperatorContext>)>> =
         const { RefCell::new(None) };
 }
 
-struct OperatorCallContextVisitor<'pr> {
+struct OperatorContextVisitor<'pr> {
     ancestors: Vec<ruby_prism::Node<'pr>>,
-    contexts: HashMap<CallKey, OperatorCallContext>,
+    contexts: HashMap<OpKey, OperatorContext>,
 }
 
-impl<'pr> Visit<'pr> for OperatorCallContextVisitor<'pr> {
+impl<'pr> Visit<'pr> for OperatorContextVisitor<'pr> {
     fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
         self.ancestors.push(node);
     }
@@ -107,21 +128,31 @@ impl<'pr> Visit<'pr> for OperatorCallContextVisitor<'pr> {
     fn visit_call_node(&mut self, node: &ruby_prism::CallNode<'pr>) {
         if OPERATOR_METHODS.contains(&node.name().as_slice()) {
             let current = node.as_node();
-            self.contexts.insert(
-                call_key(node),
-                OperatorCallContext {
-                    method_argument: operator_call_argument_context(&self.ancestors, &current),
-                },
-            );
+            self.contexts
+                .insert(op_key(&current), build_context(&self.ancestors, &current));
         }
 
         ruby_prism::visit_call_node(self, node);
     }
+
+    fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
+        let current = node.as_node();
+        self.contexts
+            .insert(op_key(&current), build_context(&self.ancestors, &current));
+        ruby_prism::visit_and_node(self, node);
+    }
+
+    fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
+        let current = node.as_node();
+        self.contexts
+            .insert(op_key(&current), build_context(&self.ancestors, &current));
+        ruby_prism::visit_or_node(self, node);
+    }
 }
 
-fn call_key(call: &ruby_prism::CallNode<'_>) -> CallKey {
-    let loc = call.location();
-    CallKey {
+fn op_key(node: &ruby_prism::Node<'_>) -> OpKey {
+    let loc = node.location();
+    OpKey {
         start: loc.start_offset(),
         end: loc.end_offset(),
     }
@@ -134,52 +165,231 @@ fn node_within_node(inner: &ruby_prism::Node<'_>, outer: &ruby_prism::Node<'_>) 
         && inner_loc.end_offset() <= outer_loc.end_offset()
 }
 
-fn operator_call_argument_context(
+/// Returns true if `node` is one of RuboCop's `UNALIGNED_RHS_TYPES`
+/// (`if`, `while`, `until`, `for`, `return`, `array`, `kwbegin`).
+fn is_unaligned_rhs_type(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_if_node().is_some()
+        || node.as_unless_node().is_some()
+        || node.as_while_node().is_some()
+        || node.as_until_node().is_some()
+        || node.as_for_node().is_some()
+        || node.as_return_node().is_some()
+        || node.as_array_node().is_some()
+        || node.as_begin_node().is_some()
+}
+
+/// Returns true if `node` is a Prism block-like construct (regular block or
+/// lambda). Both are RuboCop `block_type?` for `disqualified_rhs?`.
+fn is_block_like(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_block_node().is_some() || node.as_lambda_node().is_some()
+}
+
+/// True if the keyword ancestor's "indented expression" — predicate for
+/// `if`/`unless`/`while`/`until`, collection for `for`, value for `return` —
+/// contains `current`.
+fn within_indented_keyword_expression(
+    ancestor: &ruby_prism::Node<'_>,
+    current: &ruby_prism::Node<'_>,
+) -> Option<KeywordCtx> {
+    if let Some(if_node) = ancestor.as_if_node() {
+        // Skip ternaries — RuboCop excludes them (`ancestor.if_type? && ancestor.ternary?`).
+        // Prism encodes ternaries as IfNode but with `if_keyword_loc()` absent
+        // and `then_keyword_loc()` representing the `?`.
+        if_node.if_keyword_loc()?;
+        let predicate = if_node.predicate();
+        if node_within_node(current, &predicate) {
+            return Some(KeywordCtx {
+                keyword: "if",
+                postfix: is_modifier_if(&if_node),
+            });
+        }
+        return None;
+    }
+    if let Some(unless_node) = ancestor.as_unless_node() {
+        let predicate = unless_node.predicate();
+        if node_within_node(current, &predicate) {
+            return Some(KeywordCtx {
+                keyword: "unless",
+                postfix: is_modifier_unless(&unless_node),
+            });
+        }
+        return None;
+    }
+    if let Some(while_node) = ancestor.as_while_node() {
+        let predicate = while_node.predicate();
+        if node_within_node(current, &predicate) {
+            // While modifiers (`expr while cond`) get postfix indentation.
+            let postfix =
+                while_node.do_keyword_loc().is_none() && while_node.closing_loc().is_none();
+            return Some(KeywordCtx {
+                keyword: "while",
+                postfix,
+            });
+        }
+        return None;
+    }
+    if let Some(until_node) = ancestor.as_until_node() {
+        let predicate = until_node.predicate();
+        if node_within_node(current, &predicate) {
+            let postfix =
+                until_node.do_keyword_loc().is_none() && until_node.closing_loc().is_none();
+            return Some(KeywordCtx {
+                keyword: "until",
+                postfix,
+            });
+        }
+        return None;
+    }
+    if let Some(for_node) = ancestor.as_for_node() {
+        let collection = for_node.collection();
+        if node_within_node(current, &collection) {
+            return Some(KeywordCtx {
+                keyword: "for",
+                postfix: false,
+            });
+        }
+        return None;
+    }
+    if let Some(return_node) = ancestor.as_return_node() {
+        if let Some(args) = return_node.arguments() {
+            let args_node = args.as_node();
+            if node_within_node(current, &args_node) {
+                return Some(KeywordCtx {
+                    keyword: "return",
+                    postfix: false,
+                });
+            }
+        }
+        return None;
+    }
+    None
+}
+
+fn build_context(
     ancestors: &[ruby_prism::Node<'_>],
     current: &ruby_prism::Node<'_>,
-) -> bool {
-    for ancestor in ancestors.iter().rev().skip(1) {
-        if ancestor.as_block_node().is_some() {
-            return false;
+) -> OperatorContext {
+    let mut method_argument = false;
+    let mut method_argument_locked = false;
+    let mut keyword: Option<KeywordCtx> = None;
+    let mut block_disqualifies_assignment = false;
+    let mut assignment_resolved = false;
+
+    for ancestor in ancestors.iter().rev() {
+        // method_argument: stop at first block-like or first matching call.
+        if !method_argument_locked {
+            if is_block_like(ancestor) {
+                method_argument_locked = true;
+            } else if let Some(call) = ancestor.as_call_node() {
+                if !method_identifier_predicates::is_setter_method(call.name().as_slice())
+                    && call.arguments().is_some_and(|args| {
+                        args.arguments()
+                            .iter()
+                            .any(|arg| node_within_node(current, &arg))
+                    })
+                {
+                    method_argument = true;
+                    method_argument_locked = true;
+                }
+            }
         }
 
-        let Some(call) = ancestor.as_call_node() else {
-            continue;
-        };
-
-        if method_identifier_predicates::is_setter_method(call.name().as_slice()) {
-            continue;
+        // assignment_rhs disqualification: walk ancestors until we hit an
+        // assignment (no disqualification) or a disqualifier (block body or
+        // UNALIGNED_RHS_TYPES). RuboCop's `part_of_assignment_rhs` with
+        // `disqualified_rhs?` and `valid_rhs?`.
+        if !assignment_resolved {
+            if is_block_like(ancestor) {
+                block_disqualifies_assignment = true;
+                assignment_resolved = true;
+            } else if is_unaligned_rhs_type(ancestor) {
+                // Unaligned RHS types break the assignment search before any
+                // outer assignment can be reached.
+                block_disqualifies_assignment = true;
+                assignment_resolved = true;
+            } else if is_assignment_node(ancestor) {
+                // Assignment ancestor reached: lexical assignment-context detection
+                // is allowed to fire.
+                assignment_resolved = true;
+            }
         }
 
-        if call.arguments().is_some_and(|args| {
-            args.arguments()
-                .iter()
-                .any(|arg| node_within_node(current, &arg))
-        }) {
-            return true;
+        // keyword_special_indentation: closest keyword ancestor where current
+        // is inside the indented expression. Walks across blocks.
+        if keyword.is_none() {
+            keyword = within_indented_keyword_expression(ancestor, current);
         }
     }
 
+    OperatorContext {
+        method_argument,
+        keyword,
+        block_disqualifies_assignment,
+    }
+}
+
+/// True if `node` is an assignment-like ancestor that can host an RHS
+/// containing the operator. Mirrors RuboCop's `Node#assignment?` plus
+/// setter calls (`obj.foo = bar`).
+fn is_assignment_node(node: &ruby_prism::Node<'_>) -> bool {
+    if node.as_local_variable_write_node().is_some()
+        || node.as_local_variable_operator_write_node().is_some()
+        || node.as_local_variable_and_write_node().is_some()
+        || node.as_local_variable_or_write_node().is_some()
+        || node.as_instance_variable_write_node().is_some()
+        || node.as_instance_variable_operator_write_node().is_some()
+        || node.as_instance_variable_and_write_node().is_some()
+        || node.as_instance_variable_or_write_node().is_some()
+        || node.as_class_variable_write_node().is_some()
+        || node.as_class_variable_operator_write_node().is_some()
+        || node.as_class_variable_and_write_node().is_some()
+        || node.as_class_variable_or_write_node().is_some()
+        || node.as_global_variable_write_node().is_some()
+        || node.as_global_variable_operator_write_node().is_some()
+        || node.as_global_variable_and_write_node().is_some()
+        || node.as_global_variable_or_write_node().is_some()
+        || node.as_constant_write_node().is_some()
+        || node.as_constant_operator_write_node().is_some()
+        || node.as_constant_and_write_node().is_some()
+        || node.as_constant_or_write_node().is_some()
+        || node.as_constant_path_write_node().is_some()
+        || node.as_constant_path_operator_write_node().is_some()
+        || node.as_constant_path_and_write_node().is_some()
+        || node.as_constant_path_or_write_node().is_some()
+        || node.as_index_operator_write_node().is_some()
+        || node.as_index_and_write_node().is_some()
+        || node.as_index_or_write_node().is_some()
+        || node.as_call_operator_write_node().is_some()
+        || node.as_call_and_write_node().is_some()
+        || node.as_call_or_write_node().is_some()
+        || node.as_multi_write_node().is_some()
+        || node.as_match_write_node().is_some()
+    {
+        return true;
+    }
+    if let Some(call) = node.as_call_node() {
+        return method_identifier_predicates::is_setter_method(call.name().as_slice());
+    }
     false
 }
 
-fn operator_call_context(
+fn operator_context(
     parse_result: &ruby_prism::ParseResult<'_>,
     source: &SourceFile,
-    call: &ruby_prism::CallNode<'_>,
-) -> OperatorCallContext {
+    node: &ruby_prism::Node<'_>,
+) -> OperatorContext {
     let cache_key = CacheKey {
         parse_result_ptr: parse_result as *const _ as usize,
         source_ptr: source.as_bytes().as_ptr() as usize,
         source_len: source.as_bytes().len(),
     };
 
-    OPERATOR_CALL_CONTEXT_CACHE.with(|cache| {
+    OPERATOR_CONTEXT_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let needs_rebuild = !matches!(cache.as_ref(), Some((key, _)) if *key == cache_key);
 
         if needs_rebuild {
-            let mut visitor = OperatorCallContextVisitor {
+            let mut visitor = OperatorContextVisitor {
                 ancestors: Vec::new(),
                 contexts: HashMap::new(),
             };
@@ -189,7 +399,7 @@ fn operator_call_context(
 
         cache
             .as_ref()
-            .and_then(|(_, contexts)| contexts.get(&call_key(call)).copied())
+            .and_then(|(_, contexts)| contexts.get(&op_key(node)).copied())
             .unwrap_or_default()
     })
 }
@@ -243,16 +453,11 @@ impl Cop for MultilineOperationIndentation {
                 return;
             }
 
-            let call_context = operator_call_context(parse_result, source, &call_node);
+            let ctx = operator_context(parse_result, source, node);
             let first_arg = &args[0];
-            diagnostics.extend(self.check_binary_node(
-                source,
-                &receiver,
-                first_arg,
-                config,
-                style,
-                call_context.method_argument,
-            ));
+            diagnostics.extend(
+                self.check_binary_node(source, &receiver, first_arg, config, style, ctx, true),
+            );
             return;
         }
 
@@ -263,12 +468,14 @@ impl Cop for MultilineOperationIndentation {
             if is_inside_parentheses(source, node) {
                 return;
             }
+            let ctx = operator_context(parse_result, source, node);
             diagnostics.extend(self.check_binary_node(
                 source,
                 &and_node.left(),
                 &and_node.right(),
                 config,
                 style,
+                ctx,
                 false,
             ));
             return;
@@ -280,12 +487,14 @@ impl Cop for MultilineOperationIndentation {
             if is_inside_parentheses(source, node) {
                 return;
             }
+            let ctx = operator_context(parse_result, source, node);
             diagnostics.extend(self.check_binary_node(
                 source,
                 &or_node.left(),
                 &or_node.right(),
                 config,
                 style,
+                ctx,
                 false,
             ));
         }
@@ -581,6 +790,7 @@ fn operation_description(
 }
 
 impl MultilineOperationIndentation {
+    #[allow(clippy::too_many_arguments)]
     fn check_binary_node(
         &self,
         source: &SourceFile,
@@ -588,6 +798,7 @@ impl MultilineOperationIndentation {
         right: &ruby_prism::Node<'_>,
         config: &CopConfig,
         style: &str,
+        ctx: OperatorContext,
         accept_left_alignment: bool,
     ) -> Vec<Diagnostic> {
         let (left_line, left_col) = source.offset_to_line_col(left.location().start_offset());
@@ -616,13 +827,32 @@ impl MultilineOperationIndentation {
         // chain). This gives us the correct base indentation.
         let left_line_bytes = source.lines().nth(left_line - 1).unwrap_or(b"");
         let left_indent = indentation_of(left_line_bytes);
-        let keyword_context = keyword_context_on_line(source, left_line, left_col);
-        let assignment_context = assignment_context(source, left_line, left_col);
-        let should_align = assignment_context.is_some_and(|ctx| ctx.rhs_begins_line)
+        let lexical_keyword = keyword_context_on_line(source, left_line, left_col);
+        // AST-derived keyword wins when it disagrees: the ancestor walk catches
+        // multi-line keyword conditions (`return [] unless\n  cond1 && cond2`)
+        // that lexical scanning of the same line would miss.
+        let keyword_context = ctx.keyword.map_or(lexical_keyword, |kw| {
+            Some(KeywordContext {
+                keyword: kw.keyword,
+                special_indentation: !kw.postfix,
+            })
+        });
+        let lexical_assignment = assignment_context(source, left_line, left_col);
+        // Block-body or UNALIGNED_RHS_TYPES ancestors disqualify the lexical `=`
+        // detection from being treated as the operator's own assignment context
+        // — mirrors RuboCop's `disqualified_rhs?` (`block_type? && part_of_block_body?`
+        // and the UNALIGNED_RHS_TYPES list).
+        let assignment_context = if ctx.block_disqualifies_assignment {
+            None
+        } else {
+            lexical_assignment
+        };
+        let should_align = assignment_context.is_some_and(|c| c.rhs_begins_line)
             || (style == "aligned" && (keyword_context.is_some() || assignment_context.is_some()));
-        let align_only = should_align || (accept_left_alignment && style == "aligned");
+        let align_only =
+            should_align || (accept_left_alignment && ctx.method_argument && style == "aligned");
         let expected_indent = left_indent
-            + if keyword_context.is_some_and(|ctx| ctx.special_indentation) {
+            + if keyword_context.is_some_and(|c| c.special_indentation) {
                 2 * width
             } else {
                 width
