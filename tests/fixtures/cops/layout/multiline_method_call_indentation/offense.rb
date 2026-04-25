@@ -183,5 +183,26 @@ it 'enqueues SetPointsCountryIdsJob for points without country_id' do
       .with(point_without_country1.id)
       ^^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
       .and have_enqueued_job(DataMigrations::SetPointsCountryIdsJob)
+      ^^^^ Layout/MultilineMethodCallIndentation: Use 2 (not 4) spaces for indentation of a chained method call.
       .with(point_without_country2.id)
+end
+
+# First continuation after a parenthesized receiver still aligns with the
+# receiver's inline dot.
+def prepare_cli_args(args, has_format_option)
+  (args || '').split
+            .yield_self { args_with_at_least_one_formatter(_1, has_format_option) }
+            ^^^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.yield_self` with `.split` on line 153.
+            .yield_self { args_with_default_options(_1) }
+end
+
+# Descendant multiline block: align the matcher continuation with the receiver
+it 'matches several changes' do
+  expect { subject }.to change {
+    value
+  }.from(1).to(2)
+        .and change {
+        ^^^^ Layout/MultilineMethodCallIndentation: Align `.and` with `.to` on line 162.
+          other
+        }.from(3).to(4)
 end
