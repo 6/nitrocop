@@ -14,6 +14,10 @@ impl Cop for EmptyBlockParameter {
         &[BLOCK_NODE, BLOCK_PARAMETERS_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for EmptyBlockParameter {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check BlockNode for empty parameters (||)
         let block_node = match node.as_block_node() {
@@ -69,12 +73,27 @@ impl Cop for EmptyBlockParameter {
         }
 
         let (line, column) = source.offset_to_line_col(opening_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Omit pipes for the empty block parameters.".to_string(),
-        ));
+        );
+        if let Some(corr) = corrections {
+            // Remove the entire BlockParametersNode source range — `||`.
+            // Matches RuboCop's `corrector.remove(node.parameters.source_range)`.
+            // Surrounding whitespace cleanup is left to Layout cops.
+            let bp_loc = bp.location();
+            corr.push(crate::correction::Correction {
+                start: bp_loc.start_offset(),
+                end: bp_loc.end_offset(),
+                replacement: String::new(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
     }
 }
 
@@ -82,4 +101,5 @@ impl Cop for EmptyBlockParameter {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyBlockParameter, "cops/style/empty_block_parameter");
+    crate::cop_autocorrect_fixture_tests!(EmptyBlockParameter, "cops/style/empty_block_parameter");
 }

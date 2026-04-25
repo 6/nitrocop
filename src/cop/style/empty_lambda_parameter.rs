@@ -14,6 +14,10 @@ impl Cop for EmptyLambdaParameter {
         &[BLOCK_PARAMETERS_NODE, LAMBDA_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -21,7 +25,7 @@ impl Cop for EmptyLambdaParameter {
         _parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         // Check LambdaNode for empty parameters: -> () {}
         let lambda_node = match node.as_lambda_node() {
@@ -73,12 +77,28 @@ impl Cop for EmptyLambdaParameter {
         }
 
         let (line, column) = source.offset_to_line_col(opening_loc.start_offset());
-        diagnostics.push(self.diagnostic(
+        let mut diag = self.diagnostic(
             source,
             line,
             column,
             "Omit parentheses for the empty lambda parameters.".to_string(),
-        ));
+        );
+        if let Some(corr) = corrections {
+            // Remove the entire BlockParametersNode source range — i.e. `()`.
+            // Matches RuboCop's `corrector.remove(node.parameters.source_range)`.
+            // Any extra whitespace left between `->` and `{` is cleaned up by
+            // Layout cops on a later iteration.
+            let bp_loc = bp.location();
+            corr.push(crate::correction::Correction {
+                start: bp_loc.start_offset(),
+                end: bp_loc.end_offset(),
+                replacement: String::new(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
     }
 }
 
@@ -86,4 +106,8 @@ impl Cop for EmptyLambdaParameter {
 mod tests {
     use super::*;
     crate::cop_fixture_tests!(EmptyLambdaParameter, "cops/style/empty_lambda_parameter");
+    crate::cop_autocorrect_fixture_tests!(
+        EmptyLambdaParameter,
+        "cops/style/empty_lambda_parameter"
+    );
 }
