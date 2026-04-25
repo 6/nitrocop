@@ -1,7 +1,6 @@
 # nitrocop-config: EnforcedStyle: separator, separator, always_ignore
-# RuboCop 1.84.2 only crashes the separator-style autocorrect when a colon
-# pair's key is *strictly shorter* than the first pair's. When subsequent
-# keys are equal length or longer, it still emits offenses, so we must too.
+# RuboCop 1.84.2 still emits offenses when newline-value separator corrections
+# can be applied without overlapping the value indentation, so we must too.
 hash = {
   foo:
     bar.qux,
@@ -16,4 +15,23 @@ resource = {
     end,
   longer: name
   ^^^^^^^^^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
+}
+
+absorbed = {
+  "long":
+    first,
+  "a":
+  ^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
+    second
+}
+
+first_not_widest = {
+  "medium":
+    first,
+  "a much longer key":
+  ^^^^^^^^^^^^^^^^^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
+    second,
+  "a":
+  ^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
+    third
 }
