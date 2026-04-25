@@ -587,19 +587,26 @@ impl<'pr> Visit<'pr> for PatternMatchTargetCollector {
 // In `if foo(x = 1) || foo(x = 2)`, short-circuit evaluation means only one
 // branch executes, but the VF engine sees both assignments as sequential in
 // the same scope. Suppress the LHS assignment when the same variable is also
-// assigned in the RHS of an `or`/`||` node.
+// assigned in the RHS of an `or`/`||` node AND the variable is read after the
+// OR — without a later read, both writes are genuinely useless and RuboCop
+// reports both (e.g. `(e = 0) == 0 || include?(e = 0)` with `e` never used).
 
 fn collect_or_condition_write_offsets(
     parse_result: &ruby_prism::ParseResult<'_>,
 ) -> HashSet<usize> {
-    let mut collector = OrConditionWriteCollector::default();
+    let mut read_collector = LvarReadOffsetCollector::default();
+    read_collector.visit(&parse_result.node());
+    let mut collector = OrConditionWriteCollector {
+        offsets: HashSet::new(),
+        reads_by_name: read_collector.reads_by_name,
+    };
     collector.visit(&parse_result.node());
     collector.offsets
 }
 
-#[derive(Default)]
 struct OrConditionWriteCollector {
     offsets: HashSet<usize>,
+    reads_by_name: HashMap<Vec<u8>, Vec<usize>>,
 }
 
 /// Helper visitor that collects all local variable write offsets within a subtree.
@@ -618,21 +625,45 @@ impl<'pr> Visit<'pr> for LvarWriteSubtreeCollector {
     }
 }
 
+#[derive(Default)]
+struct LvarReadOffsetCollector {
+    reads_by_name: HashMap<Vec<u8>, Vec<usize>>,
+}
+
+impl<'pr> Visit<'pr> for LvarReadOffsetCollector {
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        self.reads_by_name
+            .entry(node.name().as_slice().to_vec())
+            .or_default()
+            .push(node.location().start_offset());
+    }
+}
+
 impl OrConditionWriteCollector {
     fn process_or_node(&mut self, node: &ruby_prism::OrNode<'_>) {
+        let or_end = node.location().end_offset();
         let mut lhs_collector = LvarWriteSubtreeCollector::default();
         lhs_collector.visit(&node.left());
         let mut rhs_collector = LvarWriteSubtreeCollector::default();
         rhs_collector.visit(&node.right());
 
         // For each variable written in LHS that is also written in RHS,
-        // suppress the LHS write offset.
+        // suppress the LHS write offset — but only when the variable is read
+        // after the OR. If the variable is never read after the OR, both
+        // writes are dead and should be reported.
         for (lhs_name, lhs_offset) in &lhs_collector.writes {
-            if rhs_collector
+            let rhs_writes_same = rhs_collector
                 .writes
                 .iter()
-                .any(|(rhs_name, _)| rhs_name == lhs_name)
-            {
+                .any(|(rhs_name, _)| rhs_name == lhs_name);
+            if !rhs_writes_same {
+                continue;
+            }
+            let read_after_or = self
+                .reads_by_name
+                .get(lhs_name)
+                .is_some_and(|offsets| offsets.iter().any(|&o| o >= or_end));
+            if read_after_or {
                 self.offsets.insert(*lhs_offset);
             }
         }
