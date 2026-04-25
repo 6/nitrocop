@@ -503,7 +503,7 @@ fn base_range_start_offset(
         && call_start_offset >= 2
         && bytes.get(call_start_offset - 2) == Some(&b'*')
         && bytes.get(call_start_offset - 1) == Some(&b'*')
-        && is_splat_boundary(bytes.get(call_start_offset - 3).copied())
+        && is_splat_boundary(byte_before(bytes, call_start_offset, 3))
     {
         return call_start_offset - 2;
     }
@@ -511,7 +511,7 @@ fn base_range_start_offset(
     if !has_same_start_parent_call
         && call_start_offset >= 1
         && bytes.get(call_start_offset - 1) == Some(&b'*')
-        && is_splat_boundary(bytes.get(call_start_offset - 2).copied())
+        && is_splat_boundary(byte_before(bytes, call_start_offset, 2))
     {
         return call_start_offset - 1;
     }
@@ -524,6 +524,10 @@ fn is_splat_boundary(byte: Option<u8>) -> bool {
         byte,
         None | Some(b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'{' | b',')
     )
+}
+
+fn byte_before(bytes: &[u8], offset: usize, back: usize) -> Option<u8> {
+    offset.checked_sub(back).and_then(|i| bytes.get(i).copied())
 }
 
 fn is_bare_operator(name: &str, has_regular_dot: bool) -> bool {
@@ -684,6 +688,16 @@ mod tests {
         let source = b"foo(1, 2, 3)\n";
         let diags = run_cop_full(&FirstArgumentIndentation, source);
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn splat_call_at_offset_one_does_not_underflow() {
+        // Regression for fuzz crash c91fe5dc62ec40d2afa32f3fe5d1fb0cd957de10:
+        // a splat call whose callee starts at byte offset 1 used to read
+        // bytes[offset - 2] unconditionally and panic with "attempt to subtract
+        // with overflow" under cargo-fuzz's overflow-checks build.
+        let source = b"*o(\n@";
+        let _ = run_cop_full(&FirstArgumentIndentation, source);
     }
 
     #[test]
