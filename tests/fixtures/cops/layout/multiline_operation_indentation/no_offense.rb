@@ -105,3 +105,26 @@ def main_sidebar_items
 
   student_sidebar_items + staff_sidebar_items
 end
+
+# Assignment RHS starts on the next line with a case expression. RuboCop treats
+# the string concatenation in each branch as assignment-aligned, so same-column
+# operands are accepted here.
+def generate_signature(action)
+  signature_fields =
+    case action
+    when CECA_ACTION_REFUND
+      options[:signature_key].to_s +
+      options[:merchant_id].to_s +
+      options[:acquirer_bin].to_s
+    end
+end
+
+# Method calls used as def modifiers are not treated as method-call argument
+# alignment contexts by RuboCop.
+private_class_method def self.build_profiler_transport(settings, agent_settings)
+  settings.profiling.exporter.transport ||
+    Profiling::HttpTransport.new(
+      agent_settings: agent_settings,
+      site: settings.site,
+    )
+end
