@@ -107,6 +107,15 @@ use ruby_prism::Visit;
 ///      `{ token:, uuid: creds[:uuid] }` reports no offenses (`uuid` < `token`), while
 ///      `{ token:, uuid_long: x }` still reports normally (`uuid_long` >= `token`). Mixed
 ///      colon/rocket pairs and same-length keys do not crash.
+///
+/// 10. **Separator-style colon crash with mixed newline values (2026-04-25):**
+///     RuboCop 1.84.2 also aborts `separator`-style checking for colon pairs when the first
+///     non-kwsplat pair's value starts on the next line but a later non-omission pair keeps
+///     its value on the same line. The cop already matched RuboCop's equivalent hash-rocket
+///     crash, but still reported offenses for colon hashes like:
+///     `{ cover_url:\n    if attached?\n      url\n    end,\n  title: name }`.
+///     Fixed by extending the same narrow mixed-newline suppression to colon pairs, while
+///     still checking all-multiline hashes and cases where the first pair stays on one line.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -399,7 +408,7 @@ fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
         return false;
     };
 
-    if !first.is_rocket || !first.value_on_new_line {
+    if !first.value_on_new_line {
         return false;
     }
 
