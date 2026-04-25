@@ -164,6 +164,10 @@ impl Cop for EmptyLiteral {
         &[CALL_NODE, CONSTANT_PATH_NODE, CONSTANT_READ_NODE]
     }
 
+    fn supports_autocorrect(&self) -> bool {
+        true
+    }
+
     fn check_node(
         &self,
         source: &SourceFile,
@@ -171,7 +175,7 @@ impl Cop for EmptyLiteral {
         parse_result: &ruby_prism::ParseResult<'_>,
         _config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
-        _corrections: Option<&mut Vec<crate::correction::Correction>>,
+        corrections: Option<&mut Vec<crate::correction::Correction>>,
     ) {
         let call_node = match node.as_call_node() {
             Some(c) => c,
@@ -245,24 +249,42 @@ impl Cop for EmptyLiteral {
             return;
         }
 
-        let msg = match const_name.as_slice() {
+        let (msg, replacement) = match const_name.as_slice() {
             b"Array" if method_bytes == b"new" || method_bytes == b"[]" => {
                 let src = String::from_utf8_lossy(call_node.location().as_slice());
-                format!("Use array literal `[]` instead of `{}`.", src)
+                (
+                    format!("Use array literal `[]` instead of `{}`.", src),
+                    "[]",
+                )
             }
             b"Hash" if method_bytes == b"new" || method_bytes == b"[]" => {
                 let src = String::from_utf8_lossy(call_node.location().as_slice());
-                format!("Use hash literal `{{}}` instead of `{}`.", src)
+                (
+                    format!("Use hash literal `{{}}` instead of `{}`.", src),
+                    "{}",
+                )
             }
-            b"String" if method_bytes == b"new" => {
-                "Use string literal `''` instead of `String.new`.".to_string()
-            }
+            b"String" if method_bytes == b"new" => (
+                "Use string literal `''` instead of `String.new`.".to_string(),
+                "''",
+            ),
             _ => return,
         };
 
         let loc = call_node.location();
         let (line, column) = source.offset_to_line_col(loc.start_offset());
-        diagnostics.push(self.diagnostic(source, line, column, msg));
+        let mut diag = self.diagnostic(source, line, column, msg);
+        if let Some(corr) = corrections {
+            corr.push(crate::correction::Correction {
+                start: loc.start_offset(),
+                end: loc.end_offset(),
+                replacement: replacement.to_string(),
+                cop_name: self.name(),
+                cop_index: 0,
+            });
+            diag.corrected = true;
+        }
+        diagnostics.push(diag);
     }
 }
 
@@ -271,6 +293,7 @@ mod tests {
     use super::*;
 
     crate::cop_fixture_tests!(EmptyLiteral, "cops/style/empty_literal");
+    crate::cop_autocorrect_fixture_tests!(EmptyLiteral, "cops/style/empty_literal");
 
     #[test]
     fn no_offense_string_new_with_frozen_string_literal() {
