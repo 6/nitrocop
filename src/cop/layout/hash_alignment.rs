@@ -100,10 +100,13 @@ use ruby_prism::Visit;
 ///      later pairs mix newline and same-line values. The corpus oracle counts that as zero
 ///      offenses, so nitrocop now suppresses that exact mixed-value shape to match RuboCop's
 ///      observable output.
-///    - Under `separator` with colon pairs, RuboCop 1.84.2 also crashes when the first pair
-///      uses Ruby 3.1 value omission (`foo:`) but a later pair has an explicit value. That
-///      shows up in the corpus as no offenses for hashes like `{ token:, uuid: creds[:uuid] }`,
-///      so nitrocop suppresses only that first-omission-plus-later-value shape.
+///    - Under `separator` with colon pairs, RuboCop 1.84.2 crashes per-pair when the first
+///      non-kwsplat pair uses Ruby 3.1 value omission (`foo:`) and a later non-omission
+///      colon pair has a *strictly shorter* key. The crash aborts processing the remaining
+///      pairs in that hash, but any offenses already emitted by earlier pairs are kept. So
+///      `{ token:, uuid: creds[:uuid] }` reports no offenses (`uuid` < `token`), while
+///      `{ token:, uuid_long: x }` still reports normally (`uuid_long` >= `token`). Mixed
+///      colon/rocket pairs and same-length keys do not crash.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -396,25 +399,26 @@ fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
         return false;
     };
 
-    if first.is_rocket {
-        if !first.value_on_new_line {
-            return false;
-        }
-
-        return pairs
-            .iter()
-            .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
-            .any(|pair| !pair.is_value_omission && !pair.value_on_new_line);
+    if !first.is_rocket || !first.value_on_new_line {
+        return false;
     }
 
-    if first.is_value_omission {
-        return pairs
-            .iter()
-            .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
-            .any(|pair| !pair.is_value_omission);
-    }
+    pairs
+        .iter()
+        .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
+        .any(|pair| !pair.is_value_omission && !pair.value_on_new_line)
+}
 
-    false
+/// RuboCop 1.84.2 crashes when checking a colon-style pair whose key is strictly shorter
+/// than the first pair's key, and the first pair is a Ruby 3.1 value omission (`foo:`).
+/// The crash aborts the hash's remaining pair checks; any offenses emitted by earlier
+/// pairs are preserved. We model the abort by `break`ing the per-pair loop on this trigger.
+fn rubocop_crashes_on_omission_pair(first: &PairInfo, pair: &PairInfo) -> bool {
+    first.is_value_omission
+        && !pair.is_kwsplat
+        && !pair.is_value_omission
+        && !pair.is_rocket
+        && pair.key_char_len < first.key_char_len
 }
 
 /// Check a hash under the "key" alignment style.
@@ -551,6 +555,10 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
     for pair in pairs {
         if std::ptr::eq(pair, first) {
             continue;
+        }
+        if rubocop_crashes_on_omission_pair(first, pair) {
+            // RuboCop crashes here and stops checking the rest of this hash.
+            break;
         }
         if !pair.begins_line {
             continue;
