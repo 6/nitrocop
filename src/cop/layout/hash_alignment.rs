@@ -108,17 +108,20 @@ use ruby_prism::Visit;
 ///      `{ token:, uuid_long: x }` still reports normally (`uuid_long` >= `token`). Mixed
 ///      colon/rocket pairs and same-length keys do not crash.
 ///
-/// 10. **Separator-style colon crash with mixed newline values (2026-04-25):**
-///     RuboCop 1.84.2 aborts `separator`-style checking for colon pairs when the first
-///     non-kwsplat pair's value starts on the next line, a later non-omission pair keeps
-///     its value on the same line, AND that later pair's key is strictly shorter than
-///     the first pair's. The crash comes from RuboCop's right-align corrector trying to
-///     pad the shorter key with leading spaces, whose remove-range overlaps with the
-///     separator and value ranges. When all later keys are equal-length or longer,
-///     RuboCop emits offenses normally, so the colon suppression is gated on
-///     `pair.key_char_len < first.key_char_len`. The rocket suppression is unconditional
-///     because RuboCop also clobbers rocket pairs that are already separator-aligned
-///     (where key length doesn't matter) — see the `"xml" =>`/`"uiinput" =>` fixture.
+/// 10. **Separator-style newline-value corrector crashes (2026-04-25):**
+///     RuboCop 1.84.2 aborts `separator`-style checking when the first non-kwsplat
+///     pair's value starts on the next line, the first pair is also the widest key
+///     in the hash, and a later non-omission pair needs a right-align key delta
+///     larger than the indentation before that later newline value (for example
+///     Conjur's `"Empty annotation name":` test-case hashes). The crash comes
+///     from RuboCop's corrector trying to remove more spaces before the value than
+///     exist on that line, causing the removal range to overlap the separator/key
+///     edits. If the first pair is not the widest key, or the newline value's
+///     indentation can absorb the key delta, RuboCop emits offenses normally.
+///     Hash rockets keep the prior same-line-value suppression because RuboCop also
+///     clobbers rocket pairs that are already separator-aligned (where key length
+///     does not distinguish the crash shape); see the `"xml" =>`/`"uiinput" =>`
+///     fixture.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -415,24 +418,38 @@ fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
         return false;
     }
 
+    let first_has_widest_key = pairs
+        .iter()
+        .filter(|pair| !pair.is_kwsplat)
+        .all(|pair| pair.key_end_col <= first.key_end_col);
+
     pairs
         .iter()
         .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
         .any(|pair| {
-            if pair.is_value_omission || pair.value_on_new_line {
+            if pair.is_value_omission {
                 return false;
             }
-            // Rocket-style triggers the clobber whenever the first pair's value
-            // is on a new line and a later pair keeps its value on the same
-            // line; the corrector's separator/value range overlaps regardless
-            // of key length.
-            //
-            // Colon-style only crashes when RuboCop's right-aligned key
-            // correction needs to pad a strictly shorter key. When the later
-            // pair's key is the same length or longer than the first pair's,
-            // RuboCop emits offenses normally — suppressing those produces
-            // FNs in the corpus.
-            first.is_rocket || pair.key_char_len < first.key_char_len
+            if !pair.value_on_new_line {
+                // Rocket-style triggers the clobber whenever the first pair's
+                // value is on a new line and a later pair keeps its value on
+                // the same line; the corrector's separator/value range overlaps
+                // regardless of key length.
+                if first.is_rocket {
+                    return true;
+                }
+
+                // Preserve the older colon same-line quirk: a strictly shorter
+                // later key crashes, while equal/longer keys report normally.
+                return pair.key_char_len < first.key_char_len;
+            }
+
+            // Colon-style and all-newline rocket pairs crash when RuboCop's
+            // value correction tries to remove more indentation than exists
+            // before the later value, but only when the first pair is the
+            // widest key. If another pair is wider, RuboCop reports normally.
+            let key_delta = first.key_end_col.saturating_sub(pair.key_end_col);
+            first_has_widest_key && key_delta > pair.value_col.unwrap_or(0)
         })
 }
 

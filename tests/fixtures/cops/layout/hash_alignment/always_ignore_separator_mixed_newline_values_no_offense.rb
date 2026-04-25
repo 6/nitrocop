@@ -16,3 +16,21 @@ resource = {
   title: name,
   body: excerpt
 }
+
+cases = {
+  "Empty annotation name":
+    ResourceRestriction.new(name: "", value: "val"),
+  "Double slash":
+    ResourceRestriction.new(name: "a//b", value: "val"),
+  "Nested Array":
+    ResourceRestriction.new(name: "a[2]/c", value: "val")
+}
+
+rocket_cases = {
+  "Empty annotation name" =>
+    ResourceRestriction.new(name: "", value: "val"),
+  "Double slash" =>
+    ResourceRestriction.new(name: "a//b", value: "val"),
+  "Nested Array" =>
+    ResourceRestriction.new(name: "a[2]/c", value: "val")
+}
