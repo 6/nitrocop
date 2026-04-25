@@ -16,9 +16,9 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
 - Tested on [**5,587 open-source repos**](docs/corpus.md):
-  - **906 of 915** cops match RuboCop exactly with default config
-  - **901 of 915** match across all `EnforcedStyle` variants
-  - Across **28.38M** offenses compared, **28.37M** (99.98%) match exactly with default config
+  - **909 of 915** cops match RuboCop exactly with default config
+  - **906 of 915** match across all `EnforcedStyle` variants
+  - Across **28.374M** offenses compared, **28.371M** (99.990%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -63,22 +63,22 @@ Compared with RuboCop on [**5,587 open-source repos**](docs/corpus.md) (590k Rub
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Layout | 100 | 97 | 94 |
+| Layout | 100 | 97 | 95 |
 | Lint | 148 | 146 | 146 |
-| Style | 287 | 286 | 284 |
+| Style | 287 | 286 | 285 |
 | Metrics | 10 | **10 ✓** | **10 ✓** |
 | Naming | 19 | **19 ✓** | **19 ✓** |
 | Security | 6 | **6 ✓** | **6 ✓** |
 | Bundler | 7 | **7 ✓** | **7 ✓** |
 | Gemspec | 10 | **10 ✓** | **10 ✓** |
 | Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **582 (98.9%)** | **577 (98.1%)** |
+| **Total** | **588** | **582 (98.9%)** | **579 (98.4%)** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Rails | 138 | 135 | 135 |
+| Rails | 138 | **138 ✓** | **138 ✓** |
 
 **[rubocop-performance](https://github.com/rubocop/rubocop-performance)** `1.26.1` (52 cops)
 
