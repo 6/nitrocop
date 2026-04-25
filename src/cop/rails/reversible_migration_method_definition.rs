@@ -17,6 +17,8 @@ const MSG: &str =
 /// - The raw text superclass check overmatched bare `ActiveRecord::Migration`
 ///   and undermatched `::ActiveRecord::Migration[...]`, causing a large FP wave
 ///   and additional misses.
+/// - `default_include` was narrower than RuboCop's `db/**/*.rb`, so migrations
+///   under non-standard directories like `db/migrate_save/` were never checked.
 ///
 /// Fix: match RuboCop's versioned migration superclass shape
 /// (`ActiveRecord::Migration[6.0]` or `::ActiveRecord::Migration[6.0]`), count
@@ -105,7 +107,7 @@ impl Cop for ReversibleMigrationMethodDefinition {
     }
 
     fn default_include(&self) -> &'static [&'static str] {
-        &["db/migrate/**/*.rb"]
+        &["db/**/*.rb"]
     }
 
     fn interested_node_types(&self) -> &'static [u8] {
