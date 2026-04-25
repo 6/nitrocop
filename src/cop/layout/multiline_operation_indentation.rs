@@ -304,9 +304,6 @@ fn build_context(
                         method_argument_locked = true;
                     }
                 }
-                if method_argument {
-                    method_argument_locked = true;
-                }
             }
         }
 
