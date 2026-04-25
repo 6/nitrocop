@@ -697,3 +697,28 @@ def modifier_if_nested_write(recursive:)
   recursive = [recursive -= 1, 0].max if recursive.is_a?(Integer)
   recursive
 end
+
+# FP fix: rescue exception captures protected by sibling retry-rescue.
+# RuboCop's `process_rescue` treats a `begin ... rescue ... end` containing
+# `retry` as a loop. When one rescue clause in the scope uses the captured
+# variable AND contains `retry`, every same-name capture in the scope stays
+# live — even one in a sibling begin block whose body is just `retry`.
+# Mirrors the Netflix-Skunkworks Scumblr `github_sync.rb#get_repos` pattern.
+def retry_protected_rescue_capture(name, type)
+  if type == "org"
+    begin
+      response = work(name)
+    rescue Foo => e
+      retry
+    end
+  else
+    begin
+      response = work(name)
+    rescue Foo => e
+      handle_rate_limit(e)
+      retry
+    rescue => e
+    end
+  end
+  response
+end

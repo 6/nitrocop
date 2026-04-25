@@ -450,3 +450,23 @@ m_over_c   = (statistics.methods / statistics.classes) rescue m_over_c = 0
 
 loc_over_m = (statistics.code_lines / statistics.methods) - 2 rescue loc_over_m = 0
 ^ Lint/UselessAssignment: Useless assignment to variable - `loc_over_m`.
+
+# FN fix: OR-condition LHS write should still be reported when the variable is
+# never read after the OR. Suppression of the LHS exists for the case where
+# the variable is read after the OR (short-circuit kept the LHS write live);
+# without a later read, both writes are dead. Mirrors discourse `plurals.rb`
+# `(e = 0) == 0 ... || !(0..5).include?(e = 0)` in a lambda body that returns
+# a symbol.
+def or_condition_writes_no_later_read(n)
+  if (
+       (
+         (e = 0) == 0 && n.to_i != 0
+          ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+       ) || !(0..5).include?(e = 0)
+                             ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
+     )
+    :many
+  else
+    :other
+  end
+end
