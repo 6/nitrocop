@@ -165,8 +165,8 @@ def claude_oauth_backend(strength: str, effort: str, display_label: str, model_l
     }
 
 
-CODEX_54_HIGH_BACKEND = codex_backend("gpt-5.4", "high", "normal")
-CODEX_54_XHIGH_BACKEND = codex_backend("gpt-5.4", "xhigh", "hard")
+CODEX_NORMAL_BACKEND = codex_backend("gpt-5.5", "high", "normal")
+CODEX_HARD_BACKEND = codex_backend("gpt-5.5", "xhigh", "hard")
 
 CLAUDE_OAUTH_NORMAL_BACKEND = claude_oauth_backend(
     "normal", "high", "claude-oauth / normal", "Claude Opus 4.7 (OAuth, high)",
@@ -180,8 +180,8 @@ BACKENDS = {
     "minimax": MINIMAX_BACKEND,
     "claude-normal": CLAUDE_NORMAL_BACKEND,
     "claude-hard": CLAUDE_HARD_BACKEND,
-    "codex-normal": CODEX_54_HIGH_BACKEND,
-    "codex-hard": CODEX_54_XHIGH_BACKEND,
+    "codex-normal": CODEX_NORMAL_BACKEND,
+    "codex-hard": CODEX_HARD_BACKEND,
     "claude-oauth-normal": CLAUDE_OAUTH_NORMAL_BACKEND,
     "claude-oauth-hard": CLAUDE_OAUTH_HARD_BACKEND,
 }

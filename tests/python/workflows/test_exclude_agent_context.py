@@ -88,12 +88,12 @@ def test_configure_codex_preserves_existing_config(tmp_path: Path):
 
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
-    (codex_home / "config.toml").write_text('model = "gpt-5.4"\n')
+    (codex_home / "config.toml").write_text('model = "gpt-5.5"\n')
 
     exclude_agent_context.configure_codex(tmp_path, codex_home=codex_home)
 
     cfg_text = (codex_home / "config.toml").read_text()
-    assert 'model = "gpt-5.4"' in cfg_text
+    assert 'model = "gpt-5.5"' in cfg_text
     assert "[[skills.config]]" in cfg_text
 
 

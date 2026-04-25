@@ -29,7 +29,7 @@ def test_codex_normal_uses_codex():
     assert "guard_backend_secrets.py" in config["setup_cmd"]
     assert "validate_codex_auth.py" in config["setup_cmd"]
     assert "CODEX_AUTH_JSON" in config["setup_cmd"]
-    assert "-m gpt-5.4" in config["run_cmd"]
+    assert "-m gpt-5.5" in config["run_cmd"]
     assert "model_reasoning_effort=high" in config["run_cmd"]
 
 
@@ -54,7 +54,7 @@ def test_choose_backend_outputs_family_strength_and_labels():
     assert fields["family"] == "codex"
     assert fields["strength"] == "normal"
     assert fields["display_label"] == "codex / normal"
-    assert fields["model_label"] == "gpt-5.4 (high)"
+    assert fields["model_label"] == "gpt-5.5 (high)"
 
 
 def test_claude_normal_uses_claude():
