@@ -79,6 +79,11 @@ def initialize(hooks = Hash.new { |h, k| h[k] = [] })
   @hooks = hooks
 end
 
+def repeated_spacing
+  map { _1**2 }
+  map { _1 ** 2 }
+end
+
 it "passes coerced value if it doesn't meet constraints" do
   called = false
 

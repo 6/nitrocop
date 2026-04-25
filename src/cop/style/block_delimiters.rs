@@ -116,6 +116,20 @@ use std::collections::HashSet;
 /// - the non-UTF-8 `always_braces` bailout must only mirror RuboCop's
 ///   parser-incompatible slash-regex `\xHH` cases; ordinary non-UTF-8 strings
 ///   with high `\xHH` escapes are still linted by RuboCop
+///
+/// ## Fix (2026-04-25): match semantic spacing-only equality and plain heredocs
+///
+/// The remaining semantic-only mismatches were two more structural-equality
+/// gaps in the "earlier sibling equal to tail" fallback:
+///
+/// - RuboCop's AST equality ignores formatting-only differences, so
+///   `map { _1**2 }` and a later tail `map { _1 ** 2 }` are structurally
+///   equal and both count as `rv_of_scope`; nitrocop now ignores internal
+///   ASCII whitespace only for source slices without literal delimiters
+/// - Prism represents plain `<<-CODE` heredocs as `StringNode`, not
+///   `InterpolatedStringNode`, so the previous heredoc-signature collector
+///   missed differing heredoc payloads and incorrectly treated distinct
+///   `example { expect(call(<<-CODE)) ... }` siblings as equal
 pub struct BlockDelimiters;
 
 impl Cop for BlockDelimiters {
@@ -1246,13 +1260,23 @@ fn node_source_matches_with_heredocs(
 ) -> bool {
     let candidate_loc = candidate.location();
     let last_loc = last.location();
+    if collect_heredoc_signatures(candidate, source) != collect_heredoc_signatures(last, source) {
+        return false;
+    }
+
     source_slice_matches(
         source,
         candidate_loc.start_offset(),
         candidate_loc.end_offset(),
         last_loc.start_offset(),
         last_loc.end_offset(),
-    ) && collect_heredoc_signatures(candidate, source) == collect_heredoc_signatures(last, source)
+    ) || source_slice_matches_without_ascii_whitespace_for_non_literals(
+        source,
+        candidate_loc.start_offset(),
+        candidate_loc.end_offset(),
+        last_loc.start_offset(),
+        last_loc.end_offset(),
+    )
 }
 
 fn source_slice_matches(
@@ -1280,6 +1304,43 @@ fn source_slice_matches_trimmed_end(
     };
 
     trim_ascii_whitespace_end(first) == trim_ascii_whitespace_end(second)
+}
+
+fn source_slice_matches_without_ascii_whitespace_for_non_literals(
+    source: &SourceFile,
+    first_start: usize,
+    first_end: usize,
+    second_start: usize,
+    second_end: usize,
+) -> bool {
+    let Some(first) = source.as_bytes().get(first_start..first_end) else {
+        return false;
+    };
+    let Some(second) = source.as_bytes().get(second_start..second_end) else {
+        return false;
+    };
+
+    if !can_ignore_ascii_whitespace_for_structural_match(first)
+        || !can_ignore_ascii_whitespace_for_structural_match(second)
+    {
+        return false;
+    }
+
+    strip_ascii_whitespace(first) == strip_ascii_whitespace(second)
+}
+
+fn can_ignore_ascii_whitespace_for_structural_match(slice: &[u8]) -> bool {
+    !slice
+        .iter()
+        .any(|byte| matches!(*byte, b'\'' | b'"' | b'`' | b'/' | b'%'))
+}
+
+fn strip_ascii_whitespace(slice: &[u8]) -> Vec<u8> {
+    slice
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect()
 }
 
 fn trim_ascii_whitespace_end(mut slice: &[u8]) -> &[u8] {
@@ -1463,6 +1524,47 @@ struct HeredocSignatureCollector<'a> {
 }
 
 impl<'a> HeredocSignatureCollector<'a> {
+    fn push_string(&mut self, node: &ruby_prism::StringNode<'_>) {
+        let Some(opening_loc) = node.opening_loc() else {
+            return;
+        };
+        let Some(closing_loc) = node.closing_loc() else {
+            return;
+        };
+        let Some(opening_slice) = self
+            .source
+            .as_bytes()
+            .get(opening_loc.start_offset()..opening_loc.end_offset())
+        else {
+            return;
+        };
+        if !opening_slice.starts_with(b"<<") {
+            return;
+        }
+
+        let mut signature = Vec::new();
+        append_source_slice(
+            self.source,
+            &mut signature,
+            opening_loc.start_offset(),
+            opening_loc.end_offset(),
+        );
+        let content_loc = node.content_loc();
+        append_source_slice(
+            self.source,
+            &mut signature,
+            content_loc.start_offset(),
+            content_loc.end_offset(),
+        );
+        append_source_slice(
+            self.source,
+            &mut signature,
+            closing_loc.start_offset(),
+            closing_loc.end_offset(),
+        );
+        self.signatures.push(signature);
+    }
+
     fn push_interpolated_string(&mut self, node: &ruby_prism::InterpolatedStringNode<'_>) {
         let Some(opening_loc) = node.opening_loc() else {
             return;
@@ -1508,6 +1610,11 @@ impl<'a> HeredocSignatureCollector<'a> {
 }
 
 impl Visit<'_> for HeredocSignatureCollector<'_> {
+    fn visit_string_node(&mut self, node: &ruby_prism::StringNode<'_>) {
+        self.push_string(node);
+        ruby_prism::visit_string_node(self, node);
+    }
+
     fn visit_interpolated_string_node(&mut self, node: &ruby_prism::InterpolatedStringNode<'_>) {
         self.push_interpolated_string(node);
         ruby_prism::visit_interpolated_string_node(self, node);
