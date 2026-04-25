@@ -297,6 +297,18 @@ use crate::parse::source::SourceFile;
 ///   `too_long?` check still joins the full physical lines in the span. Keep
 ///   nitrocop aligned with that behavior; slicing the start/end columns causes
 ///   false positives on long regex-heavy chains that RuboCop accepts.
+/// - **Parser unsafe range parity**: `case` pattern matching, `for`, `while`,
+///   and `until` nodes are no longer treated as AST unsafe-to-split ranges
+///   because RuboCop's `safe_to_split?` does not include those node types.
+///   They remain Phase 2 blocking ranges where needed for modifier backslash
+///   contexts. The backslash fallback also now anchors `elsif` and leading
+///   parenthesized continuation groups at RuboCop's reported expression column.
+/// - **Backslash lexical guards**: the text fallback now skips condition
+///   headers whose source is only `if`, `elsif`, or `unless` before a trailing
+///   backslash, where RuboCop reports no offense, while still allowing a
+///   same-line condition ending in `&&` plus a trailing backslash to be flagged.
+///   It also treats Ruby's `$\\` global variable as source content rather than
+///   a line continuation marker.
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
@@ -466,7 +478,6 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
 
     fn visit_case_match_node(&mut self, node: &ruby_prism::CaseMatchNode<'pr>) {
         let loc = node.location();
-        self.ranges.push((loc.start_offset(), loc.end_offset()));
         self.group_blocking_ranges
             .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_case_match_node(self, node);
@@ -578,7 +589,6 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
 
     fn visit_until_node(&mut self, node: &ruby_prism::UntilNode<'pr>) {
         let loc = node.location();
-        self.ranges.push((loc.start_offset(), loc.end_offset()));
         self.group_blocking_ranges
             .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_until_node(self, node);
@@ -586,7 +596,6 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
 
     fn visit_while_node(&mut self, node: &ruby_prism::WhileNode<'pr>) {
         let loc = node.location();
-        self.ranges.push((loc.start_offset(), loc.end_offset()));
         self.group_blocking_ranges
             .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_while_node(self, node);
@@ -594,7 +603,6 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
 
     fn visit_for_node(&mut self, node: &ruby_prism::ForNode<'pr>) {
         let loc = node.location();
-        self.ranges.push((loc.start_offset(), loc.end_offset()));
         self.group_blocking_ranges
             .push((loc.start_offset(), loc.end_offset()));
         ruby_prism::visit_for_node(self, node);
@@ -1536,6 +1544,12 @@ fn check_backslash_continuations(
             i += 1;
             continue;
         }
+        if ends_with_special_global_backslash(trimmed_content)
+            || is_keyword_only_continuation(trimmed_content)
+        {
+            i += 1;
+            continue;
+        }
 
         // RuboCop never reports `class Foo < \` superclass header breaks here.
         if trimmed_content.starts_with(b"class ") && trimmed_content.contains(&b'<') {
@@ -1551,7 +1565,9 @@ fn check_backslash_continuations(
         }
 
         let backslash_offset = line_starts[i] + trimmed.len() - 1;
-        if !code_map.is_code(backslash_offset) {
+        let is_elsif_line = starts_with_keyword(trimmed_content, b"elsif")
+            || trimmed_content.starts_with(b"elsif(");
+        if !code_map.is_code(backslash_offset) && !is_elsif_line {
             i += 1;
             continue;
         }
@@ -1609,6 +1625,9 @@ fn check_backslash_continuations(
         let group_trimmed_start =
             trim_leading_whitespace(trim_trailing_whitespace(lines[group_start]));
         let leading_ws = leading_whitespace_len(lines[group_start]);
+        let group_starts_with_elsif = starts_with_keyword(group_trimmed_start, b"elsif")
+            || group_trimmed_start.starts_with(b"elsif(");
+        let group_starts_with_paren = group_trimmed_start.starts_with(b"(");
         let keyword_prefix_len =
             if group_trimmed_start.starts_with(b"if ") || group_trimmed_start.starts_with(b"if(") {
                 3
@@ -1616,6 +1635,10 @@ fn check_backslash_continuations(
                 || group_trimmed_start.starts_with(b"unless(")
             {
                 7
+            } else if group_starts_with_elsif {
+                6
+            } else if group_starts_with_paren {
+                1
             } else {
                 0
             };
@@ -1664,6 +1687,14 @@ fn check_backslash_continuations(
             {
                 return false;
             }
+            if group_starts_with_elsif
+                && (us == group_statement_start || us == group_statement_start + keyword_prefix_len)
+            {
+                return false;
+            }
+            if group_starts_with_paren && us == group_statement_start {
+                return false;
+            }
             true
         });
         if has_unsafe {
@@ -1683,6 +1714,9 @@ fn check_backslash_continuations(
             {
                 return false;
             }
+            if group_starts_with_elsif {
+                return false;
+            }
             bs <= group_byte_start && be >= group_byte_end
         });
         if blocked_by_enclosing_range {
@@ -1695,7 +1729,7 @@ fn check_backslash_continuations(
                 && ce >= group_byte_end
                 && (cs < group_byte_start || ce > group_byte_end)
         });
-        if covered_by_checked_chain {
+        if covered_by_checked_chain && !is_elsif_line {
             i = final_line_idx + 1;
             continue;
         }
@@ -1752,6 +1786,13 @@ fn check_backslash_continuations(
         }
 
         let next_content = trim_leading_whitespace(lines[group_start + 1]);
+        if starts_with_keyword(next_content, b"until")
+            || starts_with_keyword(next_content, b"while")
+        {
+            i = final_line_idx + 1;
+            continue;
+        }
+
         if ternary_then_idx.is_none()
             && (next_content.starts_with(b"&&") || next_content.starts_with(b"||"))
         {
@@ -1890,6 +1931,26 @@ fn ends_with_safe_navigation_operator(trimmed: &[u8]) -> bool {
 
 fn is_word_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+fn starts_with_keyword(trimmed: &[u8], keyword: &[u8]) -> bool {
+    trimmed.starts_with(keyword)
+        && trimmed
+            .get(keyword.len())
+            .is_some_and(|b| b.is_ascii_whitespace())
+}
+
+fn ends_with_special_global_backslash(trimmed: &[u8]) -> bool {
+    trimmed.len() >= 2 && trimmed[trimmed.len() - 2] == b'$' && trimmed[trimmed.len() - 1] == b'\\'
+}
+
+fn is_keyword_only_continuation(trimmed: &[u8]) -> bool {
+    if !trimmed.ends_with(b"\\") {
+        return false;
+    }
+
+    let before_backslash = trim_trailing_whitespace(&trimmed[..trimmed.len() - 1]);
+    before_backslash == b"if" || before_backslash == b"elsif" || before_backslash == b"unless"
 }
 
 fn leading_whitespace_len(line: &[u8]) -> usize {

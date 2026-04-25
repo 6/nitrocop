@@ -381,6 +381,26 @@ end
 current_context = current_context.parent \
   until current_context.is_a?(NamespaceObject)
 
+# Condition header with only the keyword before the backslash. RuboCop does not
+# flag these; it only flags when condition code appears before the backslash.
+if \
+  foo && bar
+then
+  baz
+end
+
+if \
+  left.type == :send and left.children.length == 3 and
+  left.children[1] == :+
+then
+  left = collapse_strings(left)
+end
+
+# Ruby's $\ global variable is not a line-continuation marker.
+alias $ORS $\
+alias $OUTPUT_RECORD_SEPARATOR $\
+@origOutputSep = $\
+
 # Backslash continuation with an inline comment in the continued argument list.
 # RuboCop will not collapse the comment onto a single line.
 class AttrReaderWithComment
