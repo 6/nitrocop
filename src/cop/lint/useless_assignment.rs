@@ -154,6 +154,8 @@ impl Cop for UselessAssignment {
         let or_condition_offsets = collect_or_condition_write_offsets(parse_result);
         let post_condition_loop_body_offsets =
             collect_post_condition_loop_body_write_offsets(parse_result);
+        let retry_protected_rescue_offsets =
+            collect_retry_protected_rescue_capture_offsets(parse_result);
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
         let mut rescue_modifier_offsets = rescue_modifier_collector.offsets;
@@ -178,6 +180,7 @@ impl Cop for UselessAssignment {
                     && !or_condition_offsets.contains(&candidate.node_offset)
                     && !post_condition_loop_body_offsets.contains(&candidate.node_offset)
                     && !rescue_modifier_offsets.contains(&candidate.node_offset)
+                    && !retry_protected_rescue_offsets.contains(&candidate.node_offset)
             } else {
                 false
             };
@@ -833,6 +836,185 @@ impl<'pr> Visit<'pr> for RescueModifierPrecedingWriteCollector<'_> {
             self.offsets.insert(node.location().start_offset());
         }
         ruby_prism::visit_local_variable_write_node(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: rescue exception captures protected by a sibling retry-rescue
+// ---------------------------------------------------------------------------
+//
+// RuboCop's `process_rescue` treats a `begin ... rescue ... end` containing
+// `retry` as a loop, which (combined with the variable_force walk) keeps any
+// `rescue X => e` capture of the same name alive across the entire surrounding
+// scope — even captures in other begin blocks that don't themselves use `e`.
+//
+// Mirror that quirk: when one `rescue X => name` clause in a scope (def/class/
+// module/lambda or top-level) contains both `retry` and a read of `name`,
+// suppress the unused-warning for every rescue capture of that name in the
+// same scope.
+
+fn collect_retry_protected_rescue_capture_offsets(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashSet<usize> {
+    let mut collector = RetryProtectedRescueCollector::default();
+    collector.visit(&parse_result.node());
+    let mut suppress_collector = RetryProtectedSuppressCollector {
+        protected: &collector.protected,
+        scope_stack: vec![0],
+        offsets: HashSet::new(),
+    };
+    suppress_collector.visit(&parse_result.node());
+    suppress_collector.offsets
+}
+
+#[derive(Default)]
+struct RetryProtectedRescueCollector {
+    /// (scope_offset, name) pairs where a rescue clause uses `name` and contains retry.
+    protected: HashSet<(usize, Vec<u8>)>,
+    scope_stack: Vec<usize>,
+}
+
+impl RetryProtectedRescueCollector {
+    fn current_scope(&self) -> usize {
+        self.scope_stack.last().copied().unwrap_or(0)
+    }
+
+    fn enter_scope<F: FnOnce(&mut Self)>(&mut self, offset: usize, f: F) {
+        self.scope_stack.push(offset);
+        f(self);
+        self.scope_stack.pop();
+    }
+}
+
+fn rescue_clause_capture_name(rescue: &ruby_prism::RescueNode<'_>) -> Option<Vec<u8>> {
+    let reference = rescue.reference()?;
+    let target = reference.as_local_variable_target_node()?;
+    Some(target.name().as_slice().to_vec())
+}
+
+fn rescue_clause_capture_offset(rescue: &ruby_prism::RescueNode<'_>) -> Option<usize> {
+    let reference = rescue.reference()?;
+    let target = reference.as_local_variable_target_node()?;
+    Some(target.location().start_offset())
+}
+
+fn rescue_clause_body_has_retry_and_read(rescue: &ruby_prism::RescueNode<'_>, name: &[u8]) -> bool {
+    let Some(stmts) = rescue.statements() else {
+        return false;
+    };
+    let mut scanner = RetryAndReadScanner {
+        name,
+        has_retry: false,
+        has_read: false,
+    };
+    for stmt in stmts.body().iter() {
+        scanner.visit(&stmt);
+    }
+    scanner.has_retry && scanner.has_read
+}
+
+struct RetryAndReadScanner<'n> {
+    name: &'n [u8],
+    has_retry: bool,
+    has_read: bool,
+}
+
+impl<'pr> Visit<'pr> for RetryAndReadScanner<'_> {
+    fn visit_retry_node(&mut self, _node: &ruby_prism::RetryNode<'pr>) {
+        self.has_retry = true;
+    }
+    fn visit_local_variable_read_node(&mut self, node: &ruby_prism::LocalVariableReadNode<'pr>) {
+        if node.name().as_slice() == self.name {
+            self.has_read = true;
+        }
+    }
+    // Don't recurse into nested scopes — local var resolution doesn't cross
+    // those boundaries for rescue exception captures.
+    fn visit_def_node(&mut self, _: &ruby_prism::DefNode<'pr>) {}
+    fn visit_class_node(&mut self, _: &ruby_prism::ClassNode<'pr>) {}
+    fn visit_module_node(&mut self, _: &ruby_prism::ModuleNode<'pr>) {}
+    fn visit_lambda_node(&mut self, _: &ruby_prism::LambdaNode<'pr>) {}
+}
+
+impl<'pr> Visit<'pr> for RetryProtectedRescueCollector {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_def_node(this, node));
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_class_node(this, node));
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_module_node(this, node));
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_lambda_node(this, node));
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        if let Some(name) = rescue_clause_capture_name(node) {
+            if rescue_clause_body_has_retry_and_read(node, &name) {
+                self.protected.insert((self.current_scope(), name));
+            }
+        }
+        ruby_prism::visit_rescue_node(self, node);
+    }
+}
+
+struct RetryProtectedSuppressCollector<'a> {
+    protected: &'a HashSet<(usize, Vec<u8>)>,
+    scope_stack: Vec<usize>,
+    offsets: HashSet<usize>,
+}
+
+impl<'a> RetryProtectedSuppressCollector<'a> {
+    fn current_scope(&self) -> usize {
+        self.scope_stack.last().copied().unwrap_or(0)
+    }
+
+    fn enter_scope<F: FnOnce(&mut Self)>(&mut self, offset: usize, f: F) {
+        self.scope_stack.push(offset);
+        f(self);
+        self.scope_stack.pop();
+    }
+}
+
+impl<'pr> Visit<'pr> for RetryProtectedSuppressCollector<'_> {
+    fn visit_def_node(&mut self, node: &ruby_prism::DefNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_def_node(this, node));
+    }
+
+    fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_class_node(this, node));
+    }
+
+    fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_module_node(this, node));
+    }
+
+    fn visit_lambda_node(&mut self, node: &ruby_prism::LambdaNode<'pr>) {
+        let offset = node.location().start_offset();
+        self.enter_scope(offset, |this| ruby_prism::visit_lambda_node(this, node));
+    }
+
+    fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
+        if let Some(name) = rescue_clause_capture_name(node) {
+            if self.protected.contains(&(self.current_scope(), name)) {
+                if let Some(offset) = rescue_clause_capture_offset(node) {
+                    self.offsets.insert(offset);
+                }
+            }
+        }
+        ruby_prism::visit_rescue_node(self, node);
     }
 }
 
