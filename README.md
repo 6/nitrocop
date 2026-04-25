@@ -15,10 +15,10 @@ Benchmark on the [rubygems.org repo](https://github.com/rubygems/rubygems.org) (
 **Features**
 
 - **915 cops** from 7 RuboCop gems (rubocop, rubocop-rails, rubocop-performance, rubocop-rspec, rubocop-rspec_rails, rubocop-factory_bot, rubocop-rake)
-- Tested on [**5,588 open-source repos**](docs/corpus.md):
-  - **905 of 915** cops match RuboCop exactly with default config
-  - **900 of 915** match across all `EnforcedStyle` variants
-  - Across **28.38M** offenses compared, **28.38M** (99.98%) match exactly with default config
+- Tested on [**5,587 open-source repos**](docs/corpus.md):
+  - **906 of 915** cops match RuboCop exactly with default config
+  - **901 of 915** match across all `EnforcedStyle` variants
+  - Across **28.38M** offenses compared, **28.37M** (99.98%) match exactly with default config
 - **Autocorrect** (`-a`/`-A`) is partial — work in progress
 - Reads your existing `.rubocop.yml` — no migration needed
 - Uses [Prism](https://github.com/ruby/prism) (Ruby's official parser) via `ruby-prism` crate
@@ -55,7 +55,7 @@ Config auto-discovery walks up from the target directory to find `.rubocop.yml`.
 ## Cops
 
 <!-- corpus-cops:start -->
-Compared with RuboCop on [**5,588 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
+Compared with RuboCop on [**5,587 open-source repos**](docs/corpus.md) (590k Ruby files, 28.4M offenses compared).
 
 **Default** = default RuboCop config. **All variants** = every supported `EnforcedStyle` (e.g. `EnforcedStyle: comma`).
 
@@ -63,7 +63,7 @@ Compared with RuboCop on [**5,588 open-source repos**](docs/corpus.md) (590k Rub
 
 | Department | Cops | Exact match (default) | Exact match (all variants) |
 |------------|-----:|----------------------:|---------------------------:|
-| Layout | 100 | 96 | 93 |
+| Layout | 100 | 97 | 94 |
 | Lint | 148 | 146 | 146 |
 | Style | 287 | 286 | 284 |
 | Metrics | 10 | **10 ✓** | **10 ✓** |
@@ -72,7 +72,7 @@ Compared with RuboCop on [**5,588 open-source repos**](docs/corpus.md) (590k Rub
 | Bundler | 7 | **7 ✓** | **7 ✓** |
 | Gemspec | 10 | **10 ✓** | **10 ✓** |
 | Migration | 1 | **1 ✓** | **1 ✓** |
-| **Total** | **588** | **581 (98.8%)** | **576 (97.9%)** |
+| **Total** | **588** | **582 (98.9%)** | **577 (98.1%)** |
 
 **[rubocop-rails](https://github.com/rubocop/rubocop-rails)** `2.34.3` (138 cops)
 

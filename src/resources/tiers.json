@@ -108,6 +108,7 @@
     "Layout/SpaceAroundEqualsInParameterDefault": "stable",
     "Layout/SpaceAroundKeyword": "stable",
     "Layout/SpaceAroundMethodCallOperator": "stable",
+    "Layout/SpaceAroundOperators": "stable",
     "Layout/SpaceBeforeBlockBraces": "stable",
     "Layout/SpaceBeforeBrackets": "stable",
     "Layout/SpaceBeforeComma": "stable",
