@@ -7,3 +7,12 @@ hash = {
       proc { ui_inputs },
   "body"     => !body.empty?
 }
+
+resource = {
+  cover_url:
+    if attached?
+      url
+    end,
+  title: name,
+  body: excerpt
+}

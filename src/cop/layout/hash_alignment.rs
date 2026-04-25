@@ -107,6 +107,18 @@ use ruby_prism::Visit;
 ///      `{ token:, uuid: creds[:uuid] }` reports no offenses (`uuid` < `token`), while
 ///      `{ token:, uuid_long: x }` still reports normally (`uuid_long` >= `token`). Mixed
 ///      colon/rocket pairs and same-length keys do not crash.
+///
+/// 10. **Separator-style colon crash with mixed newline values (2026-04-25):**
+///     RuboCop 1.84.2 aborts `separator`-style checking for colon pairs when the first
+///     non-kwsplat pair's value starts on the next line, a later non-omission pair keeps
+///     its value on the same line, AND that later pair's key is strictly shorter than
+///     the first pair's. The crash comes from RuboCop's right-align corrector trying to
+///     pad the shorter key with leading spaces, whose remove-range overlaps with the
+///     separator and value ranges. When all later keys are equal-length or longer,
+///     RuboCop emits offenses normally, so the colon suppression is gated on
+///     `pair.key_char_len < first.key_char_len`. The rocket suppression is unconditional
+///     because RuboCop also clobbers rocket pairs that are already separator-aligned
+///     (where key length doesn't matter) — see the `"xml" =>`/`"uiinput" =>` fixture.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -399,14 +411,29 @@ fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
         return false;
     };
 
-    if !first.is_rocket || !first.value_on_new_line {
+    if !first.value_on_new_line {
         return false;
     }
 
     pairs
         .iter()
         .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
-        .any(|pair| !pair.is_value_omission && !pair.value_on_new_line)
+        .any(|pair| {
+            if pair.is_value_omission || pair.value_on_new_line {
+                return false;
+            }
+            // Rocket-style triggers the clobber whenever the first pair's value
+            // is on a new line and a later pair keeps its value on the same
+            // line; the corrector's separator/value range overlaps regardless
+            // of key length.
+            //
+            // Colon-style only crashes when RuboCop's right-aligned key
+            // correction needs to pad a strictly shorter key. When the later
+            // pair's key is the same length or longer than the first pair's,
+            // RuboCop emits offenses normally — suppressing those produces
+            // FNs in the corpus.
+            first.is_rocket || pair.key_char_len < first.key_char_len
+        })
 }
 
 /// RuboCop 1.84.2 crashes when checking a colon-style pair whose key is strictly shorter
@@ -1327,6 +1354,17 @@ mod tests {
             &HashAlignment,
             include_bytes!(
                 "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_mixed_newline_values_no_offense.rb"
+            ),
+            variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn separator_always_ignore_first_value_newline_equal_key_offense_fixture() {
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_first_value_newline_equal_key_offense.rb"
             ),
             variant_config("separator", "separator", "always_ignore"),
         );
