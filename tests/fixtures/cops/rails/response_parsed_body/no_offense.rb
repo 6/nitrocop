@@ -3,6 +3,9 @@ JSON.parse(data)
 JSON.parse(file.read)
 response.body
 JSON.parse(request.body)
+# RuboCop's node pattern requires `response` to have a nil receiver:
+# (send (const {nil? cbase} :JSON) :parse (send (send nil? :response) :body))
+JSON.parse(error.response.body)
 Nokogiri::XML(response.body)
 # Extra arguments — RuboCop only matches exactly 1 argument
 JSON.parse(response.body, symbolize_names: true)
