@@ -3,14 +3,14 @@ use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
 
-/// Matches RuboCop's style-specific handling of `"... \\\n#{expr}"`.
+/// Matches RuboCop's continued-string quirk for `"... \\\n#{expr}"`.
 ///
-/// RuboCop ignores the compact `#{expr}` form after a backslash-newline
-/// continuation for the default `no_space` style, but still reports missing
-/// interior spaces for `EnforcedStyle: space`. nitrocop previously skipped that
-/// continued-string interpolation in both styles, which missed the lone corpus
-/// `space` variant offense, so the continuation guard must stay limited to the
-/// no-space branch.
+/// When an interpolation starts immediately after a backslash-newline string
+/// continuation, RuboCop skips `Layout/SpaceInsideStringInterpolation`
+/// regardless of `EnforcedStyle`. nitrocop previously enforced the
+/// `EnforcedStyle: space` variant there, which produced a corpus false positive
+/// in LicenseFinder's CocoaPods spec, so the continuation guard must apply in
+/// both styles without weakening ordinary one-line `#{expr}` checks.
 pub struct SpaceInsideStringInterpolation;
 
 impl Cop for SpaceInsideStringInterpolation {
@@ -64,7 +64,7 @@ impl Cop for SpaceInsideStringInterpolation {
             return;
         }
 
-        if !require_space && starts_after_string_line_continuation(bytes, open_loc.start_offset()) {
+        if starts_after_string_line_continuation(bytes, open_loc.start_offset()) {
             return;
         }
 
