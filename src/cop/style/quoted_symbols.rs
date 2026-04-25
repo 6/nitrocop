@@ -233,7 +233,7 @@ mod tests {
             let parse_result = crate::parse::parse_source(source.as_bytes());
             let config = crate::cop::CopConfig::default();
             let cop = QuotedSymbols;
-            let ast_cops: Vec<(&dyn Cop, &crate::cop::CopConfig)> = vec![(&cop, &config)];
+            let ast_cops: Vec<(usize, &dyn Cop, &crate::cop::CopConfig)> = vec![(0, &cop, &config)];
             let mut walker = BatchedCopWalker::new(ast_cops, &source, &parse_result);
             walker.visit(&parse_result.node());
         }

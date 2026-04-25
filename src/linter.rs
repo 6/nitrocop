@@ -329,7 +329,8 @@ pub fn run_linter(
                 let t2 = std::time::Instant::now();
                 // check_node via single-cop walker
                 if !cop.interested_node_types().is_empty() || cop.name().contains('/') {
-                    let ast_cops: Vec<(&dyn Cop, &CopConfig)> = vec![(&**cop, cop_config)];
+                    let ast_cops: Vec<(usize, &dyn Cop, &CopConfig)> =
+                        vec![(i, &**cop, cop_config)];
                     let mut walker = BatchedCopWalker::new(ast_cops, &source, &parse_result);
                     walker.visit(&parse_result.node());
                 }
@@ -1255,9 +1256,9 @@ fn lint_source_once(
 
     let ast_start = std::time::Instant::now();
     if !ast_cop_indices.is_empty() {
-        let ast_cops: Vec<(&dyn Cop, &CopConfig)> = ast_cop_indices
+        let ast_cops: Vec<(usize, &dyn Cop, &CopConfig)> = ast_cop_indices
             .iter()
-            .map(|&i| (&*registry.cops()[i] as &dyn Cop, &active_base_configs[i]))
+            .map(|&i| (i, &*registry.cops()[i] as &dyn Cop, &active_base_configs[i]))
             .collect();
         let mut walker = BatchedCopWalker::new(ast_cops, source, &parse_result);
         if autocorrect_mode != crate::cli::AutocorrectMode::Off {

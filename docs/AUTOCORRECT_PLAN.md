@@ -582,7 +582,7 @@ Test that overlapping corrections from multiple cops are handled identically to 
 - Post-correction syntax validation (re-parse with Prism, discard if invalid)
 
 **What's missing:**
-- **Functional `cop_index`**: The `Correction` struct has a `cop_index` field and `CorrectionSet` sorts by it as a tiebreaker, but all 181 correction sites hardcode `cop_index: 0`. The tiebreaker is dead code.
+- **Functional `cop_index`**: ✅ Wired in `BatchedCopWalker`. Per-cop sites still hardcode `cop_index: 0`, but the walker stamps the registry index onto every correction post-dispatch (see `run_with_index` in `src/cop/walker.rs`). Tiebreaks in `CorrectionSet` are now deterministic by registration order.
 - **`autocorrect_incompatible_with`**: RuboCop lets cops declare other cops whose corrections should be entirely skipped when theirs are applied. Not implemented. (~10 cops use this in RuboCop.)
 - **Two-pass cop ordering**: RuboCop partitions cops into autocorrect vs non-autocorrect, runs autocorrect cops first, and skips non-autocorrect cops if corrections were made. Nitrocop runs all cops in a single pass (universal → pattern → AST order). This is an optimization, not a correctness issue — without it, nitrocop just does slightly more work per iteration.
 - **Checksum-based infinite loop detection**: RuboCop detects cycles by tracking source checksums across iterations. Nitrocop uses source-equality (bail if source didn't change), which catches fixed points but not cycles (A→B→A). In practice, cycles are rare because `CorrectionSet` deterministically resolves conflicts the same way each iteration.
@@ -591,19 +591,13 @@ Test that overlapping corrections from multiple cops are handled identically to 
 
 **Why it's not urgent yet:** The iteration loop handles most conflicts through convergence — corrections that were dropped in one pass get applied in the next. The gaps above affect edge cases (same-offset tiebreaking, cop-pair conflicts). Measuring actual divergence should precede investing in conflict-layer sophistication.
 
-### 8.2 Wire cop_index (next step)
+### 8.2 Wire cop_index ✅ COMPLETE
 
-The `cop_index` field in `Correction` exists so that `CorrectionSet` can break ties deterministically when two corrections start at the same byte offset (lower index wins, matching RuboCop's "first merged wins" by cop registration order). Currently dead code.
+The `cop_index` field in `Correction` is now functional. `BatchedCopWalker::new` accepts `(usize, &dyn Cop, &CopConfig)` tuples — the registry index. After each `check_node` call, the walker overwrites `cop_index` on any corrections that cop just pushed (`run_with_index` in `src/cop/walker.rs`). Same-offset ties in `CorrectionSet` now resolve deterministically by registration order, matching RuboCop's "first merged wins".
 
-**Approach:**
-1. Add a `cop_index: usize` field to `CopConfig` (or pass it alongside CopConfig in `lint_source_once`)
-2. Set it from the registry index during cop dispatch in `lint_source_once`
-3. Update all 181 correction sites to use the index instead of hardcoded `0`
-4. Mechanical change — each cop constructs `Correction { ..., cop_index: config.cop_index }` instead of `cop_index: 0`
+**Why this approach (vs. updating 181 cop sites):** Stamping at the walker layer keeps cop_index a registry-owned concept rather than something every cop has to remember to thread through `CopConfig`. The 181 hardcoded `cop_index: 0` sites are dead writes — harmless, since the walker overwrites them — but can be cleaned up opportunistically.
 
-**Why this matters:** Without functional cop_index, when two corrections start at the same offset the winner is arbitrary (depends on Vec ordering). With it, the winner is deterministic and matches RuboCop's registration-order priority.
-
-**Scope:** ~181 files, but each change is a one-line substitution. The CopConfig plumbing is ~10 lines.
+**Test:** `cop::walker::tests::dispatch_stamps_cop_index_onto_corrections` constructs a walker with two cops at distinct registry indices and asserts the stamp lands on the right correction.
 
 ### 8.3 Autocorrect comparison harness (next step)
 
