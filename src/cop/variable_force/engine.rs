@@ -948,6 +948,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        self.visit(&node.constant_path());
         if let Some(superclass) = node.superclass() {
             self.visit(&superclass);
         }
@@ -960,6 +961,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_module_node(&mut self, node: &ruby_prism::ModuleNode<'pr>) {
+        self.visit(&node.constant_path());
         let loc = node.location();
         self.enter_scope(ScopeKind::Module, loc.start_offset(), loc.end_offset());
         if let Some(body) = node.body() {
@@ -2057,6 +2059,26 @@ mod tests {
             .find(|s| s.kind == ScopeKind::TopLevel)
             .unwrap();
         assert!(top.vars["obj"].num_references > 0);
+    }
+
+    #[test]
+    fn test_class_constant_path_receiver_in_outer_scope() {
+        let scopes = run_engine("base = Object\nclass base::Foo\n  x = 1\nend\n");
+        let top = scopes
+            .iter()
+            .find(|s| s.kind == ScopeKind::TopLevel)
+            .unwrap();
+        assert!(top.vars["base"].num_references > 0);
+    }
+
+    #[test]
+    fn test_module_constant_path_receiver_in_outer_scope() {
+        let scopes = run_engine("base = Object\nmodule base::Foo\n  x = 1\nend\n");
+        let top = scopes
+            .iter()
+            .find(|s| s.kind == ScopeKind::TopLevel)
+            .unwrap();
+        assert!(top.vars["base"].num_references > 0);
     }
 
     // ── Parameter declaration tests ────────────────────────────────────

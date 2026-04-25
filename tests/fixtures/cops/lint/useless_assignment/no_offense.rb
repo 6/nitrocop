@@ -400,6 +400,18 @@ def singleton_class_receiver
   end
 end
 
+# FP fix: dynamic module constant paths read the local receiver
+module Foo
+end
+
+module Bar
+end
+
+foo = rand > 0.5 ? Foo : Bar
+
+module foo::Baz
+end
+
 # Singleton class with method calls after
 def singleton_class_with_method
   clone_obj = original.clone
