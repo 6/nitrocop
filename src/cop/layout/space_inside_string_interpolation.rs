@@ -6,11 +6,12 @@ use crate::parse::source::SourceFile;
 /// Matches RuboCop's continued-string quirk for `"... \\\n#{expr}"`.
 ///
 /// When an interpolation starts immediately after a backslash-newline string
-/// continuation, RuboCop skips `Layout/SpaceInsideStringInterpolation`
-/// regardless of `EnforcedStyle`. nitrocop previously enforced the
-/// `EnforcedStyle: space` variant there, which produced a corpus false positive
-/// in LicenseFinder's CocoaPods spec, so the continuation guard must apply in
-/// both styles without weakening ordinary one-line `#{expr}` checks.
+/// continuation, RuboCop skips `Layout/SpaceInsideStringInterpolation` in both
+/// styles. That only applies to an odd-length run of backslashes before the
+/// newline. An even run, such as a `%(` body line ending in `\\` immediately
+/// before `#{task_completions}`, is a literal trailing backslash, and RuboCop
+/// still enforces `EnforcedStyle: space` there. Count the backslash run so the
+/// continuation guard does not hide that variant offense.
 pub struct SpaceInsideStringInterpolation;
 
 impl Cop for SpaceInsideStringInterpolation {
@@ -160,11 +161,30 @@ impl Cop for SpaceInsideStringInterpolation {
 }
 
 fn starts_after_string_line_continuation(bytes: &[u8], open_start: usize) -> bool {
-    matches!(
-        open_start,
-        n if n >= 2 && bytes[n - 2] == b'\\' && bytes[n - 1] == b'\n'
-            || n >= 3 && bytes[n - 3] == b'\\' && bytes[n - 2] == b'\r' && bytes[n - 1] == b'\n'
-    )
+    let Some(run_end) = backslash_run_end_before_newline(bytes, open_start) else {
+        return false;
+    };
+
+    let mut count = 0;
+    let mut pos = run_end + 1;
+    while pos > 0 && bytes[pos - 1] == b'\\' {
+        count += 1;
+        pos -= 1;
+    }
+
+    count % 2 == 1
+}
+
+fn backslash_run_end_before_newline(bytes: &[u8], open_start: usize) -> Option<usize> {
+    if open_start < 2 || bytes.get(open_start - 1) != Some(&b'\n') {
+        return None;
+    }
+
+    if open_start >= 3 && bytes.get(open_start - 2) == Some(&b'\r') {
+        Some(open_start - 3)
+    } else {
+        Some(open_start - 2)
+    }
 }
 
 #[cfg(test)]
