@@ -61,3 +61,26 @@ def render_tags
     end
   end.join.html_safe
 end
+
+# Hash-value-omission calls inside a method body still flag even when the
+# enclosing class body has later sibling methods.
+class Demo
+  def one(value)
+    build(value:)
+         ^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+  end
+
+  def two
+    nil
+  end
+end
+
+# Lambda call-argument bodies only allow direct-body calls, not calls nested
+# under case/in branch wrappers.
+add_alchemy_filter :by_file_type, type: :select, options: ->(_query, params) do
+  case params&.to_h
+  in { only: }
+    Attachment.file_types(from_extensions: only)
+                         ^^^^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+  end
+end
