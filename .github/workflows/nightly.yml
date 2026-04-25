@@ -75,8 +75,17 @@ jobs:
               cp "$f" "$SEEDS_DIR"/
               echo "  $(basename "$f")"
             done
-            echo "has_new_seeds=true" >> "$GITHUB_OUTPUT"
             echo "Collected $(ls "$CRASH_DIR" | wc -l) crash inputs"
+
+            # libfuzzer hashes inputs by content, so a re-discovered crash maps to
+            # a seed that's already committed. Only open a PR when the copy actually
+            # introduced new or modified files in the seeds dir.
+            if [ -n "$(git status --porcelain -- "$SEEDS_DIR")" ]; then
+              echo "has_new_seeds=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_new_seeds=false" >> "$GITHUB_OUTPUT"
+              echo "All crash inputs already exist in $SEEDS_DIR; skipping PR."
+            fi
           else
             echo "has_new_seeds=false" >> "$GITHUB_OUTPUT"
           fi

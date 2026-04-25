@@ -27,7 +27,7 @@ runs:
 
     - uses: ruby/setup-ruby@v1
       with:
-        ruby-version: '4.0'
+        # ruby-version omitted so the action reads .tool-versions
         bundler-cache: false
 
     - name: Install vendor RuboCop gems

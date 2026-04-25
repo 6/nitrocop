@@ -103,7 +103,7 @@ jobs:
       - name: Make binary executable
         run: chmod +x bin/nitrocop
 
-      # Ruby version read from mise.toml
+      # Ruby version read from .tool-versions
       - uses: ruby/setup-ruby@v1
 
       - name: Cache baseline bundle
