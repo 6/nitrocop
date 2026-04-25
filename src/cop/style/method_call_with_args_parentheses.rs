@@ -353,6 +353,33 @@ use crate::parse::source::SourceFile;
 ///    with a Prism `Visit`-based traversal that visits every node in the
 ///    subtree and runs the per-node ambiguity predicate, matching RuboCop's
 ///    `descendants.any?` semantics exactly.
+///
+/// ## Variant fix (2026-04-25, sibling-depth + lambda case/in + rescue main body)
+///
+/// Three narrower omit_parentheses divergences remained:
+///
+/// 1. `require_parentheses_for_hash_value_omission?` treated ANY outer
+///    non-last statement as meaning the current call was non-value-returning.
+///    RuboCop only checks the call itself (or its direct assignment parent)
+///    for right siblings. That meant shorthand keyword calls inside a method
+///    body were incorrectly exempted whenever the enclosing `def` had later
+///    sibling methods. Reset `non_last_expression_depth` at `def` body entry so
+///    outer class/module siblings no longer leak into the method body.
+///
+/// 2. Calls nested under `case/in` branches inside a lambda literal that is
+///    passed as a call argument were incorrectly treated like direct lambda-body
+///    calls and inherited `CallLikeBlockBody`. In Parser AST those calls have an
+///    `in_pattern` direct parent, so the parentheses must still be omitted.
+///    Added `visit_in_node` parent tracking so `case/in` bodies break the
+///    direct-block allowance.
+///
+/// 3. RuboCop allows shorthand keyword calls in the MAIN expression of a
+///    `begin ... rescue` because the rescue clause makes that expression
+///    non-value-returning. Prism did not model that direct parent, so nitrocop
+///    still flagged calls like `execute(build_cloud:, user:)` before `rescue`.
+///    Added a dedicated rescue-main parent context for the single-statement
+///    case, matching the observed corpus pattern without broadening nested
+///    descendants.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -436,6 +463,7 @@ enum ParentKind {
     ClassSingleLine,
     When,
     WhenBody,
+    InPatternBody,
     MatchPattern,
     Super,
     CallAssignedRhs,
@@ -448,6 +476,7 @@ enum ParentKind {
     Grouped,
     FlowControl,
     Interpolation,
+    RescueMainBody,
     /// Boundary marker pushed at the entry of every block/lambda body. Prevents
     /// outer parents (Assignment, ConditionalBody, etc.) from leaking into the
     /// block body's statements. RuboCop's parent walks stop at the block node,
@@ -865,7 +894,9 @@ impl ParenVisitor<'_> {
         let parent = self.immediate_parent();
         if matches!(
             parent,
-            Some(ParentKind::Conditional | ParentKind::ConditionalBody)
+            Some(
+                ParentKind::Conditional | ParentKind::ConditionalBody | ParentKind::RescueMainBody
+            )
         ) {
             return true;
         }
@@ -1625,7 +1656,10 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.visit_parameters_node(&params);
         }
         if let Some(body) = node.body() {
+            let prev_non_last_expression_depth = self.non_last_expression_depth;
+            self.non_last_expression_depth = 0;
             self.visit(&body);
+            self.non_last_expression_depth = prev_non_last_expression_depth;
         }
         self.pop_scope();
         self.in_endless_def = prev_endless;
@@ -1806,7 +1840,9 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             // wrappers, so nothing inside a begin-with-rescue gets macro scope.
             self.push_macro_scope(MacroScope::NotMacroScope);
             if let Some(stmts) = node.statements() {
-                self.visit_statements_node(&stmts);
+                self.non_last_expression_depth += 1;
+                self.visit_statements_with_parent(&stmts, ParentKind::RescueMainBody);
+                self.non_last_expression_depth -= 1;
             }
             if let Some(rescue_clause) = node.rescue_clause() {
                 self.visit_rescue_node(&rescue_clause);
@@ -2050,6 +2086,13 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         // have When as parent (matching RuboCop's node.parent.when_type? check)
         if let Some(stmts) = node.statements() {
             self.visit_statements_with_parent(&stmts, ParentKind::WhenBody);
+        }
+    }
+
+    fn visit_in_node(&mut self, node: &ruby_prism::InNode<'pr>) {
+        self.visit(&node.pattern());
+        if let Some(stmts) = node.statements() {
+            self.visit_statements_with_parent(&stmts, ParentKind::InPatternBody);
         }
     }
 

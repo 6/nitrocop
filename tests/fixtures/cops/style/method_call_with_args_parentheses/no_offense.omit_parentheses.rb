@@ -50,3 +50,15 @@ end
 def ordered_languages
   Language.published.order("name #{options[:reverse] ? "DESC" : "ASC"}")
 end
+
+# Rescue clauses make the main body expression non-value-returning, so
+# shorthand keyword arguments keep their parentheses.
+module Clusters
+  class InstallBuildCloudJob < ApplicationJob
+    def perform(build_cloud, user)
+      Clusters::InstallBuildCloud.execute(build_cloud:, user:)
+    rescue StandardError
+      nil
+    end
+  end
+end
