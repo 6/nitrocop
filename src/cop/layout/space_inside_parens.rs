@@ -189,6 +189,18 @@ use crate::parse::source::SourceFile;
 /// followed by blocks now still use their last argument for compact close-side
 /// detection, and both compact open/close collapse paths require the gap to be
 /// exactly `" "`.
+///
+/// ## Corpus investigation (2026-04-25)
+///
+/// The last live `compact` FN was nested block destructuring like
+/// `foo { | ( x , ( y , w ) ) , z | }`. Prism stores those outer parens on a
+/// `MultiTargetNode`, and the previous compact close-side helper only knew how
+/// to ask calls/defs/params for their trailing child. That meant it saw the
+/// inner `)` byte but could not prove it belonged to the outer node's last
+/// syntactic child, so the `") )"` gap was skipped instead of treated like
+/// RuboCop's consecutive-`)` token pair. Fix: teach compact close-side
+/// tracking to follow the trailing child of `MultiTargetNode` /
+/// `MultiWriteNode` in left/rest/right order.
 pub struct SpaceInsideParens;
 
 const MSG: &str = "Space inside parentheses detected.";
@@ -908,6 +920,14 @@ fn compact_last_inner_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism
         return def_node.parameters().and_then(last_parameter_node);
     }
 
+    if let Some(multi_target) = node.as_multi_target_node() {
+        return last_multi_target_child(&multi_target);
+    }
+
+    if let Some(multi_write) = node.as_multi_write_node() {
+        return last_multi_write_child(&multi_write);
+    }
+
     if let Some(block_params) = node.as_block_parameters_node() {
         return block_params.parameters().and_then(last_parameter_node);
     }
@@ -947,6 +967,28 @@ fn last_parameter_node<'a>(params: ruby_prism::ParametersNode<'a>) -> Option<rub
         .or_else(|| params.rest())
         .or_else(|| params.optionals().iter().last())
         .or_else(|| params.requireds().iter().last())
+}
+
+fn last_multi_target_child<'a>(
+    multi_target: &ruby_prism::MultiTargetNode<'a>,
+) -> Option<ruby_prism::Node<'a>> {
+    multi_target
+        .rights()
+        .iter()
+        .last()
+        .or_else(|| multi_target.rest())
+        .or_else(|| multi_target.lefts().iter().last())
+}
+
+fn last_multi_write_child<'a>(
+    multi_write: &ruby_prism::MultiWriteNode<'a>,
+) -> Option<ruby_prism::Node<'a>> {
+    multi_write
+        .rights()
+        .iter()
+        .last()
+        .or_else(|| multi_write.rest())
+        .or_else(|| multi_write.lefts().iter().last())
 }
 
 fn trailing_paren_close_offset(node: &ruby_prism::Node<'_>, bytes: &[u8]) -> Option<usize> {
@@ -1447,6 +1489,46 @@ mod tests {
             .expect("expected outer parens");
 
         let last_inner = compact_last_inner_node(&node).expect("expected last inner node");
+        let trailing_close =
+            trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
+        let outer_close = src
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected closing paren");
+        let inner_close = src[..outer_close]
+            .iter()
+            .rposition(|&b| b == b')')
+            .expect("expected inner closing paren");
+
+        assert_eq!(trailing_close, inner_close);
+    }
+
+    #[test]
+    fn compact_style_tracks_nested_close_parens_through_multi_target() {
+        let src = b"foo { | ( x , ( y , w ) ) , z | }\n";
+        let parse_result = crate::parse::parse_source(src);
+        let root = parse_result.node();
+        let program = root.as_program_node().unwrap();
+        let call = program
+            .statements()
+            .body()
+            .iter()
+            .next()
+            .and_then(|node| node.as_call_node())
+            .expect("expected call node");
+        let block = call
+            .block()
+            .and_then(|block| block.as_block_node())
+            .expect("expected block node");
+        let outer_multi_target = block
+            .parameters()
+            .and_then(|params| params.as_block_parameters_node())
+            .and_then(|params| params.parameters())
+            .and_then(|params| params.requireds().iter().next())
+            .expect("expected outer multi-target");
+
+        let last_inner =
+            compact_last_inner_node(&outer_multi_target).expect("expected last inner node");
         let trailing_close =
             trailing_paren_close_offset(&last_inner, src).expect("expected nested close paren");
         let outer_close = src
