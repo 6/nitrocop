@@ -102,11 +102,16 @@ def format_count_summary(n: int) -> str:
 
 
 def format_count_precise(n: int) -> str:
-    """Format count with two decimals: 28390000 -> '28.39M', 72659 -> '72.66K'."""
+    """Format count floored to thousandths: 28395123 -> '28.395M', 72659 -> '72.659K'.
+
+    Floors instead of rounding so a near-perfect-match count never appears equal
+    to the total (e.g. matches=28,398,000 / total=28,400,000 must not both render
+    as '28.40M').
+    """
     if n >= 1_000_000:
-        return f"{n / 1_000_000:.2f}M"
+        return f"{math.floor(n / 1_000) / 1_000:.3f}M"
     elif n >= 1_000:
-        return f"{n / 1_000:.2f}K"
+        return f"{math.floor(n) / 1_000:.3f}K"
     return str(n)
 
 
@@ -116,8 +121,8 @@ def format_match_rate(rate: float) -> str:
 
 
 def format_match_rate_precise(rate: float) -> str:
-    """Format match rate floored to 0.01%: 0.99829 -> '99.82%', never rounds up to 100%."""
-    return f"{math.floor(rate * 10000) / 100:.2f}%"
+    """Format match rate floored to 0.001%: 0.999998 -> '99.999%', never rounds up to 100%."""
+    return f"{math.floor(rate * 100_000) / 1_000:.3f}%"
 
 
 def format_exact_match_pct(exact: int, total: int) -> str:
