@@ -279,6 +279,18 @@ use crate::parse::source::SourceFile;
 /// earlier `.with(...)` arguments contain single-line `{ }` blocks would
 /// incorrectly suppress offenses on later `.with(...)` calls whose argument
 /// happens to contain a multiline `do ... end`.
+///
+/// ## Corpus fix (2026-04-26)
+///
+/// RuboCop's hash-pair handling still uses `left_hand_side(node.receiver)`,
+/// which climbs through parent sends. For keyword/hash values that contain a
+/// lambda body, that means a nested chain like
+/// `t.grouping(\n  Arel::Nodes::Case.new\n    .when...)` aligns with
+/// `t.grouping(`, not with `Arel::Nodes::Case.new`. Also, Prism attaches
+/// multiline blocks directly to `CallNode`s; RuboCop's parser AST wraps them
+/// in block nodes, so a later call after `.flat_map do ... end` must not reuse
+/// `.flat_map` as a continuation anchor. Those calls fall through to the
+/// assignment-RHS base instead.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -658,7 +670,7 @@ impl ChainVisitor<'_> {
 
     fn expected_aligned_hash_pair(
         &self,
-        _call_node: &ruby_prism::CallNode<'_>,
+        call_node: &ruby_prism::CallNode<'_>,
         receiver: &ruby_prism::Node<'_>,
         rhs_line: usize,
         rhs_col: usize,
@@ -681,7 +693,9 @@ impl ChainVisitor<'_> {
             }
         }
 
-        Some(find_chain_root_col(self.source, receiver))
+        let lhs_start = left_hand_side_start_offset(call_node, &self.ancestors);
+        let (_, lhs_col) = self.source.offset_to_line_col(lhs_start);
+        Some(lhs_col)
     }
 
     fn aligned_message(
@@ -694,8 +708,9 @@ impl ChainVisitor<'_> {
         let selector_str = std::str::from_utf8(selector).unwrap_or("?");
 
         let (base_name, base_line) = if self.in_hash_value {
-            // In hash pair context, show the full chain source on the first line
-            find_chain_source_description(self.source, receiver)
+            // In hash pair context, RuboCop uses left_hand_side(node.receiver),
+            // which can climb out to an enclosing send inside the pair value.
+            find_left_hand_side_description(self.source, call_node, &self.ancestors)
         } else {
             find_alignment_base_description(
                 self.source,
@@ -852,8 +867,15 @@ fn find_block_chain_alignment(
                 if dot_line == end_line && dot_line < current_line {
                     return Some(dot_col);
                 }
-                // Multiline block: align with the dot of the block-bearing call
-                if end_line > dot_line && is_first_on_line(source, dot_loc.start_offset()) {
+                // Multiline receiver blocks are only semantic anchors for
+                // calls that do not have their own block. RuboCop's
+                // `find_multiline_block_chain_node` uses `find_continuation_node`
+                // for block-bearing current calls, and parser's receiver is
+                // a block node there, not a send node.
+                if end_line > dot_line
+                    && !has_real_block(call_node)
+                    && is_first_on_line(source, dot_loc.start_offset())
+                {
                     return Some(dot_col);
                 }
             }
@@ -889,7 +911,9 @@ fn find_current_node_block_continuation(
 
     let recv_call = receiver.as_call_node()?;
 
-    // Case 1: receiver is itself a single-line block call — use its inner call's dot
+    // Case 1: receiver is itself a single-line block call — use its inner call's dot.
+    // If the receiver has a multiline real block, RuboCop sees a block node here
+    // rather than a send node and does not reuse the receiver's continuation dot.
     if let Some(recv_block) = recv_call.block() {
         if recv_block.as_block_node().is_some() {
             let loc = recv_call.location();
@@ -901,6 +925,7 @@ fn find_current_node_block_continuation(
                     return Some(dot_col);
                 }
             }
+            return None;
         }
     }
 
@@ -1402,6 +1427,19 @@ fn uses_outer_aligned_fallback_base(
     false
 }
 
+fn find_left_hand_side_description(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'_>,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> (String, usize) {
+    let lhs_start = left_hand_side_start_offset(call_node, ancestors);
+    let (line, col) = source.offset_to_line_col(lhs_start);
+    let line_bytes = source.lines().nth(line - 1).unwrap_or(b"");
+    let line_text = std::str::from_utf8(line_bytes).unwrap_or("?");
+    let text = line_text.get(col..).unwrap_or("?").trim_end().to_string();
+    (text, line)
+}
+
 impl<'pr> Visit<'pr> for ChainVisitor<'pr> {
     fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
         self.ancestors.push(node);
@@ -1865,25 +1903,6 @@ fn find_chain_start_line(source: &SourceFile, node: &ruby_prism::Node<'_>) -> us
     line
 }
 
-/// For hash pair context: show the full source text of the receiver chain
-/// on its first line. This matches RuboCop's `base_source` which returns
-/// `@base.source[/[^\n]*/]`.
-fn find_chain_source_description(
-    source: &SourceFile,
-    receiver: &ruby_prism::Node<'_>,
-) -> (String, usize) {
-    // Get the chain root's start line
-    let chain_start_line = find_chain_start_line(source, receiver);
-    let root_col = find_chain_root_col(source, receiver);
-
-    // Get the full line text and extract from root_col to end of meaningful content
-    let line_bytes = source.lines().nth(chain_start_line - 1).unwrap_or(b"");
-    let line_text = std::str::from_utf8(line_bytes).unwrap_or("?");
-    let trimmed = line_text.get(root_col..).unwrap_or("?").trim_end();
-
-    (trimmed.to_string(), chain_start_line)
-}
-
 /// Find alignment base description for error messages.
 fn find_alignment_base_description(
     source: &SourceFile,
@@ -1900,7 +1919,9 @@ fn find_alignment_base_description(
                     let (block_dot_line, _) = source.offset_to_line_col(dot_loc.start_offset());
                     let loc = call.location();
                     let (end_line, _) = source.offset_to_line_col(loc.end_offset());
-                    if block_dot_line == end_line || end_line > block_dot_line {
+                    if block_dot_line == end_line
+                        || (end_line > block_dot_line && !has_real_block(call_node))
+                    {
                         let name = std::str::from_utf8(call.name().as_slice()).unwrap_or("?");
                         return (format!(".{name}"), block_dot_line);
                     }
@@ -1959,6 +1980,14 @@ fn find_chain_root_description(
     node: &ruby_prism::Node<'_>,
 ) -> (String, usize) {
     if let Some(call) = node.as_call_node() {
+        if call.call_operator_loc().is_none()
+            && call.name().as_slice() == b"[]"
+            && call
+                .receiver()
+                .is_some_and(|receiver| receiver.as_local_variable_read_node().is_some())
+        {
+            return find_node_first_line_description(source, node);
+        }
         if let Some(recv) = call.receiver() {
             return find_chain_root_description(source, &recv);
         }
