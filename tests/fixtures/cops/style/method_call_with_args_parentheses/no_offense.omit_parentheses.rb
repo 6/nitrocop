@@ -62,3 +62,39 @@ module Clusters
     end
   end
 end
+
+# Ternary `else` branch carrying an assignment whose RHS is a parenthesized
+# call. RuboCop's `assignment_in_condition?` allows the parens because the
+# surrounding ternary is `conditional?`. The grandparent in nitrocop's
+# parent_stack is `TernaryBranch`, which must satisfy the same allowance.
+def self._subst(rec, opts, tag, mode)
+  case mode.downcase
+  when "exist"
+    ref.nil? ? value = false : value = ref.is_tagged_with?(tag, :ns => "*")
+  when "registry"
+    ref.nil? ? value = "" : value = registry_data(ref, tag, ohash)
+  end
+end
+
+# Hash-value-omission inside a single-line block keeps parens via
+# `node.parent&.single_line?`. The Block / CallLikeBlockBody parent must
+# carry the block's source span so `parent_is_single_line()` returns true
+# for `let(:x) { create(:y, foo:) }`-style spec helpers and inline
+# `.map { |x| Foo.new(x:) }` chains.
+RSpec.describe Favorites::ForUser do
+  let!(:cluster) { create(:cluster, account:) }
+  let!(:project) { create(:project, cluster:, account:) }
+  let(:component) { Component.new(name:, label:, input_type:, params:) }
+end
+
+class Theme
+  def self.default_themes
+    DEFAULT_THEMES.map { |name, icon| new(name:, icon:) }
+  end
+end
+
+def points_creator
+  payload = data
+            .compact
+            .map { |location| location.merge(user_id:) }
+end
