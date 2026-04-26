@@ -119,6 +119,17 @@ use crate::parse::source::SourceFile;
 /// read of a local first introduced by the body is ignored as "undefined" and
 /// the body write looks dead. Match RuboCop by suppressing only those body
 /// writes whose enclosing post-condition loop predicate reads the same local.
+///
+/// ## FN fix: rescue-modifier fallback writes are only live with a later read (2026-04-26)
+///
+/// The rescue-modifier compatibility filter used to suppress every same-name
+/// write in a file once it saw `expr rescue name = fallback`. That hid real
+/// offenses like `error(..., abort = true)` when another rescue modifier in
+/// the method also assigned `abort`, and it hid the rescue-side write in
+/// `m_over_c = expr rescue m_over_c = 0`. The filter is now candidate-aware:
+/// it only keeps fallback writes and their initializers when a later read can
+/// consume the fallback value, and never for fallback writes nested under an
+/// outer assignment to the same local.
 pub struct UselessAssignment;
 
 impl Cop for UselessAssignment {
@@ -158,13 +169,7 @@ impl Cop for UselessAssignment {
             collect_retry_protected_rescue_capture_offsets(parse_result);
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
-        let mut rescue_modifier_offsets = rescue_modifier_collector.offsets;
-        // Also suppress preceding writes to variables that are written in rescue modifiers
-        let preceding = collect_rescue_modifier_preceding_write_offsets(
-            parse_result,
-            &rescue_modifier_collector.rescue_value_var_names,
-        );
-        rescue_modifier_offsets.extend(preceding);
+        let rescue_modifier_writes = rescue_modifier_collector.writes;
         let mut candidates = collector.take_candidates();
         candidates.sort_by_key(|candidate| candidate.node_offset);
 
@@ -179,7 +184,10 @@ impl Cop for UselessAssignment {
                 !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
                     && !or_condition_offsets.contains(&candidate.node_offset)
                     && !post_condition_loop_body_offsets.contains(&candidate.node_offset)
-                    && !rescue_modifier_offsets.contains(&candidate.node_offset)
+                    && !should_suppress_rescue_modifier_false_positive(
+                        &candidate,
+                        &rescue_modifier_writes,
+                    )
                     && !retry_protected_rescue_offsets.contains(&candidate.node_offset)
             } else {
                 false
@@ -766,77 +774,96 @@ impl<'pr> Visit<'pr> for PostConditionLoopBodyWriteCollector {
 }
 
 // ---------------------------------------------------------------------------
-// FP suppression: assignments inside rescue modifier expressions
+// FP suppression: live assignments inside rescue modifier expressions
 // ---------------------------------------------------------------------------
 //
-// `x = Float(y) rescue err = "bad"` — the rescue modifier creates an implicit
-// branch but the VF engine sees `err = "bad"` as sequential with prior writes.
-// Suppress writes inside the rescue value of a RescueModifierNode.
+// `x = Float(y) rescue err = "bad"` creates an implicit fallback branch, but
+// VF sees `err = "bad"` as a sequential write. Suppress those fallback writes
+// and their initializers only when a later read can consume the fallback value.
+// Do not suppress `x = foo rescue x = fallback`: RuboCop reports the nested
+// fallback assignment even when the outer `x = ...` is read later.
+
+#[derive(Debug, Clone)]
+struct RescueModifierWriteInfo {
+    name: Vec<u8>,
+    rescue_end: usize,
+    suppressible: bool,
+}
 
 #[derive(Default)]
 struct RescueModifierWriteCollector {
-    offsets: HashSet<usize>,
-    /// Variable names that have writes inside rescue modifier expressions.
-    rescue_value_var_names: HashSet<Vec<u8>>,
-    in_rescue_value: bool,
+    writes: HashMap<usize, RescueModifierWriteInfo>,
+    rescue_end_stack: Vec<usize>,
+    outer_rescue_assignment_stack: Vec<Vec<u8>>,
 }
 
 impl<'pr> Visit<'pr> for RescueModifierWriteCollector {
     fn visit_rescue_modifier_node(&mut self, node: &ruby_prism::RescueModifierNode<'pr>) {
-        // Visit the expression (normal path) normally
+        // Visit the expression (normal path) normally.
         self.visit(&node.expression());
-        // Visit the rescue value (fallback path) with suppression active
-        let was = self.in_rescue_value;
-        self.in_rescue_value = true;
+
+        // Visit the rescue value (fallback path) with its containing rescue
+        // range available for later-read checks.
+        self.rescue_end_stack.push(node.location().end_offset());
         self.visit(&node.rescue_expression());
-        self.in_rescue_value = was;
+        self.rescue_end_stack.pop();
     }
 
     fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
-        if self.in_rescue_value {
-            self.offsets.insert(node.location().start_offset());
-            self.rescue_value_var_names
-                .insert(node.name().as_slice().to_vec());
+        let name = node.name().as_slice().to_vec();
+        let outer_rescue_assignment = node.value().as_rescue_modifier_node().is_some();
+        if outer_rescue_assignment {
+            self.outer_rescue_assignment_stack.push(name.clone());
         }
-        ruby_prism::visit_local_variable_write_node(self, node);
-    }
-}
 
-/// Second pass: suppress writes to variables that are also written inside rescue
-/// modifiers. The initial `err = nil` before `x = Float(y) rescue err = "bad"`
-/// is a fallback value, not a dead write.
-fn collect_rescue_modifier_preceding_write_offsets(
-    parse_result: &ruby_prism::ParseResult<'_>,
-    rescue_value_var_names: &HashSet<Vec<u8>>,
-) -> HashSet<usize> {
-    if rescue_value_var_names.is_empty() {
-        return HashSet::new();
-    }
-    let mut collector = RescueModifierPrecedingWriteCollector {
-        offsets: HashSet::new(),
-        names: rescue_value_var_names,
-    };
-    collector.visit(&parse_result.node());
-    collector.offsets
-}
-
-struct RescueModifierPrecedingWriteCollector<'a> {
-    offsets: HashSet<usize>,
-    names: &'a HashSet<Vec<u8>>,
-}
-
-impl<'pr> Visit<'pr> for RescueModifierPrecedingWriteCollector<'_> {
-    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
-        // Keep separate fallback initializers like `err = nil` suppressed, but
-        // do not suppress the outer write in `x = expr rescue x = fallback`:
-        // RuboCop still reports that left-hand assignment as useless.
-        if self.names.contains(node.name().as_slice())
-            && node.value().as_rescue_modifier_node().is_none()
-        {
-            self.offsets.insert(node.location().start_offset());
+        if let Some(&rescue_end) = self.rescue_end_stack.last() {
+            let same_name_outer = self
+                .outer_rescue_assignment_stack
+                .last()
+                .is_some_and(|outer_name| outer_name == &name);
+            self.writes.insert(
+                node.location().start_offset(),
+                RescueModifierWriteInfo {
+                    name: name.clone(),
+                    rescue_end,
+                    suppressible: !same_name_outer,
+                },
+            );
         }
+
         ruby_prism::visit_local_variable_write_node(self, node);
+
+        if outer_rescue_assignment {
+            self.outer_rescue_assignment_stack.pop();
+        }
     }
+}
+
+fn should_suppress_rescue_modifier_false_positive(
+    candidate: &AssignmentCandidate,
+    rescue_modifier_writes: &HashMap<usize, RescueModifierWriteInfo>,
+) -> bool {
+    if let Some(info) = rescue_modifier_writes.get(&candidate.node_offset) {
+        return info.suppressible && candidate_has_reference_after(candidate, info.rescue_end);
+    }
+
+    candidate.assignment_states.iter().any(|assignment| {
+        assignment.offset > candidate.node_offset
+            && rescue_modifier_writes
+                .get(&assignment.offset)
+                .is_some_and(|info| {
+                    info.suppressible
+                        && info.name == candidate.name
+                        && candidate_has_reference_after(candidate, info.rescue_end)
+                })
+    })
+}
+
+fn candidate_has_reference_after(candidate: &AssignmentCandidate, offset: usize) -> bool {
+    candidate
+        .reference_states
+        .iter()
+        .any(|reference| reference.offset >= offset)
 }
 
 // ---------------------------------------------------------------------------
