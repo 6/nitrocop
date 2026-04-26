@@ -256,6 +256,29 @@ use crate::parse::source::SourceFile;
 /// usual visual-chain indentation. nitrocop was only using the immediate
 /// multiline chain start (`have_enqueued_job(...)`), so it missed `.with` and
 /// `.and` offenses indented four spaces too far.
+///
+/// ## Corpus fix (2026-04-25)
+///
+/// Three remaining default-style divergences came from over-reusing semantic
+/// anchors. A call with a single-line block whose receiver is a method on a
+/// parenthesized expression, such as `(args || '').split\n  .yield_self {}`,
+/// aligns with that receiver, and leading-dot matcher calls with descendant
+/// multiline blocks, such as `.and change { ... }`, align with the receiver
+/// matcher. Nested matcher chains that fall back to an outer send's
+/// indentation must not validate an earlier bad continuation dot using only
+/// the receiver subtree. Trailing-dot calls after a single-line block use
+/// ordinary trailing-dot indentation rather than aligning with the
+/// block-bearing receiver's inline dot.
+///
+/// The descendant-block-chain alignment must mirror RuboCop's
+/// `node.each_descendant(:any_block).first` followed by `multiline?` check —
+/// only the *first* descendant block (in source order) is consulted. If that
+/// first block is single-line, the alignment must NOT apply, even if a later
+/// descendant is a multiline `do ... end` block. Without this, long Sequel-
+/// style chains (e.g. `DB[:t].with(:a, ...).with(:b, ...do...end)`) where
+/// earlier `.with(...)` arguments contain single-line `{ }` blocks would
+/// incorrectly suppress offenses on later `.with(...)` calls whose argument
+/// happens to contain a multiline `do ... end`.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -508,7 +531,7 @@ impl ChainVisitor<'_> {
 
         // Try block chain continuation — when receiver is a call with a
         // single-line block, align with the block-bearing call's dot.
-        if options.allow_block_chain_alignment {
+        if options.allow_block_chain_alignment && !is_trailing_dot {
             if let Some(col) = find_block_chain_alignment(self.source, call_node, rhs_line) {
                 return Some(col);
             }
@@ -545,6 +568,14 @@ impl ChainVisitor<'_> {
         }
 
         if !is_trailing_dot {
+            if let Some(col) =
+                find_descendant_block_chain_alignment(self.source, call_node, receiver)
+            {
+                return Some(col);
+            }
+        }
+
+        if !is_trailing_dot {
             // Try first_call_alignment_node — when there's a first inline dot
             // in the chain, align with it (semantic alignment).
             if let Some(col) = find_first_dot_alignment(self.source, call_node) {
@@ -563,7 +594,10 @@ impl ChainVisitor<'_> {
             return Some(col);
         }
 
-        if options.allow_previous_continuation && !is_trailing_dot {
+        if options.allow_previous_continuation
+            && !is_trailing_dot
+            && !uses_outer_aligned_fallback_base(call_node, &self.ancestors)
+        {
             // Try previous continuation dot alignment — when there's a
             // continuation dot on a previous line in the chain, align with it.
             if let Some(anchor) =
@@ -847,7 +881,11 @@ fn find_current_node_block_continuation(
 ) -> Option<usize> {
     // Current node must have a real block (do..end or { }), not a block argument (&:foo)
     let block = call_node.block()?;
-    block.as_block_node()?;
+    let block_node = block.as_block_node()?;
+    let block_loc = block_node.location();
+    let (block_start_line, _) = source.offset_to_line_col(block_loc.start_offset());
+    let (block_end_line, _) = source.offset_to_line_col(block_loc.end_offset());
+    let block_is_single_line = block_start_line == block_end_line;
 
     let recv_call = receiver.as_call_node()?;
 
@@ -866,7 +904,20 @@ fn find_current_node_block_continuation(
         }
     }
 
-    // Case 2: receiver has a continuation dot (dot is on a line after
+    // Case 2: RuboCop's `receiver.receiver.begin_type? && node.block_node.single_line?`.
+    // Prism represents parser's begin node as ParenthesesNode.
+    if block_is_single_line
+        && recv_call
+            .receiver()
+            .is_some_and(|inner| inner.as_parentheses_node().is_some())
+    {
+        if let Some(dot_loc) = recv_call.call_operator_loc() {
+            let (_, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+            return Some(dot_col);
+        }
+    }
+
+    // Case 3: receiver has a continuation dot (dot is on a line after
     // the receiver's receiver's end line)
     let dot_loc = recv_call.call_operator_loc()?;
     let (dot_line, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
@@ -880,6 +931,69 @@ fn find_current_node_block_continuation(
     }
 
     None
+}
+
+fn find_descendant_block_chain_alignment(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'_>,
+    receiver: &ruby_prism::Node<'_>,
+) -> Option<usize> {
+    let receiver_call = find_descendant_block_chain_call(source, call_node, receiver)?;
+    let dot_loc = receiver_call.call_operator_loc()?;
+    let (_, dot_col) = source.offset_to_line_col(dot_loc.start_offset());
+    Some(dot_col)
+}
+
+fn find_descendant_block_chain_call<'a>(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'a>,
+    receiver: &ruby_prism::Node<'a>,
+) -> Option<ruby_prism::CallNode<'a>> {
+    if call_node.block().is_some() {
+        return None;
+    }
+
+    let receiver_call = receiver.as_call_node()?;
+    if first_descendant_block_is_multiline(source, &call_node.as_node()) {
+        return Some(receiver_call);
+    }
+
+    None
+}
+
+/// Mirrors RuboCop's `node.each_descendant(:any_block).first` followed by
+/// `block_node&.multiline?` — only the *first* descendant block (in source
+/// order) matters. If it is single-line, this returns false even when later
+/// descendant blocks are multiline.
+fn first_descendant_block_is_multiline(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+    struct Finder<'a> {
+        source: &'a SourceFile,
+        first_offset: Option<usize>,
+        first_is_multiline: bool,
+    }
+
+    impl<'pr> Visit<'pr> for Finder<'_> {
+        fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
+            let loc = node.location();
+            let start_offset = loc.start_offset();
+            if self.first_offset.is_none_or(|prior| start_offset < prior) {
+                let (start_line, _) = self.source.offset_to_line_col(start_offset);
+                let (end_line, _) = self.source.offset_to_line_col(loc.end_offset());
+                self.first_offset = Some(start_offset);
+                self.first_is_multiline = start_line != end_line;
+            }
+
+            ruby_prism::visit_block_node(self, node);
+        }
+    }
+
+    let mut finder = Finder {
+        source,
+        first_offset: None,
+        first_is_multiline: false,
+    };
+    finder.visit(node);
+    finder.first_is_multiline
 }
 
 /// Check if a given line has a `.` or `&.` at a specific column.
@@ -1256,16 +1370,9 @@ fn uses_outer_aligned_fallback_base(
     call_node: &ruby_prism::CallNode<'_>,
     ancestors: &[ruby_prism::Node<'_>],
 ) -> bool {
-    let Some(receiver_call) = call_node
-        .receiver()
-        .and_then(|receiver| receiver.as_call_node())
-    else {
+    if call_node.receiver().is_none() {
         return false;
     };
-
-    if receiver_call.call_operator_loc().is_some() {
-        return false;
-    }
 
     let current_loc = call_node.location();
     let mut started = false;
@@ -1798,6 +1905,14 @@ fn find_alignment_base_description(
                         return (format!(".{name}"), block_dot_line);
                     }
                 }
+            }
+        }
+
+        if let Some(call) = find_descendant_block_chain_call(source, call_node, receiver) {
+            if let Some(dot_loc) = call.call_operator_loc() {
+                let (line, _) = source.offset_to_line_col(dot_loc.start_offset());
+                let name = std::str::from_utf8(call.name().as_slice()).unwrap_or("?");
+                return (format!(".{name}"), line);
             }
         }
 

@@ -84,6 +84,11 @@ a.
   b.
   c
 
+# Trailing dot after a single-line block uses ordinary 2-space indentation,
+# not alignment with the block-bearing call's inline dot.
+items.map { |item| item }.
+  select { |item| item }
+
 # Aligned methods in assignment
 formatted_int = int_part
                 .to_s
