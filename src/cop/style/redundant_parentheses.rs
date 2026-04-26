@@ -2098,7 +2098,15 @@ fn is_spaced_unary_plus_minus_call(content: &[u8], call: &ruby_prism::CallNode<'
         return false;
     };
 
-    let between = &content[message_loc.end_offset()..receiver.location().start_offset()];
+    // Parse-error recovery can produce a synthetic receiver (e.g. `MissingNode`)
+    // whose location overlaps the message — guard against an inverted range.
+    let start = message_loc.end_offset();
+    let end = receiver.location().start_offset();
+    if start > end || end > content.len() {
+        return false;
+    }
+
+    let between = &content[start..end];
     between
         .iter()
         .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
