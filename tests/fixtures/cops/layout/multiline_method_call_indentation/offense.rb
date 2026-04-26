@@ -225,3 +225,36 @@ def candidate_hosts
         gpu.tap { |g| g.finalize }
       end)
 end
+
+# Hash pair value inside a lambda: the pair ancestor makes RuboCop align
+# nested argument chains with the climbed left-hand side, not the inner
+# argument's chain root.
+virtual_attribute :normalized_state, :string, :arel => (lambda do |t|
+  t.grouping(
+    Arel::Nodes::Case.new
+      .when(arel_table[:archived]).then(Arel.sql("'archived'"))
+      ^^^^^ Layout/MultilineMethodCallIndentation: Align `.when` with `t.grouping(` on line 189.
+      .when(arel_table[:orphaned]).then(Arel.sql("'orphaned'"))
+      ^^^^^ Layout/MultilineMethodCallIndentation: Align `.when` with `t.grouping(` on line 189.
+      .else(t.lower(
+      ^^^^^ Layout/MultilineMethodCallIndentation: Align `.else` with `t.grouping(` on line 189.
+              t.coalesce([t[:power_state], Arel.sql("'unknown'")])
+      ))
+  )
+end)
+
+# Assignment RHS followed by a multiline block receiver: later calls align
+# with the assignment RHS, not the block-bearing continuation dot.
+def gather_coverage_results
+  result.to_h do |file_path, coverage_info|
+    branch_by_line = coverage_info[:branches]
+      .flat_map do |branch, data|
+      ^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.flat_map` with `coverage_info[:branches]` on line 203.
+        data.map do |_then_or_else, _execution_count|
+          { groupingLine: 1 }
+        end
+      end
+      .group_by { |branch| branch[:groupingLine] }
+      ^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.group_by` with `coverage_info[:branches]` on line 203.
+  end
+end
