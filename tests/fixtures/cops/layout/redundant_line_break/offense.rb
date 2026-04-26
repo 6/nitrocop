@@ -541,3 +541,34 @@ def number_format(national, format)
       national.match?(cr("x"))) && \
     national.match(cr("y"))
 end
+
+warn 'Please use one of the standard log levels: ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'debug, info, warn, or error'
+
+@autoscaling_groups = @scaling_activities =
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  @launch_configurations = nil
+
+p.name == :chef_client || \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  p.type == :chef_client
+
+(format[Core::LEADING_DIGITS].nil? || \
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  national.match?(cr("x"))) && \
+  national.match(cr("y"))
+
+p.kind_of? PBXShellScriptBuildPhase and \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  not p.name.nil? and \
+  p.name.include?("Carte")
+
+super || other.is_a?(HighOrderType) \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+      && other.vars == self.vars \
+      && other.defn = self.defn
+
+return unless spec.find_all_by_name(gem)&.any? || \
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+  spec.find_by_path(gem)&.any?

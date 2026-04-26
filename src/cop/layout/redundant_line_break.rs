@@ -312,6 +312,17 @@ use crate::parse::source::SourceFile;
 ///
 /// - NOTE: The CLI does not properly enable this preview cop even with `--preview`.
 ///   Unit tests bypass CLI filtering and work correctly.
+///
+/// ## Fixes applied (2026-04-26)
+/// - **Direct ternary arm split**: RuboCop does not report a backslash on a
+///   predicate line when the next physical line is already the leading `?`
+///   ternary arm (`predicate \` newline `? then : else`). Nitrocop's text
+///   fallback now skips only that direct shape while still reporting longer
+///   backslash-continued predicates before a later ternary arm.
+/// - **Modifier return/unless and mixed operators**: The text fallback now
+///   anchors `return unless condition || \` at the condition expression, and
+///   only suppresses `foo \` newline `&& bar` when the first line is not already
+///   a boolean operator expression like `foo || bar \`.
 pub struct RedundantLineBreak;
 
 impl Cop for RedundantLineBreak {
@@ -1596,6 +1607,10 @@ fn check_backslash_continuations(
             let trimmed = trim_leading_whitespace(trim_trailing_whitespace(lines[idx]));
             trimmed.starts_with(b"?")
         });
+        if ternary_then_idx == Some(group_start + 1) {
+            i = final_line_idx + 1;
+            continue;
+        }
 
         // Phase 2 starts from explicit backslash continuations, but the Ruby
         // expression can keep going across later comma-terminated lines:
@@ -1628,6 +1643,7 @@ fn check_backslash_continuations(
         let group_starts_with_elsif = starts_with_keyword(group_trimmed_start, b"elsif")
             || group_trimmed_start.starts_with(b"elsif(");
         let group_starts_with_paren = group_trimmed_start.starts_with(b"(");
+        let modifier_prefix_len = modifier_condition_prefix_len(group_trimmed_start);
         let keyword_prefix_len =
             if group_trimmed_start.starts_with(b"if ") || group_trimmed_start.starts_with(b"if(") {
                 3
@@ -1639,6 +1655,8 @@ fn check_backslash_continuations(
                 6
             } else if group_starts_with_paren {
                 1
+            } else if modifier_prefix_len > 0 {
+                modifier_prefix_len
             } else {
                 0
             };
@@ -1695,6 +1713,12 @@ fn check_backslash_continuations(
             if group_starts_with_paren && us == group_statement_start {
                 return false;
             }
+            if modifier_prefix_len > 0
+                && (us == group_statement_start
+                    || us == group_statement_start + modifier_prefix_len)
+            {
+                return false;
+            }
             true
         });
         if has_unsafe {
@@ -1715,6 +1739,12 @@ fn check_backslash_continuations(
                 return false;
             }
             if group_starts_with_elsif {
+                return false;
+            }
+            if modifier_prefix_len > 0
+                && (bs == group_statement_start
+                    || bs == group_statement_start + modifier_prefix_len)
+            {
                 return false;
             }
             bs <= group_byte_start && be >= group_byte_end
@@ -1795,6 +1825,7 @@ fn check_backslash_continuations(
 
         if ternary_then_idx.is_none()
             && (next_content.starts_with(b"&&") || next_content.starts_with(b"||"))
+            && !contains_boolean_operator_before_continuation(group_trimmed_start)
         {
             i = final_line_idx + 1;
             continue;
@@ -1938,6 +1969,47 @@ fn starts_with_keyword(trimmed: &[u8], keyword: &[u8]) -> bool {
         && trimmed
             .get(keyword.len())
             .is_some_and(|b| b.is_ascii_whitespace())
+}
+
+fn modifier_condition_prefix_len(trimmed: &[u8]) -> usize {
+    for prefix in [b"return unless ".as_slice(), b"return if ".as_slice()] {
+        if trimmed.starts_with(prefix) {
+            return prefix.len();
+        }
+    }
+    0
+}
+
+fn contains_boolean_operator_before_continuation(trimmed: &[u8]) -> bool {
+    if !trimmed.ends_with(b"\\") {
+        return false;
+    }
+
+    let before_backslash = trim_trailing_whitespace(&trimmed[..trimmed.len() - 1]);
+    before_backslash
+        .windows(2)
+        .any(|window| window == b"||" || window == b"&&")
+        || contains_keyword_operator(before_backslash, b"or")
+        || contains_keyword_operator(before_backslash, b"and")
+}
+
+fn contains_keyword_operator(bytes: &[u8], keyword: &[u8]) -> bool {
+    if bytes.len() < keyword.len() {
+        return false;
+    }
+
+    bytes
+        .windows(keyword.len())
+        .enumerate()
+        .any(|(idx, window)| {
+            if window != keyword {
+                return false;
+            }
+            let before_ok = idx == 0 || !is_word_char(bytes[idx - 1]);
+            let after_idx = idx + keyword.len();
+            let after_ok = after_idx == bytes.len() || !is_word_char(bytes[after_idx]);
+            before_ok && after_ok
+        })
 }
 
 fn ends_with_special_global_backslash(trimmed: &[u8]) -> bool {

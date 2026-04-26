@@ -452,3 +452,13 @@ Arel.quoted('"') \
     .replace("\r", '\r')
     .replace("\t", '\t') \
 + '"'
+
+# Backslash predicates inside multiline ternaries are accepted by RuboCop even
+# when the predicate itself would fit on one line.
+comments.any? \
+  ? comments.map { |c| options.indented(indent_level, "# #{c}") }
+  : []
+
+certs_dir && !certs_dir.empty? \
+  ? 'codekitchen/dinghy-http-proxy:2.5.10' \
+  : 'freedomben/dory-http-proxy:2.6.2.2'
