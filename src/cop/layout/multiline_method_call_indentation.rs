@@ -269,6 +269,16 @@ use crate::parse::source::SourceFile;
 /// the receiver subtree. Trailing-dot calls after a single-line block use
 /// ordinary trailing-dot indentation rather than aligning with the
 /// block-bearing receiver's inline dot.
+///
+/// The descendant-block-chain alignment must mirror RuboCop's
+/// `node.each_descendant(:any_block).first` followed by `multiline?` check —
+/// only the *first* descendant block (in source order) is consulted. If that
+/// first block is single-line, the alignment must NOT apply, even if a later
+/// descendant is a multiline `do ... end` block. Without this, long Sequel-
+/// style chains (e.g. `DB[:t].with(:a, ...).with(:b, ...do...end)`) where
+/// earlier `.with(...)` arguments contain single-line `{ }` blocks would
+/// incorrectly suppress offenses on later `.with(...)` calls whose argument
+/// happens to contain a multiline `do ... end`.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -944,27 +954,33 @@ fn find_descendant_block_chain_call<'a>(
     }
 
     let receiver_call = receiver.as_call_node()?;
-    if node_has_multiline_real_block(source, &call_node.as_node()) {
+    if first_descendant_block_is_multiline(source, &call_node.as_node()) {
         return Some(receiver_call);
     }
 
     None
 }
 
-fn node_has_multiline_real_block(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+/// Mirrors RuboCop's `node.each_descendant(:any_block).first` followed by
+/// `block_node&.multiline?` — only the *first* descendant block (in source
+/// order) matters. If it is single-line, this returns false even when later
+/// descendant blocks are multiline.
+fn first_descendant_block_is_multiline(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     struct Finder<'a> {
         source: &'a SourceFile,
-        found: bool,
+        first_offset: Option<usize>,
+        first_is_multiline: bool,
     }
 
     impl<'pr> Visit<'pr> for Finder<'_> {
         fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
             let loc = node.location();
-            let (start_line, _) = self.source.offset_to_line_col(loc.start_offset());
-            let (end_line, _) = self.source.offset_to_line_col(loc.end_offset());
-            if start_line != end_line {
-                self.found = true;
-                return;
+            let start_offset = loc.start_offset();
+            if self.first_offset.is_none_or(|prior| start_offset < prior) {
+                let (start_line, _) = self.source.offset_to_line_col(start_offset);
+                let (end_line, _) = self.source.offset_to_line_col(loc.end_offset());
+                self.first_offset = Some(start_offset);
+                self.first_is_multiline = start_line != end_line;
             }
 
             ruby_prism::visit_block_node(self, node);
@@ -973,10 +989,11 @@ fn node_has_multiline_real_block(source: &SourceFile, node: &ruby_prism::Node<'_
 
     let mut finder = Finder {
         source,
-        found: false,
+        first_offset: None,
+        first_is_multiline: false,
     };
     finder.visit(node);
-    finder.found
+    finder.first_is_multiline
 }
 
 /// Check if a given line has a `.` or `&.` at a specific column.

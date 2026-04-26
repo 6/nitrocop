@@ -206,3 +206,22 @@ it 'matches several changes' do
           other
         }.from(3).to(4)
 end
+
+# When the first descendant block in source order is single-line, the
+# multiline-block descendant deeper in the chain must NOT enable receiver-
+# dot alignment. RuboCop's `each_descendant(:any_block).first` finds the
+# earliest block (the single-line `.where { ... }`) and bails — so this
+# `.with(:gpus, ...)` falls back to assignment-RHS alignment with `DB`,
+# even though its argument contains a multiline `do ... end` block.
+def candidate_hosts
+  ds = DB[:vm_host]
+    .with(:available_ipv4, DB[:ipv4_address]
+    ^^^^^ Layout/MultilineMethodCallIndentation: Align `.with` with `DB` on line 175.
+      .where { row[:ip] =~ nil })
+    .with(:gpus, DB[:pci_device]
+    ^^^^^ Layout/MultilineMethodCallIndentation: Align `.with` with `DB` on line 175.
+      .select_append do
+        gpu = build_object
+        gpu.tap { |g| g.finalize }
+      end)
+end
