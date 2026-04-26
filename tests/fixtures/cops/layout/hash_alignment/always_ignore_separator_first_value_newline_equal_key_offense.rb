@@ -35,3 +35,23 @@ first_not_widest = {
   ^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
     third
 }
+
+emits_before_clobber = {
+  "aaaaaaaaaa":
+    first,
+  "aaaaaaaa":
+  ^^^^^^^^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
+       second,
+  "a":
+    third
+}
+
+conjur_abort_after_first_offense = {
+  "When no signing key properties is set and hash is empty":
+    first,
+  "When no signing key properties is set and there are fields in hash":
+  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/HashAlignment: Align the separators of a hash literal if they span more than one line.
+    second,
+  "When all signing key properties are define":
+    third
+}
