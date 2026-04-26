@@ -445,11 +445,17 @@ end
 (e = 0) == 0 && n.to_i != 0 && n.to_i % 1_000_000 == 0 &&
  ^ Lint/UselessAssignment: Useless assignment to variable - `e`.
 
-m_over_c   = (statistics.methods / statistics.classes) rescue m_over_c = 0
-^ Lint/UselessAssignment: Useless assignment to variable - `m_over_c`.
-
-loc_over_m = (statistics.code_lines / statistics.methods) - 2 rescue loc_over_m = 0
-^ Lint/UselessAssignment: Useless assignment to variable - `loc_over_m`.
+# FN fix: when a rescue modifier fallback writes the same local as the outer
+# assignment, RuboCop reports the fallback write even if the outer assignment is
+# read later.
+def rescue_modifier_same_name_fallback_read_later(statistics)
+  m_over_c   = (statistics.methods / statistics.classes) rescue m_over_c = 0
+                                                                ^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `m_over_c`.
+  loc_over_m = (statistics.code_lines / statistics.methods) - 2 rescue loc_over_m = 0
+                                                                       ^^^^^^^^^^ Lint/UselessAssignment: Useless assignment to variable - `loc_over_m`.
+  puts m_over_c
+  puts loc_over_m
+end
 
 # FN fix: OR-condition LHS write should still be reported when the variable is
 # never read after the OR. Suppression of the LHS exists for the case where
@@ -469,4 +475,13 @@ def or_condition_writes_no_later_read(n)
   else
     :other
   end
+end
+
+# FN fix: a rescue modifier fallback write with no later read is still useless,
+# and it must not suppress earlier same-name writes in the same scope.
+def call_argument_assignments_before_unread_rescue_modifier
+  error("internal", nil, abort = true)
+                         ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `abort`.
+  pid_file.check rescue error("Cannot start", nil, abort = true)
+                                                   ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `abort`.
 end
