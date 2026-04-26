@@ -419,6 +419,53 @@ use crate::parse::source::SourceFile;
 ///    else statements, so `else resize_to_limit_options(width, height) end
 ///    .transform_values!` was treated as a chain argument. Pop and restore
 ///    the outer call-like parent in both case visitors.
+///
+/// ## Variant fix (2026-04-26, oracle: 458 FP / 8,423 FN + default 0 FP / 2 FN)
+///
+/// Four narrower divergences remained on the latest oracle:
+///
+/// 1. **Default-config FN regression in `visit_begin_node`.** The previous
+///    fix that pops an outer `Call`/`CallAssignedRhs`/`Super` parent at begin
+///    entry also caused `nested_in_non_wrapper()` to read a parent_stack with
+///    the leaked parent already gone. For
+///    `Foo.config.x = begin ...; raise "msg"; ...; end`, that meant the
+///    surrounding setter's `Call` parent vanished before the wrapper-vs-non-
+///    wrapper decision, so the begin's child scope inherited macro scope from
+///    top level and `raise "msg"`/`puts "..."` were silently treated as
+///    macros. Fixed by capturing `nested_in_non_wrapper()` BEFORE popping
+///    `leaked_parent`.
+///
+/// 2. **`assignment_in_condition?` missed ternary branches.** RuboCop's
+///    `grandparent.conditional?` is true for ternary `if` nodes, so
+///    `value = ref.is_tagged_with?(...)` inside `cond ? ... : value = ...`
+///    keeps its parens. nitrocop only matched `Conditional`/`ConditionalBody`/
+///    `When`/`WhenBody` as the grandparent. Added `TernaryBranch` so ternary
+///    `:` branches with assignment RHSs no longer false-positive.
+///
+/// 3. **Multi-statement `when`/`if`/`else` bodies leaked outer
+///    `ConditionalBody`/`WhenBody` as the assignment grandparent.** Parser AST
+///    wraps multi-statement bodies in a synthetic `:begin`. RuboCop's
+///    `assignment_in_condition?` then sees the begin (not a conditional/when)
+///    as grandparent and returns false. nitrocop's
+///    `visit_statements_with_parent` only pushed the parent kind for SINGLE-
+///    statement bodies, leaving multi-statement bodies to inherit whatever
+///    parent the surrounding `if`/`case` carried. So
+///    `case x; when :a; lvasgn1; lvasgn2 = call(...); ...; end` inside an
+///    enclosing `if cond ... end` falsely matched
+///    `Assignment + ConditionalBody` and skipped the offense. Added a
+///    `ParentKind::Begin` boundary marker pushed for multi-statement bodies
+///    in both `visit_statements_node` and `visit_statements_with_parent`
+///    (and added it to `nested_in_non_wrapper`'s wrapper exempt list because
+///    `:begin`/`:kwbegin` ARE wrappers in `in_macro_scope?`).
+///
+/// 4. **`non_last_expression_depth` leaked through block bodies.** RuboCop's
+///    `last_expression?` only inspects the call's immediate right sibling
+///    (or the right sibling of its assignment parent). nitrocop tracked a
+///    depth counter that only reset at `def` body entry, so an outer
+///    non-last `if` statement above a `.map do ... end` block kept the
+///    depth at `1` for value-omission calls inside the block. Reset
+///    `non_last_expression_depth` at every block/lambda body entry so each
+///    block body computes value-omission siblings independently.
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -522,6 +569,15 @@ enum ParentKind {
     /// so callers nested inside the block must not see the surrounding
     /// expression's parent as their grandparent.
     Block,
+    /// Synthetic begin marker pushed for multi-statement bodies (def/block/
+    /// when/if/else/etc.). Parser AST wraps multi-statement bodies as a
+    /// `:begin` node. RuboCop's `assignment_in_condition?` therefore sees a
+    /// begin (not the surrounding conditional/when) as the grandparent of an
+    /// inner assignment. This marker reproduces that boundary so outer
+    /// `ConditionalBody`/`WhenBody`/etc. don't leak across multi-statement
+    /// lists. `:begin`/`:kwbegin` ARE wrappers in `in_macro_scope?`, so this
+    /// kind is included in `nested_in_non_wrapper`'s exempt list.
+    Begin,
 }
 
 impl Cop for MethodCallWithArgsParentheses {
@@ -731,6 +787,7 @@ impl ParenVisitor<'_> {
                     | ParentKind::ConditionalBody
                     | ParentKind::WhenBody
                     | ParentKind::Block
+                    | ParentKind::Begin
             )
         })
     }
@@ -747,6 +804,16 @@ impl ParenVisitor<'_> {
                 .iter()
                 .next()
                 .is_some_and(|stmt| stmt.as_begin_node().is_none());
+
+        // Multi-statement bodies wrap as `:begin` in Parser AST. Push the
+        // synthetic boundary so descendants don't see the surrounding
+        // ConditionalBody/WhenBody as their grandparent in
+        // `assignment_in_condition`. Single-statement bodies (or a single
+        // begin child) keep the existing behavior.
+        let pushed_begin = !can_inherit_direct_parent && body.len() > 1;
+        if pushed_begin {
+            self.push_parent(ParentKind::Begin);
+        }
 
         for (index, stmt) in body.iter().enumerate() {
             let is_not_last = index + 1 < body.len();
@@ -765,6 +832,10 @@ impl ParenVisitor<'_> {
             if is_not_last {
                 self.non_last_expression_depth -= 1;
             }
+        }
+
+        if pushed_begin {
+            self.pop_parent();
         }
     }
 
@@ -1209,6 +1280,10 @@ impl ParenVisitor<'_> {
                         | ParentKind::ConditionalBody
                         | ParentKind::When
                         | ParentKind::WhenBody
+                        // Ternary `if` nodes are `conditional?` in RuboCop, so
+                        // `value = call(...)` inside `cond ? ... : value = call(...)`
+                        // keeps its parens via assignment_in_condition?.
+                        | ParentKind::TernaryBranch
                 )
             {
                 return true;
@@ -1594,6 +1669,13 @@ fn is_ambiguous_descendant(node: &ruby_prism::Node<'_>, source: &SourceFile) -> 
 impl<'pr> Visit<'pr> for ParenVisitor<'_> {
     fn visit_statements_node(&mut self, node: &ruby_prism::StatementsNode<'pr>) {
         let body = node.body();
+        // Multi-statement bodies wrap as `:begin` in Parser AST. Push a
+        // synthetic boundary marker so an outer ConditionalBody/WhenBody
+        // doesn't leak through as the grandparent of an inner assignment.
+        let pushed_begin = body.len() > 1;
+        if pushed_begin {
+            self.push_parent(ParentKind::Begin);
+        }
         for (index, stmt) in body.iter().enumerate() {
             let is_not_last = index + 1 < body.len();
             if is_not_last {
@@ -1603,6 +1685,9 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             if is_not_last {
                 self.non_last_expression_depth -= 1;
             }
+        }
+        if pushed_begin {
+            self.pop_parent();
         }
     }
 
@@ -1669,11 +1754,16 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                         self.visit(&params);
                     }
                     if let Some(body) = block_node.body() {
+                        // Reset non_last_expression_depth at block body entry
+                        // (mirrors `visit_block_node`/`visit_lambda_node`).
+                        let prev_non_last_expression_depth = self.non_last_expression_depth;
+                        self.non_last_expression_depth = 0;
                         if block_parent_is_call_like {
                             self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
                         } else {
                             self.visit(&body);
                         }
+                        self.non_last_expression_depth = prev_non_last_expression_depth;
                     }
                     self.pop_scope();
                     self.pop_parent();
@@ -1789,11 +1879,21 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             self.visit(&params);
         }
         if let Some(body) = node.body() {
+            // Reset non_last_expression_depth so an outer non-last sibling
+            // (e.g., the `if` above a `.map do ... end`) doesn't make
+            // `Foo.bar(value:)` inside the block falsely pass
+            // `require_parentheses_for_hash_value_omission?` via the
+            // `!last_expression?` branch. RuboCop only checks the call's own
+            // (or its assignment parent's) right sibling, which restarts
+            // inside each block body.
+            let prev_non_last_expression_depth = self.non_last_expression_depth;
+            self.non_last_expression_depth = 0;
             if block_parent_is_call_like {
                 self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
             } else {
                 self.visit(&body);
             }
+            self.non_last_expression_depth = prev_non_last_expression_depth;
         }
         self.pop_scope();
         self.pop_parent();
@@ -1841,11 +1941,17 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         self.push_parent(ParentKind::Block);
         self.push_macro_scope(child_scope);
         if let Some(body) = node.body() {
+            // Same reset as `visit_block_node`: each lambda body computes
+            // value-omission siblings independently, so the surrounding
+            // expression's non-last-sibling depth must not leak in.
+            let prev_non_last_expression_depth = self.non_last_expression_depth;
+            self.non_last_expression_depth = 0;
             if block_parent_is_call_like {
                 self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
             } else {
                 self.visit(&body);
             }
+            self.non_last_expression_depth = prev_non_last_expression_depth;
         }
         self.pop_scope();
         self.pop_parent();
@@ -1905,11 +2011,16 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
                     self.visit(&params);
                 }
                 if let Some(body) = block_node.body() {
+                    // Reset non_last_expression_depth at block body entry
+                    // (mirrors `visit_block_node`/`visit_lambda_node`).
+                    let prev_non_last_expression_depth = self.non_last_expression_depth;
+                    self.non_last_expression_depth = 0;
                     if block_parent_is_call_like {
                         self.visit_node_with_parent(&body, ParentKind::CallLikeBlockBody);
                     } else {
                         self.visit(&body);
                     }
+                    self.non_last_expression_depth = prev_non_last_expression_depth;
                 }
                 self.pop_scope();
                 self.pop_parent();
@@ -1927,6 +2038,13 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
     fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
         let has_rescue_or_ensure = node.rescue_clause().is_some() || node.ensure_clause().is_some();
+
+        // Capture `nested_in_non_wrapper` BEFORE popping the leaked parent so
+        // the begin's wrapper-vs-non-wrapper decision still sees the surrounding
+        // setter/chained call. Otherwise `Foo.bar = begin ...; raise "x"; end`
+        // would treat the begin as a fresh wrapper and silently exempt inner
+        // receiverless calls as macros.
+        let begin_nested_in_non_wrapper = self.nested_in_non_wrapper();
 
         // In Parser AST, statements inside `begin ... end` (with or without
         // rescue/ensure) have the (kw)begin node as their direct parent, NOT
@@ -1974,7 +2092,7 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
             // Pure `begin...end` (no rescue/ensure) — `kwbegin` is a wrapper
             // in RuboCop's `in_macro_scope?`, but only when the whole begin
             // expression is itself in macro scope.
-            let child_scope = if self.nested_in_non_wrapper() {
+            let child_scope = if begin_nested_in_non_wrapper {
                 MacroScope::NotMacroScope
             } else {
                 self.wrapper_child_scope()

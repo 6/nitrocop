@@ -222,3 +222,26 @@ end
 # Interpolated x-strings are not macro wrappers.
 %x{#{raise TypeError, "x"}}
      ^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Use parentheses for method calls with arguments.
+
+# A pure `begin ... end` whose parent is a setter assignment must NOT propagate
+# macro scope. RuboCop's in_macro_scope? rejects the surrounding setter as a
+# wrapper, so receiverless calls in the begin's `if`/`else` branches still flag.
+Foo.bar.baz = begin
+  if (token = ENV.fetch('SECRET_KEY_BASE', nil)).present?
+    token
+  elsif Rails.env.production?
+    raise 'You must set SECRET_KEY_BASE'
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Use parentheses for method calls with arguments.
+  else
+    sf = Rails.root.join('tmp/secret_key_base')
+    if File.exist?(sf)
+      File.read(sf)
+    else
+      puts "=> Generating initial SECRET_KEY_BASE in #{sf}"
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Use parentheses for method calls with arguments.
+      token = SecureRandom.hex(30)
+      File.write(sf, token)
+      token
+    end
+  end
+end

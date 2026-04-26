@@ -84,3 +84,41 @@ add_alchemy_filter :by_file_type, type: :select, options: ->(_query, params) do
                          ^^^^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
   end
 end
+
+# Hash-value-omission inside a block whose surrounding expression is a
+# non-call (here `||=` op-assignment): RuboCop's call_in_argument_with_block?
+# rejects the outer or-asgn, and require_parentheses_for_hash_value_omission?
+# falls through because the call IS the last expression in the block body.
+# Earlier nitrocop kept these parens because the outer non-last `if` leaked a
+# non-zero `non_last_expression_depth` into the block body.
+def search_filter_params
+  @cache ||= begin
+    a = 1
+
+    if cond
+      bar[:k] ||= [1, 2, 3].map do |extension|
+        Marcel::MimeType.for(extension:)
+                            ^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+      end
+    end
+
+    z
+  end
+end
+
+# Multi-statement when body wraps as a synthetic `:begin` in Parser AST. The
+# inner lvasgn's grandparent in RuboCop is the synthetic begin, NOT the
+# outer `if`'s ConditionalBody, so `assignment_in_condition?` returns false
+# and the call still flags. Earlier nitrocop let `ConditionalBody` leak
+# through as the lvasgn's grandparent.
+def picture_factory(picture, acc)
+  if acc.image_file
+    case Alchemy.storage_adapter.name
+    when :active_storage
+      filename = acc.image_file.original_filename
+      content_type = Marcel::MimeType.for(extension: File.extname(filename))
+                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+      picture.image_file = filename
+    end
+  end
+end

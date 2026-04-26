@@ -62,3 +62,16 @@ module Clusters
     end
   end
 end
+
+# Ternary `else` branch carrying an assignment whose RHS is a parenthesized
+# call. RuboCop's `assignment_in_condition?` allows the parens because the
+# surrounding ternary is `conditional?`. The grandparent in nitrocop's
+# parent_stack is `TernaryBranch`, which must satisfy the same allowance.
+def self._subst(rec, opts, tag, mode)
+  case mode.downcase
+  when "exist"
+    ref.nil? ? value = false : value = ref.is_tagged_with?(tag, :ns => "*")
+  when "registry"
+    ref.nil? ? value = "" : value = registry_data(ref, tag, ohash)
+  end
+end
