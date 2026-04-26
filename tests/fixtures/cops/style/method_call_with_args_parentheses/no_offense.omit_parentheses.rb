@@ -75,3 +75,26 @@ def self._subst(rec, opts, tag, mode)
     ref.nil? ? value = "" : value = registry_data(ref, tag, ohash)
   end
 end
+
+# Hash-value-omission inside a single-line block keeps parens via
+# `node.parent&.single_line?`. The Block / CallLikeBlockBody parent must
+# carry the block's source span so `parent_is_single_line()` returns true
+# for `let(:x) { create(:y, foo:) }`-style spec helpers and inline
+# `.map { |x| Foo.new(x:) }` chains.
+RSpec.describe Favorites::ForUser do
+  let!(:cluster) { create(:cluster, account:) }
+  let!(:project) { create(:project, cluster:, account:) }
+  let(:component) { Component.new(name:, label:, input_type:, params:) }
+end
+
+class Theme
+  def self.default_themes
+    DEFAULT_THEMES.map { |name, icon| new(name:, icon:) }
+  end
+end
+
+def points_creator
+  payload = data
+            .compact
+            .map { |location| location.merge(user_id:) }
+end
