@@ -122,6 +122,15 @@ use ruby_prism::Visit;
 ///     clobbers rocket pairs that are already separator-aligned (where key length
 ///     does not distinguish the crash shape); see the `"xml" =>`/`"uiinput" =>`
 ///     fixture.
+///
+/// 11. **Separator-style clobber abort is per-pair, not whole-hash (2026-04-26):**
+///     RuboCop registers separator offenses in pair order and runs each correction
+///     as the offense is added. When a later newline-value pair would make the
+///     value-removal range reach back into the key line, RuboCop aborts at that
+///     pair, preserving offenses already emitted for earlier pairs and dropping the
+///     crashing pair plus the rest of the hash. This matters for Conjur-style
+///     string-label hashes where one longer key is reported before subsequent
+///     shorter keys disappear after the corrector clobber.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -409,48 +418,24 @@ where
         .any(|window| pairs_share_line(window[0], window[1]))
 }
 
-fn separator_style_rubocop_clobber_quirk(pairs: &[PairInfo]) -> bool {
-    let Some(first) = first_pair(pairs) else {
-        return false;
-    };
-
+fn separator_style_correction_clobbers(first: &PairInfo, pair: &PairInfo) -> bool {
     if !first.value_on_new_line {
         return false;
     }
 
-    let first_has_widest_key = pairs
-        .iter()
-        .filter(|pair| !pair.is_kwsplat)
-        .all(|pair| pair.key_end_col <= first.key_end_col);
+    if pair.is_kwsplat || pair.is_value_omission {
+        return false;
+    }
 
-    pairs
-        .iter()
-        .filter(|pair| !pair.is_kwsplat && !std::ptr::eq(*pair, first))
-        .any(|pair| {
-            if pair.is_value_omission {
-                return false;
-            }
-            if !pair.value_on_new_line {
-                // Rocket-style triggers the clobber whenever the first pair's
-                // value is on a new line and a later pair keeps its value on
-                // the same line; the corrector's separator/value range overlaps
-                // regardless of key length.
-                if first.is_rocket {
-                    return true;
-                }
+    if !pair.value_on_new_line {
+        if first.is_rocket && pair.is_rocket {
+            return pair.key_char_len < first.key_char_len || first.sep_col == pair.sep_col;
+        }
+        return !first.is_rocket && !pair.is_rocket && pair.key_char_len < first.key_char_len;
+    }
 
-                // Preserve the older colon same-line quirk: a strictly shorter
-                // later key crashes, while equal/longer keys report normally.
-                return pair.key_char_len < first.key_char_len;
-            }
-
-            // Colon-style and all-newline rocket pairs crash when RuboCop's
-            // value correction tries to remove more indentation than exists
-            // before the later value, but only when the first pair is the
-            // widest key. If another pair is wider, RuboCop reports normally.
-            let key_delta = first.key_end_col.saturating_sub(pair.key_end_col);
-            first_has_widest_key && key_delta > pair.value_col.unwrap_or(0)
-        })
+    let key_delta = first.key_end_col as isize - pair.key_end_col as isize;
+    key_delta > pair.value_col.unwrap_or(0) as isize + 1
 }
 
 /// RuboCop 1.84.2 crashes when checking a colon-style pair whose key is strictly shorter
@@ -587,10 +572,6 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
         return offenses;
     }
 
-    if separator_style_rubocop_clobber_quirk(pairs) {
-        return offenses;
-    }
-
     let first = match first_pair(pairs) {
         Some(p) => p,
         None => return offenses,
@@ -656,6 +637,10 @@ fn check_separator_style(source: &SourceFile, pairs: &[PairInfo]) -> Vec<AlignOf
         }
 
         if bad {
+            if separator_style_correction_clobbers(first, pair) {
+                break;
+            }
+
             offenses.push(AlignOffense {
                 line: pair.line,
                 col: pair.col,
