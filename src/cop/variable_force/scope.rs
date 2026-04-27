@@ -35,8 +35,11 @@ pub enum ScopeKind {
 
 impl ScopeKind {
     /// Whether this scope can access local variables from enclosing scopes.
+    /// Matches RuboCop's `find_variable` which only walks through block-like
+    /// scopes (`block`, `numblock`, `itblock`); `def`/`defs`/class/module/
+    /// sclass all act as hard local-variable boundaries.
     pub fn is_twisted(&self) -> bool {
-        matches!(self, Self::Block | Self::Defs | Self::SingletonClass)
+        matches!(self, Self::Block)
     }
 
     /// Whether this scope creates a hard boundary that blocks access to outer

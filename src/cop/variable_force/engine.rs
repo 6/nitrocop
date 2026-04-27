@@ -544,6 +544,80 @@ impl<'a> Engine<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn assign_multi_target(
+        &mut self,
+        target: &ruby_prism::Node<'_>,
+        rhs_refs: &[(Vec<u8>, bool)],
+        in_branch: bool,
+        shadowing_in_branch: bool,
+        branch_id: Option<usize>,
+        branch_path: Vec<usize>,
+        seq: usize,
+    ) {
+        if let Some(t) = target.as_local_variable_target_node() {
+            let name = t.name().as_slice().to_vec();
+            let offset = t.location().start_offset();
+            if !self.table.variable_exists(&name) {
+                self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
+            }
+            let rhs_refs_var = rhs_refs
+                .iter()
+                .find(|(n, _)| n == &name)
+                .is_some_and(|(_, r)| *r);
+            let mut a = Assignment::new(offset, AssignmentKind::Multiple);
+            a.in_branch = in_branch;
+            a.shadowing_in_branch = shadowing_in_branch;
+            a.branch_id = branch_id;
+            a.branch_path = branch_path;
+            a.sequence = seq;
+            a.rhs_references_var = rhs_refs_var;
+            self.table.assign_to_variable(&name, a);
+        } else if let Some(mt) = target.as_multi_target_node() {
+            // Nested parenthesized targets: `(a,), b = []`. Recurse into each
+            // inner target so nested local-variable targets get assignments.
+            for inner in mt.lefts().iter() {
+                self.assign_multi_target(
+                    &inner,
+                    rhs_refs,
+                    in_branch,
+                    shadowing_in_branch,
+                    branch_id,
+                    branch_path.clone(),
+                    seq,
+                );
+            }
+            if let Some(rest) = mt.rest() {
+                if let Some(splat) = rest.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        self.assign_multi_target(
+                            &expr,
+                            rhs_refs,
+                            in_branch,
+                            shadowing_in_branch,
+                            branch_id,
+                            branch_path.clone(),
+                            seq,
+                        );
+                    }
+                }
+            }
+            for inner in mt.rights().iter() {
+                self.assign_multi_target(
+                    &inner,
+                    rhs_refs,
+                    in_branch,
+                    shadowing_in_branch,
+                    branch_id,
+                    branch_path.clone(),
+                    seq,
+                );
+            }
+        } else {
+            self.visit(target);
+        }
+    }
+
     fn declare_and_assign_for_targets(&mut self, node: &ruby_prism::Node<'_>) {
         struct TargetCollector {
             targets: Vec<(Vec<u8>, usize)>,
@@ -1011,12 +1085,12 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     }
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
-        // Collect target names before visiting the RHS so we can detect self-refs
+        // Collect target names (including inside nested parenthesized targets
+        // like `(a,), b = []`) before visiting the RHS so we can detect
+        // self-references.
         let mut target_names: Vec<Vec<u8>> = Vec::new();
         for target in node.lefts().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                target_names.push(t.name().as_slice().to_vec());
-            }
+            collect_multi_target_lvar_names(&target, &mut target_names);
         }
         if let Some(rest) = node.rest() {
             if let Some(splat) = rest.as_splat_node() {
@@ -1028,9 +1102,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         }
         for target in node.rights().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                target_names.push(t.name().as_slice().to_vec());
-            }
+            collect_multi_target_lvar_names(&target, &mut target_names);
         }
 
         // Bare `super` (ForwardingSuperNode) implicitly forwards all method
@@ -1080,27 +1152,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let seq = self.next_sequence();
 
         for target in node.lefts().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                let name = t.name().as_slice().to_vec();
-                let offset = t.location().start_offset();
-                if !self.table.variable_exists(&name) {
-                    self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
-                }
-                let rhs_refs_var = rhs_refs
-                    .iter()
-                    .find(|(n, _)| n == &name)
-                    .is_some_and(|(_, r)| *r);
-                let mut a = Assignment::new(offset, AssignmentKind::Multiple);
-                a.in_branch = in_branch;
-                a.shadowing_in_branch = shadowing_in_branch;
-                a.branch_id = branch_id;
-                a.branch_path = branch_path.clone();
-                a.sequence = seq;
-                a.rhs_references_var = rhs_refs_var;
-                self.table.assign_to_variable(&name, a);
-            } else {
-                self.visit(&target);
-            }
+            self.assign_multi_target(
+                &target,
+                &rhs_refs,
+                in_branch,
+                shadowing_in_branch,
+                branch_id,
+                branch_path.clone(),
+                seq,
+            );
         }
         if let Some(rest) = node.rest() {
             if let Some(splat) = rest.as_splat_node() {
@@ -1134,27 +1194,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         }
         for target in node.rights().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                let name = t.name().as_slice().to_vec();
-                let offset = t.location().start_offset();
-                if !self.table.variable_exists(&name) {
-                    self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
-                }
-                let rhs_refs_var = rhs_refs
-                    .iter()
-                    .find(|(n, _)| n == &name)
-                    .is_some_and(|(_, r)| *r);
-                let mut a = Assignment::new(offset, AssignmentKind::Multiple);
-                a.in_branch = in_branch;
-                a.shadowing_in_branch = shadowing_in_branch;
-                a.branch_id = branch_id;
-                a.branch_path = branch_path.clone();
-                a.sequence = seq;
-                a.rhs_references_var = rhs_refs_var;
-                self.table.assign_to_variable(&name, a);
-            } else {
-                self.visit(&target);
-            }
+            self.assign_multi_target(
+                &target,
+                &rhs_refs,
+                in_branch,
+                shadowing_in_branch,
+                branch_id,
+                branch_path.clone(),
+                seq,
+            );
         }
     }
 
@@ -1966,6 +2014,32 @@ fn collect_modifier_conditional_child_offsets(
 
 /// Check if a predicate expression contains a local variable write.
 /// Used to detect modifier-if patterns like `puts a if (a = 123)`.
+/// Recursively collect local-variable target names inside (potentially nested)
+/// multi-write targets like `(a, b), c = []`.
+fn collect_multi_target_lvar_names(target: &ruby_prism::Node<'_>, out: &mut Vec<Vec<u8>>) {
+    if let Some(t) = target.as_local_variable_target_node() {
+        out.push(t.name().as_slice().to_vec());
+        return;
+    }
+    if let Some(mt) = target.as_multi_target_node() {
+        for inner in mt.lefts().iter() {
+            collect_multi_target_lvar_names(&inner, out);
+        }
+        if let Some(rest) = mt.rest() {
+            if let Some(splat) = rest.as_splat_node() {
+                if let Some(expr) = splat.expression() {
+                    if let Some(t) = expr.as_local_variable_target_node() {
+                        out.push(t.name().as_slice().to_vec());
+                    }
+                }
+            }
+        }
+        for inner in mt.rights().iter() {
+            collect_multi_target_lvar_names(&inner, out);
+        }
+    }
+}
+
 fn predicate_has_lvar_write(node: &ruby_prism::Node<'_>) -> bool {
     struct LvarWriteDetector {
         found: bool,
@@ -3062,28 +3136,20 @@ end
         );
     }
 
-    // ── Nested multi-write should NOT create extra assignments ────────
+    // ── Nested multi-write tracks every target ────────────────────────
 
     #[test]
-    fn test_nested_multi_write_no_extra_assignments() {
-        // `a, (b, c) = 1, [2, 3]` — nested multi-write targets b and c should
-        // NOT be tracked by the VF engine (matching RuboCop behavior). Only
-        // top-level target 'a' should have an assignment.
+    fn test_nested_multi_write_tracks_inner_targets() {
+        // `a, (b, c) = 1, [2, 3]` — inner targets `b` and `c` are tracked
+        // (matching RuboCop, which flags `Useless assignment to variable - b`
+        // when `b` is not referenced afterwards).
         let scopes = run_engine("a, (b, c) = 1, [2, 3]\nputs a\n");
         let top = &scopes[0];
-        assert!(
-            top.vars.contains_key("a"),
-            "top-level target 'a' should be tracked"
-        );
+        assert!(top.vars.contains_key("a"));
         assert_eq!(top.vars["a"].num_assignments, 1);
-        // Nested targets should NOT be tracked (no generic handler to catch them)
-        assert!(
-            !top.vars.contains_key("b"),
-            "nested multi-write target 'b' should not be tracked"
-        );
-        assert!(
-            !top.vars.contains_key("c"),
-            "nested multi-write target 'c' should not be tracked"
-        );
+        assert!(top.vars.contains_key("b"));
+        assert_eq!(top.vars["b"].num_assignments, 1);
+        assert!(top.vars.contains_key("c"));
+        assert_eq!(top.vars["c"].num_assignments, 1);
     }
 }
