@@ -67,6 +67,17 @@ use crate::parse::source::SourceFile;
 /// same-line `=`. This catches RSpec keyword-argument conditions and case-branch
 /// concatenations assigned to a variable, and removes the broad left-column
 /// fallback that hid over-indented block-body boolean chains.
+///
+/// Key fix (2026-04-27): the default aligned-style `not_for_this_cop?` path is
+/// now based on Prism ancestors instead of scanning raw source for any unmatched
+/// parenthesis. The source scan skipped valid full-file offenses when an
+/// unrelated comment or earlier method signature contained `(`, while AST-based
+/// `ParenthesesNode` and parenthesized call-argument checks still preserve
+/// RuboCop's grouped-expression exclusions. `EnforcedStyle=indented` keeps the
+/// historical source-scan guard to avoid broad variant corpus churn. The same
+/// pass also stops treating hash rockets (`=>`) as assignment operators, so
+/// direct method-return hash values use ordinary continuation indentation
+/// instead of assignment alignment.
 pub struct MultilineOperationIndentation;
 
 const OPERATOR_METHODS: &[&[u8]] = &[
@@ -92,6 +103,9 @@ struct OperatorContext {
     /// Used to mirror RuboCop's `part_of_assignment_rhs` without parent links
     /// during the actual node check.
     assignment_rhs_start: Option<usize>,
+    /// Mirrors RuboCop's `not_for_this_cop?`: operators inside grouped
+    /// expressions or parenthesized method argument lists are excluded.
+    not_for_this_cop: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -286,8 +300,18 @@ fn build_context(
     let mut block_disqualifies_assignment = false;
     let mut assignment_rhs_start = None;
     let mut assignment_resolved = false;
+    let mut not_for_this_cop = false;
+    let current_key = op_key(current);
 
     for ancestor in ancestors.iter().rev() {
+        if op_key(ancestor) == current_key {
+            continue;
+        }
+
+        if !not_for_this_cop && ancestor_excludes_from_this_cop(ancestor, current) {
+            not_for_this_cop = true;
+        }
+
         // method_argument: stop at first block-like or first matching call.
         if !method_argument_locked {
             if is_block_like(ancestor) {
@@ -340,7 +364,28 @@ fn build_context(
         keyword,
         block_disqualifies_assignment,
         assignment_rhs_start,
+        not_for_this_cop,
     }
+}
+
+fn ancestor_excludes_from_this_cop(
+    ancestor: &ruby_prism::Node<'_>,
+    current: &ruby_prism::Node<'_>,
+) -> bool {
+    if ancestor.as_parentheses_node().is_some() {
+        return node_within_node(current, ancestor);
+    }
+
+    let Some(call) = ancestor.as_call_node() else {
+        return false;
+    };
+    let (Some(opening), Some(closing)) = (call.opening_loc(), call.closing_loc()) else {
+        return false;
+    };
+
+    let current_loc = current.location();
+    current_loc.start_offset() > opening.start_offset()
+        && current_loc.end_offset() < closing.end_offset()
 }
 
 /// Returns the RHS for assignment-like ancestors. Mirrors RuboCop's
@@ -510,9 +555,8 @@ impl Cop for MultilineOperationIndentation {
                 return;
             }
 
-            // Skip if inside a grouped expression or method call arg list parentheses.
-            // Matches RuboCop's not_for_this_cop? check for operator method calls.
-            if is_inside_parentheses(source, node) {
+            let ctx = operator_context(parse_result, source, node);
+            if excluded_from_this_cop(source, node, style, ctx) {
                 return;
             }
 
@@ -531,7 +575,6 @@ impl Cop for MultilineOperationIndentation {
                 return;
             }
 
-            let ctx = operator_context(parse_result, source, node);
             let first_arg = &args[0];
             diagnostics
                 .extend(self.check_binary_node(source, &receiver, first_arg, config, style, ctx));
@@ -540,12 +583,10 @@ impl Cop for MultilineOperationIndentation {
 
         // Check AndNode
         if let Some(and_node) = node.as_and_node() {
-            // Skip if inside a grouped expression (parentheses) or method call
-            // arg list parentheses — matches RuboCop's not_for_this_cop? check.
-            if is_inside_parentheses(source, node) {
+            let ctx = operator_context(parse_result, source, node);
+            if excluded_from_this_cop(source, node, style, ctx) {
                 return;
             }
-            let ctx = operator_context(parse_result, source, node);
             diagnostics.extend(self.check_binary_node(
                 source,
                 &and_node.left(),
@@ -559,11 +600,10 @@ impl Cop for MultilineOperationIndentation {
 
         // Check OrNode
         if let Some(or_node) = node.as_or_node() {
-            // Skip if inside a grouped expression or method call arg list parentheses
-            if is_inside_parentheses(source, node) {
+            let ctx = operator_context(parse_result, source, node);
+            if excluded_from_this_cop(source, node, style, ctx) {
                 return;
             }
-            let ctx = operator_context(parse_result, source, node);
             diagnostics.extend(self.check_binary_node(
                 source,
                 &or_node.left(),
@@ -576,19 +616,26 @@ impl Cop for MultilineOperationIndentation {
     }
 }
 
-/// Check if a node is enclosed by parentheses by scanning the source.
-/// This matches RuboCop's `not_for_this_cop?` which skips and/or nodes inside
-/// grouped expressions `(expr)` or method call arg list parentheses `foo(expr)`.
-///
-/// We scan backwards from the node's start offset counting unbalanced parens.
-/// If we find an unmatched `(` that is also balanced by a `)` after the node's
-/// end, the node is inside parentheses.
-fn is_inside_parentheses(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+fn excluded_from_this_cop(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    style: &str,
+    ctx: OperatorContext,
+) -> bool {
+    if style == "indented" {
+        return is_inside_parentheses_by_source_scan(source, node);
+    }
+
+    ctx.not_for_this_cop
+}
+
+/// Historical parenthesis guard used for `EnforcedStyle=indented` corpus
+/// compatibility. The default aligned style uses AST ancestors instead.
+fn is_inside_parentheses_by_source_scan(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
     let bytes = source.as_bytes();
     let node_start = node.location().start_offset();
     let node_end = node.location().end_offset();
 
-    // Scan backwards from node_start to find unmatched '('
     let mut depth = 0i32;
     let mut pos = node_start;
     while pos > 0 {
@@ -599,8 +646,6 @@ fn is_inside_parentheses(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bo
                 if depth > 0 {
                     depth -= 1;
                 } else {
-                    // Found an unmatched '(' before the node.
-                    // Now verify there's a matching ')' after the node.
                     let mut fwd_depth = 0i32;
                     for &b in &bytes[node_end..] {
                         match b {
@@ -617,11 +662,6 @@ fn is_inside_parentheses(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bo
                     }
                     return false;
                 }
-            }
-            // Don't cross method/class/module boundaries
-            b'\n' => {
-                // Check if this line starts a method/class def (rough check)
-                // We allow scanning through multiple lines within a single expression.
             }
             _ => {}
         }
@@ -661,6 +701,9 @@ fn is_assignment_operator(bytes: &[u8], idx: usize) -> bool {
         return false;
     }
     if bytes.get(idx + 1) == Some(&b'=') {
+        return false;
+    }
+    if bytes.get(idx + 1) == Some(&b'>') {
         return false;
     }
     !matches!(
