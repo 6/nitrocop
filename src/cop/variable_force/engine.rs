@@ -654,7 +654,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         r.branch_id = self.current_branch_id();
         r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
+        // Mirror RuboCop's `Branch::OpAsgn(right_body)`: the RHS of an op-assign
+        // gets its own branch context so reads of other locals inside it can
+        // walk back past sibling-branch assignments to the originating
+        // initializer.
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
         self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
         let seq = self.next_sequence();
         let mut a = Assignment::new(offset, AssignmentKind::Operator);
         a.sequence = seq;
@@ -684,7 +693,12 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         r.branch_id = self.current_branch_id();
         r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
         self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
         let seq = self.next_sequence();
         let mut a = Assignment::new(offset, AssignmentKind::LogicalOr);
         a.sequence = seq;
@@ -714,7 +728,12 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         r.branch_id = self.current_branch_id();
         r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
         self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
         let seq = self.next_sequence();
         let mut a = Assignment::new(offset, AssignmentKind::LogicalAnd);
         a.sequence = seq;
@@ -725,6 +744,270 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         a.branch_path = self.current_branch_path();
         a.in_modifier_conditional = in_modifier_conditional;
         self.table.assign_to_variable(&name, a);
+    }
+
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_global_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_global_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOrWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_global_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableAndWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_instance_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_instance_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOrWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_instance_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableAndWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_class_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_class_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOrWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_class_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableAndWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+    ) {
+        self.visit_constant_path_node(&node.target());
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
+    ) {
+        self.visit_constant_path_node(&node.target());
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'pr>,
+    ) {
+        self.visit_constant_path_node(&node.target());
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
     }
 
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
@@ -1506,13 +1789,21 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.visit(&node.collection());
         let index = node.index();
         self.declare_and_assign_for_targets(&index);
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        // Mirror RuboCop's `Branch::For` (element=0, collection=1, body=2):
+        // wrap the body in a branch context so reads of the loop's index can
+        // reach assignments living inside other for-loops in the same scope.
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 2, false, false, false, false, false, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
             }
         }
-        let loc = node.location();
-        self.mark_loop_back_edges(loc.start_offset(), loc.end_offset());
+        self.pop_branch();
+        self.branch_depth -= 1;
+        self.mark_loop_back_edges(location.start_offset(), location.end_offset());
     }
 
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
@@ -1548,12 +1839,25 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let si = self.table.current_scope_index();
             let branch_id = self.current_branch_id();
             let branch_path = self.current_branch_path();
+            // Take branch_contexts out so we can pass them to reference_with_branches.
+            let contexts = std::mem::take(&mut self.table.branch_contexts);
             for var in self.table.accessible_variables_mut() {
                 let mut reference = Reference::implicit(offset, si);
-                reference.branch_id = branch_id;
-                reference.branch_path = branch_path.clone();
-                var.reference(reference);
+                // RuboCop's `Branch.of(node, scope: var.scope)` returns nil when
+                // the binding lives in an inner scope, so cross-scope references
+                // act as if they had no branch context. Emulate that here by
+                // dropping the current branch path for outer-scope variables;
+                // same-scope references keep the live branch_id/branch_path.
+                if var.scope_index == si {
+                    reference.branch_id = branch_id;
+                    reference.branch_path = branch_path.clone();
+                } else {
+                    reference.branch_id = None;
+                    reference.branch_path = Vec::new();
+                }
+                var.reference_with_branches(reference, &contexts);
             }
+            self.table.branch_contexts = contexts;
         }
         if let Some(recv) = node.receiver() {
             self.visit(&recv);

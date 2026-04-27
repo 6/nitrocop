@@ -170,17 +170,30 @@ impl Cop for UselessAssignment {
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
         let rescue_modifier_writes = rescue_modifier_collector.writes;
+        let chained_assignment_descendants =
+            collect_chained_assignment_descendant_offsets(parse_result);
         let mut candidates = collector.take_candidates();
         candidates.sort_by_key(|candidate| candidate.node_offset);
+        let mut suppressed_chained_descendants: HashSet<usize> = HashSet::new();
 
         for candidate in candidates {
             if pattern_match_offsets.contains(&candidate.node_offset) {
                 continue;
             }
 
-            let emit = if conditional_operator_offsets.contains(&candidate.node_offset) {
+            if suppressed_chained_descendants.contains(&candidate.node_offset) {
+                continue;
+            }
+
+            let emit = if candidate.captured_protection {
+                false
+            } else if !candidate.engine_used
+                && conditional_operator_offsets.contains(&candidate.node_offset)
+            {
                 true
-            } else if !candidate.engine_used {
+            } else if candidate.engine_used {
+                false
+            } else {
                 !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
                     && !or_condition_offsets.contains(&candidate.node_offset)
                     && !post_condition_loop_body_offsets.contains(&candidate.node_offset)
@@ -189,12 +202,14 @@ impl Cop for UselessAssignment {
                         &rescue_modifier_writes,
                     )
                     && !retry_protected_rescue_offsets.contains(&candidate.node_offset)
-            } else {
-                false
             };
 
             if !emit {
                 continue;
+            }
+
+            if let Some(descendants) = chained_assignment_descendants.get(&candidate.node_offset) {
+                suppressed_chained_descendants.extend(descendants);
             }
 
             let (line, column) = source.offset_to_line_col(candidate.node_offset);
@@ -229,6 +244,12 @@ struct AssignmentCandidate {
     node_offset: usize,
     branch_id: Option<usize>,
     engine_used: bool,
+    /// Whether the assignment's value flows out via a block capture rather
+    /// than a real reference. Used to suppress force-emit pathways
+    /// (e.g. the `cond ? var += ... : var` operator collector) that mirror
+    /// RuboCop's flagging — RuboCop honours `captured_by_block` via
+    /// `Assignment#used?`, so capture-only liveness should also win there.
+    captured_protection: bool,
     value_range: Option<(usize, usize)>,
     assignment_states: Vec<AssignmentState>,
     reference_states: Vec<ReferenceState>,
@@ -278,11 +299,14 @@ impl variable_force::VariableForceConsumer for PendingOffenseCollector {
                 })
                 .collect();
             for assignment in &variable.assignments {
+                let captured_protection =
+                    !assignment.referenced && variable.captured_by_block && !assignment.reassigned;
                 candidates.push(AssignmentCandidate {
                     name: variable.name.clone(),
                     node_offset: assignment.node_offset,
                     branch_id: assignment.branch_id,
                     engine_used: assignment.used(variable.captured_by_block),
+                    captured_protection,
                     value_range: assignment.value_range,
                     assignment_states: assignment_states.clone(),
                     reference_states: reference_states.clone(),
@@ -1042,6 +1066,59 @@ impl<'pr> Visit<'pr> for RetryProtectedSuppressCollector<'_> {
             }
         }
         ruby_prism::visit_rescue_node(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: chained assignment (`outer = method(... inner = value ...)`).
+// ---------------------------------------------------------------------------
+//
+// RuboCop's `Lint/UselessAssignment` calls `ignore_node` on chained assignment
+// nodes whose RHS is a send after reporting the outer offense. Subsequent
+// reverse-iteration over assignments to the *inner* variable then sees the
+// inner write as `part_of_ignored_node?` and skips it.
+//
+// We approximate that with a narrower targeted rule: only suppress lvasgn
+// nodes that appear as **direct positional arguments** of the outer call,
+// i.e. patterns like `resolve(records, properties, name = value)` where the
+// inline assignment is functioning as a self-documenting positional argument.
+// This handles the archivesspace case while keeping the suppression scope
+// tight enough that Prism's tolerant parsing of malformed source can not
+// silently swallow unrelated later statements.
+
+fn collect_chained_assignment_descendant_offsets(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashMap<usize, HashSet<usize>> {
+    let mut collector = ChainedAssignmentDescendantCollector::default();
+    collector.visit(&parse_result.node());
+    collector.descendants
+}
+
+#[derive(Default)]
+struct ChainedAssignmentDescendantCollector {
+    descendants: HashMap<usize, HashSet<usize>>,
+}
+
+impl<'pr> Visit<'pr> for ChainedAssignmentDescendantCollector {
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let outer_offset = node.location().start_offset();
+        let value = node.value();
+        if let Some(call) = value.as_call_node() {
+            if call.closing_loc().is_some() {
+                if let Some(args) = call.arguments() {
+                    let mut descendants: HashSet<usize> = HashSet::new();
+                    for arg in args.arguments().iter() {
+                        if let Some(inner) = arg.as_local_variable_write_node() {
+                            descendants.insert(inner.location().start_offset());
+                        }
+                    }
+                    if !descendants.is_empty() {
+                        self.descendants.insert(outer_offset, descendants);
+                    }
+                }
+            }
+        }
+        ruby_prism::visit_local_variable_write_node(self, node);
     }
 }
 
