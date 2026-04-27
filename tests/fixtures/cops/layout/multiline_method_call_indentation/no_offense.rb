@@ -233,3 +233,22 @@ def posts
     .includes(:author)
     .paginate(page: 1)
 end
+
+# Trailing-dot chains inside an if-expression branch that is itself the
+# receiver of `.foo` on the assignment RHS keep the branch's local alignment.
+# They must not be re-anchored to the outer assignment RHS column.
+def visible_variants_for_outgoing_exchanges
+  visible = {}
+  visible_enterprises.each do |enterprise|
+    variants = if enterprise.prefers_product_selection_from_inventory_only?
+                 permissions.
+                   visible_variants_for_outgoing_exchanges_to(enterprise).
+                   visible_for(enterprise)
+               else
+                 permissions.
+                   visible_variants_for_outgoing_exchanges_to(enterprise).
+                   not_hidden_for(enterprise)
+               end.pluck(:id)
+    visible[enterprise.id] = variants if variants.any?
+  end
+end
