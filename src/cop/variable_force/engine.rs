@@ -1532,33 +1532,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             self.visit(&node.predicate());
         } else {
-            // Pre-condition loop (while...end): visit condition first, then body.
+            // Pre-condition loop (while...end and modifier `body while cond`):
+            // visit condition first, then body. Liveness for modifier-form
+            // `body while (a = expr)` is tracked via the
+            // `in_modifier_conditional` flag rather than a dedicated branch
+            // context (matches RuboCop's `Variable#in_modifier_conditional?`).
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
-            if pred_has_write && is_modifier {
+            if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
             }
             self.visit(&node.predicate());
-            if pred_has_write && is_modifier {
-                self.pop_branch();
+            if pred_has_write {
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch_with_flags(
-                parent_id, body_child, false, false, false, false, false, false,
-            );
+            self.push_branch_with_flags(parent_id, 0, false, false, false, false, false, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1594,33 +1583,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             self.visit(&node.predicate());
         } else {
-            // Pre-condition loop (until...end): visit condition first, then body.
+            // Pre-condition loop (until...end and modifier `body until cond`):
+            // visit condition first, then body. Liveness for modifier-form
+            // `body until (a = expr)` is tracked via the
+            // `in_modifier_conditional` flag rather than a dedicated branch
+            // context (matches RuboCop's `Variable#in_modifier_conditional?`).
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
-            if pred_has_write && is_modifier {
+            if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
             }
             self.visit(&node.predicate());
-            if pred_has_write && is_modifier {
-                self.pop_branch();
+            if pred_has_write {
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch_with_flags(
-                parent_id, body_child, false, false, false, false, false, false,
-            );
+            self.push_branch_with_flags(parent_id, 0, false, false, false, false, false, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);

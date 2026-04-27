@@ -896,13 +896,17 @@ fn candidate_has_reference_after(candidate: &AssignmentCandidate, offset: usize)
 //
 // RuboCop's `process_rescue` treats a `begin ... rescue ... end` containing
 // `retry` as a loop, which (combined with the variable_force walk) keeps any
-// `rescue X => e` capture of the same name alive across the entire surrounding
-// scope — even captures in other begin blocks that don't themselves use `e`.
+// `rescue X => e` capture of the same name alive in *sibling* begin blocks —
+// e.g. an `if/else` whose two branches both have a rescue capturing `e` and
+// only one of which actually reads `e` and retries.
 //
-// Mirror that quirk: when one `rescue X => name` clause in a scope (def/class/
-// module/lambda or top-level) contains both `retry` and a read of `name`,
-// suppress the unused-warning for every rescue capture of that name in the
-// same scope.
+// The protection does **not** extend into begin blocks that contain the
+// retrying begin (e.g. `def f; begin; do_something do; begin; ...; rescue =>
+// e; ...; retry; end; end; rescue Timeout::Error => e; end; end` — the outer
+// `Timeout::Error => e` is independent of the inner retry). Mirror that by
+// tracking each retry-protected begin's full range and only suppressing
+// rescue captures whose enclosing begin does **not** contain the retrying
+// begin.
 
 fn collect_retry_protected_rescue_capture_offsets(
     parse_result: &ruby_prism::ParseResult<'_>,
@@ -911,21 +915,38 @@ fn collect_retry_protected_rescue_capture_offsets(
     collector.visit(&parse_result.node());
     let mut suppress_collector = RetryProtectedSuppressCollector {
         protected: &collector.protected,
-        scope_stack: vec![0],
+        begin_stack: Vec::new(),
+        scope_stack: Vec::new(),
         offsets: HashSet::new(),
     };
     suppress_collector.visit(&parse_result.node());
     suppress_collector.offsets
 }
 
+/// (scope_offset, variable_name) keying retry-protection.
+type RetryProtectedKey = (usize, Vec<u8>);
+/// (begin_start_offset, begin_end_offset).
+type BeginRange = (usize, usize);
+/// Map keyed by (scope_offset, variable_name) → list of begin ranges inside
+/// that scope whose rescue chain has retry-and-read of the variable.
+type RetryProtectedMap = HashMap<RetryProtectedKey, Vec<BeginRange>>;
+
 #[derive(Default)]
 struct RetryProtectedRescueCollector {
-    /// (scope_offset, name) pairs where a rescue clause uses `name` and contains retry.
-    protected: HashSet<(usize, Vec<u8>)>,
+    /// `(scope_offset, name)` → list of `(begin_start, begin_end)` ranges of
+    /// `begin` blocks inside that scope whose rescue chain contains `retry`
+    /// and a read of `name`. Suppression is scope-local: a retry-rescue in
+    /// a different def does not protect captures in this def.
+    protected: RetryProtectedMap,
+    begin_stack: Vec<BeginRange>,
     scope_stack: Vec<usize>,
 }
 
 impl RetryProtectedRescueCollector {
+    fn current_begin(&self) -> Option<(usize, usize)> {
+        self.begin_stack.last().copied()
+    }
+
     fn current_scope(&self) -> usize {
         self.scope_stack.last().copied().unwrap_or(0)
     }
@@ -1008,10 +1029,23 @@ impl<'pr> Visit<'pr> for RetryProtectedRescueCollector {
         self.enter_scope(offset, |this| ruby_prism::visit_lambda_node(this, node));
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let loc = node.location();
+        self.begin_stack
+            .push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_begin_node(self, node);
+        self.begin_stack.pop();
+    }
+
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(name) = rescue_clause_capture_name(node) {
             if rescue_clause_body_has_retry_and_read(node, &name) {
-                self.protected.insert((self.current_scope(), name));
+                if let Some(begin) = self.current_begin() {
+                    self.protected
+                        .entry((self.current_scope(), name))
+                        .or_default()
+                        .push(begin);
+                }
             }
         }
         ruby_prism::visit_rescue_node(self, node);
@@ -1019,12 +1053,17 @@ impl<'pr> Visit<'pr> for RetryProtectedRescueCollector {
 }
 
 struct RetryProtectedSuppressCollector<'a> {
-    protected: &'a HashSet<(usize, Vec<u8>)>,
+    protected: &'a RetryProtectedMap,
+    begin_stack: Vec<BeginRange>,
     scope_stack: Vec<usize>,
     offsets: HashSet<usize>,
 }
 
 impl<'a> RetryProtectedSuppressCollector<'a> {
+    fn current_begin(&self) -> Option<(usize, usize)> {
+        self.begin_stack.last().copied()
+    }
+
     fn current_scope(&self) -> usize {
         self.scope_stack.last().copied().unwrap_or(0)
     }
@@ -1057,11 +1096,34 @@ impl<'pr> Visit<'pr> for RetryProtectedSuppressCollector<'_> {
         self.enter_scope(offset, |this| ruby_prism::visit_lambda_node(this, node));
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let loc = node.location();
+        self.begin_stack
+            .push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_begin_node(self, node);
+        self.begin_stack.pop();
+    }
+
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(name) = rescue_clause_capture_name(node) {
-            if self.protected.contains(&(self.current_scope(), name)) {
-                if let Some(offset) = rescue_clause_capture_offset(node) {
-                    self.offsets.insert(offset);
+            if let (Some((b_start, b_end)), Some(ranges)) = (
+                self.current_begin(),
+                self.protected.get(&(self.current_scope(), name)),
+            ) {
+                let protected = ranges.iter().any(|&(p_start, p_end)| {
+                    // Self-protection: same begin block.
+                    (p_start == b_start && p_end == b_end)
+                        // Sibling/unrelated: protecting begin is *outside* the
+                        // current begin (not nested inside it). RuboCop keeps
+                        // a sibling retry-rescue's captures alive but not those
+                        // in an outer begin that *contains* the retrying begin.
+                        || p_start < b_start
+                        || p_end > b_end
+                });
+                if protected {
+                    if let Some(offset) = rescue_clause_capture_offset(node) {
+                        self.offsets.insert(offset);
+                    }
                 }
             }
         }
