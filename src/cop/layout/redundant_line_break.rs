@@ -323,6 +323,19 @@ use crate::parse::source::SourceFile;
 ///   anchors `return unless condition || \` at the condition expression, and
 ///   only suppresses `foo \` newline `&& bar` when the first line is not already
 ///   a boolean operator expression like `foo || bar \`.
+///
+/// ## Fixes applied (2026-04-27)
+/// - **Multistatement class body safety**: Prism models class bodies as a
+///   `StatementsNode`, while Parser exposes a multiline `begin` descendant when
+///   the body has multiple statements. The unsafe range collector now treats
+///   those multistatement class bodies as unsafe so class expressions ending in
+///   `.new` are not falsely collapsed, while single-statement class receivers
+///   remain reportable like RuboCop.
+/// - **Corpus-derived continuation coverage**: command-style split strings,
+///   chained assignments, and boolean operator backslash continuations are
+///   covered in fixtures while preserving the broad value-only split-string
+///   guard needed for RuboCop-accepted hash values, return expressions, and
+///   long call arguments.
 pub struct RedundantLineBreak;
 
 impl Cop for RedundantLineBreak {
@@ -408,6 +421,7 @@ impl Cop for RedundantLineBreak {
             reported_starts,
             ast_diagnostics,
             checked_chain_ranges,
+            reported_ranges,
             ..
         } = visitor;
         diagnostics.extend(ast_diagnostics);
@@ -421,6 +435,7 @@ impl Cop for RedundantLineBreak {
             inspect_blocks,
             diagnostics,
             &reported_starts,
+            &reported_ranges,
             &unsafe_ranges,
             &group_blocking_ranges,
             &ternary_ranges,
@@ -511,6 +526,10 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        if class_body_has_multiple_statements(node) {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
         if let Some(superclass) = node.superclass() {
             let loc = node.location();
             let super_loc = superclass.location();
@@ -637,6 +656,12 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         }
         ruby_prism::visit_interpolated_regular_expression_node(self, node);
     }
+}
+
+fn class_body_has_multiple_statements(node: &ruby_prism::ClassNode<'_>) -> bool {
+    node.body()
+        .and_then(|body| body.as_statements_node())
+        .is_some_and(|statements| statements.body().len() > 1)
 }
 
 /// Collects byte ranges of block/lambda nodes, tracking whether each is multiline.
@@ -866,6 +891,13 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                     || (ends_with_safe_navigation_operator(&combined)
                         && trimmed.first().is_some_and(|b| is_word_char(*b)))
                 {
+                    // RuboCop's chain-dot collapse regex `/\n\s*(?=(&)?\.\w)/`
+                    // does NOT strip a preceding backslash, so a line ending in
+                    // `\` joined to a `.method` continuation keeps the `\` in
+                    // the joined source, inflating the length check.
+                    if prev_had_backslash {
+                        combined.push(b'\\');
+                    }
                     combined.extend_from_slice(trimmed);
                 } else {
                     combined.push(b' ');
@@ -1079,6 +1111,15 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 .or_else(|| ancestor.as_and_node().map(|n| n.operator_loc()));
 
             if let Some(op_loc) = operator_loc {
+                let outer_loc = ancestor.location();
+                // RuboCop's `on_send` walks up through Or/And operators. The walked-up
+                // node is then checked via `offense?` — which short-circuits on
+                // `suitable_as_single_line?` (e.g. `too_long?`) before evaluating
+                // `require_backslash?`. If the outer expression doesn't fit on one
+                // line, no offense fires. Suppress here to match.
+                if !self.suitable_as_single_line(outer_loc.start_offset(), outer_loc.end_offset()) {
+                    return true;
+                }
                 let (op_line, _) = self.source.offset_to_line_col(op_loc.start_offset());
                 let lines: Vec<&[u8]> = self.source.lines().collect();
                 if op_line > 0 && op_line <= lines.len() {
@@ -1515,6 +1556,7 @@ fn check_backslash_continuations(
     inspect_blocks: bool,
     diagnostics: &mut Vec<Diagnostic>,
     already_reported: &HashSet<usize>,
+    ast_reported_ranges: &[(usize, usize)],
     unsafe_ranges: &[(usize, usize)],
     group_blocking_ranges: &[(usize, usize)],
     ternary_ranges: &[(usize, usize)],
@@ -1754,12 +1796,33 @@ fn check_backslash_continuations(
             continue;
         }
 
+        // Compare the chain range against the post-indent statement start, since
+        // an AST CallNode starts at the call name (e.g. `pipe`), not at column 0
+        // of the line. Without this, the strict-enclosure check fails for
+        // `pipe \\\n   arg1,\n   arg2` even though the call covers the whole
+        // group.
         let covered_by_checked_chain = checked_chain_ranges.iter().any(|&(cs, ce)| {
-            cs <= group_byte_start
+            cs <= group_statement_start
                 && ce >= group_byte_end
-                && (cs < group_byte_start || ce > group_byte_end)
+                && (cs < group_statement_start || ce > group_byte_end)
         });
         if covered_by_checked_chain && !is_elsif_line {
+            i = final_line_idx + 1;
+            continue;
+        }
+
+        // The AST phase already reported an enclosing assignment / call. RuboCop's
+        // `register_offense` calls `ignore_node`, so the inner expression is skipped
+        // by `part_of_ignored_node?`. Phase 2's text scan has no AST context, so
+        // mirror the suppression: if the backslash group's first line falls inside
+        // an already-reported AST range, skip it. Comparing against `group_byte_end`
+        // is too strict because Phase 2 extends the group past the actual expression
+        // (into the following statement) when the last continuation line has no
+        // trailing comma.
+        let covered_by_ast_report = ast_reported_ranges
+            .iter()
+            .any(|&(rs, re)| rs <= group_byte_start && re > group_byte_start);
+        if covered_by_ast_report {
             i = final_line_idx + 1;
             continue;
         }
@@ -1795,7 +1858,11 @@ fn check_backslash_continuations(
             if t.is_empty() {
                 continue;
             }
-            let content_part = if line_idx <= group_end {
+            // `group_end` is the first line WITHOUT a trailing backslash (one
+            // past the last backslash-continued line). Only strip the trailing
+            // `\` for lines that actually have one, otherwise we drop the last
+            // content character (`,` or `)`) and undercount the joined length.
+            let content_part = if line_idx < group_end {
                 let before_bs = trim_trailing_whitespace(&t[..t.len() - 1]);
                 trim_leading_whitespace(before_bs)
             } else {

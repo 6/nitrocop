@@ -462,3 +462,74 @@ comments.any? \
 certs_dir && !certs_dir.empty? \
   ? 'codekitchen/dinghy-http-proxy:2.5.10' \
   : 'freedomben/dory-http-proxy:2.6.2.2'
+
+# Hash key/value continuation inside a larger hash. RuboCop judges the hash as
+# a whole and does not report the continued key/value line independently.
+form_fields = {
+  "#{PAGE1_KEY}.VeteransServiceNumber_If_Applicable[0]": \
+  data.veteran_service_number,
+  "#{PAGE1_KEY}.SomeExtremelyLongFieldNameThatKeepsTheWholeHashFromFittingOnOneLine[0]": data.other
+}
+
+# Class expression receiver with a multiline body. RuboCop does not collapse
+# the class body just to attach the trailing `.new`.
+let!(:test_object) do
+  class TestController < ApplicationController
+    include TestObjectContent
+
+    self
+  end.new
+end
+
+# Inside an `or` / `and` keyword expression, RuboCop walks up to the operator
+# node before checking suitability. If the joined outer expression would
+# exceed `MaxLineLength`, the offense is suppressed even when the inner
+# `raise`/call by itself would fit on a single line.
+def configure(my_proc, req_arity, var)
+  case my_proc
+  when Proc
+    arity = my_proc.arity
+    (arity == req_arity) or \
+      raise ArgumentError,
+            "#{var}=#{my_proc.inspect} has invalid arity: " \
+            "#{arity} (need #{req_arity})"
+  end
+end
+
+# `pipe arg1, arg2` style call where the joined call exceeds MaxLineLength.
+# Phase 2's combined-line check undercounted by stripping a trailing `\\` from
+# the line one past the backslash sequence (which holds the closing arg / call,
+# not a continuation marker), and `covered_by_checked_chain` failed because the
+# AST chain starts after the indent while the group started at column 0.
+module Builder
+  class Remote
+    def inspect_remote_context
+      pipe \
+        docker(:context, :inspect, remote_context_name, "--format", ENDPOINT_DOCKER_HOST_INSPECT),
+        grep("-xq", remote)
+    end
+  end
+end
+
+# Backslash continuation between method-chain segments survives RuboCop's
+# `to_single_line` chain-dot collapse regex `/\n\s*(?=(&)?\.\w)/`, which strips
+# the newline+indent but leaves the trailing `\` in place. The joined length
+# therefore exceeds 120 chars and `too_long?` suppresses the offense.
+on_supported_os.each do |os, facts|
+  describe 'datadog::ubuntu' do
+    let(:facts) { facts }
+    context 'with debian' do
+      context 'with reports' do
+        context 'when ruby-devel installed' do
+          context 'with provider option' do
+            it do
+              is_expected.to contain_package('ruby-devel')\
+                .with_ensure('installed')\
+                .that_comes_before('Package[dogapi]')
+            end
+          end
+        end
+      end
+    end
+  end
+end

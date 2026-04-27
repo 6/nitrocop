@@ -572,3 +572,53 @@ super || other.is_a?(HighOrderType) \
 return unless spec.find_all_by_name(gem)&.any? || \
               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
   spec.find_by_path(gem)&.any?
+
+warn 'Please use one of the standard log levels: ' \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  'debug, info, warn, or error'
+
+@autoscaling_groups = @scaling_activities =
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  @launch_configurations = nil
+
+p.name == :chef_client || \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  p.type == :chef_client
+
+(format[Core::LEADING_DIGITS].nil? || \
+ ^ Layout/RedundantLineBreak: Redundant line break detected.
+  national.match?(cr("x"))) && \
+  national.match(cr("y"))
+
+p.kind_of? PBXShellScriptBuildPhase and \
+^ Layout/RedundantLineBreak: Redundant line break detected.
+  not p.name.nil? and \
+  p.name.include?("Carte")
+
+@text_line_matrix =
+^ Layout/RedundantLineBreak: Redundant line break detected.
+@text_rendering_matrix = nil
+
+@text_line_matrix =
+^ Layout/RedundantLineBreak: Redundant line break detected.
+@text_rendering_matrix = Matrix.identity(3)
+
+foo do
+  class C
+  ^^^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+    self
+  end.new
+end
+
+# AST phase reports the enclosing assignment. Phase 2 must skip the inner
+# backslash group (RuboCop's `register_offense` calls `ignore_node` so the
+# inner expression is `part_of_ignored_node?` and not re-reported).
+def calculate(a, eSquared, phiPrime, osgb_fo)
+  rho =
+  ^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+    a\
+      * osgb_fo\
+      * (1.0 - eSquared)\
+      * ((1.0 - eSquared * Math.sin(phiPrime)**2)**-1.5)
+  rho
+end
