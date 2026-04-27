@@ -486,6 +486,40 @@ use crate::parse::source::SourceFile;
 /// and `visit_statements_with_parent` via `_loc` variants that accept an
 /// `Option<(usize, usize)>` location for the synthetic `CallLikeBlockBody`
 /// boundary.
+///
+/// ## Variant fix (2026-04-27, oracle: 385 FP / 2,384 FN)
+///
+/// Three independent regressions remained on the latest oracle:
+///
+/// 1. **`hash_literal_in_arguments?` missed hashes hidden behind non-send
+///    descendants.** RuboCop runs `node.descendants.any? { hash_literal? }`
+///    over the WHOLE call subtree once any direct argument is a send. The
+///    hand-rolled `has_hash_literal` only recursed through call args/recv,
+///    array elements, and hash pairs, so a `{}` reachable through an
+///    `||=` op-asgn arg (`create_ou_tree(ou, hous[k] ||= {}, ...)`) or
+///    through an `lvasgn = {...}` arg (`described_class.new(values = {...},
+///    admin)`) was invisible. Replaced with a Prism `Visit` traversal that
+///    matches `descendants.any?` exactly.
+///
+/// 2. **`and`/`or` keyword operators were treated as `logical_operator?`.**
+///    `PredicateOperatorNode#logical_operator?` in rubocop-ast returns true
+///    only when the operator source is `&&` or `||` — `and`/`or` keywords
+///    are "semantic" operators and are NOT `logical_operator?`. Calls under
+///    `and`/`or` parents must therefore still flag because
+///    `call_in_logical_operators?` returns false. nitrocop pushed
+///    `ParentKind::LogicalOp` for ALL And/Or nodes, exempting these calls.
+///    Now `visit_and_node`/`visit_or_node` consult `operator_loc()` and
+///    only push `LogicalOp` for `&&` / `||`. The `is_ambiguous_node`
+///    descendant predicate also checks operator slice for the same reason.
+///
+/// 3. **`case ... else <call> end` lost its conditional grandparent.**
+///    Default Prism traversal of the else clause did not push any
+///    parent context, so an inner `lvasgn = call(...)` saw the surrounding
+///    `def`/`if` body as its grandparent and `assignment_in_condition?`
+///    returned false. Override `visit_case_node` to dispatch the else
+///    statements through `visit_statements_with_parent(stmts,
+///    ConditionalBody)` so the assignment grandparent matches RuboCop's
+///    `case` (which is `conditional?`).
 pub struct MethodCallWithArgsParentheses;
 
 /// Check if a method name matches any pattern in the list (regex-style).
@@ -1490,70 +1524,53 @@ fn unwrap_parenthesized_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_pri
     }
 }
 
-/// Check if a node contains a hash literal with braces (not keyword hash)
-fn has_hash_literal(node: &ruby_prism::Node<'_>) -> bool {
-    if let Some(unwrapped) = unwrap_parenthesized_node(node) {
-        return has_hash_literal(&unwrapped);
-    }
+/// Returns true when the operator slice is `&&` or `||` (the "logical"
+/// operators in rubocop-ast's `PredicateOperatorNode#logical_operator?`).
+/// `and`/`or` keywords return false — they are "semantic" operators and do
+/// not satisfy `logical_operator?`.
+fn is_short_circuit_operator(op: &[u8]) -> bool {
+    op == b"&&" || op == b"||"
+}
 
-    if let Some(hash) = node.as_hash_node() {
-        if hash.opening_loc().as_slice() == b"{" {
+fn call_contains_hash_literal(call: &ruby_prism::CallNode<'_>) -> bool {
+    let mut visitor = HashLiteralDescendantVisitor { found: false };
+    if let Some(recv) = call.receiver() {
+        visitor.visit(&recv);
+        if visitor.found {
             return true;
         }
     }
-    // Recurse into descendants
-    if let Some(call) = node.as_call_node() {
-        if let Some(args) = call.arguments() {
-            for arg in args.arguments().iter() {
-                if has_hash_literal(&arg) {
-                    return true;
-                }
-            }
-        }
-        if let Some(recv) = call.receiver() {
-            if has_hash_literal(&recv) {
+    if let Some(args) = call.arguments() {
+        for arg in args.arguments().iter() {
+            visitor.visit(&arg);
+            if visitor.found {
                 return true;
             }
-        }
-    }
-    if let Some(array) = node.as_array_node() {
-        for elem in array.elements().iter() {
-            if has_hash_literal(&elem) {
-                return true;
-            }
-        }
-    }
-    if let Some(kw_hash) = node.as_keyword_hash_node() {
-        for elem in kw_hash.elements().iter() {
-            if has_hash_literal(&elem) {
-                return true;
-            }
-        }
-    }
-    if let Some(assoc) = node.as_assoc_node() {
-        if has_hash_literal(&assoc.value()) {
-            return true;
         }
     }
     false
 }
 
-fn call_contains_hash_literal(call: &ruby_prism::CallNode<'_>) -> bool {
-    if let Some(recv) = call.receiver() {
-        if has_hash_literal(&recv) {
-            return true;
-        }
-    }
+/// Visit-based traversal that finds any braced hash literal descendant.
+/// Mirrors rubocop-ast's `node.descendants.any? { |d| d.hash_type? && d.braces? }`.
+/// The hand-rolled `has_hash_literal` only recursed into a few specific node
+/// shapes (call args/recv, array elements, hash pairs) so it missed `{}`
+/// hidden inside op-asgn/lvasgn/begin/etc. children.
+struct HashLiteralDescendantVisitor {
+    found: bool,
+}
 
-    if let Some(args) = call.arguments() {
-        for arg in args.arguments().iter() {
-            if has_hash_literal(&arg) {
-                return true;
+impl<'pr> Visit<'pr> for HashLiteralDescendantVisitor {
+    fn visit_branch_node_enter(&mut self, node: ruby_prism::Node<'pr>) {
+        if self.found {
+            return;
+        }
+        if let Some(hash) = node.as_hash_node() {
+            if hash.opening_loc().as_slice() == b"{" {
+                self.found = true;
             }
         }
     }
-
-    false
 }
 
 /// Check if a CallNode has parenthesized ancestor calls in the chain
@@ -1604,10 +1621,22 @@ fn is_ambiguous_node(node: &ruby_prism::Node<'_>, source: &SourceFile) -> bool {
         || node.as_lambda_node().is_some()
         || node.as_block_node().is_some()
         || node.as_forwarding_arguments_node().is_some()
-        || node.as_and_node().is_some()
-        || node.as_or_node().is_some()
     {
         return true;
+    }
+
+    // RuboCop's `logical_operator?` only returns true when the operator source
+    // is `&&` or `||` — `and`/`or` keywords are "semantic" operators and are
+    // NOT treated as ambiguous by `call_with_ambiguous_arguments?`.
+    if let Some(and) = node.as_and_node() {
+        if is_short_circuit_operator(and.operator_loc().as_slice()) {
+            return true;
+        }
+    }
+    if let Some(or) = node.as_or_node() {
+        if is_short_circuit_operator(or.operator_loc().as_slice()) {
+            return true;
+        }
     }
 
     // Ternary if — has then_keyword (the `?`) but no end_keyword
@@ -2305,17 +2334,30 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
     }
 
     fn visit_and_node(&mut self, node: &ruby_prism::AndNode<'pr>) {
-        self.push_parent(ParentKind::LogicalOp);
+        // RuboCop's `logical_operator?` returns true only for `&&` / `||`.
+        // `and`/`or` keywords are "semantic" operators and DO NOT satisfy
+        // `call_in_logical_operators?`, so calls under them must still flag.
+        let push_parent = is_short_circuit_operator(node.operator_loc().as_slice());
+        if push_parent {
+            self.push_parent(ParentKind::LogicalOp);
+        }
         self.visit(&node.left());
         self.visit(&node.right());
-        self.pop_parent();
+        if push_parent {
+            self.pop_parent();
+        }
     }
 
     fn visit_or_node(&mut self, node: &ruby_prism::OrNode<'pr>) {
-        self.push_parent(ParentKind::LogicalOp);
+        let push_parent = is_short_circuit_operator(node.operator_loc().as_slice());
+        if push_parent {
+            self.push_parent(ParentKind::LogicalOp);
+        }
         self.visit(&node.left());
         self.visit(&node.right());
-        self.pop_parent();
+        if push_parent {
+            self.pop_parent();
+        }
     }
 
     fn visit_optional_parameter_node(&mut self, node: &ruby_prism::OptionalParameterNode<'pr>) {
@@ -2371,7 +2413,31 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         };
 
         self.push_macro_scope(MacroScope::NotMacroScope);
-        ruby_prism::visit_case_node(self, node);
+
+        // The case predicate's Parser parent is the `case` node, which is
+        // `conditional?`. Push `Conditional` so `assignment_in_condition?`
+        // matches for an inline assignment in the predicate
+        // (`case response = http.request(...)`).
+        if let Some(predicate) = node.predicate() {
+            self.push_parent(ParentKind::Conditional);
+            self.visit(&predicate);
+            self.pop_parent();
+        }
+
+        // Visit when conditions/bodies via their existing visit_when_node.
+        for cond in node.conditions().iter() {
+            self.visit(&cond);
+        }
+
+        // The `else` branch's body has the `case` node as its Parser parent,
+        // which is `conditional?`. Push `ConditionalBody` for the body so
+        // `assignment_in_condition?` matches for inner assignment RHS calls.
+        if let Some(else_clause) = node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
+            }
+        }
+
         self.pop_scope();
 
         if let Some(parent) = leaked_parent {
@@ -2396,7 +2462,26 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         };
 
         self.push_macro_scope(MacroScope::NotMacroScope);
-        ruby_prism::visit_case_match_node(self, node);
+
+        // Mirror visit_case_node: the case_match predicate's Parser parent is
+        // `case_match` (`conditional?`); the else clause body has `case_match`
+        // as direct parent too.
+        if let Some(predicate) = node.predicate() {
+            self.push_parent(ParentKind::Conditional);
+            self.visit(&predicate);
+            self.pop_parent();
+        }
+
+        for cond in node.conditions().iter() {
+            self.visit(&cond);
+        }
+
+        if let Some(else_clause) = node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
+            }
+        }
+
         self.pop_scope();
 
         if let Some(parent) = leaked_parent {

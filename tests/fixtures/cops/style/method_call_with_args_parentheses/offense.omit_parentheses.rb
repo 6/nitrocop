@@ -122,3 +122,35 @@ def picture_factory(picture, acc)
     end
   end
 end
+
+# `and` / `or` keyword operators are NOT logical_operator? in rubocop-ast
+# (only `&&` and `||` are). Calls under an `and`/`or` parent must therefore
+# still flag because `call_in_logical_operators?` returns false. nitrocop
+# previously treated all AndNode/OrNode parents as logical, exempting these.
+def textual?(object)
+  object.is_a?(Symbol) or object.is_a?(String)
+              ^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+                                      ^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+end
+
+def can_interpret?(parent, keyword, *args, &block)
+  (
+    keyword == 'bind' and
+      (
+        (
+          (args.size == 1)
+        ) ||
+        (
+          (args.size == 2) and
+            textual?(args[1])
+                    ^^^^^^^^^ Style/MethodCallWithArgsParentheses: Omit parentheses for method calls with arguments.
+        )
+      )
+  )
+end
+
+# `&&` / `||` STILL exempt their operands via `call_in_logical_operators?`.
+# Sanity check that semantic-vs-logical distinction does not over-fire.
+def textual_and?(object)
+  object.is_a?(Symbol) && object.is_a?(String)
+end
