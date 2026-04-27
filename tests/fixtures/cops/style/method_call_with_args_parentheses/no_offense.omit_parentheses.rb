@@ -125,3 +125,14 @@ def format_timezone_else(new_time)
     new_time = I18n.l(new_time)
   end
 end
+
+# Inline assignment as the case predicate keeps parens because the lvasgn's
+# Parser parent is the `case` node (`conditional?`).
+def fetch_with_redirect(http, request)
+  begin
+    case response = http.request(request)
+    when Net::HTTPRedirection then location = response['location']
+    when Net::HTTPClientError, Net::HTTPServerError then response.error!
+    end
+  end until Net::HTTPSuccess == response
+end

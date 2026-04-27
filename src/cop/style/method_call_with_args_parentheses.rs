@@ -2414,9 +2414,14 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
 
         self.push_macro_scope(MacroScope::NotMacroScope);
 
-        // Visit the predicate.
+        // The case predicate's Parser parent is the `case` node, which is
+        // `conditional?`. Push `Conditional` so `assignment_in_condition?`
+        // matches for an inline assignment in the predicate
+        // (`case response = http.request(...)`).
         if let Some(predicate) = node.predicate() {
+            self.push_parent(ParentKind::Conditional);
             self.visit(&predicate);
+            self.pop_parent();
         }
 
         // Visit when conditions/bodies via their existing visit_when_node.
@@ -2457,7 +2462,26 @@ impl<'pr> Visit<'pr> for ParenVisitor<'_> {
         };
 
         self.push_macro_scope(MacroScope::NotMacroScope);
-        ruby_prism::visit_case_match_node(self, node);
+
+        // Mirror visit_case_node: the case_match predicate's Parser parent is
+        // `case_match` (`conditional?`); the else clause body has `case_match`
+        // as direct parent too.
+        if let Some(predicate) = node.predicate() {
+            self.push_parent(ParentKind::Conditional);
+            self.visit(&predicate);
+            self.pop_parent();
+        }
+
+        for cond in node.conditions().iter() {
+            self.visit(&cond);
+        }
+
+        if let Some(else_clause) = node.else_clause() {
+            if let Some(stmts) = else_clause.statements() {
+                self.visit_statements_with_parent(&stmts, ParentKind::ConditionalBody);
+            }
+        }
+
         self.pop_scope();
 
         if let Some(parent) = leaked_parent {
