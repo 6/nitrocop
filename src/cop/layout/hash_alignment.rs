@@ -131,6 +131,16 @@ use ruby_prism::Visit;
 ///     crashing pair plus the rest of the hash. This matters for Conjur-style
 ///     string-label hashes where one longer key is reported before subsequent
 ///     shorter keys disappear after the corrector clobber.
+///
+/// 12. **Variant batch `with_fixed_indentation` sibling config (2026-04-27):**
+///     The generated `separator, separator, always_ignore` variant also flips
+///     `Layout/ArgumentAlignment` to `with_fixed_indentation`. RuboCop's
+///     `autocorrect_incompatible_with_other_cops?` only suppresses HashAlignment
+///     when the hash's parent is a method call and the selector or preceding
+///     argument shares the first pair's line. The previous nitrocop guard skipped
+///     any inline explicit hash, including constant assignments and nested hash
+///     values such as `locals: { user: ..., contributions: ... }`, causing the
+///     large separator-style FN batch.
 pub struct HashAlignment;
 
 /// Which alignment style to use.
@@ -253,6 +263,11 @@ struct PairInfo {
     key_char_len: usize,
     /// Separator source length (for table alignment calculation).
     sep_source_len: usize,
+}
+
+struct CallParentInfo {
+    start_offset: usize,
+    argument_locations: Vec<(usize, usize)>,
 }
 
 fn extract_pair_info(source: &SourceFile, elem: &ruby_prism::Node<'_>) -> Option<PairInfo> {
@@ -380,6 +395,73 @@ fn is_last_argument_hash(
     }
 
     false
+}
+
+fn call_parent_info(parent: Option<&ruby_prism::Node<'_>>) -> Option<CallParentInfo> {
+    let call = parent.and_then(|parent| parent.as_call_node())?;
+    let argument_locations = call
+        .arguments()
+        .map(|args| {
+            args.arguments()
+                .iter()
+                .map(|arg| {
+                    let loc = arg.location();
+                    (loc.start_offset(), loc.end_offset())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Some(CallParentInfo {
+        start_offset: call.location().start_offset(),
+        argument_locations,
+    })
+}
+
+fn previous_call_argument_location(
+    argument_locations: &[(usize, usize)],
+    node: &ruby_prism::Node<'_>,
+) -> Option<(usize, usize)> {
+    let mut previous = None;
+
+    for &(start, end) in argument_locations {
+        if start == node.location().start_offset() && end == node.location().end_offset() {
+            return previous;
+        }
+        previous = Some((start, end));
+    }
+
+    None
+}
+
+fn location_shares_line_with_pair(
+    source: &SourceFile,
+    start_offset: usize,
+    end_offset: usize,
+    pair: &PairInfo,
+) -> bool {
+    let start_line = source.offset_to_line_col(start_offset).0;
+    let last_line = source.offset_to_line_col(end_offset.saturating_sub(1)).0;
+    start_line == pair.line || last_line == pair.line
+}
+
+fn fixed_indentation_autocorrect_incompatible(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    call_parent: Option<&CallParentInfo>,
+    first: &PairInfo,
+) -> bool {
+    let Some(call_parent) = call_parent else {
+        return false;
+    };
+
+    if let Some((start, end)) =
+        previous_call_argument_location(&call_parent.argument_locations, node)
+    {
+        return location_shares_line_with_pair(source, start, end, first);
+    }
+
+    source.offset_to_line_col(call_parent.start_offset).0 == first.line
 }
 
 fn should_ignore_last_argument_hash(
@@ -926,6 +1008,7 @@ impl HashAlignment {
         config: &CopConfig,
         diagnostics: &mut Vec<Diagnostic>,
         is_last_argument_hash: bool,
+        call_parent: Option<&CallParentInfo>,
     ) {
         let _allow_multiple = config.get_bool("AllowMultipleStyles", true);
         let (rocket_styles, colon_styles, last_arg_style) =
@@ -1006,19 +1089,12 @@ impl HashAlignment {
             None => return,
         };
 
-        // autocorrect_incompatible_with_other_cops? check
-        if fixed_indentation {
-            if is_keyword_hash {
-                if !first.begins_line {
-                    return;
-                }
-            } else {
-                let hash_begins_line =
-                    crate::cop::shared::util::begins_its_line(source, hash_node_start);
-                if !hash_begins_line && !first.begins_line {
-                    return;
-                }
-            }
+        // autocorrect_incompatible_with_other_cops? check. This is intentionally
+        // scoped to call-parent hashes, matching RuboCop's `node.parent&.call_type?`.
+        if fixed_indentation
+            && fixed_indentation_autocorrect_incompatible(source, node, call_parent, first)
+        {
+            return;
         }
 
         // Determine which styles apply based on pair types present
@@ -1111,12 +1187,14 @@ impl<'a, 'src, 'pr> ruby_prism::Visit<'pr> for HashAlignmentVisitor<'a, 'src, 'p
     fn visit_hash_node(&mut self, node: &ruby_prism::HashNode<'pr>) {
         let generic = node.as_node();
         let is_last_arg = is_last_argument_hash(&generic, self.current_parent());
+        let call_parent = call_parent_info(self.current_parent());
         self.cop.check_hash_node(
             self.source,
             &generic,
             self.config,
             self.diagnostics,
             is_last_arg,
+            call_parent.as_ref(),
         );
         ruby_prism::visit_hash_node(self, node);
     }
@@ -1124,12 +1202,14 @@ impl<'a, 'src, 'pr> ruby_prism::Visit<'pr> for HashAlignmentVisitor<'a, 'src, 'p
     fn visit_keyword_hash_node(&mut self, node: &ruby_prism::KeywordHashNode<'pr>) {
         let generic = node.as_node();
         let is_last_arg = is_last_argument_hash(&generic, self.current_parent());
+        let call_parent = call_parent_info(self.current_parent());
         self.cop.check_hash_node(
             self.source,
             &generic,
             self.config,
             self.diagnostics,
             is_last_arg,
+            call_parent.as_ref(),
         );
         ruby_prism::visit_keyword_hash_node(self, node);
     }
@@ -1259,6 +1339,22 @@ mod tests {
                 "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_inline_first_pair_offense.rb"
             ),
             variant_config("separator", "separator", "always_ignore"),
+        );
+    }
+
+    #[test]
+    fn separator_always_ignore_fixed_indentation_nested_offense_fixture() {
+        let mut config = variant_config("separator", "separator", "always_ignore");
+        config.options.insert(
+            "ArgumentAlignmentStyle".into(),
+            serde_yml::Value::String("with_fixed_indentation".into()),
+        );
+        crate::testutil::assert_cop_offenses_full_with_config(
+            &HashAlignment,
+            include_bytes!(
+                "../../../tests/fixtures/cops/layout/hash_alignment/always_ignore_separator_fixed_indentation_nested_offense.rb"
+            ),
+            config,
         );
     }
 
