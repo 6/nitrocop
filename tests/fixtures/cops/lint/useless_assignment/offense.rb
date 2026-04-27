@@ -218,7 +218,6 @@ exec_resp = PWN::Plugins::MSR206.exec(
 ^ Lint/UselessAssignment: Useless assignment to variable - `exec_resp`.
 
 is_found ? found += [c] : found
-           ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `found`.
 
 is_found ? found += [c] : found
            ^^^^^ Lint/UselessAssignment: Useless assignment to variable - `found`.

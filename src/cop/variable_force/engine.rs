@@ -544,6 +544,80 @@ impl<'a> Engine<'a> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn assign_multi_target(
+        &mut self,
+        target: &ruby_prism::Node<'_>,
+        rhs_refs: &[(Vec<u8>, bool)],
+        in_branch: bool,
+        shadowing_in_branch: bool,
+        branch_id: Option<usize>,
+        branch_path: Vec<usize>,
+        seq: usize,
+    ) {
+        if let Some(t) = target.as_local_variable_target_node() {
+            let name = t.name().as_slice().to_vec();
+            let offset = t.location().start_offset();
+            if !self.table.variable_exists(&name) {
+                self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
+            }
+            let rhs_refs_var = rhs_refs
+                .iter()
+                .find(|(n, _)| n == &name)
+                .is_some_and(|(_, r)| *r);
+            let mut a = Assignment::new(offset, AssignmentKind::Multiple);
+            a.in_branch = in_branch;
+            a.shadowing_in_branch = shadowing_in_branch;
+            a.branch_id = branch_id;
+            a.branch_path = branch_path;
+            a.sequence = seq;
+            a.rhs_references_var = rhs_refs_var;
+            self.table.assign_to_variable(&name, a);
+        } else if let Some(mt) = target.as_multi_target_node() {
+            // Nested parenthesized targets: `(a,), b = []`. Recurse into each
+            // inner target so nested local-variable targets get assignments.
+            for inner in mt.lefts().iter() {
+                self.assign_multi_target(
+                    &inner,
+                    rhs_refs,
+                    in_branch,
+                    shadowing_in_branch,
+                    branch_id,
+                    branch_path.clone(),
+                    seq,
+                );
+            }
+            if let Some(rest) = mt.rest() {
+                if let Some(splat) = rest.as_splat_node() {
+                    if let Some(expr) = splat.expression() {
+                        self.assign_multi_target(
+                            &expr,
+                            rhs_refs,
+                            in_branch,
+                            shadowing_in_branch,
+                            branch_id,
+                            branch_path.clone(),
+                            seq,
+                        );
+                    }
+                }
+            }
+            for inner in mt.rights().iter() {
+                self.assign_multi_target(
+                    &inner,
+                    rhs_refs,
+                    in_branch,
+                    shadowing_in_branch,
+                    branch_id,
+                    branch_path.clone(),
+                    seq,
+                );
+            }
+        } else {
+            self.visit(target);
+        }
+    }
+
     fn declare_and_assign_for_targets(&mut self, node: &ruby_prism::Node<'_>) {
         struct TargetCollector {
             targets: Vec<(Vec<u8>, usize)>,
@@ -654,7 +728,16 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         r.branch_id = self.current_branch_id();
         r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
+        // Mirror RuboCop's `Branch::OpAsgn(right_body)`: the RHS of an op-assign
+        // gets its own branch context so reads of other locals inside it can
+        // walk back past sibling-branch assignments to the originating
+        // initializer.
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
         self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
         let seq = self.next_sequence();
         let mut a = Assignment::new(offset, AssignmentKind::Operator);
         a.sequence = seq;
@@ -684,7 +767,12 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         r.branch_id = self.current_branch_id();
         r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
         self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
         let seq = self.next_sequence();
         let mut a = Assignment::new(offset, AssignmentKind::LogicalOr);
         a.sequence = seq;
@@ -714,7 +802,12 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         r.branch_id = self.current_branch_id();
         r.branch_path = self.current_branch_path();
         self.table.reference_variable(&name, r);
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
         self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
         let seq = self.next_sequence();
         let mut a = Assignment::new(offset, AssignmentKind::LogicalAnd);
         a.sequence = seq;
@@ -727,13 +820,277 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.table.assign_to_variable(&name, a);
     }
 
+    fn visit_call_operator_write_node(&mut self, node: &ruby_prism::CallOperatorWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_call_or_write_node(&mut self, node: &ruby_prism::CallOrWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_call_and_write_node(&mut self, node: &ruby_prism::CallAndWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_index_operator_write_node(&mut self, node: &ruby_prism::IndexOperatorWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_index_or_write_node(&mut self, node: &ruby_prism::IndexOrWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_global_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_global_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableOrWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_global_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::GlobalVariableAndWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_instance_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_instance_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableOrWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_instance_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::InstanceVariableAndWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_class_variable_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_class_variable_or_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableOrWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_class_variable_and_write_node(
+        &mut self,
+        node: &ruby_prism::ClassVariableAndWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantOperatorWriteNode<'pr>,
+    ) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_or_write_node(&mut self, node: &ruby_prism::ConstantOrWriteNode<'pr>) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_and_write_node(&mut self, node: &ruby_prism::ConstantAndWriteNode<'pr>) {
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_path_operator_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOperatorWriteNode<'pr>,
+    ) {
+        self.visit_constant_path_node(&node.target());
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, false, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_path_or_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathOrWriteNode<'pr>,
+    ) {
+        self.visit_constant_path_node(&node.target());
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_constant_path_and_write_node(
+        &mut self,
+        node: &ruby_prism::ConstantPathAndWriteNode<'pr>,
+    ) {
+        self.visit_constant_path_node(&node.target());
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
+    fn visit_index_and_write_node(&mut self, node: &ruby_prism::IndexAndWriteNode<'pr>) {
+        if let Some(recv) = node.receiver() {
+            self.visit(&recv);
+        }
+        if let Some(args) = node.arguments() {
+            for arg in args.arguments().iter() {
+                self.visit(&arg);
+            }
+        }
+        let parent_id = Self::branch_parent_id(&node.location());
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 1, false, false, false, false, true, false);
+        self.visit(&node.value());
+        self.pop_branch();
+        self.branch_depth -= 1;
+    }
+
     fn visit_multi_write_node(&mut self, node: &ruby_prism::MultiWriteNode<'pr>) {
-        // Collect target names before visiting the RHS so we can detect self-refs
+        // Collect target names (including inside nested parenthesized targets
+        // like `(a,), b = []`) before visiting the RHS so we can detect
+        // self-references.
         let mut target_names: Vec<Vec<u8>> = Vec::new();
         for target in node.lefts().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                target_names.push(t.name().as_slice().to_vec());
-            }
+            collect_multi_target_lvar_names(&target, &mut target_names);
         }
         if let Some(rest) = node.rest() {
             if let Some(splat) = rest.as_splat_node() {
@@ -745,9 +1102,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         }
         for target in node.rights().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                target_names.push(t.name().as_slice().to_vec());
-            }
+            collect_multi_target_lvar_names(&target, &mut target_names);
         }
 
         // Bare `super` (ForwardingSuperNode) implicitly forwards all method
@@ -797,27 +1152,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         let seq = self.next_sequence();
 
         for target in node.lefts().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                let name = t.name().as_slice().to_vec();
-                let offset = t.location().start_offset();
-                if !self.table.variable_exists(&name) {
-                    self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
-                }
-                let rhs_refs_var = rhs_refs
-                    .iter()
-                    .find(|(n, _)| n == &name)
-                    .is_some_and(|(_, r)| *r);
-                let mut a = Assignment::new(offset, AssignmentKind::Multiple);
-                a.in_branch = in_branch;
-                a.shadowing_in_branch = shadowing_in_branch;
-                a.branch_id = branch_id;
-                a.branch_path = branch_path.clone();
-                a.sequence = seq;
-                a.rhs_references_var = rhs_refs_var;
-                self.table.assign_to_variable(&name, a);
-            } else {
-                self.visit(&target);
-            }
+            self.assign_multi_target(
+                &target,
+                &rhs_refs,
+                in_branch,
+                shadowing_in_branch,
+                branch_id,
+                branch_path.clone(),
+                seq,
+            );
         }
         if let Some(rest) = node.rest() {
             if let Some(splat) = rest.as_splat_node() {
@@ -851,27 +1194,15 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
         }
         for target in node.rights().iter() {
-            if let Some(t) = target.as_local_variable_target_node() {
-                let name = t.name().as_slice().to_vec();
-                let offset = t.location().start_offset();
-                if !self.table.variable_exists(&name) {
-                    self.declare_variable(name.clone(), offset, DeclarationKind::Assignment);
-                }
-                let rhs_refs_var = rhs_refs
-                    .iter()
-                    .find(|(n, _)| n == &name)
-                    .is_some_and(|(_, r)| *r);
-                let mut a = Assignment::new(offset, AssignmentKind::Multiple);
-                a.in_branch = in_branch;
-                a.shadowing_in_branch = shadowing_in_branch;
-                a.branch_id = branch_id;
-                a.branch_path = branch_path.clone();
-                a.sequence = seq;
-                a.rhs_references_var = rhs_refs_var;
-                self.table.assign_to_variable(&name, a);
-            } else {
-                self.visit(&target);
-            }
+            self.assign_multi_target(
+                &target,
+                &rhs_refs,
+                in_branch,
+                shadowing_in_branch,
+                branch_id,
+                branch_path.clone(),
+                seq,
+            );
         }
     }
 
@@ -987,42 +1318,27 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         let location = node.location();
         let parent_id = Self::branch_parent_id(&location);
-        let is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
+        let _is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
 
         // RuboCop's ShadowedArgument treats any assignment under an if/unless
         // predicate as conditional, even though the predicate itself always
-        // executes. For statement form, bump branch_depth without pushing a
-        // branch context so the assignment stays visible to later reads like
-        // a `case` predicate write. Modifier form still needs a real
-        // predicate context so the left-hand body can see an earlier
-        // assignment (`puts a if (a = 123)`).
+        // executes. Bump branch_depth without pushing a branch context so the
+        // ShadowedArgument cop sees these as in-branch writes, matching
+        // RuboCop. Liveness for modifier-form patterns like
+        // `puts a if (a = 123)` is handled separately via the
+        // `in_modifier_conditional` flag on assignments whose direct parent
+        // is the modifier-if itself.
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            if is_modifier {
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
-            }
         }
         self.visit(&node.predicate());
         if pred_has_write {
-            if is_modifier {
-                self.pop_branch();
-            }
             self.branch_depth -= 1;
         }
 
-        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
-        self.push_branch(parent_id, body_child, false);
+        self.push_branch(parent_id, 0, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
@@ -1032,7 +1348,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.branch_depth -= 1;
         if let Some(subsequent) = node.subsequent() {
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child + 1, false);
+            self.push_branch(parent_id, 1, false);
             self.visit(&subsequent);
             self.pop_branch();
             self.branch_depth -= 1;
@@ -1042,29 +1358,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         let location = node.location();
         let parent_id = Self::branch_parent_id(&location);
-        let is_modifier = node.end_keyword_loc().is_none();
+        let _is_modifier = node.end_keyword_loc().is_none();
 
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            if is_modifier {
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
-            }
         }
         self.visit(&node.predicate());
         if pred_has_write {
-            if is_modifier {
-                self.pop_branch();
-            }
             self.branch_depth -= 1;
         }
 
@@ -1074,12 +1375,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // A (the unless body, as else-branch). We must match this order
         // for `find_variable` to return the same declaration_offset as
         // RuboCop's VF.
-        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         if let Some(else_clause) = node.else_clause() {
-            self.push_branch_with_flags(
-                parent_id, body_child, false, false, false, false, false, true,
-            );
+            self.push_branch_with_flags(parent_id, 0, false, false, false, false, false, true);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1087,7 +1385,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
             self.pop_branch();
         }
-        self.push_branch(parent_id, body_child + 1, false);
+        self.push_branch(parent_id, 1, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
@@ -1234,33 +1532,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             self.visit(&node.predicate());
         } else {
-            // Pre-condition loop (while...end): visit condition first, then body.
+            // Pre-condition loop (while...end and modifier `body while cond`):
+            // visit condition first, then body. Liveness for modifier-form
+            // `body while (a = expr)` is tracked via the
+            // `in_modifier_conditional` flag rather than a dedicated branch
+            // context (matches RuboCop's `Variable#in_modifier_conditional?`).
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
-            if pred_has_write && is_modifier {
+            if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
             }
             self.visit(&node.predicate());
-            if pred_has_write && is_modifier {
-                self.pop_branch();
+            if pred_has_write {
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch_with_flags(
-                parent_id, body_child, false, false, false, false, false, false,
-            );
+            self.push_branch_with_flags(parent_id, 0, false, false, false, false, false, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1296,33 +1583,22 @@ impl<'pr> Visit<'pr> for Engine<'_> {
 
             self.visit(&node.predicate());
         } else {
-            // Pre-condition loop (until...end): visit condition first, then body.
+            // Pre-condition loop (until...end and modifier `body until cond`):
+            // visit condition first, then body. Liveness for modifier-form
+            // `body until (a = expr)` is tracked via the
+            // `in_modifier_conditional` flag rather than a dedicated branch
+            // context (matches RuboCop's `Variable#in_modifier_conditional?`).
             let pred_has_write = predicate_has_lvar_write(&node.predicate());
-            let is_modifier = node.do_keyword_loc().is_none() && node.closing_loc().is_none();
-            if pred_has_write && is_modifier {
+            if pred_has_write {
                 self.branch_depth += 1;
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
             }
             self.visit(&node.predicate());
-            if pred_has_write && is_modifier {
-                self.pop_branch();
+            if pred_has_write {
                 self.branch_depth -= 1;
             }
 
-            let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
             self.branch_depth += 1;
-            self.push_branch_with_flags(
-                parent_id, body_child, false, false, false, false, false, false,
-            );
+            self.push_branch_with_flags(parent_id, 0, false, false, false, false, false, false);
             if let Some(stmts) = node.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1506,13 +1782,21 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.visit(&node.collection());
         let index = node.index();
         self.declare_and_assign_for_targets(&index);
+        let location = node.location();
+        let parent_id = Self::branch_parent_id(&location);
+        // Mirror RuboCop's `Branch::For` (element=0, collection=1, body=2):
+        // wrap the body in a branch context so reads of the loop's index can
+        // reach assignments living inside other for-loops in the same scope.
+        self.branch_depth += 1;
+        self.push_branch_with_flags(parent_id, 2, false, false, false, false, false, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
             }
         }
-        let loc = node.location();
-        self.mark_loop_back_edges(loc.start_offset(), loc.end_offset());
+        self.pop_branch();
+        self.branch_depth -= 1;
+        self.mark_loop_back_edges(location.start_offset(), location.end_offset());
     }
 
     fn visit_forwarding_super_node(&mut self, node: &ruby_prism::ForwardingSuperNode<'pr>) {
@@ -1548,12 +1832,25 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             let si = self.table.current_scope_index();
             let branch_id = self.current_branch_id();
             let branch_path = self.current_branch_path();
+            // Take branch_contexts out so we can pass them to reference_with_branches.
+            let contexts = std::mem::take(&mut self.table.branch_contexts);
             for var in self.table.accessible_variables_mut() {
                 let mut reference = Reference::implicit(offset, si);
-                reference.branch_id = branch_id;
-                reference.branch_path = branch_path.clone();
-                var.reference(reference);
+                // RuboCop's `Branch.of(node, scope: var.scope)` returns nil when
+                // the binding lives in an inner scope, so cross-scope references
+                // act as if they had no branch context. Emulate that here by
+                // dropping the current branch path for outer-scope variables;
+                // same-scope references keep the live branch_id/branch_path.
+                if var.scope_index == si {
+                    reference.branch_id = branch_id;
+                    reference.branch_path = branch_path.clone();
+                } else {
+                    reference.branch_id = None;
+                    reference.branch_path = Vec::new();
+                }
+                var.reference_with_branches(reference, &contexts);
             }
+            self.table.branch_contexts = contexts;
         }
         if let Some(recv) = node.receiver() {
             self.visit(&recv);
@@ -1589,6 +1886,33 @@ fn collect_modifier_conditional_child_offsets(
     impl Collector {
         fn record_direct_child(&mut self, child: Option<Node<'_>>) {
             let Some(child) = child else { return };
+            // RuboCop's `in_modifier_conditional?` unwraps a `begin` parent
+            // (i.e. parenthesized expression) before checking the conditional.
+            // Mirror that here so patterns like `puts a if (a = 123)` are
+            // matched even though `(...)` introduces a `ParenthesesNode` /
+            // `BeginNode` wrapper in Prism's AST.
+            let child = if let Some(begin) = child.as_parentheses_node() {
+                if let Some(body) = begin.body() {
+                    if let Some(stmts) = body.as_statements_node() {
+                        let mut iter = stmts.body().iter();
+                        if let Some(first) = iter.next() {
+                            if iter.next().is_none() {
+                                first
+                            } else {
+                                return;
+                            }
+                        } else {
+                            return;
+                        }
+                    } else {
+                        body
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                child
+            };
             if let Some(n) = child.as_local_variable_write_node() {
                 self.offsets.insert(n.location().start_offset());
             } else if let Some(n) = child.as_local_variable_operator_write_node() {
@@ -1610,6 +1934,10 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                // RuboCop's `in_modifier_conditional?` also matches an
+                // assignment whose direct parent is the modifier conditional
+                // itself — patterns like `puts a if (a = 123)`.
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_if_node(self, node);
         }
@@ -1622,6 +1950,7 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_unless_node(self, node);
         }
@@ -1636,6 +1965,7 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_while_node(self, node);
         }
@@ -1650,6 +1980,7 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_until_node(self, node);
         }
@@ -1662,6 +1993,32 @@ fn collect_modifier_conditional_child_offsets(
 
 /// Check if a predicate expression contains a local variable write.
 /// Used to detect modifier-if patterns like `puts a if (a = 123)`.
+/// Recursively collect local-variable target names inside (potentially nested)
+/// multi-write targets like `(a, b), c = []`.
+fn collect_multi_target_lvar_names(target: &ruby_prism::Node<'_>, out: &mut Vec<Vec<u8>>) {
+    if let Some(t) = target.as_local_variable_target_node() {
+        out.push(t.name().as_slice().to_vec());
+        return;
+    }
+    if let Some(mt) = target.as_multi_target_node() {
+        for inner in mt.lefts().iter() {
+            collect_multi_target_lvar_names(&inner, out);
+        }
+        if let Some(rest) = mt.rest() {
+            if let Some(splat) = rest.as_splat_node() {
+                if let Some(expr) = splat.expression() {
+                    if let Some(t) = expr.as_local_variable_target_node() {
+                        out.push(t.name().as_slice().to_vec());
+                    }
+                }
+            }
+        }
+        for inner in mt.rights().iter() {
+            collect_multi_target_lvar_names(&inner, out);
+        }
+    }
+}
+
 fn predicate_has_lvar_write(node: &ruby_prism::Node<'_>) -> bool {
     struct LvarWriteDetector {
         found: bool,
@@ -2758,28 +3115,20 @@ end
         );
     }
 
-    // ── Nested multi-write should NOT create extra assignments ────────
+    // ── Nested multi-write tracks every target ────────────────────────
 
     #[test]
-    fn test_nested_multi_write_no_extra_assignments() {
-        // `a, (b, c) = 1, [2, 3]` — nested multi-write targets b and c should
-        // NOT be tracked by the VF engine (matching RuboCop behavior). Only
-        // top-level target 'a' should have an assignment.
+    fn test_nested_multi_write_tracks_inner_targets() {
+        // `a, (b, c) = 1, [2, 3]` — inner targets `b` and `c` are tracked
+        // (matching RuboCop, which flags `Useless assignment to variable - b`
+        // when `b` is not referenced afterwards).
         let scopes = run_engine("a, (b, c) = 1, [2, 3]\nputs a\n");
         let top = &scopes[0];
-        assert!(
-            top.vars.contains_key("a"),
-            "top-level target 'a' should be tracked"
-        );
+        assert!(top.vars.contains_key("a"));
         assert_eq!(top.vars["a"].num_assignments, 1);
-        // Nested targets should NOT be tracked (no generic handler to catch them)
-        assert!(
-            !top.vars.contains_key("b"),
-            "nested multi-write target 'b' should not be tracked"
-        );
-        assert!(
-            !top.vars.contains_key("c"),
-            "nested multi-write target 'c' should not be tracked"
-        );
+        assert!(top.vars.contains_key("b"));
+        assert_eq!(top.vars["b"].num_assignments, 1);
+        assert!(top.vars.contains_key("c"));
+        assert_eq!(top.vars["c"].num_assignments, 1);
     }
 }

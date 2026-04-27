@@ -170,17 +170,30 @@ impl Cop for UselessAssignment {
         let mut rescue_modifier_collector = RescueModifierWriteCollector::default();
         rescue_modifier_collector.visit(&parse_result.node());
         let rescue_modifier_writes = rescue_modifier_collector.writes;
+        let chained_assignment_descendants =
+            collect_chained_assignment_descendant_offsets(parse_result);
         let mut candidates = collector.take_candidates();
         candidates.sort_by_key(|candidate| candidate.node_offset);
+        let mut suppressed_chained_descendants: HashSet<usize> = HashSet::new();
 
         for candidate in candidates {
             if pattern_match_offsets.contains(&candidate.node_offset) {
                 continue;
             }
 
-            let emit = if conditional_operator_offsets.contains(&candidate.node_offset) {
+            if suppressed_chained_descendants.contains(&candidate.node_offset) {
+                continue;
+            }
+
+            let emit = if candidate.captured_protection {
+                false
+            } else if !candidate.engine_used
+                && conditional_operator_offsets.contains(&candidate.node_offset)
+            {
                 true
-            } else if !candidate.engine_used {
+            } else if candidate.engine_used {
+                false
+            } else {
                 !should_suppress_multi_rescue_false_positive(&candidate, &rescue_contexts)
                     && !or_condition_offsets.contains(&candidate.node_offset)
                     && !post_condition_loop_body_offsets.contains(&candidate.node_offset)
@@ -189,12 +202,14 @@ impl Cop for UselessAssignment {
                         &rescue_modifier_writes,
                     )
                     && !retry_protected_rescue_offsets.contains(&candidate.node_offset)
-            } else {
-                false
             };
 
             if !emit {
                 continue;
+            }
+
+            if let Some(descendants) = chained_assignment_descendants.get(&candidate.node_offset) {
+                suppressed_chained_descendants.extend(descendants);
             }
 
             let (line, column) = source.offset_to_line_col(candidate.node_offset);
@@ -229,6 +244,12 @@ struct AssignmentCandidate {
     node_offset: usize,
     branch_id: Option<usize>,
     engine_used: bool,
+    /// Whether the assignment's value flows out via a block capture rather
+    /// than a real reference. Used to suppress force-emit pathways
+    /// (e.g. the `cond ? var += ... : var` operator collector) that mirror
+    /// RuboCop's flagging — RuboCop honours `captured_by_block` via
+    /// `Assignment#used?`, so capture-only liveness should also win there.
+    captured_protection: bool,
     value_range: Option<(usize, usize)>,
     assignment_states: Vec<AssignmentState>,
     reference_states: Vec<ReferenceState>,
@@ -278,11 +299,14 @@ impl variable_force::VariableForceConsumer for PendingOffenseCollector {
                 })
                 .collect();
             for assignment in &variable.assignments {
+                let captured_protection =
+                    !assignment.referenced && variable.captured_by_block && !assignment.reassigned;
                 candidates.push(AssignmentCandidate {
                     name: variable.name.clone(),
                     node_offset: assignment.node_offset,
                     branch_id: assignment.branch_id,
                     engine_used: assignment.used(variable.captured_by_block),
+                    captured_protection,
                     value_range: assignment.value_range,
                     assignment_states: assignment_states.clone(),
                     reference_states: reference_states.clone(),
@@ -872,13 +896,17 @@ fn candidate_has_reference_after(candidate: &AssignmentCandidate, offset: usize)
 //
 // RuboCop's `process_rescue` treats a `begin ... rescue ... end` containing
 // `retry` as a loop, which (combined with the variable_force walk) keeps any
-// `rescue X => e` capture of the same name alive across the entire surrounding
-// scope — even captures in other begin blocks that don't themselves use `e`.
+// `rescue X => e` capture of the same name alive in *sibling* begin blocks —
+// e.g. an `if/else` whose two branches both have a rescue capturing `e` and
+// only one of which actually reads `e` and retries.
 //
-// Mirror that quirk: when one `rescue X => name` clause in a scope (def/class/
-// module/lambda or top-level) contains both `retry` and a read of `name`,
-// suppress the unused-warning for every rescue capture of that name in the
-// same scope.
+// The protection does **not** extend into begin blocks that contain the
+// retrying begin (e.g. `def f; begin; do_something do; begin; ...; rescue =>
+// e; ...; retry; end; end; rescue Timeout::Error => e; end; end` — the outer
+// `Timeout::Error => e` is independent of the inner retry). Mirror that by
+// tracking each retry-protected begin's full range and only suppressing
+// rescue captures whose enclosing begin does **not** contain the retrying
+// begin.
 
 fn collect_retry_protected_rescue_capture_offsets(
     parse_result: &ruby_prism::ParseResult<'_>,
@@ -887,21 +915,38 @@ fn collect_retry_protected_rescue_capture_offsets(
     collector.visit(&parse_result.node());
     let mut suppress_collector = RetryProtectedSuppressCollector {
         protected: &collector.protected,
-        scope_stack: vec![0],
+        begin_stack: Vec::new(),
+        scope_stack: Vec::new(),
         offsets: HashSet::new(),
     };
     suppress_collector.visit(&parse_result.node());
     suppress_collector.offsets
 }
 
+/// (scope_offset, variable_name) keying retry-protection.
+type RetryProtectedKey = (usize, Vec<u8>);
+/// (begin_start_offset, begin_end_offset).
+type BeginRange = (usize, usize);
+/// Map keyed by (scope_offset, variable_name) → list of begin ranges inside
+/// that scope whose rescue chain has retry-and-read of the variable.
+type RetryProtectedMap = HashMap<RetryProtectedKey, Vec<BeginRange>>;
+
 #[derive(Default)]
 struct RetryProtectedRescueCollector {
-    /// (scope_offset, name) pairs where a rescue clause uses `name` and contains retry.
-    protected: HashSet<(usize, Vec<u8>)>,
+    /// `(scope_offset, name)` → list of `(begin_start, begin_end)` ranges of
+    /// `begin` blocks inside that scope whose rescue chain contains `retry`
+    /// and a read of `name`. Suppression is scope-local: a retry-rescue in
+    /// a different def does not protect captures in this def.
+    protected: RetryProtectedMap,
+    begin_stack: Vec<BeginRange>,
     scope_stack: Vec<usize>,
 }
 
 impl RetryProtectedRescueCollector {
+    fn current_begin(&self) -> Option<(usize, usize)> {
+        self.begin_stack.last().copied()
+    }
+
     fn current_scope(&self) -> usize {
         self.scope_stack.last().copied().unwrap_or(0)
     }
@@ -984,10 +1029,23 @@ impl<'pr> Visit<'pr> for RetryProtectedRescueCollector {
         self.enter_scope(offset, |this| ruby_prism::visit_lambda_node(this, node));
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let loc = node.location();
+        self.begin_stack
+            .push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_begin_node(self, node);
+        self.begin_stack.pop();
+    }
+
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(name) = rescue_clause_capture_name(node) {
             if rescue_clause_body_has_retry_and_read(node, &name) {
-                self.protected.insert((self.current_scope(), name));
+                if let Some(begin) = self.current_begin() {
+                    self.protected
+                        .entry((self.current_scope(), name))
+                        .or_default()
+                        .push(begin);
+                }
             }
         }
         ruby_prism::visit_rescue_node(self, node);
@@ -995,12 +1053,17 @@ impl<'pr> Visit<'pr> for RetryProtectedRescueCollector {
 }
 
 struct RetryProtectedSuppressCollector<'a> {
-    protected: &'a HashSet<(usize, Vec<u8>)>,
+    protected: &'a RetryProtectedMap,
+    begin_stack: Vec<BeginRange>,
     scope_stack: Vec<usize>,
     offsets: HashSet<usize>,
 }
 
 impl<'a> RetryProtectedSuppressCollector<'a> {
+    fn current_begin(&self) -> Option<(usize, usize)> {
+        self.begin_stack.last().copied()
+    }
+
     fn current_scope(&self) -> usize {
         self.scope_stack.last().copied().unwrap_or(0)
     }
@@ -1033,15 +1096,91 @@ impl<'pr> Visit<'pr> for RetryProtectedSuppressCollector<'_> {
         self.enter_scope(offset, |this| ruby_prism::visit_lambda_node(this, node));
     }
 
+    fn visit_begin_node(&mut self, node: &ruby_prism::BeginNode<'pr>) {
+        let loc = node.location();
+        self.begin_stack
+            .push((loc.start_offset(), loc.end_offset()));
+        ruby_prism::visit_begin_node(self, node);
+        self.begin_stack.pop();
+    }
+
     fn visit_rescue_node(&mut self, node: &ruby_prism::RescueNode<'pr>) {
         if let Some(name) = rescue_clause_capture_name(node) {
-            if self.protected.contains(&(self.current_scope(), name)) {
-                if let Some(offset) = rescue_clause_capture_offset(node) {
-                    self.offsets.insert(offset);
+            if let (Some((b_start, b_end)), Some(ranges)) = (
+                self.current_begin(),
+                self.protected.get(&(self.current_scope(), name)),
+            ) {
+                let protected = ranges.iter().any(|&(p_start, p_end)| {
+                    // Self-protection: same begin block.
+                    (p_start == b_start && p_end == b_end)
+                        // Sibling/unrelated: protecting begin is *outside* the
+                        // current begin (not nested inside it). RuboCop keeps
+                        // a sibling retry-rescue's captures alive but not those
+                        // in an outer begin that *contains* the retrying begin.
+                        || p_start < b_start
+                        || p_end > b_end
+                });
+                if protected {
+                    if let Some(offset) = rescue_clause_capture_offset(node) {
+                        self.offsets.insert(offset);
+                    }
                 }
             }
         }
         ruby_prism::visit_rescue_node(self, node);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FP suppression: chained assignment (`outer = method(... inner = value ...)`).
+// ---------------------------------------------------------------------------
+//
+// RuboCop's `Lint/UselessAssignment` calls `ignore_node` on chained assignment
+// nodes whose RHS is a send after reporting the outer offense. Subsequent
+// reverse-iteration over assignments to the *inner* variable then sees the
+// inner write as `part_of_ignored_node?` and skips it.
+//
+// We approximate that with a narrower targeted rule: only suppress lvasgn
+// nodes that appear as **direct positional arguments** of the outer call,
+// i.e. patterns like `resolve(records, properties, name = value)` where the
+// inline assignment is functioning as a self-documenting positional argument.
+// This handles the archivesspace case while keeping the suppression scope
+// tight enough that Prism's tolerant parsing of malformed source can not
+// silently swallow unrelated later statements.
+
+fn collect_chained_assignment_descendant_offsets(
+    parse_result: &ruby_prism::ParseResult<'_>,
+) -> HashMap<usize, HashSet<usize>> {
+    let mut collector = ChainedAssignmentDescendantCollector::default();
+    collector.visit(&parse_result.node());
+    collector.descendants
+}
+
+#[derive(Default)]
+struct ChainedAssignmentDescendantCollector {
+    descendants: HashMap<usize, HashSet<usize>>,
+}
+
+impl<'pr> Visit<'pr> for ChainedAssignmentDescendantCollector {
+    fn visit_local_variable_write_node(&mut self, node: &ruby_prism::LocalVariableWriteNode<'pr>) {
+        let outer_offset = node.location().start_offset();
+        let value = node.value();
+        if let Some(call) = value.as_call_node() {
+            if call.closing_loc().is_some() {
+                if let Some(args) = call.arguments() {
+                    let mut descendants: HashSet<usize> = HashSet::new();
+                    for arg in args.arguments().iter() {
+                        if let Some(inner) = arg.as_local_variable_write_node() {
+                            descendants.insert(inner.location().start_offset());
+                        }
+                    }
+                    if !descendants.is_empty() {
+                        self.descendants.insert(outer_offset, descendants);
+                    }
+                }
+            }
+        }
+        ruby_prism::visit_local_variable_write_node(self, node);
     }
 }
 
