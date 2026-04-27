@@ -609,3 +609,16 @@ foo do
     self
   end.new
 end
+
+# AST phase reports the enclosing assignment. Phase 2 must skip the inner
+# backslash group (RuboCop's `register_offense` calls `ignore_node` so the
+# inner expression is `part_of_ignored_node?` and not re-reported).
+def calculate(a, eSquared, phiPrime, osgb_fo)
+  rho =
+  ^^^^^ Layout/RedundantLineBreak: Redundant line break detected.
+    a\
+      * osgb_fo\
+      * (1.0 - eSquared)\
+      * ((1.0 - eSquared * Math.sin(phiPrime)**2)**-1.5)
+  rho
+end

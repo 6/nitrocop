@@ -421,6 +421,7 @@ impl Cop for RedundantLineBreak {
             reported_starts,
             ast_diagnostics,
             checked_chain_ranges,
+            reported_ranges,
             ..
         } = visitor;
         diagnostics.extend(ast_diagnostics);
@@ -434,6 +435,7 @@ impl Cop for RedundantLineBreak {
             inspect_blocks,
             diagnostics,
             &reported_starts,
+            &reported_ranges,
             &unsafe_ranges,
             &group_blocking_ranges,
             &ternary_ranges,
@@ -1109,6 +1111,15 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                 .or_else(|| ancestor.as_and_node().map(|n| n.operator_loc()));
 
             if let Some(op_loc) = operator_loc {
+                let outer_loc = ancestor.location();
+                // RuboCop's `on_send` walks up through Or/And operators. The walked-up
+                // node is then checked via `offense?` — which short-circuits on
+                // `suitable_as_single_line?` (e.g. `too_long?`) before evaluating
+                // `require_backslash?`. If the outer expression doesn't fit on one
+                // line, no offense fires. Suppress here to match.
+                if !self.suitable_as_single_line(outer_loc.start_offset(), outer_loc.end_offset()) {
+                    return true;
+                }
                 let (op_line, _) = self.source.offset_to_line_col(op_loc.start_offset());
                 let lines: Vec<&[u8]> = self.source.lines().collect();
                 if op_line > 0 && op_line <= lines.len() {
@@ -1545,6 +1556,7 @@ fn check_backslash_continuations(
     inspect_blocks: bool,
     diagnostics: &mut Vec<Diagnostic>,
     already_reported: &HashSet<usize>,
+    ast_reported_ranges: &[(usize, usize)],
     unsafe_ranges: &[(usize, usize)],
     group_blocking_ranges: &[(usize, usize)],
     ternary_ranges: &[(usize, usize)],
@@ -1790,6 +1802,22 @@ fn check_backslash_continuations(
                 && (cs < group_byte_start || ce > group_byte_end)
         });
         if covered_by_checked_chain && !is_elsif_line {
+            i = final_line_idx + 1;
+            continue;
+        }
+
+        // The AST phase already reported an enclosing assignment / call. RuboCop's
+        // `register_offense` calls `ignore_node`, so the inner expression is skipped
+        // by `part_of_ignored_node?`. Phase 2's text scan has no AST context, so
+        // mirror the suppression: if the backslash group's first line falls inside
+        // an already-reported AST range, skip it. Comparing against `group_byte_end`
+        // is too strict because Phase 2 extends the group past the actual expression
+        // (into the following statement) when the last continuation line has no
+        // trailing comma.
+        let covered_by_ast_report = ast_reported_ranges
+            .iter()
+            .any(|&(rs, re)| rs <= group_byte_start && re > group_byte_start);
+        if covered_by_ast_report {
             i = final_line_idx + 1;
             continue;
         }

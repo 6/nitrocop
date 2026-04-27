@@ -481,6 +481,21 @@ let!(:test_object) do
   end.new
 end
 
+# Inside an `or` / `and` keyword expression, RuboCop walks up to the operator
+# node before checking suitability. If the joined outer expression would
+# exceed `MaxLineLength`, the offense is suppressed even when the inner
+# `raise`/call by itself would fit on a single line.
+def configure(my_proc, req_arity, var)
+  case my_proc
+  when Proc
+    arity = my_proc.arity
+    (arity == req_arity) or \
+      raise ArgumentError,
+            "#{var}=#{my_proc.inspect} has invalid arity: " \
+            "#{arity} (need #{req_arity})"
+  end
+end
+
 # Backslash continuation between method-chain segments survives RuboCop's
 # `to_single_line` chain-dot collapse regex `/\n\s*(?=(&)?\.\w)/`, which strips
 # the newline+indent but leaves the trailing `\` in place. The joined length
