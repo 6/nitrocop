@@ -1241,6 +1241,12 @@ fn find_assignment_rhs_base<'a>(
         if ancestor.as_block_node().is_some() || ancestor.as_begin_node().is_some() {
             break;
         }
+        // Conditional/loop branches reset the alignment base — RuboCop does
+        // not pull the assignment RHS through into a branch body, even when
+        // the assignment value is `if cond ... end.method`.
+        if is_control_flow_expression(ancestor) {
+            break;
+        }
 
         let Some(value) = assignment_rhs_node(ancestor) else {
             continue;
