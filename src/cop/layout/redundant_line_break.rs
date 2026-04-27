@@ -1796,10 +1796,15 @@ fn check_backslash_continuations(
             continue;
         }
 
+        // Compare the chain range against the post-indent statement start, since
+        // an AST CallNode starts at the call name (e.g. `pipe`), not at column 0
+        // of the line. Without this, the strict-enclosure check fails for
+        // `pipe \\\n   arg1,\n   arg2` even though the call covers the whole
+        // group.
         let covered_by_checked_chain = checked_chain_ranges.iter().any(|&(cs, ce)| {
-            cs <= group_byte_start
+            cs <= group_statement_start
                 && ce >= group_byte_end
-                && (cs < group_byte_start || ce > group_byte_end)
+                && (cs < group_statement_start || ce > group_byte_end)
         });
         if covered_by_checked_chain && !is_elsif_line {
             i = final_line_idx + 1;
@@ -1853,7 +1858,11 @@ fn check_backslash_continuations(
             if t.is_empty() {
                 continue;
             }
-            let content_part = if line_idx <= group_end {
+            // `group_end` is the first line WITHOUT a trailing backslash (one
+            // past the last backslash-continued line). Only strip the trailing
+            // `\` for lines that actually have one, otherwise we drop the last
+            // content character (`,` or `)`) and undercount the joined length.
+            let content_part = if line_idx < group_end {
                 let before_bs = trim_trailing_whitespace(&t[..t.len() - 1]);
                 trim_leading_whitespace(before_bs)
             } else {

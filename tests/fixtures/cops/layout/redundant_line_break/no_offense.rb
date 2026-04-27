@@ -496,6 +496,21 @@ def configure(my_proc, req_arity, var)
   end
 end
 
+# `pipe arg1, arg2` style call where the joined call exceeds MaxLineLength.
+# Phase 2's combined-line check undercounted by stripping a trailing `\\` from
+# the line one past the backslash sequence (which holds the closing arg / call,
+# not a continuation marker), and `covered_by_checked_chain` failed because the
+# AST chain starts after the indent while the group started at column 0.
+module Builder
+  class Remote
+    def inspect_remote_context
+      pipe \
+        docker(:context, :inspect, remote_context_name, "--format", ENDPOINT_DOCKER_HOST_INSPECT),
+        grep("-xq", remote)
+    end
+  end
+end
+
 # Backslash continuation between method-chain segments survives RuboCop's
 # `to_single_line` chain-dot collapse regex `/\n\s*(?=(&)?\.\w)/`, which strips
 # the newline+indent but leaves the trailing `\` in place. The joined length
