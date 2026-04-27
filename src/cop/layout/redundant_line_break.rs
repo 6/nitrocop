@@ -889,6 +889,13 @@ impl<'a, 'pr> RedundantLineBreakVisitor<'a, 'pr> {
                     || (ends_with_safe_navigation_operator(&combined)
                         && trimmed.first().is_some_and(|b| is_word_char(*b)))
                 {
+                    // RuboCop's chain-dot collapse regex `/\n\s*(?=(&)?\.\w)/`
+                    // does NOT strip a preceding backslash, so a line ending in
+                    // `\` joined to a `.method` continuation keeps the `\` in
+                    // the joined source, inflating the length check.
+                    if prev_had_backslash {
+                        combined.push(b'\\');
+                    }
                     combined.extend_from_slice(trimmed);
                 } else {
                     combined.push(b' ');

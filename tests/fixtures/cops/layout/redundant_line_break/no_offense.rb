@@ -480,3 +480,26 @@ let!(:test_object) do
     self
   end.new
 end
+
+# Backslash continuation between method-chain segments survives RuboCop's
+# `to_single_line` chain-dot collapse regex `/\n\s*(?=(&)?\.\w)/`, which strips
+# the newline+indent but leaves the trailing `\` in place. The joined length
+# therefore exceeds 120 chars and `too_long?` suppresses the offense.
+on_supported_os.each do |os, facts|
+  describe 'datadog::ubuntu' do
+    let(:facts) { facts }
+    context 'with debian' do
+      context 'with reports' do
+        context 'when ruby-devel installed' do
+          context 'with provider option' do
+            it do
+              is_expected.to contain_package('ruby-devel')\
+                .with_ensure('installed')\
+                .that_comes_before('Package[dogapi]')
+            end
+          end
+        end
+      end
+    end
+  end
+end
