@@ -46,7 +46,7 @@ User.a
 # Trailing dot: misaligned in assignment
 a = b.c.
  d
- ^ Layout/MultilineMethodCallIndentation: Align `d` with `b` on line 38.
+ ^ Layout/MultilineMethodCallIndentation: Align `d` with `b.c.` on line 38.
 
 # Unaligned method in block body
 a do
@@ -89,7 +89,7 @@ end
 def prepare_headers
   headers['Cookie'] = final_cookies_hash.
     map { |k, v| "#{Cookie.encode(k)}=#{Cookie.encode(v)}" }.join(';')
-    ^^^ Layout/MultilineMethodCallIndentation: Align `map` with `final_cookies_hash` on line 73.
+    ^^^ Layout/MultilineMethodCallIndentation: Align `map` with `final_cookies_hash.` on line 73.
 end
 
 # Trailing-dot setter call: RuboCop checks setter methods like ordinary chains
@@ -216,10 +216,10 @@ end
 def candidate_hosts
   ds = DB[:vm_host]
     .with(:available_ipv4, DB[:ipv4_address]
-    ^^^^^ Layout/MultilineMethodCallIndentation: Align `.with` with `DB` on line 175.
+    ^^^^^ Layout/MultilineMethodCallIndentation: Align `.with` with `DB[:vm_host]` on line 175.
       .where { row[:ip] =~ nil })
     .with(:gpus, DB[:pci_device]
-    ^^^^^ Layout/MultilineMethodCallIndentation: Align `.with` with `DB` on line 175.
+    ^^^^^ Layout/MultilineMethodCallIndentation: Align `.with` with `DB[:vm_host]` on line 175.
       .select_append do
         gpu = build_object
         gpu.tap { |g| g.finalize }
@@ -258,3 +258,15 @@ def gather_coverage_results
       ^^^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.group_by` with `coverage_info[:branches]` on line 203.
   end
 end
+
+# Hash pair value starting on the next line does not use the single-line block dot
+foo(
+  score_types:
+    ReviewableScore
+      .types
+      ^^^^^^ Layout/MultilineMethodCallIndentation: Align `.types` with `ReviewableScore` on line 216.
+      .filter { |k, v| k != :notify_user }
+      ^^^^^^^ Layout/MultilineMethodCallIndentation: Align `.filter` with `ReviewableScore` on line 216.
+      .map { |k, v| { id: v, name: ReviewableScore.type_title(k) } },
+      ^^^^ Layout/MultilineMethodCallIndentation: Align `.map` with `ReviewableScore` on line 216.
+)

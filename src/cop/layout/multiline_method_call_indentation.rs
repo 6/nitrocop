@@ -1,7 +1,7 @@
 use ruby_prism::Visit;
 
 use crate::cop::shared::method_identifier_predicates;
-use crate::cop::shared::util::{assignment_context_base_col, indentation_of};
+use crate::cop::shared::util::indentation_of;
 use crate::cop::{Cop, CopConfig};
 use crate::diagnostic::Diagnostic;
 use crate::parse::source::SourceFile;
@@ -291,6 +291,20 @@ use crate::parse::source::SourceFile;
 /// in block nodes, so a later call after `.flat_map do ... end` must not reuse
 /// `.flat_map` as a continuation anchor. Those calls fall through to the
 /// assignment-RHS base instead.
+///
+/// ## Corpus fix (2026-04-27)
+///
+/// RuboCop's assignment RHS alignment is AST-based. A trailing-dot call nested
+/// inside an operator RHS of an assignment, such as
+/// `value = left || receiver.\n        call`, aligns with the start of the
+/// whole assignment RHS, not with the nested receiver. The previous text scan
+/// also treated unrelated `=` tokens inside earlier block arguments as
+/// assignment context, which falsely flagged RSpec `change { x = y }` matcher
+/// chains. Assignment bases now come from actual Prism write ancestors, and
+/// semantic block-chain alignment ignores multiline block calls when they are
+/// only the receiver of the current call. This accepts continuations after
+/// completed block receivers, while still flagging assignment-RHS chains after
+/// multiline block continuations.
 pub struct MultilineMethodCallIndentation;
 
 impl Cop for MultilineMethodCallIndentation {
@@ -606,24 +620,19 @@ impl ChainVisitor<'_> {
             return Some(col);
         }
 
-        if options.allow_previous_continuation
-            && !is_trailing_dot
-            && !uses_outer_aligned_fallback_base(call_node, &self.ancestors)
-        {
+        if options.allow_previous_continuation && !is_trailing_dot {
             // Try previous continuation dot alignment — when there's a
             // continuation dot on a previous line in the chain, align with it.
             if let Some(anchor) =
                 find_previous_continuation_dot_anchor(self.source, receiver, rhs_line)
             {
-                let anchor_receiver_is_post_multiline_block_call = anchor
-                    .receiver()
-                    .and_then(|receiver| receiver.as_call_node())
-                    .and_then(|receiver| receiver.receiver())
-                    .is_some_and(|receiver| {
-                        receiver_is_multiline_block_call(self.source, &receiver)
-                    });
-                if anchor_receiver_is_post_multiline_block_call
-                    || self.previous_continuation_anchor_is_valid(&anchor)
+                let anchor_receiver_is_post_multiline_block_call =
+                    call_receiver_is_post_multiline_block_call(self.source, &anchor);
+                let can_use_anchor = anchor_receiver_is_post_multiline_block_call
+                    || !uses_outer_aligned_fallback_base(call_node, &self.ancestors);
+                if can_use_anchor
+                    && (anchor_receiver_is_post_multiline_block_call
+                        || self.previous_continuation_anchor_is_valid(&anchor))
                 {
                     if let Some(dot_loc) = anchor.call_operator_loc() {
                         let (_, dot_col) = self.source.offset_to_line_col(dot_loc.start_offset());
@@ -687,8 +696,11 @@ impl ChainVisitor<'_> {
                 return Some(rhs_col); // Accept — aligned with first line dot
             }
 
-            // Block chain continuation
-            if let Some(col) = find_block_chain_col(self.source, receiver, rhs_line) {
+            // Block chain continuation. RuboCop only lets this override the
+            // hash-pair base when the value starts on the key line.
+            if hash_pair_value_starts_on_key_line(self.source, call_node, &self.ancestors)
+                && let Some(col) = find_block_chain_col(self.source, receiver, rhs_line)
+            {
                 return Some(col);
             }
         }
@@ -979,7 +991,7 @@ fn find_descendant_block_chain_call<'a>(
     }
 
     let receiver_call = receiver.as_call_node()?;
-    if first_descendant_block_is_multiline(source, &call_node.as_node()) {
+    if first_descendant_block_is_multiline(source, &call_node.as_node(), receiver) {
         return Some(receiver_call);
     }
 
@@ -988,11 +1000,21 @@ fn find_descendant_block_chain_call<'a>(
 
 /// Mirrors RuboCop's `node.each_descendant(:any_block).first` followed by
 /// `block_node&.multiline?` — only the *first* descendant block (in source
-/// order) matters. If it is single-line, this returns false even when later
-/// descendant blocks are multiline.
-fn first_descendant_block_is_multiline(source: &SourceFile, node: &ruby_prism::Node<'_>) -> bool {
+/// order) matters. Parser does not treat a multiline block receiver as this
+/// descendant for calls like `items.map do ... end\n  .compact`, so skip blocks
+/// fully contained by the current call's receiver.
+fn first_descendant_block_is_multiline(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    receiver: &ruby_prism::Node<'_>,
+) -> bool {
+    let receiver_loc = receiver.location();
+    let skip_receiver_blocks = receiver_is_multiline_block_call(source, receiver);
     struct Finder<'a> {
         source: &'a SourceFile,
+        receiver_start: usize,
+        receiver_end: usize,
+        skip_receiver_blocks: bool,
         first_offset: Option<usize>,
         first_is_multiline: bool,
     }
@@ -1001,9 +1023,16 @@ fn first_descendant_block_is_multiline(source: &SourceFile, node: &ruby_prism::N
         fn visit_block_node(&mut self, node: &ruby_prism::BlockNode<'pr>) {
             let loc = node.location();
             let start_offset = loc.start_offset();
+            let end_offset = loc.end_offset();
+            if self.skip_receiver_blocks
+                && start_offset >= self.receiver_start
+                && end_offset <= self.receiver_end
+            {
+                return;
+            }
             if self.first_offset.is_none_or(|prior| start_offset < prior) {
                 let (start_line, _) = self.source.offset_to_line_col(start_offset);
-                let (end_line, _) = self.source.offset_to_line_col(loc.end_offset());
+                let (end_line, _) = self.source.offset_to_line_col(end_offset);
                 self.first_offset = Some(start_offset);
                 self.first_is_multiline = start_line != end_line;
             }
@@ -1014,11 +1043,51 @@ fn first_descendant_block_is_multiline(source: &SourceFile, node: &ruby_prism::N
 
     let mut finder = Finder {
         source,
+        receiver_start: receiver_loc.start_offset(),
+        receiver_end: receiver_loc.end_offset(),
+        skip_receiver_blocks,
         first_offset: None,
         first_is_multiline: false,
     };
     finder.visit(node);
     finder.first_is_multiline
+}
+
+fn call_receiver_is_post_multiline_block_call(
+    source: &SourceFile,
+    call: &ruby_prism::CallNode<'_>,
+) -> bool {
+    let Some(receiver) = call.receiver() else {
+        return false;
+    };
+
+    receiver_is_multiline_block_call(source, &receiver)
+        || receiver
+            .as_call_node()
+            .and_then(|receiver_call| receiver_call.receiver())
+            .is_some_and(|inner_receiver| receiver_is_multiline_block_call(source, &inner_receiver))
+}
+
+fn hash_pair_value_starts_on_key_line(
+    source: &SourceFile,
+    call_node: &ruby_prism::CallNode<'_>,
+    ancestors: &[ruby_prism::Node<'_>],
+) -> bool {
+    let current = call_node.as_node();
+    for ancestor in ancestors.iter().rev() {
+        let Some(assoc) = ancestor.as_assoc_node() else {
+            continue;
+        };
+        let value = assoc.value();
+        if !node_within_node(&current, &value) {
+            continue;
+        }
+        let (key_line, _) = source.offset_to_line_col(assoc.key().location().start_offset());
+        let (value_line, _) = source.offset_to_line_col(value.location().start_offset());
+        return key_line == value_line;
+    }
+
+    false
 }
 
 /// Check if a given line has a `.` or `&.` at a specific column.
@@ -1079,12 +1148,22 @@ fn find_first_dot_alignment(
     let receiver = call_node.receiver()?;
 
     // Find the first call with a dot in the chain
-    let (first_dot_offset, first_dot_line, first_dot_col, _name, first_call_start_line) =
-        find_first_call_info(source, &receiver)?;
+    let (
+        first_dot_offset,
+        first_dot_line,
+        first_dot_col,
+        _name,
+        first_call_start_line,
+        first_call_has_multiline_block,
+    ) = find_first_call_info(source, &receiver)?;
 
     // Check that the first dot is inline (not a continuation dot)
     if is_first_on_line(source, first_dot_offset) {
         return None; // First dot is also a continuation dot — no inline base
+    }
+
+    if first_call_has_multiline_block {
+        return None;
     }
 
     // Check the base receiver type. RuboCop skips if the base receiver is
@@ -1122,7 +1201,6 @@ fn find_syntactic_alignment(
         return Some(col);
     }
 
-    let root_offset = find_chain_root_offset(receiver);
     let _ = call_node;
 
     // For trailing dot style, check if the chain root is in a keyword
@@ -1132,12 +1210,6 @@ fn find_syntactic_alignment(
         if let Some(col) = keyword_condition_alignment(source, receiver) {
             return Some(col);
         }
-    }
-
-    // Assignment RHS: `a = b\n    .c` — align with `b`
-    if assignment_context_base_col(source, root_offset).is_some() {
-        let chain_root_col = find_chain_root_col(source, receiver);
-        return Some(chain_root_col);
     }
 
     // Multi-line assignment RHS: `a =\n  b\n  .c` — the `=` is on the
@@ -1157,7 +1229,155 @@ fn find_syntactic_alignment_base_node<'a>(
     let current = call_node.as_node();
 
     find_keyword_expression_base(&current, ancestors)
+        .or_else(|| find_assignment_rhs_base(&current, ancestors))
         .or_else(|| find_operator_rhs_base(&current, ancestors))
+}
+
+fn find_assignment_rhs_base<'a>(
+    current: &ruby_prism::Node<'a>,
+    ancestors: &[ruby_prism::Node<'a>],
+) -> Option<ruby_prism::Node<'a>> {
+    for ancestor in ancestors.iter().rev().skip(1) {
+        if ancestor.as_block_node().is_some() || ancestor.as_begin_node().is_some() {
+            break;
+        }
+        // Conditional/loop branches reset the alignment base — RuboCop does
+        // not pull the assignment RHS through into a branch body, even when
+        // the assignment value is `if cond ... end.method`.
+        if is_control_flow_expression(ancestor) {
+            break;
+        }
+
+        let Some(value) = assignment_rhs_node(ancestor) else {
+            continue;
+        };
+        if is_control_flow_expression(&value) {
+            continue;
+        }
+        if node_within_node(current, &value) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn assignment_rhs_node<'a>(node: &ruby_prism::Node<'a>) -> Option<ruby_prism::Node<'a>> {
+    if let Some(n) = node.as_local_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_local_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_local_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_local_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_instance_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_class_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_global_variable_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_constant_path_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_index_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_index_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_index_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_call_operator_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_call_and_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_call_or_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_multi_write_node() {
+        return Some(n.value());
+    }
+    if let Some(n) = node.as_match_write_node() {
+        return Some(n.call().as_node());
+    }
+    if let Some(call) = node.as_call_node() {
+        if call.is_attribute_write() {
+            let args = call.arguments()?;
+            let value = args.arguments().iter().last()?;
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn is_control_flow_expression(node: &ruby_prism::Node<'_>) -> bool {
+    node.as_if_node().is_some()
+        || node.as_unless_node().is_some()
+        || node.as_case_node().is_some()
+        || node.as_case_match_node().is_some()
+        || node.as_while_node().is_some()
+        || node.as_until_node().is_some()
+        || node.as_for_node().is_some()
 }
 
 fn find_keyword_expression_base<'a>(
@@ -1304,7 +1524,9 @@ fn prev_line_ends_with_assignment(source: &SourceFile, receiver: &ruby_prism::No
 }
 
 /// Find the earliest previous continuation-dot call in the receiver chain.
-/// A continuation dot is one that is the first non-whitespace on its line.
+/// A continuation dot is one that is the first non-whitespace on its line, or
+/// an inline post-block call like `end.compact` that RuboCop can use as the
+/// next chain anchor.
 fn find_previous_continuation_dot_anchor<'a>(
     source: &SourceFile,
     receiver: &ruby_prism::Node<'a>,
@@ -1313,7 +1535,10 @@ fn find_previous_continuation_dot_anchor<'a>(
     if let Some(call) = receiver.as_call_node() {
         if let Some(dot_loc) = call.call_operator_loc() {
             let (dot_line, _dot_col) = source.offset_to_line_col(dot_loc.start_offset());
-            if dot_line < current_line && is_first_on_line(source, dot_loc.start_offset()) {
+            if dot_line < current_line
+                && (is_first_on_line(source, dot_loc.start_offset())
+                    || call_receiver_is_post_multiline_block_call(source, &call))
+            {
                 // Found a continuation dot on an earlier line.
                 // Check if there's an even earlier one to use as the alignment base.
                 if let Some(recv) = call.receiver() {
@@ -1585,11 +1810,12 @@ fn find_first_call_dot(
 }
 
 /// Find info about the first call with a dot in the chain.
-/// Returns (dot_offset, dot_line, dot_col, method_name, call_start_line).
+/// Returns (dot_offset, dot_line, dot_col, method_name, call_start_line,
+/// call_has_multiline_block).
 fn find_first_call_info(
     source: &SourceFile,
     node: &ruby_prism::Node<'_>,
-) -> Option<(usize, usize, usize, String, usize)> {
+) -> Option<(usize, usize, usize, String, usize, bool)> {
     if let Some(call) = node.as_call_node() {
         if let Some(recv) = call.receiver() {
             if !receiver_is_multiline_block_call(source, &recv) {
@@ -1604,7 +1830,14 @@ fn find_first_call_info(
                 .unwrap_or("?")
                 .to_string();
             let (start_line, _) = source.offset_to_line_col(call.location().start_offset());
-            return Some((dot_loc.start_offset(), dot_line, dot_col, name, start_line));
+            return Some((
+                dot_loc.start_offset(),
+                dot_line,
+                dot_col,
+                name,
+                start_line,
+                receiver_is_multiline_block_call(source, node),
+            ));
         }
     }
     None
@@ -1664,6 +1897,12 @@ fn keyword_extra_indent(
         Some(r) => r,
         None => return 0,
     };
+    let Some(dot_loc) = call_node.call_operator_loc() else {
+        return 0;
+    };
+    if chain_starts_from_completed_keyword_receiver(source, &receiver, dot_loc.start_offset()) {
+        return 0;
+    }
     let chain_start_line = find_chain_start_line(source, &receiver);
     let chain_line_bytes = source.lines().nth(chain_start_line - 1).unwrap_or(b"");
     let trimmed = chain_line_bytes
@@ -1679,6 +1918,41 @@ fn keyword_extra_indent(
         }
     }
     0
+}
+
+fn chain_starts_from_completed_keyword_receiver(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+    current_dot_offset: usize,
+) -> bool {
+    let Some(root_end_line) = completed_keyword_receiver_end_line(source, node) else {
+        return false;
+    };
+    let (dot_line, _) = source.offset_to_line_col(current_dot_offset);
+    dot_line > root_end_line
+}
+
+fn completed_keyword_receiver_end_line(
+    source: &SourceFile,
+    node: &ruby_prism::Node<'_>,
+) -> Option<usize> {
+    if let Some(call) = node.as_call_node() {
+        if let Some(recv) = call.receiver() {
+            return completed_keyword_receiver_end_line(source, &recv);
+        }
+    }
+
+    let is_keyword_receiver = node.as_if_node().is_some()
+        || node.as_unless_node().is_some()
+        || node.as_while_node().is_some()
+        || node.as_until_node().is_some()
+        || node.as_for_node().is_some();
+    if !is_keyword_receiver {
+        return None;
+    }
+
+    let (end_line, _) = source.offset_to_line_col(node.location().end_offset());
+    Some(end_line)
 }
 
 /// Find the start column of the chain root (deepest receiver).
@@ -1938,10 +2212,16 @@ fn find_alignment_base_description(
         }
 
         // Check for first inline dot alignment
-        if let Some((first_dot_offset, first_dot_line, _, name, _)) =
-            find_first_call_info(source, receiver)
+        if let Some((
+            first_dot_offset,
+            first_dot_line,
+            _,
+            name,
+            _,
+            first_call_has_multiline_block,
+        )) = find_first_call_info(source, receiver)
         {
-            if !is_first_on_line(source, first_dot_offset) {
+            if !is_first_on_line(source, first_dot_offset) && !first_call_has_multiline_block {
                 // First dot is inline — use it as alignment base description
                 return (format!(".{name}"), first_dot_line);
             }
