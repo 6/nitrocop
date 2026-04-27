@@ -323,6 +323,19 @@ use crate::parse::source::SourceFile;
 ///   anchors `return unless condition || \` at the condition expression, and
 ///   only suppresses `foo \` newline `&& bar` when the first line is not already
 ///   a boolean operator expression like `foo || bar \`.
+///
+/// ## Fixes applied (2026-04-27)
+/// - **Multistatement class body safety**: Prism models class bodies as a
+///   `StatementsNode`, while Parser exposes a multiline `begin` descendant when
+///   the body has multiple statements. The unsafe range collector now treats
+///   those multistatement class bodies as unsafe so class expressions ending in
+///   `.new` are not falsely collapsed, while single-statement class receivers
+///   remain reportable like RuboCop.
+/// - **Corpus-derived continuation coverage**: command-style split strings,
+///   chained assignments, and boolean operator backslash continuations are
+///   covered in fixtures while preserving the broad value-only split-string
+///   guard needed for RuboCop-accepted hash values, return expressions, and
+///   long call arguments.
 pub struct RedundantLineBreak;
 
 impl Cop for RedundantLineBreak {
@@ -511,6 +524,10 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
     }
 
     fn visit_class_node(&mut self, node: &ruby_prism::ClassNode<'pr>) {
+        if class_body_has_multiple_statements(node) {
+            let loc = node.location();
+            self.ranges.push((loc.start_offset(), loc.end_offset()));
+        }
         if let Some(superclass) = node.superclass() {
             let loc = node.location();
             let super_loc = superclass.location();
@@ -637,6 +654,12 @@ impl<'pr> Visit<'pr> for UnsafeRangeCollector {
         }
         ruby_prism::visit_interpolated_regular_expression_node(self, node);
     }
+}
+
+fn class_body_has_multiple_statements(node: &ruby_prism::ClassNode<'_>) -> bool {
+    node.body()
+        .and_then(|body| body.as_statements_node())
+        .is_some_and(|statements| statements.body().len() > 1)
 }
 
 /// Collects byte ranges of block/lambda nodes, tracking whether each is multiline.

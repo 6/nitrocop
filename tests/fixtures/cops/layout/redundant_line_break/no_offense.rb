@@ -462,3 +462,21 @@ comments.any? \
 certs_dir && !certs_dir.empty? \
   ? 'codekitchen/dinghy-http-proxy:2.5.10' \
   : 'freedomben/dory-http-proxy:2.6.2.2'
+
+# Hash key/value continuation inside a larger hash. RuboCop judges the hash as
+# a whole and does not report the continued key/value line independently.
+form_fields = {
+  "#{PAGE1_KEY}.VeteransServiceNumber_If_Applicable[0]": \
+  data.veteran_service_number,
+  "#{PAGE1_KEY}.SomeExtremelyLongFieldNameThatKeepsTheWholeHashFromFittingOnOneLine[0]": data.other
+}
+
+# Class expression receiver with a multiline body. RuboCop does not collapse
+# the class body just to attach the trailing `.new`.
+let!(:test_object) do
+  class TestController < ApplicationController
+    include TestObjectContent
+
+    self
+  end.new
+end
