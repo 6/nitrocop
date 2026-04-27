@@ -75,6 +75,42 @@ result =
   .where(active: true)
   .order(:name)
 
+# Assignment RHS detection does not cross into a begin body
+result ||=
+  begin
+    Item
+      .where(active: true)
+  end
+
+# Assignment RHS alignment does not apply inside if-expression branches
+def visible_users(condition)
+  result = if condition
+             User
+               .where(active: true)
+               .order(:name)
+           else
+             User.none
+           end
+end
+
+# Continuation after a multiline block uses ordinary indentation
+def human_readable_time
+  [1, 2].map do |value|
+      value
+    end
+    .compact
+    .reverse
+end
+
+# A call chained inline after a multiline block can anchor later continuations
+def get_doc_type_counts(docs)
+  docs.map do |doc|
+    doc
+  end.compact
+     .group_by(&:itself)
+     .transform_values(&:count)
+end
+
 # Trailing dot style: properly indented
 a.
   b
@@ -109,6 +145,13 @@ end
 # Correctly aligned trailing dot in assignment
 a = b.c.
     d
+
+# Trailing-dot operator RHS in assignment aligns with the assignment RHS
+@client_language = @current_user&.locale&.to_sym || http_accept_language.
+                   compatible_language_from(I18n.available_locales)
+
+average_count = 1.0 * group.course_users.map(&:experience_points).reduce(:+) / group.
+                course_users.students.count
 
 # Inside grouped expression (rubocop skips)
 (a.
@@ -175,3 +218,18 @@ expect { subject.run! }
   .to emit_notification("run").with_payload(x)
   .and emit_notification("count").with_payload(y).with_value(0)
   .and emit_notification("future").with_payload(z).with_value(0)
+
+# RSpec change matcher continuation keeps the outer expectation indentation
+expect { lru_cache[:key] = 'value' }.to change { lru_cache[:key] }
+  .from(nil).to('value')
+
+# Chaining after a multiline conditional expression uses ordinary indentation
+def posts
+  if @author
+    @author.posts
+  else
+    Post
+  end.order(created_at: :desc)
+    .includes(:author)
+    .paginate(page: 1)
+end
