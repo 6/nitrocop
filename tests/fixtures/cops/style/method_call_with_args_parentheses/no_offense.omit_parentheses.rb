@@ -98,3 +98,30 @@ def points_creator
             .compact
             .map { |location| location.merge(user_id:) }
 end
+
+# Hash literal reachable through a non-send/non-hash descendant of an arg.
+# RuboCop's `hash_literal_in_arguments?` runs `node.descendants.any?` over the
+# whole subtree once a direct arg is a send call, so a `{}` nested inside an
+# `||=` op-asgn arg or an `lvasgn = {...}` arg keeps the parens too.
+def allowed_ous_tree_each
+  ous = {}
+  hous = {}
+  ous.each { |ou| create_ou_tree(ou, hous[dc_path] ||= {}, ou[0].split(',')) }
+end
+
+def workflow_setup
+  workflow = described_class.new(values = {:running_pre_dialog => false}, admin)
+end
+
+# Single-statement `else` body of a `case` expression. RuboCop's
+# `assignment_in_condition?` exempts because the lvasgn's grandparent is the
+# `case` node (`conditional?`). nitrocop must push `ConditionalBody` for the
+# else branch's single statement so that grandparent matches.
+def format_timezone_else(new_time)
+  case ftype
+  when "tl"
+    new_time = I18n.l(new_time)
+  else
+    new_time = I18n.l(new_time)
+  end
+end
