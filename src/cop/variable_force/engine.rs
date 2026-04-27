@@ -1318,42 +1318,27 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_if_node(&mut self, node: &ruby_prism::IfNode<'pr>) {
         let location = node.location();
         let parent_id = Self::branch_parent_id(&location);
-        let is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
+        let _is_modifier = node.end_keyword_loc().is_none() && node.if_keyword_loc().is_some();
 
         // RuboCop's ShadowedArgument treats any assignment under an if/unless
         // predicate as conditional, even though the predicate itself always
-        // executes. For statement form, bump branch_depth without pushing a
-        // branch context so the assignment stays visible to later reads like
-        // a `case` predicate write. Modifier form still needs a real
-        // predicate context so the left-hand body can see an earlier
-        // assignment (`puts a if (a = 123)`).
+        // executes. Bump branch_depth without pushing a branch context so the
+        // ShadowedArgument cop sees these as in-branch writes, matching
+        // RuboCop. Liveness for modifier-form patterns like
+        // `puts a if (a = 123)` is handled separately via the
+        // `in_modifier_conditional` flag on assignments whose direct parent
+        // is the modifier-if itself.
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            if is_modifier {
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
-            }
         }
         self.visit(&node.predicate());
         if pred_has_write {
-            if is_modifier {
-                self.pop_branch();
-            }
             self.branch_depth -= 1;
         }
 
-        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
-        self.push_branch(parent_id, body_child, false);
+        self.push_branch(parent_id, 0, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
@@ -1363,7 +1348,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         self.branch_depth -= 1;
         if let Some(subsequent) = node.subsequent() {
             self.branch_depth += 1;
-            self.push_branch(parent_id, body_child + 1, false);
+            self.push_branch(parent_id, 1, false);
             self.visit(&subsequent);
             self.pop_branch();
             self.branch_depth -= 1;
@@ -1373,29 +1358,14 @@ impl<'pr> Visit<'pr> for Engine<'_> {
     fn visit_unless_node(&mut self, node: &ruby_prism::UnlessNode<'pr>) {
         let location = node.location();
         let parent_id = Self::branch_parent_id(&location);
-        let is_modifier = node.end_keyword_loc().is_none();
+        let _is_modifier = node.end_keyword_loc().is_none();
 
         let pred_has_write = predicate_has_lvar_write(&node.predicate());
         if pred_has_write {
             self.branch_depth += 1;
-            if is_modifier {
-                self.push_branch_with_flags(
-                    parent_id,
-                    0,
-                    true,
-                    is_modifier,
-                    false,
-                    false,
-                    false,
-                    false,
-                );
-            }
         }
         self.visit(&node.predicate());
         if pred_has_write {
-            if is_modifier {
-                self.pop_branch();
-            }
             self.branch_depth -= 1;
         }
 
@@ -1405,12 +1375,9 @@ impl<'pr> Visit<'pr> for Engine<'_> {
         // A (the unless body, as else-branch). We must match this order
         // for `find_variable` to return the same declaration_offset as
         // RuboCop's VF.
-        let body_child = if pred_has_write && is_modifier { 1 } else { 0 };
         self.branch_depth += 1;
         if let Some(else_clause) = node.else_clause() {
-            self.push_branch_with_flags(
-                parent_id, body_child, false, false, false, false, false, true,
-            );
+            self.push_branch_with_flags(parent_id, 0, false, false, false, false, false, true);
             if let Some(stmts) = else_clause.statements() {
                 for stmt in stmts.body().iter() {
                     self.visit(&stmt);
@@ -1418,7 +1385,7 @@ impl<'pr> Visit<'pr> for Engine<'_> {
             }
             self.pop_branch();
         }
-        self.push_branch(parent_id, body_child + 1, false);
+        self.push_branch(parent_id, 1, false);
         if let Some(stmts) = node.statements() {
             for stmt in stmts.body().iter() {
                 self.visit(&stmt);
@@ -1941,6 +1908,33 @@ fn collect_modifier_conditional_child_offsets(
     impl Collector {
         fn record_direct_child(&mut self, child: Option<Node<'_>>) {
             let Some(child) = child else { return };
+            // RuboCop's `in_modifier_conditional?` unwraps a `begin` parent
+            // (i.e. parenthesized expression) before checking the conditional.
+            // Mirror that here so patterns like `puts a if (a = 123)` are
+            // matched even though `(...)` introduces a `ParenthesesNode` /
+            // `BeginNode` wrapper in Prism's AST.
+            let child = if let Some(begin) = child.as_parentheses_node() {
+                if let Some(body) = begin.body() {
+                    if let Some(stmts) = body.as_statements_node() {
+                        let mut iter = stmts.body().iter();
+                        if let Some(first) = iter.next() {
+                            if iter.next().is_none() {
+                                first
+                            } else {
+                                return;
+                            }
+                        } else {
+                            return;
+                        }
+                    } else {
+                        body
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                child
+            };
             if let Some(n) = child.as_local_variable_write_node() {
                 self.offsets.insert(n.location().start_offset());
             } else if let Some(n) = child.as_local_variable_operator_write_node() {
@@ -1962,6 +1956,10 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                // RuboCop's `in_modifier_conditional?` also matches an
+                // assignment whose direct parent is the modifier conditional
+                // itself — patterns like `puts a if (a = 123)`.
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_if_node(self, node);
         }
@@ -1974,6 +1972,7 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_unless_node(self, node);
         }
@@ -1988,6 +1987,7 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_while_node(self, node);
         }
@@ -2002,6 +2002,7 @@ fn collect_modifier_conditional_child_offsets(
                         self.record_direct_child(Some(stmt));
                     }
                 }
+                self.record_direct_child(Some(node.predicate()));
             }
             ruby_prism::visit_until_node(self, node);
         }
