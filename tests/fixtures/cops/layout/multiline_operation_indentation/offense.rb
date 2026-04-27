@@ -88,3 +88,16 @@ def get_date_filter(operator)
         ^ Layout/MultilineOperationIndentation: Align the operands of an expression in an assignment spanning multiple lines.
     end
 end
+
+# Unrelated parentheses earlier/later in the file must not suppress the cop.
+# This mirrors full-file corpus FNs where a snippet detects but the full file
+# was skipped by the old source scanner.
+# option docs (
+def initialize_client
+  if proxy_missing
+    raise ArgumentError, "Proxy IP and port must both be specified or" +
+          " both left nil"
+          ^ Layout/MultilineOperationIndentation: Align the operands of an expression spanning multiple lines.
+  end
+end
+# option docs )

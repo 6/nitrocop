@@ -66,6 +66,16 @@ data = {
             oauth.info.try(:[], 'headline')
 }
 
+# Hash-rocket values returned directly from a method are ordinary expression
+# continuations; the `=>` is not an assignment context.
+def metadata
+  {
+    'zipCode' => @data.dig('authorizer_address', 'postal_code') ||
+      @data.dig('person_address', 'postal_code') ||
+      @data.dig('organization_address', 'postal_code')
+  }
+end
+
 # Chained + inside method call args (no parens) — RuboCop accepts via
 # argument_in_method_call; we keep same-column alignment only for that context
 def from_string(str)
