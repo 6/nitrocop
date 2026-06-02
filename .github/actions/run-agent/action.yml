@@ -134,7 +134,7 @@ runs:
     - name: Run agent (action)
       if: steps.resolve.outputs.action == 'true'
       id: action_agent
-      uses: anthropics/claude-code-action@v1
+      uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1
       with:
         claude_code_oauth_token: ${{ inputs.claude_code_oauth_token }}
         prompt: ${{ steps.resolve.outputs.prompt_content }}
